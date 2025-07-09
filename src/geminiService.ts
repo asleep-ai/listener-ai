@@ -7,6 +7,7 @@ export interface TranscriptionResult {
   summary: string;
   keyPoints: string[];
   actionItems: string[];
+  emoji: string;
 }
 
 export class GeminiService {
@@ -48,29 +49,41 @@ export class GeminiService {
       const prompt = `Please analyze this audio recording and provide:
 
 1. A complete and accurate transcription of the entire audio content with timestamps and speaker labels
+   - Keep the transcript in the ORIGINAL SPOKEN LANGUAGE (do not translate)
    - Format each line as: "참가자[HH:MM:SS]: spoken text"
    - Use "참가자1", "참가자2", etc. if multiple speakers are detected
    - Include timestamps for each speaker turn or significant pause
-   - Example: "참가자1[00:00:05]: 안녕하세요, 오늘 회의를 시작하겠습니다."
+   - Example: "참가자1[00:00:05]: Hello, let's start the meeting."
 
-2. A concise summary of the meeting (2-3 paragraphs)
-3. Key points discussed (as a bullet list)
-4. Action items mentioned (as a bullet list with assigned persons if mentioned)
+2. A concise summary of the meeting IN KOREAN (2-3 paragraphs)
+3. Key points discussed IN KOREAN (as a bullet list)
+4. Action items mentioned IN KOREAN (as a bullet list with assigned persons if mentioned)
+5. An appropriate emoji that best represents the meeting content/mood (single emoji)
+
+IMPORTANT: 
+- Keep the transcript in the original spoken language
+- Translate ONLY the summary, keyPoints, and actionItems to Korean
+- Choose an emoji that reflects the meeting's main topic or mood (e.g., 📊 for data, 💡 for ideas, 🎯 for goals, 🚀 for launches, 📝 for planning, etc.)
 
 Format your response as JSON with the following structure:
 {
-  "transcript": "Full transcription with format: 참가자[HH:MM:SS]: text",
-  "summary": "Brief summary of the meeting",
-  "keyPoints": ["Key point 1", "Key point 2", ...],
-  "actionItems": ["Action item 1", "Action item 2", ...]
+  "transcript": "Full transcription in ORIGINAL LANGUAGE with format: 참가자[HH:MM:SS]: text",
+  "summary": "회의 요약 (한국어로 작성)",
+  "keyPoints": ["주요 포인트 1 (한국어)", "주요 포인트 2 (한국어)", ...],
+  "actionItems": ["액션 아이템 1 (한국어)", "액션 아이템 2 (한국어)", ...],
+  "emoji": "📝"
 }`;
 
+      // Determine MIME type based on file extension
+      const fileExt = path.extname(audioFilePath).toLowerCase();
+      const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+      
       // Generate content with inline audio data
       const result = await this.model.generateContent([
         prompt,
         {
           inlineData: {
-            mimeType: 'audio/wav',
+            mimeType: mimeType,
             data: base64Audio
           }
         }
@@ -99,7 +112,8 @@ Format your response as JSON with the following structure:
             transcript: parsedResult.transcript || '',
             summary: parsedResult.summary || '',
             keyPoints: Array.isArray(parsedResult.keyPoints) ? parsedResult.keyPoints : [],
-            actionItems: Array.isArray(parsedResult.actionItems) ? parsedResult.actionItems : []
+            actionItems: Array.isArray(parsedResult.actionItems) ? parsedResult.actionItems : [],
+            emoji: parsedResult.emoji || '📝'
           };
         }
         
@@ -109,7 +123,8 @@ Format your response as JSON with the following structure:
           transcript: directParse.transcript || '',
           summary: directParse.summary || '',
           keyPoints: Array.isArray(directParse.keyPoints) ? directParse.keyPoints : [],
-          actionItems: Array.isArray(directParse.actionItems) ? directParse.actionItems : []
+          actionItems: Array.isArray(directParse.actionItems) ? directParse.actionItems : [],
+          emoji: directParse.emoji || '📝'
         };
         
       } catch (parseError) {
@@ -121,7 +136,8 @@ Format your response as JSON with the following structure:
           transcript: text,
           summary: 'Unable to generate summary. The audio might be too short or unclear.',
           keyPoints: [],
-          actionItems: []
+          actionItems: [],
+          emoji: '📝'
         };
       }
 

@@ -158,10 +158,14 @@ export class NotionService {
         );
       }
 
-      // Create the page
+      // Create the page with emoji
       const response = await this.notion.pages.create({
         parent: {
           database_id: this.databaseId
+        },
+        icon: {
+          type: 'emoji',
+          emoji: transcriptionResult.emoji as any
         },
         properties: properties,
         children: children
