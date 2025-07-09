@@ -85,14 +85,19 @@ export class SimpleAudioRecorder {
       // Optimized ffmpeg command for MP3 output
       const args = [
         '-f', 'avfoundation',
-        '-thread_queue_size', '8192',  // Larger buffer to prevent audio drops
-        '-probesize', '10M',          // Increase probe size
+        '-thread_queue_size', '16384',  // Even larger buffer for smoother processing
+        '-probesize', '32M',           // Larger probe size
+        '-analyzeduration', '10M',      // More time for format analysis
         '-i', audioDevice,
-        '-acodec', 'libmp3lame',      // MP3 encoder
-        '-b:a', '192k',               // Higher bitrate for better quality
-        '-ar', '48000',               // Keep original sample rate to avoid resampling issues
-        '-ac', '1',                   // Mono (matches input)
-        '-af', 'volume=10.0,alimiter=limit=0.95:attack=5:release=50',  // Volume boost with limiter to prevent clipping
+        '-acodec', 'libmp3lame',       // MP3 encoder
+        '-b:a', '128k',                // Lower bitrate for faster encoding
+        '-ar', '48000',                // Keep original sample rate
+        '-ac', '1',                    // Mono (matches input)
+        '-threads', '0',               // Use all available CPU threads
+        '-preset', 'ultrafast',        // Fastest encoding preset
+        '-af', 'volume=10.0,alimiter=limit=0.95:attack=5:release=50',  // Volume boost with limiter
+        '-fflags', '+genpts+igndts',  // Better timestamp handling
+        '-flags', '+low_delay',        // Reduce encoding delay
         '-y',
         this.outputPath
       ];
