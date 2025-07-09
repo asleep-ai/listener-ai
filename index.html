@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Listener.AI</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Listener.AI</h1>
+    <p class="subtitle">Record and transcribe your meetings with AI</p>
+    
+    <div class="recording-section">
+      <div class="status-indicator" id="statusIndicator">
+        <span class="status-dot"></span>
+        <span id="statusText">Ready to record</span>
+      </div>
+      
+      <input type="text" 
+             id="meetingTitle" 
+             placeholder="Enter meeting title..." 
+             class="meeting-title-input">
+      
+      <button id="recordButton" class="record-button">
+        Start Recording
+      </button>
+      
+      <div id="recordingTime" class="recording-time">00:00</div>
+    </div>
+    
+    <div class="recordings-section">
+      <h2>Recent Recordings</h2>
+      <div id="recordingsList" class="recordings-list">
+        <p class="no-recordings">No recordings yet</p>
+      </div>
+    </div>
+    
+    <div id="configModal" class="modal">
+      <div class="modal-content">
+        <h2>API Configuration</h2>
+        <div class="form-group">
+          <label for="geminiApiKey">Gemini API Key:</label>
+          <input type="password" id="geminiApiKey" placeholder="Enter your Gemini API key">
+          <small>Get your API key from <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI Studio</a></small>
+        </div>
+        <div class="form-group">
+          <label for="notionApiKey">Notion Integration Token:</label>
+          <input type="password" id="notionApiKey" placeholder="Enter your Notion integration token">
+          <small>Create an integration at <a href="https://www.notion.so/my-integrations" target="_blank">Notion Integrations</a></small>
+        </div>
+        <div class="form-group">
+          <label for="notionDatabaseId">Notion Database ID:</label>
+          <input type="text" id="notionDatabaseId" placeholder="Enter your Notion database ID">
+          <small>Copy from your database URL: notion.so/[workspace]/[database-id]?v=...</small>
+        </div>
+        <div class="modal-buttons">
+          <button id="saveConfig" class="save-button">Save</button>
+          <button id="cancelConfig" class="cancel-button">Cancel</button>
+        </div>
+      </div>
+    </div>
+    
+    <div id="transcriptionModal" class="modal">
+      <div class="modal-content transcription-content">
+        <span class="close">&times;</span>
+        <h2 id="transcriptionTitle">Transcription</h2>
+        <div class="transcription-header">
+          <div class="transcription-tabs">
+            <button class="tab-button active" data-tab="transcript">Transcript</button>
+            <button class="tab-button" data-tab="summary">Summary</button>
+            <button class="tab-button" data-tab="keypoints">Key Points</button>
+            <button class="tab-button" data-tab="actions">Action Items</button>
+          </div>
+          <button id="uploadToNotion" class="notion-button" style="display: none;">
+            <span class="notion-icon">📝</span> Upload to Notion
+          </button>
+        </div>
+        <div class="tab-content">
+          <div id="transcript" class="tab-pane active">
+            <p class="loading">Loading transcription...</p>
+          </div>
+          <div id="summary" class="tab-pane">
+            <p class="loading">Loading summary...</p>
+          </div>
+          <div id="keypoints" class="tab-pane">
+            <ul class="loading">Loading key points...</ul>
+          </div>
+          <div id="actions" class="tab-pane">
+            <ul class="loading">Loading action items...</ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <script src="renderer.js"></script>
+</body>
+</html>

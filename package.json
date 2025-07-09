@@ -1,0 +1,54 @@
+{
+  "name": "listener-ai",
+  "version": "1.0.0",
+  "description": "A lightweight desktop application for recording and transcribing meetings with AI-powered notes.",
+  "main": "dist/main.js",
+  "scripts": {
+    "start": "npm run build && electron .",
+    "dev": "tsc && electron .",
+    "build": "tsc",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/asleep-ai/listener-ai.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/asleep-ai/listener-ai/issues"
+  },
+  "homepage": "https://github.com/asleep-ai/listener-ai#readme",
+  "devDependencies": {
+    "@types/node": "^24.0.12",
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@notionhq/client": "^4.0.0",
+    "@types/fluent-ffmpeg": "^2.1.27",
+    "fluent-ffmpeg": "^2.1.3"
+  },
+  "build": {
+    "appId": "com.listenerai.app",
+    "productName": "Listener.AI",
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}
