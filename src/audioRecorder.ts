@@ -59,6 +59,7 @@ export class AudioRecorder {
         .audioCodec('pcm_s16le')
         .audioFrequency(44100)
         .audioChannels(2)
+        .audioFilters('aresample=async=1000:min_hard_comp=0.100000:first_pts=0')
         .on('start', (commandLine: string) => {
           console.log('FFmpeg process started:', commandLine);
         })
@@ -104,7 +105,14 @@ export class AudioRecorder {
       const defaultIndex = await this.getDefaultMicrophoneIndex();
       return {
         device: `:${defaultIndex}`,
-        options: ['-f', 'avfoundation']
+        options: [
+          '-f', 'avfoundation',
+          '-thread_queue_size', '8192',
+          '-probesize', '32M',
+          '-analyzeduration', '10M',
+          '-fflags', '+genpts+igndts',
+          '-avoid_negative_ts', 'make_zero'
+        ]
       };
     } else if (platform === 'win32') {
       // Windows - use DirectShow
