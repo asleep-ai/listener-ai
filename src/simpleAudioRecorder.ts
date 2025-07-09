@@ -76,21 +76,23 @@ export class SimpleAudioRecorder {
   async startRecording(meetingTitle: string): Promise<{ success: boolean; filePath?: string; error?: string }> {
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const fileName = `${meetingTitle.replace(/[^a-z0-9]/gi, '_')}_${timestamp}.wav`;
+      const fileName = `${meetingTitle.replace(/[^a-z0-9]/gi, '_')}_${timestamp}.mp3`;
       this.outputPath = path.join(app.getPath('userData'), 'recordings', fileName);
 
       const ffmpegPath = this.getFFmpegPath();
       const audioDevice = await this.detectAudioDevice();
       
-      // Optimized ffmpeg command to prevent ticking sounds
+      // Optimized ffmpeg command for MP3 output
       const args = [
         '-f', 'avfoundation',
-        '-thread_queue_size', '4096',  // Increase thread queue size to prevent buffer underruns
+        '-thread_queue_size', '8192',  // Larger buffer to prevent audio drops
+        '-probesize', '10M',          // Increase probe size
         '-i', audioDevice,
-        '-acodec', 'pcm_s16le',       // Uncompressed WAV
-        '-ar', '44100',               // Standard sample rate (44.1kHz)
-        '-ac', '2',                   // Stereo for better quality
-        '-af', 'aresample=async=1:min_hard_comp=0.100000:first_pts=0',  // Audio resampling to fix timing issues
+        '-acodec', 'libmp3lame',      // MP3 encoder
+        '-b:a', '192k',               // Higher bitrate for better quality
+        '-ar', '48000',               // Keep original sample rate to avoid resampling issues
+        '-ac', '1',                   // Mono (matches input)
+        '-af', 'volume=10.0,alimiter=limit=0.95:attack=5:release=50',  // Volume boost with limiter to prevent clipping
         '-y',
         this.outputPath
       ];
@@ -177,7 +179,7 @@ export class SimpleAudioRecorder {
   async startRecordingCoreAudio(meetingTitle: string): Promise<{ success: boolean; filePath?: string; error?: string }> {
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const fileName = `${meetingTitle.replace(/[^a-z0-9]/gi, '_')}_${timestamp}.wav`;
+      const fileName = `${meetingTitle.replace(/[^a-z0-9]/gi, '_')}_${timestamp}.mp3`;
       this.outputPath = path.join(app.getPath('userData'), 'recordings', fileName);
 
       const ffmpegPath = this.getFFmpegPath();
@@ -190,7 +192,8 @@ export class SimpleAudioRecorder {
         '-probesize', '32M',          // Larger probe size
         '-analyzeduration', '10M',     // Longer analysis duration
         '-i', audioDevice,
-        '-acodec', 'pcm_s24le',       // 24-bit for better quality
+        '-acodec', 'libmp3lame',      // MP3 encoder
+        '-b:a', '192k',               // Higher bitrate for better quality
         '-ar', '48000',               // 48kHz sample rate
         '-ac', '2',                   // Stereo
         '-af', 'aresample=async=1000:min_hard_comp=0.100000:first_pts=0,highpass=f=80,lowpass=f=15000',
