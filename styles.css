@@ -1,0 +1,418 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  background-color: #f5f5f5;
+  color: #333;
+  user-select: none;
+}
+
+.container {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 40px 20px;
+}
+
+h1 {
+  text-align: center;
+  color: #2c3e50;
+  margin-bottom: 10px;
+}
+
+.subtitle {
+  text-align: center;
+  color: #7f8c8d;
+  margin-bottom: 40px;
+}
+
+.recording-section {
+  background: white;
+  border-radius: 12px;
+  padding: 30px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  margin-bottom: 30px;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  margin-bottom: 20px;
+  font-size: 14px;
+  color: #666;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #95a5a6;
+  margin-right: 10px;
+  transition: background-color 0.3s;
+}
+
+.status-indicator.recording .status-dot {
+  background-color: #e74c3c;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.5; }
+  100% { opacity: 1; }
+}
+
+.meeting-title-input {
+  width: 100%;
+  padding: 12px 16px;
+  font-size: 16px;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  transition: border-color 0.3s;
+}
+
+.meeting-title-input:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.record-button {
+  width: 100%;
+  padding: 15px;
+  font-size: 18px;
+  font-weight: 600;
+  color: white;
+  background-color: #3498db;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.record-button:hover {
+  background-color: #2980b9;
+}
+
+.record-button.recording {
+  background-color: #e74c3c;
+}
+
+.record-button.recording:hover {
+  background-color: #c0392b;
+}
+
+.recording-time {
+  text-align: center;
+  font-size: 24px;
+  font-weight: 600;
+  color: #2c3e50;
+  margin-top: 20px;
+  display: none;
+}
+
+.recording-time.active {
+  display: block;
+}
+
+.recordings-section {
+  background: white;
+  border-radius: 12px;
+  padding: 30px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+}
+
+.recordings-section h2 {
+  color: #2c3e50;
+  margin-bottom: 20px;
+}
+
+.recordings-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.recording-item {
+  padding: 15px;
+  border-bottom: 1px solid #ecf0f1;
+  transition: background-color 0.2s;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.recording-item:hover {
+  background-color: #f8f9fa;
+}
+
+.recording-item:last-child {
+  border-bottom: none;
+}
+
+.recording-info {
+  flex: 1;
+}
+
+.recording-title {
+  font-weight: 600;
+  color: #2c3e50;
+  margin-bottom: 5px;
+}
+
+.recording-date {
+  font-size: 14px;
+  color: #7f8c8d;
+}
+
+.no-recordings {
+  text-align: center;
+  color: #95a5a6;
+  padding: 20px;
+}
+
+/* Modal styles */
+.modal {
+  display: none;
+  position: fixed;
+  z-index: 1000;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.5);
+}
+
+.modal-content {
+  background-color: white;
+  margin: 15% auto;
+  padding: 30px;
+  border-radius: 12px;
+  width: 80%;
+  max-width: 500px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
+.transcription-content {
+  max-width: 800px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.close {
+  color: #aaa;
+  float: right;
+  font-size: 28px;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+.close:hover,
+.close:focus {
+  color: #000;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 10px;
+  border: 2px solid #e0e0e0;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.form-group small {
+  display: block;
+  margin-top: 5px;
+  color: #7f8c8d;
+  font-size: 12px;
+}
+
+.form-group a {
+  color: #3498db;
+  text-decoration: none;
+}
+
+.modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.save-button, .cancel-button {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.save-button {
+  background-color: #3498db;
+  color: white;
+}
+
+.save-button:hover {
+  background-color: #2980b9;
+}
+
+.cancel-button {
+  background-color: #ecf0f1;
+  color: #2c3e50;
+}
+
+.cancel-button:hover {
+  background-color: #d5dbdb;
+}
+
+/* Transcription tabs */
+.transcription-tabs {
+  display: flex;
+  border-bottom: 2px solid #ecf0f1;
+  margin-bottom: 20px;
+}
+
+.tab-button {
+  background: none;
+  border: none;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #7f8c8d;
+  cursor: pointer;
+  transition: all 0.3s;
+  border-bottom: 3px solid transparent;
+}
+
+.tab-button:hover {
+  color: #2c3e50;
+}
+
+.tab-button.active {
+  color: #3498db;
+  border-bottom-color: #3498db;
+}
+
+.tab-content {
+  min-height: 300px;
+}
+
+.tab-pane {
+  display: none;
+  animation: fadeIn 0.3s;
+}
+
+.tab-pane.active {
+  display: block;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.loading {
+  color: #95a5a6;
+  font-style: italic;
+  text-align: center;
+  padding: 40px;
+}
+
+/* Transcript formatting */
+#transcript {
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 14px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  background-color: #f8f9fa;
+  padding: 20px;
+  border-radius: 8px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.transcript-line {
+  margin-bottom: 10px;
+}
+
+.transcript-speaker {
+  color: #3498db;
+  font-weight: bold;
+}
+
+.transcript-timestamp {
+  color: #7f8c8d;
+}
+
+.transcribe-button {
+  background-color: #9b59b6;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  margin-top: 10px;
+  transition: background-color 0.3s;
+}
+
+.transcribe-button:hover {
+  background-color: #8e44ad;
+}
+
+.transcribe-button:disabled {
+  background-color: #95a5a6;
+  cursor: not-allowed;
+}
+
+/* Transcription header and Notion button */
+.transcription-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.notion-button {
+  background-color: #000000;
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background-color 0.3s;
+}
+
+.notion-button:hover {
+  background-color: #333333;
+}
+
+.notion-button:disabled {
+  background-color: #95a5a6;
+  cursor: not-allowed;
+}
+
+.notion-icon {
+  font-size: 18px;
+}
