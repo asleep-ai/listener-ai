@@ -20,6 +20,9 @@ window.addEventListener('DOMContentLoaded', async () => {
       showConfigModal();
     });
   }
+  
+  // Load existing recordings
+  await loadRecordings();
 });
 
 recordButton.addEventListener('click', async () => {
@@ -71,8 +74,8 @@ async function stopRecording() {
       
       stopTimer();
       
-      // Add to recent recordings with file path
-      addRecordingToList(meetingTitle.value, new Date(), result.filePath);
+      // Refresh the recordings list
+      await refreshRecordingsList();
       
       // Clear the title input
       meetingTitle.value = '';
@@ -417,4 +420,70 @@ async function promptForApiKeys(missingKeys) {
       alert('Failed to save API keys: ' + result.error);
     }
   }
+}
+
+// Function to load and display recordings
+async function loadRecordings() {
+  try {
+    const result = await window.electronAPI.getRecordings();
+    
+    if (result.success && result.recordings.length > 0) {
+      recordingsList.innerHTML = '';
+      
+      result.recordings.forEach(recording => {
+        const recordingItem = createRecordingItem(recording);
+        recordingsList.appendChild(recordingItem);
+      });
+    } else {
+      recordingsList.innerHTML = '<p class="no-recordings">No recordings yet</p>';
+    }
+  } catch (error) {
+    console.error('Error loading recordings:', error);
+    recordingsList.innerHTML = '<p class="no-recordings">Error loading recordings</p>';
+  }
+}
+
+// Function to create a recording item element
+function createRecordingItem(recording) {
+  const item = document.createElement('div');
+  item.className = 'recording-item';
+  
+  const date = new Date(recording.createdAt);
+  const dateStr = date.toLocaleDateString();
+  const timeStr = date.toLocaleTimeString();
+  const sizeStr = formatFileSize(recording.size);
+  
+  item.innerHTML = `
+    <div class="recording-info">
+      <h3>${recording.title}</h3>
+      <p class="recording-meta">${dateStr} ${timeStr} • ${sizeStr}</p>
+    </div>
+    <div class="recording-actions">
+      <button class="action-button transcribe-btn" data-path="${recording.path}" data-title="${recording.title}">
+        Transcribe
+      </button>
+    </div>
+  `;
+  
+  // Add event listener to transcribe button
+  const transcribeBtn = item.querySelector('.transcribe-btn');
+  transcribeBtn.addEventListener('click', () => {
+    handleTranscribe(recording.path, recording.title);
+  });
+  
+  return item;
+}
+
+// Function to format file size
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// Function to refresh recordings list after a new recording
+async function refreshRecordingsList() {
+  await loadRecordings();
 }

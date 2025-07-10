@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import * as path from 'path';
+import * as fs from 'fs';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
 import { GeminiService } from './geminiService';
 import { ConfigService } from './configService';
@@ -182,4 +183,49 @@ ipcMain.handle('upload-to-notion', async (event, data: { title: string; transcri
 // Open external URL
 ipcMain.handle('open-external', async (event, url: string) => {
   shell.openExternal(url);
+});
+
+// Get list of recordings
+ipcMain.handle('get-recordings', async () => {
+  try {
+    const recordingsDir = path.join(app.getPath('userData'), 'recordings');
+    
+    // Ensure directory exists
+    if (!fs.existsSync(recordingsDir)) {
+      return { success: true, recordings: [] };
+    }
+    
+    // Read all files in the recordings directory
+    const files = fs.readdirSync(recordingsDir);
+    
+    // Filter for audio files and get their stats
+    const recordings = files
+      .filter((file: string) => file.endsWith('.mp3') || file.endsWith('.wav'))
+      .map((file: string) => {
+        const filePath = path.join(recordingsDir, file);
+        const stats = fs.statSync(filePath);
+        
+        // Extract title from filename (format: title_timestamp.ext)
+        const nameWithoutExt = path.basename(file, path.extname(file));
+        const parts = nameWithoutExt.split('_');
+        const timestamp = parts.pop(); // Remove timestamp
+        const title = parts.join('_') || 'Untitled';
+        
+        return {
+          filename: file,
+          path: filePath,
+          title: title,
+          timestamp: timestamp,
+          size: stats.size,
+          createdAt: stats.birthtime,
+          modifiedAt: stats.mtime
+        };
+      })
+      .sort((a: any, b: any) => b.createdAt.getTime() - a.createdAt.getTime()); // Sort by newest first
+    
+    return { success: true, recordings };
+  } catch (error) {
+    console.error('Error getting recordings:', error);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
 });
