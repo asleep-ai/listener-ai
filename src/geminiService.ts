@@ -58,7 +58,7 @@ export class GeminiService {
         temperature: 0.7,
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 8192,  // Reduced to prevent overly long outputs
+        maxOutputTokens: 16384,  // Doubled for longer transcriptions
         responseMimeType: "application/json"  // Force JSON response
         // responseSchema: transcriptionSchema as any  // Temporarily disabled for debugging
       }
@@ -71,7 +71,7 @@ export class GeminiService {
         temperature: 0.7,
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 8192  // Sufficient for 5-minute segments
+        maxOutputTokens: 16384  // Doubled for better handling of 5-minute segments
       }
     });
   }
