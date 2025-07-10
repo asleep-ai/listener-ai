@@ -168,6 +168,31 @@ h1 {
   margin-bottom: 20px;
 }
 
+.recordings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.recordings-header h2 {
+  margin-bottom: 0;
+}
+
+.folder-button {
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  padding: 8px;
+  border-radius: 8px;
+  transition: background-color 0.2s;
+}
+
+.folder-button:hover {
+  background-color: rgba(0, 0, 0, 0.05);
+}
+
 .recordings-list {
   max-height: 300px;
   overflow-y: auto;
