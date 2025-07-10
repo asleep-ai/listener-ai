@@ -1,6 +1,7 @@
 let isRecording = false;
 let recordingStartTime = null;
 let timerInterval = null;
+let isAutoModeProcessing = false; // Track if auto mode is processing
 
 const recordButton = document.getElementById('recordButton');
 const statusIndicator = document.getElementById('statusIndicator');
@@ -75,6 +76,12 @@ recordButton.addEventListener('click', async () => {
 });
 
 async function startRecording() {
+  // Prevent starting a new recording if auto mode is processing
+  if (isAutoModeProcessing) {
+    alert('Please wait for auto mode processing to complete before starting a new recording.');
+    return;
+  }
+  
   const title = meetingTitle.value.trim() || 'Untitled_Meeting';
 
   try {
@@ -122,6 +129,12 @@ async function stopRecording() {
       
       // Auto mode: transcribe and upload automatically
       if (autoModeToggle.checked && audioPath) {
+        // Set auto mode processing flag and disable record button
+        isAutoModeProcessing = true;
+        recordButton.disabled = true;
+        recordButton.style.opacity = '0.5';
+        recordButton.style.cursor = 'not-allowed';
+        
         // Show a notification that auto mode is running
         statusText.textContent = 'Auto mode: Processing recording...';
         
@@ -176,6 +189,12 @@ async function stopRecording() {
         } catch (error) {
           statusText.textContent = 'Auto mode: Error processing recording';
           console.error('Auto mode error:', error);
+        } finally {
+          // Clear auto mode processing flag and re-enable record button
+          isAutoModeProcessing = false;
+          recordButton.disabled = false;
+          recordButton.style.opacity = '';
+          recordButton.style.cursor = '';
         }
         
         // Reset status after 5 seconds

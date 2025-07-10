@@ -133,6 +133,16 @@ h1 {
   background-color: #c0392b;
 }
 
+.record-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: #6c757d;
+}
+
+.record-button:disabled:hover {
+  background-color: #6c757d;
+}
+
 .recording-time {
   text-align: center;
   font-size: 24px;
