@@ -75,12 +75,7 @@ recordButton.addEventListener('click', async () => {
 });
 
 async function startRecording() {
-  const title = meetingTitle.value.trim();
-  if (!title) {
-    alert('Please enter a meeting title');
-    meetingTitle.focus();
-    return;
-  }
+  const title = meetingTitle.value.trim() || 'Untitled_Meeting';
 
   try {
     const result = await window.electronAPI.startRecording(title);
@@ -143,9 +138,19 @@ async function stopRecording() {
             if (notionConfig.notionApiKey && notionConfig.notionDatabaseId) {
               console.log('Auto mode: Uploading to Notion...');
               
+              // Use generated title if recording was untitled
+              const finalTitle = (recordingTitle === 'Untitled_Meeting' && transcriptionResult.data.suggestedTitle) 
+                ? transcriptionResult.data.suggestedTitle 
+                : recordingTitle;
+              
+              // Update audioPath if file was renamed
+              if (transcriptionResult.newFilePath) {
+                audioPath = transcriptionResult.newFilePath;
+              }
+              
               // Upload to Notion
               const uploadResult = await window.electronAPI.uploadToNotion({
-                title: recordingTitle,
+                title: finalTitle,
                 transcriptionData: transcriptionResult.data,
                 audioFilePath: audioPath
               });
@@ -384,6 +389,16 @@ async function handleTranscribe(filePath, title) {
       // Hide progress bar
       if (progressContainer) {
         progressContainer.style.display = 'none';
+      }
+      
+      // Update file path if it was renamed
+      if (result.newFilePath) {
+        filePath = result.newFilePath;
+        // Update the title if it was generated
+        if (result.data.suggestedTitle && title === 'Untitled_Meeting') {
+          title = result.data.suggestedTitle;
+          document.getElementById('transcriptionTitle').textContent = `Transcription - ${title}`;
+        }
       }
       
       // Store transcription data for Notion upload

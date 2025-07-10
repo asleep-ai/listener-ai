@@ -9,6 +9,7 @@ export interface TranscriptionResult {
   keyPoints: string[];
   actionItems: string[];
   emoji: string;
+  suggestedTitle?: string;
 }
 
 export class GeminiService {
@@ -58,7 +59,7 @@ export class GeminiService {
         temperature: 0.7,
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 16384,  // Doubled for longer transcriptions
+        maxOutputTokens: 32768,  // Increased for very long transcriptions
         responseMimeType: "application/json"  // Force JSON response
         // responseSchema: transcriptionSchema as any  // Temporarily disabled for debugging
       }
@@ -71,7 +72,7 @@ export class GeminiService {
         temperature: 0.7,
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 16384  // Doubled for better handling of 5-minute segments
+        maxOutputTokens: 32768  // Increased for comprehensive 5-minute segments
       }
     });
   }
@@ -197,13 +198,15 @@ export class GeminiService {
       
       const summaryPrompt = `Based on this meeting transcript, provide:
 
-1. A concise summary in Korean (2-3 paragraphs)
-2. Key points discussed in Korean (as a bullet list)
-3. Action items mentioned in Korean (as a bullet list)
-4. An appropriate emoji that represents the meeting
+1. A concise meeting title in Korean (10-20 characters that captures the main topic)
+2. A concise summary in Korean (2-3 paragraphs)
+3. Key points discussed in Korean (as a bullet list)
+4. Action items mentioned in Korean (as a bullet list)
+5. An appropriate emoji that represents the meeting
 
 Return as JSON:
 {
+  "suggestedTitle": "concise title in Korean",
   "summary": "summary in Korean",
   "keyPoints": ["point 1", "point 2"],
   "actionItems": ["action 1", "action 2"],
@@ -215,6 +218,7 @@ Return as JSON:
       const summaryText = summaryResponse.text();
       
       let summaryData = {
+        suggestedTitle: '',
         summary: '',
         keyPoints: [] as string[],
         actionItems: [] as string[],
@@ -241,7 +245,8 @@ Return as JSON:
         summary: summaryData.summary,
         keyPoints: summaryData.keyPoints,
         actionItems: summaryData.actionItems,
-        emoji: summaryData.emoji
+        emoji: summaryData.emoji,
+        suggestedTitle: summaryData.suggestedTitle
       };
       
     } catch (error) {

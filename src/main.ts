@@ -48,6 +48,37 @@ app.on('window-all-closed', () => {
   }
 });
 
+// Helper function to rename audio file with generated title
+async function renameAudioFile(oldPath: string, suggestedTitle: string): Promise<string> {
+  try {
+    const dir = path.dirname(oldPath);
+    const ext = path.extname(oldPath);
+    const oldFileName = path.basename(oldPath, ext);
+    
+    // Extract timestamp from old filename (format: Untitled_Meeting_2025-07-10T01-34-07-679Z)
+    const timestampMatch = oldFileName.match(/_(\d{4}-\d{2}-\d{2}T[\d-]+Z)$/);
+    const timestamp = timestampMatch ? timestampMatch[1] : new Date().toISOString().replace(/[:.]/g, '-');
+    
+    // Sanitize the suggested title
+    const sanitizedTitle = suggestedTitle
+      .replace(/[<>:"/\\|?*]/g, '_')  // Replace problematic characters
+      .replace(/\s+/g, '_')           // Replace spaces with underscores
+      .trim();
+    
+    const newFileName = `${sanitizedTitle}_${timestamp}${ext}`;
+    const newPath = path.join(dir, newFileName);
+    
+    // Rename the file
+    await fs.promises.rename(oldPath, newPath);
+    console.log(`Renamed file from ${oldFileName} to ${newFileName}`);
+    
+    return newPath;
+  } catch (error) {
+    console.error('Error renaming file:', error);
+    return oldPath; // Return original path if rename fails
+  }
+}
+
 // IPC handlers for recording functionality
 ipcMain.handle('start-recording', async (event, meetingTitle: string, useAlternativeMethod: boolean = false) => {
   try {
@@ -160,6 +191,13 @@ ipcMain.handle('transcribe-audio', async (event, filePath: string) => {
     
     const result = await geminiService.transcribeAudio(filePath, progressCallback);
     console.log('Transcription completed successfully');
+    
+    // Check if we need to rename the file (if it was untitled)
+    const fileName = path.basename(filePath);
+    if (fileName.includes('Untitled_Meeting') && result.suggestedTitle) {
+      const newFilePath = await renameAudioFile(filePath, result.suggestedTitle);
+      return { success: true, data: result, newFilePath };
+    }
     
     return { success: true, data: result };
   } catch (error) {
