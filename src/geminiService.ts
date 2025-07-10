@@ -82,10 +82,13 @@ export class GeminiService {
 
 1. A complete and accurate transcription of the entire audio content with timestamps and speaker labels
    - Keep the transcript in the ORIGINAL SPOKEN LANGUAGE (do not translate)
-   - Format each line as: "참가자[HH:MM:SS]: spoken text"
+   - Format each speaker turn on a new line as: "참가자[HH:MM:SS]: spoken text"
    - Use "참가자1", "참가자2", etc. if multiple speakers are detected
    - Include timestamps for each speaker turn or significant pause
-   - Example: "참가자1[00:00:05]: Hello, let's start the meeting."
+   - Each speaker's turn should be clearly separated
+   - Example format:
+     참가자1[00:00:05]: Hello, let's start the meeting.
+     참가자2[00:00:10]: Yes, let's begin with the agenda.
 
 2. A concise summary of the meeting IN KOREAN (2-3 paragraphs)
 3. Key points discussed IN KOREAN (as a bullet list)
@@ -155,12 +158,23 @@ Format your response as JSON with the following structure:
           jsonText = codeBlockMatch[1];
         }
         
-        // Try to find JSON object
+        // Try to find JSON object (more flexible regex)
         const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           const parsedResult = JSON.parse(jsonMatch[0]);
+          
+          // Format transcript with line breaks between speakers
+          let formattedTranscript = parsedResult.transcript || '';
+          if (formattedTranscript) {
+            // Replace speaker changes with line breaks
+            formattedTranscript = formattedTranscript
+              .replace(/(\. )?참가자(\d+)\[/g, '\n\n참가자$2[')
+              .replace(/(\. )?Speaker(\d+)\[/g, '\n\nSpeaker$2[')
+              .trim();
+          }
+          
           return {
-            transcript: parsedResult.transcript || '',
+            transcript: formattedTranscript,
             summary: parsedResult.summary || '',
             keyPoints: Array.isArray(parsedResult.keyPoints) ? parsedResult.keyPoints : [],
             actionItems: Array.isArray(parsedResult.actionItems) ? parsedResult.actionItems : [],
@@ -170,8 +184,18 @@ Format your response as JSON with the following structure:
         
         // If no JSON found, try to parse the entire response
         const directParse = JSON.parse(text);
+        
+        // Format transcript with line breaks between speakers
+        let formattedTranscript = directParse.transcript || '';
+        if (formattedTranscript) {
+          formattedTranscript = formattedTranscript
+            .replace(/(\. )?참가자(\d+)\[/g, '\n\n참가자$2[')
+            .replace(/(\. )?Speaker(\d+)\[/g, '\n\nSpeaker$2[')
+            .trim();
+        }
+        
         return {
-          transcript: directParse.transcript || '',
+          transcript: formattedTranscript,
           summary: directParse.summary || '',
           keyPoints: Array.isArray(directParse.keyPoints) ? directParse.keyPoints : [],
           actionItems: Array.isArray(directParse.actionItems) ? directParse.actionItems : [],
@@ -180,12 +204,50 @@ Format your response as JSON with the following structure:
         
       } catch (parseError) {
         console.error('Error parsing JSON response:', parseError);
-        console.log('Raw response:', text);
+        console.log('Attempting to extract useful information from response...');
         
-        // Fallback: return the raw text as transcript
+        // Try to extract sections manually
+        const result: TranscriptionResult = {
+          transcript: '',
+          summary: '',
+          keyPoints: [],
+          actionItems: [],
+          emoji: '📝'
+        };
+        
+        // Try to extract transcript
+        const transcriptMatch = text.match(/"transcript"\s*:\s*"([^"]+)"/);
+        if (transcriptMatch) {
+          result.transcript = transcriptMatch[1]
+            .replace(/\\n/g, '\n')
+            .replace(/(\. )?참가자(\d+)\[/g, '\n\n참가자$2[')
+            .replace(/(\. )?Speaker(\d+)\[/g, '\n\nSpeaker$2[')
+            .trim();
+        }
+        
+        // Try to extract summary
+        const summaryMatch = text.match(/"summary"\s*:\s*"([^"]+)"/);
+        if (summaryMatch) {
+          result.summary = summaryMatch[1].replace(/\\n/g, '\n');
+        }
+        
+        // Try to extract emoji
+        const emojiMatch = text.match(/"emoji"\s*:\s*"([^"]+)"/);
+        if (emojiMatch) {
+          result.emoji = emojiMatch[1];
+        }
+        
+        // If we found at least transcript or summary, return it
+        if (result.transcript || result.summary) {
+          console.log('Successfully extracted partial data from response');
+          return result;
+        }
+        
+        // Last resort: return raw text as transcript
+        console.log('Unable to extract structured data, returning raw text');
         return {
           transcript: text,
-          summary: 'Unable to generate summary. The audio might be too short or unclear.',
+          summary: 'JSON 파싱 오류로 인해 요약을 생성할 수 없습니다.',
           keyPoints: [],
           actionItems: [],
           emoji: '📝'
