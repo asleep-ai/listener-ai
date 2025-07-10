@@ -9,6 +9,19 @@ const recordingTime = document.getElementById('recordingTime');
 const meetingTitle = document.getElementById('meetingTitle');
 const recordingsList = document.getElementById('recordingsList');
 
+// Check for API keys on startup
+window.addEventListener('DOMContentLoaded', async () => {
+  await checkAndPromptForConfig();
+  
+  // Add settings button listener
+  const settingsButton = document.getElementById('settingsButton');
+  if (settingsButton) {
+    settingsButton.addEventListener('click', () => {
+      showConfigModal();
+    });
+  }
+});
+
 recordButton.addEventListener('click', async () => {
   if (!isRecording) {
     startRecording();
@@ -149,11 +162,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   
   // Setup event listeners after elements are loaded
   setupEventListeners();
-  
-  const hasConfig = await window.electronAPI.checkConfig();
-  if (!hasConfig) {
-    configModal.style.display = 'block';
-  }
 });
 
 function setupEventListeners() {
@@ -326,6 +334,87 @@ async function handleTranscribe(filePath, title) {
     if (button) {
       button.disabled = false;
       button.textContent = 'Transcribe';
+    }
+  }
+}
+
+// Function to check and prompt for API keys
+async function checkAndPromptForConfig() {
+  const configCheck = await window.electronAPI.checkConfig();
+  
+  if (!configCheck.hasConfig) {
+    const missing = configCheck.missing;
+    const message = `The following API keys are missing:\n${missing.join('\n')}\n\nWould you like to configure them now?`;
+    
+    if (confirm(message)) {
+      await promptForApiKeys(missing);
+    }
+  }
+}
+
+// Function to show the config modal
+async function showConfigModal() {
+  // Load current config
+  const config = await window.electronAPI.getConfig();
+  
+  // Pre-fill the form if values exist
+  if (geminiApiKeyInput && config.geminiApiKey) {
+    geminiApiKeyInput.value = config.geminiApiKey;
+  }
+  if (notionApiKeyInput && config.notionApiKey) {
+    notionApiKeyInput.value = config.notionApiKey;
+  }
+  if (notionDatabaseIdInput && config.notionDatabaseId) {
+    notionDatabaseIdInput.value = config.notionDatabaseId;
+  }
+  
+  // Show the modal
+  if (configModal) {
+    configModal.style.display = 'block';
+  }
+}
+
+// Function to prompt for individual API keys
+async function promptForApiKeys(missingKeys) {
+  const config = {};
+  
+  for (const key of missingKeys) {
+    let value = '';
+    let promptMessage = '';
+    let configKey = '';
+    
+    switch (key) {
+      case 'Gemini API Key':
+        promptMessage = 'Enter your Gemini API key:\n(Get one at https://makersuite.google.com/app/apikey)';
+        configKey = 'geminiApiKey';
+        break;
+      case 'Notion Integration Token':
+        promptMessage = 'Enter your Notion Integration token:\n(Create one at https://www.notion.so/my-integrations)';
+        configKey = 'notionApiKey';
+        break;
+      case 'Notion Database ID':
+        promptMessage = 'Enter your Notion Database ID:\n(Found in your database URL after the workspace name)';
+        configKey = 'notionDatabaseId';
+        break;
+    }
+    
+    value = prompt(promptMessage);
+    if (value && value.trim()) {
+      config[configKey] = value.trim();
+    }
+  }
+  
+  // Save the configuration
+  if (Object.keys(config).length > 0) {
+    const result = await window.electronAPI.saveConfig(config);
+    if (result.success) {
+      alert('API keys saved successfully!');
+      
+      // Show platform-specific config location
+      const configPath = result.configPath || 'application data directory';
+      alert(`Configuration saved to:\n${configPath}\n\nThis location is specific to your operating system.`);
+    } else {
+      alert('Failed to save API keys: ' + result.error);
     }
   }
 }

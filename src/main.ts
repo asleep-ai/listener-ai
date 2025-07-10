@@ -72,9 +72,6 @@ ipcMain.handle('stop-recording', async () => {
 });
 
 // Configuration handlers
-ipcMain.handle('check-config', async () => {
-  return configService.hasRequiredConfig();
-});
 
 ipcMain.handle('save-config', async (event, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string }) => {
   try {
@@ -100,7 +97,10 @@ ipcMain.handle('save-config', async (event, config: { geminiApiKey?: string; not
       });
     }
     
-    return { success: true };
+    return { 
+      success: true,
+      configPath: app.getPath('userData')
+    };
   } catch (error) {
     console.error('Error saving config:', error);
     return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -109,6 +109,13 @@ ipcMain.handle('save-config', async (event, config: { geminiApiKey?: string; not
 
 ipcMain.handle('get-config', async () => {
   return configService.getAllConfig();
+});
+
+ipcMain.handle('check-config', async () => {
+  return {
+    hasConfig: configService.hasRequiredConfig(),
+    missing: configService.getMissingConfigs()
+  };
 });
 
 // Transcription handler

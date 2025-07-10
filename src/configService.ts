@@ -66,7 +66,15 @@ export class ConfigService {
   }
 
   hasRequiredConfig(): boolean {
-    return !!this.getGeminiApiKey();
+    return !!this.getGeminiApiKey() && !!this.getNotionApiKey() && !!this.getNotionDatabaseId();
+  }
+  
+  getMissingConfigs(): string[] {
+    const missing: string[] = [];
+    if (!this.getGeminiApiKey()) missing.push('Gemini API Key');
+    if (!this.getNotionApiKey()) missing.push('Notion Integration Token');
+    if (!this.getNotionDatabaseId()) missing.push('Notion Database ID');
+    return missing;
   }
 
   getAllConfig(): AppConfig {
