@@ -1,4 +1,4 @@
-import { spawn, ChildProcess, exec } from 'child_process';
+import { spawn, ChildProcess, exec, execSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
@@ -188,57 +188,100 @@ export class SimpleAudioRecorder {
   }
 
   private async detectWindowsAudioDevice(): Promise<string> {
-    const { exec } = require('child_process');
-    const { promisify } = require('util');
-    const execAsync = promisify(exec);
-    
     try {
+      // Get ffmpeg path
+      const ffmpegPath = this.getFFmpegPath();
+      
       // List DirectShow audio devices on Windows
-      const { stdout } = await execAsync('ffmpeg -list_devices true -f dshow -i dummy 2>&1');
-      console.log('Windows audio devices:', stdout);
+      // Note: ffmpeg outputs device list to stderr, not stdout
+      let output = '';
+      try {
+        // Execute ffmpeg with proper encoding for Windows
+        const result = execSync(`"${ffmpegPath}" -list_devices true -f dshow -i dummy 2>&1`, {
+          encoding: 'utf8',
+          windowsHide: true
+        });
+        output = result.toString();
+      } catch (e: any) {
+        // ffmpeg exits with error when listing devices, but output contains the device list
+        output = e.stdout || e.output?.join('') || e.toString();
+      }
       
-      // Look for microphone devices
-      const lines = stdout.split('\n');
-      let audioDevices: string[] = [];
-      let inAudioSection = false;
+      console.log('Windows audio devices output:', output);
       
-      for (const line of lines) {
-        if (line.includes('DirectShow audio devices')) {
-          inAudioSection = true;
-          continue;
-        }
-        if (inAudioSection && line.includes(']  "')) {
-          const match = line.match(/\]  "([^"]+)"/);
-          if (match) {
-            audioDevices.push(match[1]);
+      // Parse audio devices from the output
+      const lines = output.split('\n');
+      let audioDevices: { name: string, alternativeName?: string }[] = [];
+      let currentDevice: { name: string, alternativeName?: string } | null = null;
+      
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        
+        // Look for audio device lines
+        // Format: [dshow @ 0x...] "Device Name" (audio)
+        if (line.includes('(audio)') && line.includes('"')) {
+          // Extract device name between quotes
+          const nameMatch = line.match(/"([^"]+)"/);
+          if (nameMatch) {
+            currentDevice = { name: nameMatch[1] };
           }
         }
-        if (inAudioSection && line.includes('DirectShow video devices')) {
-          break;
+        
+        // Look for alternative name on the next line
+        // Format: [dshow @ 0x...] Alternative name "@device_cm_{...}"
+        if (currentDevice && line.includes('Alternative name')) {
+          const altMatch = line.match(/Alternative name\s+"([^"]+)"/);
+          if (altMatch) {
+            currentDevice.alternativeName = altMatch[1];
+            audioDevices.push(currentDevice);
+            currentDevice = null;
+          } else {
+            // If no alternative name found, still add the device
+            audioDevices.push(currentDevice);
+            currentDevice = null;
+          }
         }
+      }
+      
+      // Add the last device if it didn't have an alternative name
+      if (currentDevice) {
+        audioDevices.push(currentDevice);
       }
       
       console.log('Found audio devices:', audioDevices);
       
-      // Try to find default microphone
-      const defaultMic = audioDevices.find(d => 
-        d.toLowerCase().includes('microphone') ||
-        d.toLowerCase().includes('mic') ||
-        d.toLowerCase().includes('audio')
+      // Try to find a suitable microphone
+      // Prefer devices with "마이크" (microphone in Korean) or "Microphone" in the name
+      const preferredDevice = audioDevices.find(device => 
+        device.name.includes('마이크') || 
+        device.name.toLowerCase().includes('microphone') ||
+        device.name.toLowerCase().includes('mic')
       );
       
-      if (defaultMic) {
-        return `audio="${defaultMic}"`;
-      } else if (audioDevices.length > 0) {
-        return `audio="${audioDevices[0]}"`;
+      if (preferredDevice) {
+        // Use alternative name if available, otherwise use the device name
+        if (preferredDevice.alternativeName) {
+          return `audio="${preferredDevice.alternativeName}"`;
+        }
+        // For device names with Korean or special characters, use quotes
+        return `audio="${preferredDevice.name}"`;
       }
       
-      // Fallback to default
-      return 'audio=@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{00000000-0000-0000-0000-000000000000}';
+      // If no preferred device, use the first available audio device
+      if (audioDevices.length > 0) {
+        const device = audioDevices[0];
+        if (device.alternativeName) {
+          return `audio="${device.alternativeName}"`;
+        }
+        return `audio="${device.name}"`;
+      }
+      
+      // Fallback: try to use the default audio capture device
+      return 'audio="@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{C15FA2FB-82F9-4D2A-9364-6512775A41AD}"';
     } catch (error) {
       console.error('Error detecting Windows audio device:', error);
-      // Return Windows default audio capture device
-      return 'audio=@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{00000000-0000-0000-0000-000000000000}';
+      // Return a generic microphone reference
+      return 'audio="Microphone"';
     }
   }
 
@@ -261,6 +304,14 @@ export class SimpleAudioRecorder {
         if (fs.existsSync(ffmpegPath)) {
           return ffmpegPath;
         }
+      }
+      
+      // Check if ffmpeg is in PATH
+      try {
+        execSync('where ffmpeg', { encoding: 'utf8' });
+        return 'ffmpeg.exe';
+      } catch (e) {
+        // ffmpeg not in PATH
       }
     }
     return 'ffmpeg';
