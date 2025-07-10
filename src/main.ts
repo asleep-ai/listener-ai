@@ -245,6 +245,19 @@ ipcMain.handle('open-external', async (event, url: string) => {
   shell.openExternal(url);
 });
 
+// Open recordings folder
+ipcMain.handle('open-recordings-folder', async () => {
+  const recordingsPath = path.join(app.getPath('userData'), 'recordings');
+  
+  // Ensure the directory exists
+  if (!fs.existsSync(recordingsPath)) {
+    fs.mkdirSync(recordingsPath, { recursive: true });
+  }
+  
+  // Open the folder in the system file explorer
+  shell.openPath(recordingsPath);
+});
+
 // Get list of recordings
 ipcMain.handle('get-recordings', async () => {
   try {

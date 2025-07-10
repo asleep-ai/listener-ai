@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   uploadToNotion: (data: { title: string; transcriptionData: any; audioFilePath?: string }) => 
     ipcRenderer.invoke('upload-to-notion', data),
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
+  openRecordingsFolder: () => ipcRenderer.invoke('open-recordings-folder'),
   getRecordings: () => ipcRenderer.invoke('get-recordings'),
   onTranscriptionProgress: (callback: (progress: { percent: number; message: string }) => void) => {
     ipcRenderer.on('transcription-progress', (_, progress) => callback(progress));

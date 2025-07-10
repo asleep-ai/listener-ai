@@ -52,6 +52,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
   }
   
+  // Add open folder button listener
+  const openFolderButton = document.getElementById('openFolderButton');
+  if (openFolderButton) {
+    openFolderButton.addEventListener('click', async () => {
+      await window.electronAPI.openRecordingsFolder();
+    });
+  }
+  
   // Load existing recordings
   await loadRecordings();
   
