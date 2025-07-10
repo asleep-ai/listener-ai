@@ -28,6 +28,7 @@ export class GeminiService {
         topK: 40,
         topP: 0.95,
         maxOutputTokens: 8192,
+        responseMimeType: "application/json"  // Force JSON response
       }
     });
   }
@@ -95,17 +96,20 @@ export class GeminiService {
 4. Action items mentioned IN KOREAN (as a bullet list with assigned persons if mentioned)
 5. An appropriate emoji that best represents the meeting content/mood (single emoji)
 
-IMPORTANT: 
-- Keep the transcript in the original spoken language
-- Translate ONLY the summary, keyPoints, and actionItems to Korean
-- Choose an emoji that reflects the meeting's main topic or mood (e.g., 📊 for data, 💡 for ideas, 🎯 for goals, 🚀 for launches, 📝 for planning, etc.)
+IMPORTANT RULES:
+1. Keep the transcript in the original spoken language
+2. Translate ONLY the summary, keyPoints, and actionItems to Korean
+3. Choose an emoji that reflects the meeting's main topic or mood
+4. Your response MUST be ONLY valid JSON - no additional text before or after
+5. Do NOT wrap the JSON in markdown code blocks
+6. Ensure all strings are properly escaped for JSON
 
-Format your response as JSON with the following structure:
+Return ONLY this JSON structure:
 {
   "transcript": "Full transcription in ORIGINAL LANGUAGE with format: 참가자[HH:MM:SS]: text",
   "summary": "회의 요약 (한국어로 작성)",
-  "keyPoints": ["주요 포인트 1 (한국어)", "주요 포인트 2 (한국어)", ...],
-  "actionItems": ["액션 아이템 1 (한국어)", "액션 아이템 2 (한국어)", ...],
+  "keyPoints": ["주요 포인트 1 (한국어)", "주요 포인트 2 (한국어)"],
+  "actionItems": ["액션 아이템 1 (한국어)", "액션 아이템 2 (한국어)"],
   "emoji": "📝"
 }`;
 
@@ -215,20 +219,25 @@ Format your response as JSON with the following structure:
           emoji: '📝'
         };
         
-        // Try to extract transcript
-        const transcriptMatch = text.match(/"transcript"\s*:\s*"([^"]+)"/);
+        // Try to extract transcript (handle multi-line strings)
+        const transcriptMatch = text.match(/"transcript"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
         if (transcriptMatch) {
           result.transcript = transcriptMatch[1]
             .replace(/\\n/g, '\n')
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, '\\')
             .replace(/(\. )?참가자(\d+)\[/g, '\n\n참가자$2[')
             .replace(/(\. )?Speaker(\d+)\[/g, '\n\nSpeaker$2[')
             .trim();
         }
         
-        // Try to extract summary
-        const summaryMatch = text.match(/"summary"\s*:\s*"([^"]+)"/);
+        // Try to extract summary (handle multi-line strings)
+        const summaryMatch = text.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
         if (summaryMatch) {
-          result.summary = summaryMatch[1].replace(/\\n/g, '\n');
+          result.summary = summaryMatch[1]
+            .replace(/\\n/g, '\n')
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, '\\');
         }
         
         // Try to extract emoji

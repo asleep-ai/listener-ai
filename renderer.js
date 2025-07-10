@@ -11,6 +11,21 @@ const recordingsList = document.getElementById('recordingsList');
 
 // Check for API keys on startup
 window.addEventListener('DOMContentLoaded', async () => {
+  // Initialize modal elements first
+  configModal = document.getElementById('configModal');
+  transcriptionModal = document.getElementById('transcriptionModal');
+  saveConfigBtn = document.getElementById('saveConfig');
+  cancelConfigBtn = document.getElementById('cancelConfig');
+  geminiApiKeyInput = document.getElementById('geminiApiKey');
+  notionApiKeyInput = document.getElementById('notionApiKey');
+  notionDatabaseIdInput = document.getElementById('notionDatabaseId');
+  closeTranscriptionBtn = document.querySelector('.close');
+  uploadToNotionBtn = document.getElementById('uploadToNotion');
+  
+  // Setup event listeners
+  setupEventListeners();
+  
+  // Check for API configuration
   await checkAndPromptForConfig();
   
   // Add settings button listener
@@ -143,29 +158,6 @@ let configModal, transcriptionModal, saveConfigBtn, cancelConfigBtn;
 let geminiApiKeyInput, notionApiKeyInput, notionDatabaseIdInput;
 let closeTranscriptionBtn, uploadToNotionBtn;
 
-// Check for API configuration on startup
-window.addEventListener('DOMContentLoaded', async () => {
-  // Initialize modal elements after DOM is loaded
-  configModal = document.getElementById('configModal');
-  transcriptionModal = document.getElementById('transcriptionModal');
-  saveConfigBtn = document.getElementById('saveConfig');
-  cancelConfigBtn = document.getElementById('cancelConfig');
-  geminiApiKeyInput = document.getElementById('geminiApiKey');
-  notionApiKeyInput = document.getElementById('notionApiKey');
-  notionDatabaseIdInput = document.getElementById('notionDatabaseId');
-  closeTranscriptionBtn = document.querySelector('.close');
-  uploadToNotionBtn = document.getElementById('uploadToNotion');
-  
-  // Debug modal elements
-  console.log('Modal elements:', {
-    configModal: !!configModal,
-    transcriptionModal: !!transcriptionModal,
-    closeTranscriptionBtn: !!closeTranscriptionBtn
-  });
-  
-  // Setup event listeners after elements are loaded
-  setupEventListeners();
-});
 
 function setupEventListeners() {
   saveConfigBtn.addEventListener('click', async () => {
@@ -350,7 +342,8 @@ async function checkAndPromptForConfig() {
     const message = `The following API keys are missing:\n${missing.join('\n')}\n\nWould you like to configure them now?`;
     
     if (confirm(message)) {
-      await promptForApiKeys(missing);
+      // Show the config modal instead of using prompts
+      showConfigModal();
     }
   }
 }
