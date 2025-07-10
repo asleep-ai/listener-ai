@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
+import { GoogleAIFileManager } from '@google/generative-ai/server';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -13,9 +14,13 @@ export interface TranscriptionResult {
 export class GeminiService {
   private genAI: GoogleGenerativeAI;
   private model: GenerativeModel;
+  private fileManager: GoogleAIFileManager;
+  private apiKey: string;
 
   constructor(apiKey: string) {
+    this.apiKey = apiKey;
     this.genAI = new GoogleGenerativeAI(apiKey);
+    this.fileManager = new GoogleAIFileManager(apiKey);
     this.model = this.genAI.getGenerativeModel({ 
       model: "gemini-2.5-flash",  // Using Gemini 2.5 Flash model
       generationConfig: {
@@ -34,14 +39,41 @@ export class GeminiService {
       const fileSizeInMB = stats.size / (1024 * 1024);
       console.log(`Audio file size: ${fileSizeInMB.toFixed(2)} MB`);
 
-      // Check if file is too large (limit to 10MB for inline data)
-      if (fileSizeInMB > 10) {
-        throw new Error('Audio file is too large. Please record shorter sessions (under 10 minutes).');
+      let fileUri: string | null = null;
+      let uploadedFileName: string | null = null;
+      
+      // Use Files API for files over 20MB
+      if (fileSizeInMB > 20) {
+        console.log('File is over 20MB, using Files API for upload...');
+        
+        // Determine MIME type based on file extension
+        const fileExt = path.extname(audioFilePath).toLowerCase();
+        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+        
+        // Upload the file using Files API
+        const uploadResult = await this.fileManager.uploadFile(audioFilePath, {
+          mimeType: mimeType,
+          displayName: path.basename(audioFilePath),
+        });
+        
+        console.log(`File uploaded successfully. URI: ${uploadResult.file.uri}`);
+        fileUri = uploadResult.file.uri;
+        uploadedFileName = uploadResult.file.name;
+        
+        // Wait for file to be active
+        let file = await this.fileManager.getFile(uploadResult.file.name);
+        while (file.state === "PROCESSING") {
+          console.log('Waiting for file to be processed...');
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          file = await this.fileManager.getFile(uploadResult.file.name);
+        }
+        
+        if (file.state === "FAILED") {
+          throw new Error('File processing failed');
+        }
+        
+        console.log('File is ready for use');
       }
-
-      // Read the audio file
-      const audioData = fs.readFileSync(audioFilePath);
-      const base64Audio = audioData.toString('base64');
 
       console.log('Sending audio to Gemini for transcription...');
 
@@ -74,20 +106,39 @@ Format your response as JSON with the following structure:
   "emoji": "📝"
 }`;
 
-      // Determine MIME type based on file extension
-      const fileExt = path.extname(audioFilePath).toLowerCase();
-      const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
-      
-      // Generate content with inline audio data
-      const result = await this.model.generateContent([
-        prompt,
-        {
-          inlineData: {
-            mimeType: mimeType,
-            data: base64Audio
+      // Generate content based on file size
+      let result;
+      if (fileUri) {
+        // Use file URI for large files
+        const fileExt = path.extname(audioFilePath).toLowerCase();
+        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+        
+        result = await this.model.generateContent([
+          prompt,
+          {
+            fileData: {
+              fileUri: fileUri,
+              mimeType: mimeType
+            }
           }
-        }
-      ]);
+        ]);
+      } else {
+        // Use inline data for small files (under 20MB)
+        const audioData = fs.readFileSync(audioFilePath);
+        const base64Audio = audioData.toString('base64');
+        const fileExt = path.extname(audioFilePath).toLowerCase();
+        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+        
+        result = await this.model.generateContent([
+          prompt,
+          {
+            inlineData: {
+              mimeType: mimeType,
+              data: base64Audio
+            }
+          }
+        ]);
+      }
       
       const response = await result.response;
       const text = response.text();
