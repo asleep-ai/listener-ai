@@ -252,16 +252,20 @@ export class SimpleAudioRecorder {
       
       // Try to find a suitable microphone
       // Prefer devices with "마이크" (microphone in Korean) or "Microphone" in the name
+      // Also check for corrupted Korean text patterns
       const preferredDevice = audioDevices.find(device => 
         device.name.includes('마이크') || 
+        device.name.includes('留덉씠') || // Corrupted Korean for 마이크
         device.name.toLowerCase().includes('microphone') ||
-        device.name.toLowerCase().includes('mic')
+        device.name.toLowerCase().includes('mic') ||
+        device.name.includes('(') && device.name.includes(')') // Devices with parentheses often are mics
       );
       
       if (preferredDevice) {
         // Use alternative name if available, otherwise use the device name
         if (preferredDevice.alternativeName) {
-          return `audio="${preferredDevice.alternativeName}"`;
+          // Don't add quotes around alternative names - ffmpeg handles them internally
+          return `audio=${preferredDevice.alternativeName}`;
         }
         // For device names with Korean or special characters, use quotes
         return `audio="${preferredDevice.name}"`;
@@ -271,13 +275,14 @@ export class SimpleAudioRecorder {
       if (audioDevices.length > 0) {
         const device = audioDevices[0];
         if (device.alternativeName) {
-          return `audio="${device.alternativeName}"`;
+          // Don't add quotes around alternative names
+          return `audio=${device.alternativeName}`;
         }
         return `audio="${device.name}"`;
       }
       
-      // Fallback: try to use the default audio capture device
-      return 'audio="@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{C15FA2FB-82F9-4D2A-9364-6512775A41AD}"';
+      // Fallback: try to use the default audio capture device without quotes
+      return 'audio=@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{C15FA2FB-82F9-4D2A-9364-6512775A41AD}';
     } catch (error) {
       console.error('Error detecting Windows audio device:', error);
       // Return a generic microphone reference
