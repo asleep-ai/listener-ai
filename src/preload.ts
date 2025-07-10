@@ -13,5 +13,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   transcribeAudio: (filePath: string) => ipcRenderer.invoke('transcribe-audio', filePath),
   uploadToNotion: (data: { title: string; transcriptionData: any; audioFilePath?: string }) => 
     ipcRenderer.invoke('upload-to-notion', data),
-  openExternal: (url: string) => ipcRenderer.invoke('open-external', url)
+  openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
+  getRecordings: () => ipcRenderer.invoke('get-recordings')
 });
