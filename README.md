@@ -5,15 +5,20 @@ A lightweight desktop application for recording and transcribing meetings with A
 ## Features
 
 - **Easy Recording**: One-click audio recording using your system microphone
-- **AI Transcription**: Automatic transcription and meeting notes using Google Gemini AI
-- **Notion Integration**: Seamlessly save your meeting notes to Notion
+- **AI Transcription**: Automatic transcription with speaker identification using Google Gemini AI
+- **Smart Summaries**: AI-generated meeting summaries, key points, and action items in Korean
+- **Auto Mode**: Automatically transcribe and upload to Notion after recording stops
+- **Auto Title Generation**: Automatically generates meeting titles from content when not provided
+- **Notion Integration**: Seamlessly save your meeting notes to Notion with emoji support
+- **Progress Tracking**: Real-time progress updates during transcription
+- **Korean Language Support**: Full support for Korean file names and content
 - **Simple Interface**: Clean, minimal UI focused on productivity
 
 ## Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/listener-ai.git
+git clone https://github.com/asleep-ai/listener-ai.git
 cd listener-ai
 
 # Install dependencies
@@ -84,13 +89,18 @@ Ensure ffmpeg is installed:
 ## Usage
 
 1. Launch the application
-2. Click "Start Recording" to begin capturing audio
-3. Enter or edit the meeting title
+2. (Optional) Enter a meeting title, or leave blank for auto-generated title
+3. Click "Start Recording" to begin capturing audio
 4. Click "Stop Recording" when finished
-5. The app will automatically:
-   - Transcribe the audio using Gemini AI
-   - Generate meeting notes and summary
-   - Upload to your Notion workspace
+5. Choose your workflow:
+   - **Manual Mode**: Click "Transcribe" button on any recording
+   - **Auto Mode**: Enable the toggle for automatic transcription and Notion upload
+
+The app will automatically:
+- Transcribe the audio with speaker identification
+- Generate a Korean title if none was provided
+- Create meeting summary, key points, and action items in Korean
+- Upload to your Notion workspace with appropriate emoji
 
 ## Development
 
