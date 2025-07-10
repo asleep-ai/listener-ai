@@ -118,8 +118,8 @@ async function stopRecording() {
       stopTimer();
       
       // Store the title before clearing
-      const recordingTitle = meetingTitle.value;
-      const audioPath = result.filePath;
+      const recordingTitle = meetingTitle.value.trim() || 'Untitled_Meeting';
+      let audioPath = result.filePath;
       
       // Clear the title input
       meetingTitle.value = '';
@@ -159,9 +159,13 @@ async function stopRecording() {
               console.log('Auto mode: Uploading to Notion...');
               
               // Use generated title if recording was untitled
-              const finalTitle = (recordingTitle === 'Untitled_Meeting' && transcriptionResult.data.suggestedTitle) 
+              const finalTitle = (recordingTitle === '' || recordingTitle === 'Untitled_Meeting') && transcriptionResult.data.suggestedTitle 
                 ? transcriptionResult.data.suggestedTitle 
-                : recordingTitle;
+                : (recordingTitle || transcriptionResult.data.suggestedTitle || 'Untitled Meeting');
+              
+              console.log('Auto mode: Final title for Notion:', finalTitle);
+              console.log('Auto mode: Recording title was:', recordingTitle);
+              console.log('Auto mode: Suggested title was:', transcriptionResult.data.suggestedTitle);
               
               // Upload to Notion with the correct file path
               const uploadResult = await window.electronAPI.uploadToNotion({
