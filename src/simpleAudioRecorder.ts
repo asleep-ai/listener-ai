@@ -85,11 +85,28 @@ export class SimpleAudioRecorder {
       this.outputPath = path.join(app.getPath('userData'), 'recordings', fileName);
 
       const ffmpegPath = this.getFFmpegPath();
-      const audioDevice = await this.detectAudioDevice();
+      
+      // Platform-specific audio input configuration
+      let inputFormat: string;
+      let audioDevice: string;
+      
+      if (process.platform === 'darwin') {
+        // macOS
+        inputFormat = 'avfoundation';
+        audioDevice = await this.detectAudioDevice();
+      } else if (process.platform === 'win32') {
+        // Windows
+        inputFormat = 'dshow';
+        audioDevice = await this.detectWindowsAudioDevice();
+      } else {
+        // Linux
+        inputFormat = 'alsa';
+        audioDevice = 'default';
+      }
       
       // Optimized ffmpeg command for MP3 output
       const args = [
-        '-f', 'avfoundation',
+        '-f', inputFormat,
         '-thread_queue_size', '16384',  // Even larger buffer for smoother processing
         '-probesize', '32M',           // Larger probe size
         '-analyzeduration', '10M',      // More time for format analysis
@@ -170,12 +187,80 @@ export class SimpleAudioRecorder {
     }
   }
 
+  private async detectWindowsAudioDevice(): Promise<string> {
+    const { exec } = require('child_process');
+    const { promisify } = require('util');
+    const execAsync = promisify(exec);
+    
+    try {
+      // List DirectShow audio devices on Windows
+      const { stdout } = await execAsync('ffmpeg -list_devices true -f dshow -i dummy 2>&1');
+      console.log('Windows audio devices:', stdout);
+      
+      // Look for microphone devices
+      const lines = stdout.split('\n');
+      let audioDevices: string[] = [];
+      let inAudioSection = false;
+      
+      for (const line of lines) {
+        if (line.includes('DirectShow audio devices')) {
+          inAudioSection = true;
+          continue;
+        }
+        if (inAudioSection && line.includes(']  "')) {
+          const match = line.match(/\]  "([^"]+)"/);
+          if (match) {
+            audioDevices.push(match[1]);
+          }
+        }
+        if (inAudioSection && line.includes('DirectShow video devices')) {
+          break;
+        }
+      }
+      
+      console.log('Found audio devices:', audioDevices);
+      
+      // Try to find default microphone
+      const defaultMic = audioDevices.find(d => 
+        d.toLowerCase().includes('microphone') ||
+        d.toLowerCase().includes('mic') ||
+        d.toLowerCase().includes('audio')
+      );
+      
+      if (defaultMic) {
+        return `audio="${defaultMic}"`;
+      } else if (audioDevices.length > 0) {
+        return `audio="${audioDevices[0]}"`;
+      }
+      
+      // Fallback to default
+      return 'audio=@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{00000000-0000-0000-0000-000000000000}';
+    } catch (error) {
+      console.error('Error detecting Windows audio device:', error);
+      // Return Windows default audio capture device
+      return 'audio=@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{00000000-0000-0000-0000-000000000000}';
+    }
+  }
+
   private getFFmpegPath(): string {
     if (process.platform === 'darwin') {
       if (fs.existsSync('/opt/homebrew/bin/ffmpeg')) {
         return '/opt/homebrew/bin/ffmpeg';
       } else if (fs.existsSync('/usr/local/bin/ffmpeg')) {
         return '/usr/local/bin/ffmpeg';
+      }
+    } else if (process.platform === 'win32') {
+      // Common Windows ffmpeg locations
+      const possiblePaths = [
+        'C:\\ffmpeg\\bin\\ffmpeg.exe',
+        'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
+        'C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe'
+      ];
+      
+      for (const ffmpegPath of possiblePaths) {
+        if (fs.existsSync(ffmpegPath)) {
+          return ffmpegPath;
+        }
       }
     }
     return 'ffmpeg';
@@ -185,7 +270,7 @@ export class SimpleAudioRecorder {
     return path.join(app.getPath('userData'), 'recordings');
   }
 
-  // Alternative recording method using CoreAudio (macOS only) for cleaner audio
+  // Alternative recording method (platform-specific optimizations)
   async startRecordingCoreAudio(meetingTitle: string): Promise<{ success: boolean; filePath?: string; error?: string }> {
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -198,11 +283,28 @@ export class SimpleAudioRecorder {
       this.outputPath = path.join(app.getPath('userData'), 'recordings', fileName);
 
       const ffmpegPath = this.getFFmpegPath();
-      const audioDevice = await this.detectAudioDevice();
       
-      // Use CoreAudio with optimized settings for macOS
+      // Platform-specific audio input configuration
+      let inputFormat: string;
+      let audioDevice: string;
+      
+      if (process.platform === 'darwin') {
+        // macOS
+        inputFormat = 'avfoundation';
+        audioDevice = await this.detectAudioDevice();
+      } else if (process.platform === 'win32') {
+        // Windows
+        inputFormat = 'dshow';
+        audioDevice = await this.detectWindowsAudioDevice();
+      } else {
+        // Linux
+        inputFormat = 'alsa';
+        audioDevice = 'default';
+      }
+      
+      // Use optimized settings for each platform
       const args = [
-        '-f', 'avfoundation',
+        '-f', inputFormat,
         '-thread_queue_size', '8192',  // Very large queue to prevent drops
         '-probesize', '32M',          // Larger probe size
         '-analyzeduration', '10M',     // Longer analysis duration

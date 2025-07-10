@@ -82,9 +82,22 @@ NOTION_DATABASE_ID=your_notion_database_id
 ### Prerequisites
 
 Ensure ffmpeg is installed:
-- macOS: `brew install ffmpeg`
-- Windows: Download from [ffmpeg.org](https://ffmpeg.org)
-- Linux: `sudo apt-get install ffmpeg`
+
+#### macOS
+```bash
+brew install ffmpeg
+```
+
+#### Windows
+1. Download ffmpeg from [ffmpeg.org](https://ffmpeg.org/download.html)
+2. Extract to `C:\ffmpeg`
+3. Add `C:\ffmpeg\bin` to your PATH environment variable
+4. Verify installation: `ffmpeg -version`
+
+#### Linux
+```bash
+sudo apt-get install ffmpeg
+```
 
 ## Usage
 
