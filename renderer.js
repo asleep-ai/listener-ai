@@ -146,6 +146,13 @@ async function stopRecording() {
           if (transcriptionResult.success) {
             console.log('Auto mode: Transcription complete');
             
+            // Update audioPath if file was renamed
+            let finalAudioPath = audioPath;
+            if (transcriptionResult.newFilePath) {
+              finalAudioPath = transcriptionResult.newFilePath;
+              console.log('Auto mode: File renamed to:', finalAudioPath);
+            }
+            
             // Check if Notion is configured
             const notionConfig = await window.electronAPI.getConfig();
             if (notionConfig.notionApiKey && notionConfig.notionDatabaseId) {
@@ -156,16 +163,11 @@ async function stopRecording() {
                 ? transcriptionResult.data.suggestedTitle 
                 : recordingTitle;
               
-              // Update audioPath if file was renamed
-              if (transcriptionResult.newFilePath) {
-                audioPath = transcriptionResult.newFilePath;
-              }
-              
-              // Upload to Notion
+              // Upload to Notion with the correct file path
               const uploadResult = await window.electronAPI.uploadToNotion({
                 title: finalTitle,
                 transcriptionData: transcriptionResult.data,
-                audioFilePath: audioPath
+                audioFilePath: finalAudioPath
               });
               
               if (uploadResult.success) {
@@ -182,6 +184,9 @@ async function stopRecording() {
             } else {
               statusText.textContent = 'Auto mode: Transcription complete (Notion not configured)';
             }
+            
+            // Refresh recordings list to show the renamed file
+            await refreshRecordingsList();
           } else {
             statusText.textContent = 'Auto mode: Transcription failed';
             console.error('Auto mode: Transcription failed:', transcriptionResult.error);
@@ -189,6 +194,7 @@ async function stopRecording() {
         } catch (error) {
           statusText.textContent = 'Auto mode: Error processing recording';
           console.error('Auto mode error:', error);
+          console.error('Error details:', error.message, error.stack);
         } finally {
           // Clear auto mode processing flag and re-enable record button
           isAutoModeProcessing = false;
