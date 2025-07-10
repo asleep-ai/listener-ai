@@ -8,6 +8,18 @@ const statusText = document.getElementById('statusText');
 const recordingTime = document.getElementById('recordingTime');
 const meetingTitle = document.getElementById('meetingTitle');
 const recordingsList = document.getElementById('recordingsList');
+const autoModeToggle = document.getElementById('autoModeToggle');
+let progressContainer = null;
+let progressFill = null;
+let progressText = null;
+
+// Listen for transcription progress
+window.electronAPI.onTranscriptionProgress((progress) => {
+  if (progressContainer && progressFill && progressText) {
+    progressFill.style.width = `${progress.percent}%`;
+    progressText.textContent = progress.message;
+  }
+});
 
 // Check for API keys on startup
 window.addEventListener('DOMContentLoaded', async () => {
@@ -21,6 +33,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   notionDatabaseIdInput = document.getElementById('notionDatabaseId');
   closeTranscriptionBtn = document.querySelector('.close');
   uploadToNotionBtn = document.getElementById('uploadToNotion');
+  progressContainer = document.getElementById('transcriptionProgress');
+  progressFill = document.getElementById('progressFill');
+  progressText = document.getElementById('progressText');
   
   // Setup event listeners
   setupEventListeners();
@@ -38,6 +53,17 @@ window.addEventListener('DOMContentLoaded', async () => {
   
   // Load existing recordings
   await loadRecordings();
+  
+  // Load auto mode preference
+  const config = await window.electronAPI.getConfig();
+  if (config.autoMode !== undefined) {
+    autoModeToggle.checked = config.autoMode;
+  }
+  
+  // Save auto mode preference when toggled
+  autoModeToggle.addEventListener('change', async () => {
+    await window.electronAPI.saveConfig({ autoMode: autoModeToggle.checked });
+  });
 });
 
 recordButton.addEventListener('click', async () => {
@@ -89,11 +115,69 @@ async function stopRecording() {
       
       stopTimer();
       
-      // Refresh the recordings list
-      await refreshRecordingsList();
+      // Store the title before clearing
+      const recordingTitle = meetingTitle.value;
+      const audioPath = result.filePath;
       
       // Clear the title input
       meetingTitle.value = '';
+      
+      // Refresh the recordings list
+      await refreshRecordingsList();
+      
+      // Auto mode: transcribe and upload automatically
+      if (autoModeToggle.checked && audioPath) {
+        // Show a notification that auto mode is running
+        statusText.textContent = 'Auto mode: Processing recording...';
+        
+        try {
+          // Start transcription
+          console.log('Auto mode: Starting transcription...');
+          const transcriptionResult = await window.electronAPI.transcribeAudio(audioPath);
+          
+          if (transcriptionResult.success) {
+            console.log('Auto mode: Transcription complete');
+            
+            // Check if Notion is configured
+            const notionConfig = await window.electronAPI.getConfig();
+            if (notionConfig.notionApiKey && notionConfig.notionDatabaseId) {
+              console.log('Auto mode: Uploading to Notion...');
+              
+              // Upload to Notion
+              const uploadResult = await window.electronAPI.uploadToNotion({
+                title: recordingTitle,
+                transcriptionData: transcriptionResult.data,
+                audioFilePath: audioPath
+              });
+              
+              if (uploadResult.success) {
+                statusText.textContent = 'Auto mode: Successfully uploaded to Notion!';
+                
+                // Open the Notion page if URL is available
+                if (uploadResult.url) {
+                  window.electronAPI.openExternal(uploadResult.url);
+                }
+              } else {
+                statusText.textContent = 'Auto mode: Failed to upload to Notion';
+                console.error('Auto mode: Notion upload failed:', uploadResult.error);
+              }
+            } else {
+              statusText.textContent = 'Auto mode: Transcription complete (Notion not configured)';
+            }
+          } else {
+            statusText.textContent = 'Auto mode: Transcription failed';
+            console.error('Auto mode: Transcription failed:', transcriptionResult.error);
+          }
+        } catch (error) {
+          statusText.textContent = 'Auto mode: Error processing recording';
+          console.error('Auto mode error:', error);
+        }
+        
+        // Reset status after 5 seconds
+        setTimeout(() => {
+          statusText.textContent = 'Ready to record';
+        }, 5000);
+      }
     }
   } catch (error) {
     alert('Failed to stop recording: ' + error.message);
@@ -267,6 +351,13 @@ async function handleTranscribe(filePath, title) {
   if (transcriptionModal) {
     transcriptionModal.style.display = 'block';
     document.getElementById('transcriptionTitle').textContent = `Transcription - ${title}`;
+    
+    // Show progress bar
+    if (progressContainer) {
+      progressContainer.style.display = 'block';
+      progressFill.style.width = '0%';
+      progressText.textContent = 'Initializing transcription...';
+    }
   } else {
     console.error('Transcription modal not found');
     return;
@@ -290,6 +381,11 @@ async function handleTranscribe(filePath, title) {
     const result = await window.electronAPI.transcribeAudio(filePath);
     
     if (result.success) {
+      // Hide progress bar
+      if (progressContainer) {
+        progressContainer.style.display = 'none';
+      }
+      
       // Store transcription data for Notion upload
       currentTranscriptionData = result.data;
       currentMeetingTitle = title;

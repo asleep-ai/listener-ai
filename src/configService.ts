@@ -6,6 +6,7 @@ export interface AppConfig {
   geminiApiKey?: string;
   notionApiKey?: string;
   notionDatabaseId?: string;
+  autoMode?: boolean;
 }
 
 export class ConfigService {
@@ -77,11 +78,21 @@ export class ConfigService {
     return missing;
   }
 
+  getAutoMode(): boolean {
+    return this.config.autoMode || false;
+  }
+
+  setAutoMode(enabled: boolean): void {
+    this.config.autoMode = enabled;
+    this.saveConfig();
+  }
+
   getAllConfig(): AppConfig {
     return {
       geminiApiKey: this.getGeminiApiKey(),
       notionApiKey: this.getNotionApiKey(),
-      notionDatabaseId: this.getNotionDatabaseId()
+      notionDatabaseId: this.getNotionDatabaseId(),
+      autoMode: this.getAutoMode()
     };
   }
 }

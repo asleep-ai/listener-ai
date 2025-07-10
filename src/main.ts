@@ -74,7 +74,7 @@ ipcMain.handle('stop-recording', async () => {
 
 // Configuration handlers
 
-ipcMain.handle('save-config', async (event, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string }) => {
+ipcMain.handle('save-config', async (event, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean }) => {
   try {
     if (config.geminiApiKey) {
       configService.setGeminiApiKey(config.geminiApiKey);
@@ -88,6 +88,10 @@ ipcMain.handle('save-config', async (event, config: { geminiApiKey?: string; not
     
     if (config.notionDatabaseId) {
       configService.setNotionDatabaseId(config.notionDatabaseId);
+    }
+    
+    if (config.autoMode !== undefined) {
+      configService.setAutoMode(config.autoMode);
     }
     
     // Initialize Notion service if both required fields are present
@@ -124,6 +128,11 @@ ipcMain.handle('transcribe-audio', async (event, filePath: string) => {
   try {
     console.log('Transcription requested for:', filePath);
     
+    // Send progress update
+    if (mainWindow) {
+      mainWindow.webContents.send('transcription-progress', { percent: 0, message: 'Initializing Gemini service...' });
+    }
+    
     // Initialize Gemini service if not already initialized
     if (!geminiService) {
       const apiKey = configService.getGeminiApiKey();
@@ -135,8 +144,21 @@ ipcMain.handle('transcribe-audio', async (event, filePath: string) => {
       geminiService = new GeminiService(apiKey);
     }
 
+    // Send progress update
+    if (mainWindow) {
+      mainWindow.webContents.send('transcription-progress', { percent: 10, message: 'Starting transcription...' });
+    }
+
     console.log('Starting transcription...');
-    const result = await geminiService.transcribeAudio(filePath);
+    
+    // Set up progress callback
+    const progressCallback = (percent: number, message: string) => {
+      if (mainWindow) {
+        mainWindow.webContents.send('transcription-progress', { percent, message });
+      }
+    };
+    
+    const result = await geminiService.transcribeAudio(filePath, progressCallback);
     console.log('Transcription completed successfully');
     
     return { success: true, data: result };
@@ -200,7 +222,11 @@ ipcMain.handle('get-recordings', async () => {
     
     // Filter for audio files and get their stats
     const recordings = files
-      .filter((file: string) => file.endsWith('.mp3') || file.endsWith('.wav'))
+      .filter((file: string) => {
+        // Filter out segment files
+        if (file.includes('_segment_')) return false;
+        return file.endsWith('.mp3') || file.endsWith('.wav');
+      })
       .map((file: string) => {
         const filePath = path.join(recordingsDir, file);
         const stats = fs.statSync(filePath);

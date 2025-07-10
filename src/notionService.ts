@@ -190,13 +190,33 @@ export class NotionService {
 
   // Split long transcript into multiple blocks (Notion has a 2000 character limit per block)
   private splitTranscriptIntoBlocks(transcript: string): BlockObjectRequest[] {
-    const maxLength = 2000;
+    const maxLength = 1900; // Leave some buffer for safety
     const blocks: BlockObjectRequest[] = [];
+    
+    // If transcript is short enough, return single block
+    if (transcript.length <= maxLength) {
+      return [{
+        type: 'code',
+        code: {
+          rich_text: [{
+            type: 'text',
+            text: { content: transcript }
+          }],
+          language: 'plain text'
+        }
+      } as BlockObjectRequest];
+    }
+    
+    // Split by preserving line breaks where possible
     const lines = transcript.split('\n');
     let currentBlock = '';
 
     for (const line of lines) {
-      if (currentBlock.length + line.length + 1 > maxLength) {
+      // Check if adding this line would exceed the limit
+      const lineWithNewline = currentBlock ? '\n' + line : line;
+      
+      if (currentBlock.length + lineWithNewline.length > maxLength) {
+        // If current block has content, save it
         if (currentBlock) {
           blocks.push({
             type: 'code',
@@ -209,13 +229,34 @@ export class NotionService {
             }
           } as BlockObjectRequest);
         }
-        currentBlock = line;
+        
+        // If single line is too long, split it
+        if (line.length > maxLength) {
+          let remainingLine = line;
+          while (remainingLine.length > 0) {
+            const chunk = remainingLine.substring(0, maxLength);
+            blocks.push({
+              type: 'code',
+              code: {
+                rich_text: [{
+                  type: 'text',
+                  text: { content: chunk }
+                }],
+                language: 'plain text'
+              }
+            } as BlockObjectRequest);
+            remainingLine = remainingLine.substring(maxLength);
+          }
+          currentBlock = '';
+        } else {
+          currentBlock = line;
+        }
       } else {
-        currentBlock += (currentBlock ? '\n' : '') + line;
+        currentBlock += lineWithNewline;
       }
     }
 
-    // Add the last block
+    // Add the last block if it has content
     if (currentBlock) {
       blocks.push({
         type: 'code',
