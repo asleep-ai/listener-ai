@@ -76,7 +76,12 @@ export class SimpleAudioRecorder {
   async startRecording(meetingTitle: string): Promise<{ success: boolean; filePath?: string; error?: string }> {
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const fileName = `${meetingTitle.replace(/[^a-z0-9]/gi, '_')}_${timestamp}.mp3`;
+      // Sanitize filename while preserving Korean characters and other Unicode
+      const sanitizedTitle = meetingTitle
+        .replace(/[<>:"/\\|?*]/g, '_')  // Replace only truly problematic characters for filenames
+        .replace(/\s+/g, '_')           // Replace spaces with underscores
+        .trim();
+      const fileName = `${sanitizedTitle}_${timestamp}.mp3`;
       this.outputPath = path.join(app.getPath('userData'), 'recordings', fileName);
 
       const ffmpegPath = this.getFFmpegPath();
@@ -184,7 +189,12 @@ export class SimpleAudioRecorder {
   async startRecordingCoreAudio(meetingTitle: string): Promise<{ success: boolean; filePath?: string; error?: string }> {
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const fileName = `${meetingTitle.replace(/[^a-z0-9]/gi, '_')}_${timestamp}.mp3`;
+      // Sanitize filename while preserving Korean characters and other Unicode
+      const sanitizedTitle = meetingTitle
+        .replace(/[<>:"/\\|?*]/g, '_')  // Replace only truly problematic characters for filenames
+        .replace(/\s+/g, '_')           // Replace spaces with underscores
+        .trim();
+      const fileName = `${sanitizedTitle}_${timestamp}.mp3`;
       this.outputPath = path.join(app.getPath('userData'), 'recordings', fileName);
 
       const ffmpegPath = this.getFFmpegPath();
