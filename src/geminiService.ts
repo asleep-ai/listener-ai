@@ -14,6 +14,7 @@ export interface TranscriptionResult {
 export class GeminiService {
   private genAI: GoogleGenerativeAI;
   private model: GenerativeModel;
+  private segmentModel: GenerativeModel;
   private fileManager: GoogleAIFileManager;
   private apiKey: string;
 
@@ -21,248 +22,78 @@ export class GeminiService {
     this.apiKey = apiKey;
     this.genAI = new GoogleGenerativeAI(apiKey);
     this.fileManager = new GoogleAIFileManager(apiKey);
+    // Define the schema for structured output
+    const transcriptionSchema = {
+      type: "object",
+      properties: {
+        transcript: {
+          type: "string",
+          description: "Full transcription with timestamps and speaker labels"
+        },
+        summary: {
+          type: "string", 
+          description: "Meeting summary in Korean"
+        },
+        keyPoints: {
+          type: "array",
+          items: { type: "string" },
+          description: "Key points discussed in Korean"
+        },
+        actionItems: {
+          type: "array",
+          items: { type: "string" },
+          description: "Action items in Korean"
+        },
+        emoji: {
+          type: "string",
+          description: "Single emoji representing the meeting"
+        }
+      },
+      required: ["transcript", "summary", "keyPoints", "actionItems", "emoji"]
+    };
+
     this.model = this.genAI.getGenerativeModel({ 
       model: "gemini-2.5-flash",  // Using Gemini 2.5 Flash model
       generationConfig: {
         temperature: 0.7,
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 8192,
+        maxOutputTokens: 8192,  // Reduced to prevent overly long outputs
         responseMimeType: "application/json"  // Force JSON response
+        // responseSchema: transcriptionSchema as any  // Temporarily disabled for debugging
+      }
+    });
+    
+    // Initialize segment model without JSON response mode for plain text transcription
+    this.segmentModel = this.genAI.getGenerativeModel({
+      model: "gemini-2.5-flash",
+      generationConfig: {
+        temperature: 0.7,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 8192  // Sufficient for 5-minute segments
       }
     });
   }
 
-  async transcribeAudio(audioFilePath: string): Promise<TranscriptionResult> {
+  async transcribeAudio(audioFilePath: string, progressCallback?: (percent: number, message: string) => void): Promise<TranscriptionResult> {
     try {
       // Check file size
       const stats = fs.statSync(audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
       console.log(`Audio file size: ${fileSizeInMB.toFixed(2)} MB`);
-
-      let fileUri: string | null = null;
-      let uploadedFileName: string | null = null;
       
-      // Use Files API for files over 20MB
-      if (fileSizeInMB > 20) {
-        console.log('File is over 20MB, using Files API for upload...');
-        
-        // Determine MIME type based on file extension
-        const fileExt = path.extname(audioFilePath).toLowerCase();
-        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
-        
-        // Upload the file using Files API
-        const uploadResult = await this.fileManager.uploadFile(audioFilePath, {
-          mimeType: mimeType,
-          displayName: path.basename(audioFilePath),
-        });
-        
-        console.log(`File uploaded successfully. URI: ${uploadResult.file.uri}`);
-        fileUri = uploadResult.file.uri;
-        uploadedFileName = uploadResult.file.name;
-        
-        // Wait for file to be active
-        let file = await this.fileManager.getFile(uploadResult.file.name);
-        while (file.state === "PROCESSING") {
-          console.log('Waiting for file to be processed...');
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          file = await this.fileManager.getFile(uploadResult.file.name);
-        }
-        
-        if (file.state === "FAILED") {
-          throw new Error('File processing failed');
-        }
-        
-        console.log('File is ready for use');
-      }
-
-      console.log('Sending audio to Gemini for transcription...');
-
-      // Create the prompt for transcription and analysis
-      const prompt = `Please analyze this audio recording and provide:
-
-1. A complete and accurate transcription of the entire audio content with timestamps and speaker labels
-   - Keep the transcript in the ORIGINAL SPOKEN LANGUAGE (do not translate)
-   - Format each speaker turn on a new line as: "참가자[HH:MM:SS]: spoken text"
-   - Use "참가자1", "참가자2", etc. if multiple speakers are detected
-   - Include timestamps for each speaker turn or significant pause
-   - Each speaker's turn should be clearly separated
-   - Example format:
-     참가자1[00:00:05]: Hello, let's start the meeting.
-     참가자2[00:00:10]: Yes, let's begin with the agenda.
-
-2. A concise summary of the meeting IN KOREAN (2-3 paragraphs)
-3. Key points discussed IN KOREAN (as a bullet list)
-4. Action items mentioned IN KOREAN (as a bullet list with assigned persons if mentioned)
-5. An appropriate emoji that best represents the meeting content/mood (single emoji)
-
-IMPORTANT RULES:
-1. Keep the transcript in the original spoken language
-2. Translate ONLY the summary, keyPoints, and actionItems to Korean
-3. Choose an emoji that reflects the meeting's main topic or mood
-4. Your response MUST be ONLY valid JSON - no additional text before or after
-5. Do NOT wrap the JSON in markdown code blocks
-6. Ensure all strings are properly escaped for JSON
-
-Return ONLY this JSON structure:
-{
-  "transcript": "Full transcription in ORIGINAL LANGUAGE with format: 참가자[HH:MM:SS]: text",
-  "summary": "회의 요약 (한국어로 작성)",
-  "keyPoints": ["주요 포인트 1 (한국어)", "주요 포인트 2 (한국어)"],
-  "actionItems": ["액션 아이템 1 (한국어)", "액션 아이템 2 (한국어)"],
-  "emoji": "📝"
-}`;
-
-      // Generate content based on file size
-      let result;
-      if (fileUri) {
-        // Use file URI for large files
-        const fileExt = path.extname(audioFilePath).toLowerCase();
-        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
-        
-        result = await this.model.generateContent([
-          prompt,
-          {
-            fileData: {
-              fileUri: fileUri,
-              mimeType: mimeType
-            }
-          }
-        ]);
-      } else {
-        // Use inline data for small files (under 20MB)
-        const audioData = fs.readFileSync(audioFilePath);
-        const base64Audio = audioData.toString('base64');
-        const fileExt = path.extname(audioFilePath).toLowerCase();
-        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
-        
-        result = await this.model.generateContent([
-          prompt,
-          {
-            inlineData: {
-              mimeType: mimeType,
-              data: base64Audio
-            }
-          }
-        ]);
+      if (progressCallback) {
+        progressCallback(15, `Processing ${fileSizeInMB.toFixed(1)} MB audio file...`);
       }
       
-      const response = await result.response;
-      const text = response.text();
-      console.log('Received response from Gemini');
-
-      // Parse the JSON response
-      try {
-        // Extract JSON from the response (in case it's wrapped in markdown code blocks)
-        let jsonText = text;
-        
-        // Remove markdown code blocks if present
-        const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-        if (codeBlockMatch) {
-          jsonText = codeBlockMatch[1];
-        }
-        
-        // Try to find JSON object (more flexible regex)
-        const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsedResult = JSON.parse(jsonMatch[0]);
-          
-          // Format transcript with line breaks between speakers
-          let formattedTranscript = parsedResult.transcript || '';
-          if (formattedTranscript) {
-            // Replace speaker changes with line breaks
-            formattedTranscript = formattedTranscript
-              .replace(/(\. )?참가자(\d+)\[/g, '\n\n참가자$2[')
-              .replace(/(\. )?Speaker(\d+)\[/g, '\n\nSpeaker$2[')
-              .trim();
-          }
-          
-          return {
-            transcript: formattedTranscript,
-            summary: parsedResult.summary || '',
-            keyPoints: Array.isArray(parsedResult.keyPoints) ? parsedResult.keyPoints : [],
-            actionItems: Array.isArray(parsedResult.actionItems) ? parsedResult.actionItems : [],
-            emoji: parsedResult.emoji || '📝'
-          };
-        }
-        
-        // If no JSON found, try to parse the entire response
-        const directParse = JSON.parse(text);
-        
-        // Format transcript with line breaks between speakers
-        let formattedTranscript = directParse.transcript || '';
-        if (formattedTranscript) {
-          formattedTranscript = formattedTranscript
-            .replace(/(\. )?참가자(\d+)\[/g, '\n\n참가자$2[')
-            .replace(/(\. )?Speaker(\d+)\[/g, '\n\nSpeaker$2[')
-            .trim();
-        }
-        
-        return {
-          transcript: formattedTranscript,
-          summary: directParse.summary || '',
-          keyPoints: Array.isArray(directParse.keyPoints) ? directParse.keyPoints : [],
-          actionItems: Array.isArray(directParse.actionItems) ? directParse.actionItems : [],
-          emoji: directParse.emoji || '📝'
-        };
-        
-      } catch (parseError) {
-        console.error('Error parsing JSON response:', parseError);
-        console.log('Attempting to extract useful information from response...');
-        
-        // Try to extract sections manually
-        const result: TranscriptionResult = {
-          transcript: '',
-          summary: '',
-          keyPoints: [],
-          actionItems: [],
-          emoji: '📝'
-        };
-        
-        // Try to extract transcript (handle multi-line strings)
-        const transcriptMatch = text.match(/"transcript"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
-        if (transcriptMatch) {
-          result.transcript = transcriptMatch[1]
-            .replace(/\\n/g, '\n')
-            .replace(/\\"/g, '"')
-            .replace(/\\\\/g, '\\')
-            .replace(/(\. )?참가자(\d+)\[/g, '\n\n참가자$2[')
-            .replace(/(\. )?Speaker(\d+)\[/g, '\n\nSpeaker$2[')
-            .trim();
-        }
-        
-        // Try to extract summary (handle multi-line strings)
-        const summaryMatch = text.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
-        if (summaryMatch) {
-          result.summary = summaryMatch[1]
-            .replace(/\\n/g, '\n')
-            .replace(/\\"/g, '"')
-            .replace(/\\\\/g, '\\');
-        }
-        
-        // Try to extract emoji
-        const emojiMatch = text.match(/"emoji"\s*:\s*"([^"]+)"/);
-        if (emojiMatch) {
-          result.emoji = emojiMatch[1];
-        }
-        
-        // If we found at least transcript or summary, return it
-        if (result.transcript || result.summary) {
-          console.log('Successfully extracted partial data from response');
-          return result;
-        }
-        
-        // Last resort: return raw text as transcript
-        console.log('Unable to extract structured data, returning raw text');
-        return {
-          transcript: text,
-          summary: 'JSON 파싱 오류로 인해 요약을 생성할 수 없습니다.',
-          keyPoints: [],
-          actionItems: [],
-          emoji: '📝'
-        };
-      }
-
+      // Get audio duration using ffprobe
+      const duration = await this.getAudioDuration(audioFilePath);
+      console.log(`Audio duration: ${duration} seconds`);
+      
+      // Always use the two-step approach for consistency
+      console.log('Using two-step transcription approach...');
+      return await this.transcribeWithTwoSteps(audioFilePath, duration, progressCallback);
     } catch (error) {
       console.error('Error transcribing audio:', error);
       
@@ -281,11 +112,377 @@ Return ONLY this JSON structure:
     }
   }
 
-  // Alternative method for chunked audio processing (for very long recordings)
-  async transcribeAudioChunked(audioFilePath: string, chunkSizeMinutes: number = 10): Promise<TranscriptionResult> {
-    // This would be implemented if we need to handle very long recordings
-    // For now, we'll use the simple method
-    return this.transcribeAudio(audioFilePath);
+  // Get audio duration using ffprobe
+  private async getAudioDuration(audioFilePath: string): Promise<number> {
+    const { exec } = require('child_process');
+    const { promisify } = require('util');
+    const execAsync = promisify(exec);
+    
+    try {
+      const { stdout } = await execAsync(
+        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioFilePath}"`
+      );
+      return parseFloat(stdout.trim());
+    } catch (error) {
+      console.error('Error getting audio duration:', error);
+      throw error;
+    }
+  }
+
+  // Split audio file into segments
+  private async splitAudioIntoSegments(audioFilePath: string, segmentDuration: number = 300): Promise<string[]> {
+    const { exec } = require('child_process');
+    const { promisify } = require('util');
+    const execAsync = promisify(exec);
+    
+    const outputDir = path.dirname(audioFilePath);
+    const baseName = path.basename(audioFilePath, path.extname(audioFilePath));
+    const ext = path.extname(audioFilePath);
+    
+    const segmentPath = path.join(outputDir, `${baseName}_segment_%03d${ext}`);
+    
+    try {
+      // Split audio into segments
+      await execAsync(
+        `ffmpeg -i "${audioFilePath}" -f segment -segment_time ${segmentDuration} -c copy "${segmentPath}"`
+      );
+      
+      // Find all created segment files
+      const segmentFiles = fs.readdirSync(outputDir)
+        .filter(file => file.startsWith(`${baseName}_segment_`) && file.endsWith(ext))
+        .map(file => path.join(outputDir, file))
+        .sort();
+      
+      console.log(`Split audio into ${segmentFiles.length} segments`);
+      return segmentFiles;
+    } catch (error) {
+      console.error('Error splitting audio:', error);
+      throw error;
+    }
+  }
+
+  // Helper function to format time
+  private formatTime(seconds: number): string {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  
+  // Get duration for segment calculation
+  private getSegmentDuration(audioFilePath: string): number {
+    return 300; // 5 minutes in seconds
+  }
+
+  // Two-step transcription approach for all audio files
+  private async transcribeWithTwoSteps(audioFilePath: string, duration: number, progressCallback?: (percent: number, message: string) => void): Promise<TranscriptionResult> {
+    try {
+      let fullTranscript = '';
+      
+      // Step 1: Get transcript
+      if (duration > 300) {
+        // Use segmented approach for long audio
+        console.log('Audio is longer than 5 minutes, using segmented transcription...');
+        fullTranscript = await this.getSegmentedTranscript(audioFilePath, duration, progressCallback);
+      } else {
+        // Get transcript for short audio
+        console.log('Transcribing short audio...');
+        fullTranscript = await this.getShortAudioTranscript(audioFilePath, progressCallback);
+      }
+      
+      // Step 2: Generate summary, key points, action items from transcript
+      if (progressCallback) {
+        progressCallback(85, 'Generating summary and key points...');
+      }
+      
+      const summaryPrompt = `Based on this meeting transcript, provide:
+
+1. A concise summary in Korean (2-3 paragraphs)
+2. Key points discussed in Korean (as a bullet list)
+3. Action items mentioned in Korean (as a bullet list)
+4. An appropriate emoji that represents the meeting
+
+Return as JSON:
+{
+  "summary": "summary in Korean",
+  "keyPoints": ["point 1", "point 2"],
+  "actionItems": ["action 1", "action 2"],
+  "emoji": "📝"
+}`;
+
+      const summaryResult = await this.model.generateContent([summaryPrompt, fullTranscript]);
+      const summaryResponse = await summaryResult.response;
+      const summaryText = summaryResponse.text();
+      
+      let summaryData = {
+        summary: '',
+        keyPoints: [] as string[],
+        actionItems: [] as string[],
+        emoji: '📝'
+      };
+      
+      try {
+        summaryData = JSON.parse(summaryText);
+      } catch (e) {
+        console.error('Error parsing summary JSON:', e);
+        // Try to extract manually
+        const summaryMatch = summaryText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
+        if (summaryMatch) {
+          summaryData.summary = summaryMatch[1].replace(/\\n/g, '\n');
+        }
+      }
+      
+      if (progressCallback) {
+        progressCallback(95, 'Finalizing results...');
+      }
+      
+      return {
+        transcript: fullTranscript,
+        summary: summaryData.summary,
+        keyPoints: summaryData.keyPoints,
+        actionItems: summaryData.actionItems,
+        emoji: summaryData.emoji
+      };
+      
+    } catch (error) {
+      console.error('Error in two-step transcription:', error);
+      throw error;
+    }
+  }
+
+  // Get transcript for short audio files
+  private async getShortAudioTranscript(audioFilePath: string, progressCallback?: (percent: number, message: string) => void): Promise<string> {
+    try {
+      const stats = fs.statSync(audioFilePath);
+      const fileSizeInMB = stats.size / (1024 * 1024);
+      
+      if (progressCallback) {
+        progressCallback(20, 'Processing audio file...');
+      }
+      
+      // Use Files API for files over 20MB
+      let fileUri: string | null = null;
+      if (fileSizeInMB > 20) {
+        console.log('File is over 20MB, using Files API for upload...');
+        
+        if (progressCallback) {
+          progressCallback(25, 'Uploading large file to Gemini...');
+        }
+        
+        const fileExt = path.extname(audioFilePath).toLowerCase();
+        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+        
+        const uploadResult = await this.fileManager.uploadFile(audioFilePath, {
+          mimeType: mimeType,
+          displayName: path.basename(audioFilePath),
+        });
+        
+        fileUri = uploadResult.file.uri;
+        
+        // Wait for file to be active
+        let file = await this.fileManager.getFile(uploadResult.file.name);
+        let retries = 0;
+        while (file.state === "PROCESSING" && retries < 30) {
+          console.log(`Waiting for file to be processed... (attempt ${retries + 1}/30)`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          file = await this.fileManager.getFile(uploadResult.file.name);
+          retries++;
+        }
+        
+        if (file.state !== "ACTIVE") {
+          throw new Error(`File is not active. State: ${file.state}`);
+        }
+      }
+      
+      if (progressCallback) {
+        progressCallback(50, 'Transcribing audio...');
+      }
+      
+      const transcriptPrompt = `Please transcribe this audio recording with proper speaker identification.
+
+Format requirements:
+1. IDENTIFY different speakers and label them as 참가자1, 참가자2, etc.
+2. Each speaker's turn MUST start on a NEW LINE
+3. Format: 참가자X: [what they said]
+4. Add a blank line between different speakers
+
+Example format:
+참가자1: 안녕하세요, 오늘 회의를 시작하겠습니다.
+
+참가자2: 네, 준비됐습니다.
+
+참가자1: 첫 번째 안건은...
+
+IMPORTANT:
+- You MUST identify and differentiate between speakers
+- Each speaker turn MUST start on a new line
+- Add blank line between different speakers
+- DO NOT include timestamps
+- Keep the transcription in the original spoken language
+- Return ONLY the transcription text, no JSON formatting`;
+
+      let result;
+      if (fileUri) {
+        const fileExt = path.extname(audioFilePath).toLowerCase();
+        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+        
+        result = await this.segmentModel.generateContent([
+          {
+            fileData: {
+              fileUri: fileUri,
+              mimeType: mimeType
+            }
+          },
+          transcriptPrompt
+        ]);
+      } else {
+        const audioData = fs.readFileSync(audioFilePath);
+        const base64Audio = audioData.toString('base64');
+        const fileExt = path.extname(audioFilePath).toLowerCase();
+        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+        
+        result = await this.segmentModel.generateContent([
+          {
+            inlineData: {
+              mimeType: mimeType,
+              data: base64Audio
+            }
+          },
+          transcriptPrompt
+        ]);
+      }
+      
+      const response = await result.response;
+      return response.text();
+      
+    } catch (error) {
+      console.error('Error transcribing short audio:', error);
+      throw error;
+    }
+  }
+
+  // Get segmented transcript (renamed from transcribeAudioSegmented)
+  private async getSegmentedTranscript(audioFilePath: string, duration: number, progressCallback?: (percent: number, message: string) => void): Promise<string> {
+    try {
+      // Split audio into 5-minute segments
+      const segmentFiles = await this.splitAudioIntoSegments(audioFilePath, 300);
+      
+      if (progressCallback) {
+        progressCallback(20, `Processing ${segmentFiles.length} segments...`);
+      }
+      
+      // Create promises for all segment transcriptions
+      const transcriptionPromises = segmentFiles.map(async (segmentFile, i) => {
+        const segmentStartTime = i * 300; // 5 minutes in seconds
+        
+        // Create segment-specific prompt
+        const segmentPrompt = `Please transcribe audio segment ${i + 1} of ${segmentFiles.length} with proper speaker identification.
+
+Format requirements:
+1. IDENTIFY different speakers and label them as 참가자1, 참가자2, etc.
+2. Each speaker's turn MUST start on a NEW LINE
+3. Format: 참가자X: [what they said]
+4. Add a blank line between different speakers
+
+Example format:
+참가자1: 안녕하세요, 오늘 회의를 시작하겠습니다.
+
+참가자2: 네, 준비됐습니다.
+
+참가자1: 첫 번째 안건은...
+
+IMPORTANT:
+- You MUST identify and differentiate between speakers
+- Each speaker turn MUST start on a new line
+- Add blank line between different speakers
+- DO NOT include timestamps
+- Keep the transcription in the original spoken language
+- Return ONLY the transcription text, no JSON formatting`;
+
+        try {
+          console.log(`Starting transcription for segment ${i + 1}/${segmentFiles.length}...`);
+          
+          const audioData = fs.readFileSync(segmentFile);
+          const base64Audio = audioData.toString('base64');
+          const fileExt = path.extname(segmentFile).toLowerCase();
+          const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+          
+          const result = await this.segmentModel.generateContent([
+            {
+              inlineData: {
+                mimeType: mimeType,
+                data: base64Audio
+              }
+            },
+            segmentPrompt
+          ]);
+          
+          const response = await result.response;
+          const transcript = response.text();
+          
+          console.log(`Completed transcription for segment ${i + 1}/${segmentFiles.length}`);
+          
+          // Add segment time range header
+          const segmentEndTime = Math.min(segmentStartTime + 300, duration);
+          const segmentHeader = `[Segment ${i + 1}: ${this.formatTime(segmentStartTime)} ~ ${this.formatTime(segmentEndTime)}]\n\n`;
+          
+          return {
+            index: i,
+            content: segmentHeader + transcript
+          };
+          
+        } catch (segmentError) {
+          console.error(`Error transcribing segment ${i + 1}:`, segmentError);
+          return {
+            index: i,
+            content: `[Segment ${i + 1} transcription failed]`
+          };
+        }
+      });
+      
+      // Track progress of concurrent transcriptions
+      let completedCount = 0;
+      const progressTrackedPromises = transcriptionPromises.map(promise => 
+        promise.then(result => {
+          completedCount++;
+          if (progressCallback) {
+            const progress = 20 + (completedCount / segmentFiles.length) * 60; // 20-80% range
+            progressCallback(progress, `Transcribed ${completedCount} of ${segmentFiles.length} segments...`);
+          }
+          return result;
+        })
+      );
+      
+      // Wait for all transcriptions to complete
+      const segmentResults = await Promise.all(progressTrackedPromises);
+      
+      // Sort by index to maintain order
+      segmentResults.sort((a, b) => a.index - b.index);
+      
+      // Update progress
+      if (progressCallback) {
+        progressCallback(80, 'All segments transcribed, merging results...');
+      }
+      
+      // Extract transcripts in order
+      const segmentTranscripts = segmentResults.map(result => result.content);
+      
+      // Clean up segment files
+      await Promise.all(segmentFiles.map(async (segmentFile) => {
+        try {
+          fs.unlinkSync(segmentFile);
+        } catch (e) {
+          console.error(`Failed to delete segment file: ${segmentFile}`, e);
+        }
+      }));
+      
+      // Merge all transcripts with clear segment breaks
+      return segmentTranscripts.join('\n\n---\n\n');
+      
+    } catch (error) {
+      console.error('Error in segmented transcription:', error);
+      throw error;
+    }
   }
 
   // Test the API connection

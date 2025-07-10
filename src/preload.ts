@@ -7,12 +7,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
   },
   checkConfig: () => ipcRenderer.invoke('check-config'),
-  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string }) => 
+  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean }) => 
     ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   transcribeAudio: (filePath: string) => ipcRenderer.invoke('transcribe-audio', filePath),
   uploadToNotion: (data: { title: string; transcriptionData: any; audioFilePath?: string }) => 
     ipcRenderer.invoke('upload-to-notion', data),
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
-  getRecordings: () => ipcRenderer.invoke('get-recordings')
+  getRecordings: () => ipcRenderer.invoke('get-recordings'),
+  onTranscriptionProgress: (callback: (progress: { percent: number; message: string }) => void) => {
+    ipcRenderer.on('transcription-progress', (_, progress) => callback(progress));
+  }
 });

@@ -30,6 +30,14 @@
       </button>
       
       <div id="recordingTime" class="recording-time">00:00</div>
+      
+      <div class="auto-mode-container">
+        <label class="toggle-container">
+          <input type="checkbox" id="autoModeToggle">
+          <span class="toggle-label">Auto Mode</span>
+          <span class="toggle-description">Automatically transcribe and upload to Notion after recording</span>
+        </label>
+      </div>
     </div>
     
     <div class="recordings-section">
@@ -68,6 +76,12 @@
       <div class="modal-content transcription-content">
         <span class="close">&times;</span>
         <h2 id="transcriptionTitle">Transcription</h2>
+        <div id="transcriptionProgress" class="progress-container" style="display: none;">
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <p class="progress-text" id="progressText">Initializing...</p>
+        </div>
         <div class="transcription-header">
           <div class="transcription-tabs">
             <button class="tab-button active" data-tab="transcript">Transcript</button>
