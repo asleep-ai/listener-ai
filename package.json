@@ -25,7 +25,9 @@
   },
   "homepage": "https://github.com/asleep-ai/listener-ai#readme",
   "devDependencies": {
+    "@electron/notarize": "^3.0.1",
     "@types/node": "^24.0.12",
+    "dotenv": "^17.2.0",
     "electron": "^37.2.0",
     "electron-builder": "^26.0.12",
     "ts-node": "^10.9.2",
@@ -59,8 +61,10 @@
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icon.png",
-      "hardenedRuntime": false,
+      "hardenedRuntime": true,
       "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
       "target": [
         {
           "target": "dmg",
@@ -71,6 +75,7 @@
         }
       ]
     },
+    "afterSign": "build/notarize.js",
     "dmg": {
       "contents": [
         {
