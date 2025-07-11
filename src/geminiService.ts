@@ -29,8 +29,9 @@ function findFFprobeBinary(): string | null {
   // In production, check various locations
   const possiblePaths = [
     // Check in extraResources (most likely location)
+    path.join(process.resourcesPath, 'bin', ffprobeBinary),
+    // Legacy locations for backward compatibility
     path.join(process.resourcesPath, ffprobeBinary),
-    path.join(process.resourcesPath, 'ffprobe-static', ffprobeBinary),
     // Check in app.asar.unpacked
     path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffprobe-static', ffprobeBinary),
     path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffprobe-static', 'bin', platform, arch, ffprobeBinary),
@@ -39,16 +40,22 @@ function findFFprobeBinary(): string | null {
   // Platform specific paths
   if (platform === 'darwin') {
     possiblePaths.push(
+      path.join(app.getAppPath(), '..', '..', 'Resources', 'bin', ffprobeBinary),
       path.join(app.getAppPath(), '..', '..', 'Resources', ffprobeBinary)
     );
   } else if (platform === 'win32') {
     possiblePaths.push(
-      path.join(path.dirname(app.getPath('exe')), ffprobeBinary),
+      path.join(path.dirname(app.getPath('exe')), 'resources', 'bin', ffprobeBinary),
       path.join(path.dirname(app.getPath('exe')), 'resources', ffprobeBinary)
     );
   }
   
+  console.log('Searching for ffprobe binary...');
+  console.log('Platform:', platform, 'Arch:', arch);
+  console.log('App packaged:', app.isPackaged);
+  
   for (const p of possiblePaths) {
+    console.log('Checking ffprobe path:', p, 'exists:', fs.existsSync(p));
     if (fs.existsSync(p)) {
       console.log('Found ffprobe at:', p);
       // Make executable on Unix
@@ -63,6 +70,7 @@ function findFFprobeBinary(): string | null {
     }
   }
   
+  console.log('ffprobe not found in bundled locations, trying system ffprobe');
   // Try system ffprobe as fallback
   return 'ffprobe';
 }

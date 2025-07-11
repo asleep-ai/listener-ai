@@ -64,7 +64,8 @@
     "extraResources": [
       {
         "from": "node_modules/ffmpeg-static/ffmpeg",
-        "to": "ffmpeg"
+        "to": "bin/ffmpeg",
+        "filter": ["**/*"]
       }
     ],
     "mac": {
@@ -74,6 +75,11 @@
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
       "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Listener.AI needs access to your microphone to record meetings.",
+        "LSApplicationCategoryType": "public.app-category.productivity",
+        "CFBundleExecutable": "Listener.AI"
+      },
       "target": [
         {
           "target": "dmg",
@@ -83,10 +89,13 @@
           ]
         }
       ],
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
       "extraResources": [
         {
           "from": "node_modules/ffprobe-static/bin/darwin/${arch}/ffprobe",
-          "to": "ffprobe"
+          "to": "bin/ffprobe",
+          "filter": ["**/*"]
         }
       ]
     },
@@ -117,7 +126,7 @@
       "extraResources": [
         {
           "from": "node_modules/ffprobe-static/bin/win32/x64/ffprobe.exe",
-          "to": "ffprobe.exe"
+          "to": "bin/ffprobe.exe"
         }
       ]
     },

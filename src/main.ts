@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
@@ -86,10 +86,32 @@ ipcMain.handle('start-recording', async (event, meetingTitle: string, useAlterna
     const result = useAlternativeMethod 
       ? await audioRecorder.startRecordingCoreAudio(meetingTitle)
       : await audioRecorder.startRecording(meetingTitle);
+    
+    // If recording failed, show error dialog
+    if (!result.success) {
+      dialog.showErrorBox(
+        'Recording Failed',
+        `Failed to start recording: ${result.error || 'Unknown error'}\n\n` +
+        'Please check:\n' +
+        '1. Microphone permissions are granted\n' +
+        '2. FFmpeg is installed (if on Windows)\n' +
+        '3. No other app is using the microphone'
+      );
+    }
+    
     return result;
   } catch (error) {
     console.error('Error starting recording:', error);
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    
+    // Show error dialog for unexpected errors
+    dialog.showErrorBox(
+      'Recording Error',
+      `An unexpected error occurred: ${errorMessage}\n\n` +
+      'Please try restarting the application.'
+    );
+    
+    return { success: false, error: errorMessage };
   }
 });
 
