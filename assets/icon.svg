@@ -1,0 +1,7 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background with rounded corners - Using the specific blue color -->
+  <rect width="1024" height="1024" rx="150" fill="#2563EB"/>
+  
+  <!-- L.AI Text - Properly centered with fancy font -->
+  <text x="512" y="512" font-family="Futura, Helvetica Neue, sans-serif" font-size="320" font-weight="800" text-anchor="middle" dominant-baseline="middle" fill="white" letter-spacing="20">L.AI</text>
+</svg>
