@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, dialog, Menu } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
@@ -25,7 +25,27 @@ function createWindow() {
     icon: path.join(__dirname, '../assets/icon.png') // We'll add this later
   });
 
-  mainWindow.loadFile(path.join(__dirname, '../index.html'));
+  // Load the index.html file
+  const indexPath = path.join(__dirname, '../index.html');
+  console.log('Loading index.html from:', indexPath);
+  console.log('App packaged:', app.isPackaged);
+  console.log('__dirname:', __dirname);
+  
+  mainWindow.loadFile(indexPath).catch(err => {
+    console.error('Failed to load index.html:', err);
+    dialog.showErrorBox('Loading Error', `Failed to load application UI: ${err.message}\n\nPath: ${indexPath}`);
+  });
+  
+  // Open DevTools in development or if there's an error
+  if (!app.isPackaged) {
+    mainWindow.webContents.openDevTools();
+  }
+  
+  // Also open DevTools if page fails to load
+  mainWindow.webContents.on('did-fail-load', () => {
+    console.error('Page failed to load');
+    mainWindow?.webContents.openDevTools();
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -33,6 +53,41 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // Create menu with DevTools option
+  const template = [
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Toggle Developer Tools',
+          accelerator: process.platform === 'darwin' ? 'Cmd+Option+I' : 'Ctrl+Shift+I',
+          click: () => {
+            if (mainWindow) {
+              mainWindow.webContents.toggleDevTools();
+            }
+          }
+        },
+        { type: 'separator' },
+        { role: 'reload' },
+        { role: 'forceReload' }
+      ]
+    }
+  ];
+  
+  if (process.platform === 'darwin') {
+    template.unshift({
+      label: app.getName(),
+      submenu: [
+        { role: 'about' } as any,
+        { type: 'separator' } as any,
+        { role: 'quit' } as any
+      ]
+    });
+  }
+  
+  const menu = Menu.buildFromTemplate(template as any);
+  Menu.setApplicationMenu(menu);
+  
   createWindow();
 
   app.on('activate', () => {
