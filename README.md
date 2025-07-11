@@ -30,9 +30,10 @@ npm start
 
 ## Prerequisites
 
-- ffmpeg installed on your system
 - Google Gemini API key
 - Notion API key and database ID
+
+**Note**: FFmpeg is now bundled with the application, so you don't need to install it separately!
 
 ## Configuration
 
