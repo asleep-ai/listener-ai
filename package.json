@@ -73,6 +73,7 @@
       "identity": null,
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "target": [
         {
           "target": "dmg",
