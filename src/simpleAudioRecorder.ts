@@ -6,28 +6,76 @@ import { promisify } from 'util';
 
 // Try to import bundled ffmpeg, fallback to system ffmpeg
 let ffmpegPath: string | null = null;
-try {
-  ffmpegPath = require('ffmpeg-static');
-  console.log('Using bundled FFmpeg from:', ffmpegPath);
-} catch (e) {
-  console.log('Bundled FFmpeg not found, will try system FFmpeg');
+
+// Helper function to find FFmpeg binary
+function findFFmpegBinary(): string | null {
+  const platform = process.platform;
+  const arch = process.arch;
+  const ffmpegBinary = platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
   
-  // In production, ffmpeg-static might be in app.asar.unpacked
-  if (app.isPackaged) {
-    const possiblePaths = [
-      path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg'),
-      path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'),
-    ];
-    
-    for (const p of possiblePaths) {
-      if (fs.existsSync(p)) {
-        ffmpegPath = p;
-        console.log('Found bundled FFmpeg in production at:', ffmpegPath);
-        break;
+  // First, try ffmpeg-static in development
+  if (!app.isPackaged) {
+    try {
+      const staticPath = require('ffmpeg-static');
+      if (staticPath && fs.existsSync(staticPath)) {
+        console.log('Using ffmpeg-static in development:', staticPath);
+        return staticPath;
       }
+    } catch (e) {
+      console.log('ffmpeg-static not available in development');
     }
   }
+  
+  // In production, check various locations
+  const possiblePaths = [
+    // Check in extraResources (most likely location)
+    path.join(process.resourcesPath, 'ffmpeg-static', ffmpegBinary),
+    path.join(process.resourcesPath, 'ffmpeg-static', 'bin', platform, arch, ffmpegBinary),
+    path.join(process.resourcesPath, 'ffmpeg-static', platform, arch, ffmpegBinary),
+    // Check in app.asar.unpacked
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', ffmpegBinary),
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'bin', platform, arch, ffmpegBinary),
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', '@ffmpeg-installer', 'ffmpeg', platform + '-' + arch, ffmpegBinary),
+    // Check in resources
+    path.join(process.resourcesPath, ffmpegBinary),
+    path.join(process.resourcesPath, 'bin', ffmpegBinary),
+  ];
+  
+  // Platform specific paths
+  if (platform === 'darwin') {
+    possiblePaths.push(
+      path.join(app.getAppPath(), '..', '..', 'Resources', ffmpegBinary),
+      path.join(app.getAppPath(), '..', '..', 'Resources', 'bin', ffmpegBinary)
+    );
+  } else if (platform === 'win32') {
+    possiblePaths.push(
+      path.join(path.dirname(app.getPath('exe')), ffmpegBinary),
+      path.join(path.dirname(app.getPath('exe')), 'resources', ffmpegBinary)
+    );
+  }
+  
+  console.log('Searching for FFmpeg binary...');
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      console.log('Found FFmpeg at:', p);
+      // Make executable on Unix
+      if (platform !== 'win32') {
+        try {
+          fs.chmodSync(p, 0o755);
+        } catch (e) {
+          console.error('Failed to chmod FFmpeg:', e);
+        }
+      }
+      return p;
+    }
+  }
+  
+  console.log('FFmpeg not found in bundled locations');
+  return null;
 }
+
+// Initialize FFmpeg path
+ffmpegPath = findFFmpegBinary();
 
 export class SimpleAudioRecorder {
   private recordingProcess: ChildProcess | null = null;
@@ -113,7 +161,16 @@ export class SimpleAudioRecorder {
       
       // Check if FFmpeg exists
       if (!fs.existsSync(ffmpegPath) && ffmpegPath !== 'ffmpeg' && ffmpegPath !== 'ffmpeg.exe') {
-        throw new Error('FFmpeg not found. The bundled FFmpeg may have failed to load. Please try reinstalling the application.');
+        const { dialog } = require('electron');
+        dialog.showErrorBox(
+          'FFmpeg Not Found', 
+          'The audio recording component (FFmpeg) could not be found.\n\n' +
+          'Please try:\n' +
+          '1. Reinstalling the application\n' +
+          '2. Installing FFmpeg manually (https://ffmpeg.org)\n\n' +
+          'Searched path: ' + ffmpegPath
+        );
+        throw new Error('FFmpeg not found. The bundled FFmpeg may have failed to load.');
       }
       
       // Platform-specific audio input configuration
@@ -385,7 +442,16 @@ export class SimpleAudioRecorder {
       
       // Check if FFmpeg exists
       if (!fs.existsSync(ffmpegPath) && ffmpegPath !== 'ffmpeg' && ffmpegPath !== 'ffmpeg.exe') {
-        throw new Error('FFmpeg not found. The bundled FFmpeg may have failed to load. Please try reinstalling the application.');
+        const { dialog } = require('electron');
+        dialog.showErrorBox(
+          'FFmpeg Not Found', 
+          'The audio recording component (FFmpeg) could not be found.\n\n' +
+          'Please try:\n' +
+          '1. Reinstalling the application\n' +
+          '2. Installing FFmpeg manually (https://ffmpeg.org)\n\n' +
+          'Searched path: ' + ffmpegPath
+        );
+        throw new Error('FFmpeg not found. The bundled FFmpeg may have failed to load.');
       }
       
       // Platform-specific audio input configuration
