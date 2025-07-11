@@ -1,6 +1,6 @@
 {
   "name": "listener-ai",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A lightweight desktop application for recording and transcribing meetings with AI-powered notes.",
   "main": "dist/main.js",
   "scripts": {
@@ -11,6 +11,8 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
     "dist:all": "npm run build && electron-builder -mw",
+    "version:bump": "node scripts/bump-version.js",
+    "release": "npm run version:bump && npm run dist:all",
     "postinstall": "electron-builder install-app-deps"
   },
   "repository": {
