@@ -4,6 +4,31 @@ import * as fs from 'fs';
 import { app } from 'electron';
 import { promisify } from 'util';
 
+// Try to import bundled ffmpeg, fallback to system ffmpeg
+let ffmpegPath: string | null = null;
+try {
+  ffmpegPath = require('ffmpeg-static');
+  console.log('Using bundled FFmpeg from:', ffmpegPath);
+} catch (e) {
+  console.log('Bundled FFmpeg not found, will try system FFmpeg');
+  
+  // In production, ffmpeg-static might be in app.asar.unpacked
+  if (app.isPackaged) {
+    const possiblePaths = [
+      path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg'),
+      path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'),
+    ];
+    
+    for (const p of possiblePaths) {
+      if (fs.existsSync(p)) {
+        ffmpegPath = p;
+        console.log('Found bundled FFmpeg in production at:', ffmpegPath);
+        break;
+      }
+    }
+  }
+}
+
 export class SimpleAudioRecorder {
   private recordingProcess: ChildProcess | null = null;
   private outputPath: string | null = null;
@@ -85,6 +110,11 @@ export class SimpleAudioRecorder {
       this.outputPath = path.join(app.getPath('userData'), 'recordings', fileName);
 
       const ffmpegPath = this.getFFmpegPath();
+      
+      // Check if FFmpeg exists
+      if (!fs.existsSync(ffmpegPath) && ffmpegPath !== 'ffmpeg' && ffmpegPath !== 'ffmpeg.exe') {
+        throw new Error('FFmpeg not found. The bundled FFmpeg may have failed to load. Please try reinstalling the application.');
+      }
       
       // Platform-specific audio input configuration
       let inputFormat: string;
@@ -291,6 +321,12 @@ export class SimpleAudioRecorder {
   }
 
   private getFFmpegPath(): string {
+    // First, try to use bundled FFmpeg
+    if (ffmpegPath && fs.existsSync(ffmpegPath)) {
+      return ffmpegPath;
+    }
+    
+    // Fallback to system FFmpeg
     if (process.platform === 'darwin') {
       if (fs.existsSync('/opt/homebrew/bin/ffmpeg')) {
         return '/opt/homebrew/bin/ffmpeg';
@@ -305,9 +341,9 @@ export class SimpleAudioRecorder {
         'C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe'
       ];
       
-      for (const ffmpegPath of possiblePaths) {
-        if (fs.existsSync(ffmpegPath)) {
-          return ffmpegPath;
+      for (const systemPath of possiblePaths) {
+        if (fs.existsSync(systemPath)) {
+          return systemPath;
         }
       }
       
@@ -319,6 +355,13 @@ export class SimpleAudioRecorder {
         // ffmpeg not in PATH
       }
     }
+    
+    // Last resort - try bundled FFmpeg again (might be in production build)
+    if (ffmpegPath) {
+      return ffmpegPath;
+    }
+    
+    // Final fallback
     return 'ffmpeg';
   }
 
@@ -339,6 +382,11 @@ export class SimpleAudioRecorder {
       this.outputPath = path.join(app.getPath('userData'), 'recordings', fileName);
 
       const ffmpegPath = this.getFFmpegPath();
+      
+      // Check if FFmpeg exists
+      if (!fs.existsSync(ffmpegPath) && ffmpegPath !== 'ffmpeg' && ffmpegPath !== 'ffmpeg.exe') {
+        throw new Error('FFmpeg not found. The bundled FFmpeg may have failed to load. Please try reinstalling the application.');
+      }
       
       // Platform-specific audio input configuration
       let inputFormat: string;

@@ -43,9 +43,7 @@ npm run dist:all
 
 ## Important Notes
 
-1. **FFmpeg Dependency**: Users will need FFmpeg installed on their system:
-   - macOS: `brew install ffmpeg`
-   - Windows: Download from https://ffmpeg.org/download.html
+1. **FFmpeg**: FFmpeg is now bundled with the application! Users don't need to install it separately.
 
 2. **Code Signing**: 
    - For macOS distribution, you'll need an Apple Developer certificate
