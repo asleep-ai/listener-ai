@@ -2,6 +2,73 @@ import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
 import { GoogleAIFileManager } from '@google/generative-ai/server';
 import * as fs from 'fs';
 import * as path from 'path';
+import { app } from 'electron';
+
+// Import ffprobe path
+let ffprobePath: string | null = null;
+
+// Helper function to find ffprobe binary
+function findFFprobeBinary(): string | null {
+  const platform = process.platform;
+  const arch = process.arch;
+  const ffprobeBinary = platform === 'win32' ? 'ffprobe.exe' : 'ffprobe';
+  
+  // First, try ffprobe-static in development
+  if (!app.isPackaged) {
+    try {
+      const staticPath = require('ffprobe-static').path;
+      if (staticPath && fs.existsSync(staticPath)) {
+        console.log('Using ffprobe-static in development:', staticPath);
+        return staticPath;
+      }
+    } catch (e) {
+      console.log('ffprobe-static not available in development');
+    }
+  }
+  
+  // In production, check various locations
+  const possiblePaths = [
+    // Check in extraResources (most likely location)
+    path.join(process.resourcesPath, ffprobeBinary),
+    path.join(process.resourcesPath, 'ffprobe-static', ffprobeBinary),
+    // Check in app.asar.unpacked
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffprobe-static', ffprobeBinary),
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffprobe-static', 'bin', platform, arch, ffprobeBinary),
+  ];
+  
+  // Platform specific paths
+  if (platform === 'darwin') {
+    possiblePaths.push(
+      path.join(app.getAppPath(), '..', '..', 'Resources', ffprobeBinary)
+    );
+  } else if (platform === 'win32') {
+    possiblePaths.push(
+      path.join(path.dirname(app.getPath('exe')), ffprobeBinary),
+      path.join(path.dirname(app.getPath('exe')), 'resources', ffprobeBinary)
+    );
+  }
+  
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      console.log('Found ffprobe at:', p);
+      // Make executable on Unix
+      if (platform !== 'win32') {
+        try {
+          fs.chmodSync(p, 0o755);
+        } catch (e) {
+          console.error('Failed to chmod ffprobe:', e);
+        }
+      }
+      return p;
+    }
+  }
+  
+  // Try system ffprobe as fallback
+  return 'ffprobe';
+}
+
+// Initialize ffprobe path
+ffprobePath = findFFprobeBinary();
 
 export interface TranscriptionResult {
   transcript: string;
@@ -120,9 +187,10 @@ export class GeminiService {
     const execAsync = promisify(exec);
     
     try {
-      const { stdout } = await execAsync(
-        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioFilePath}"`
-      );
+      const ffprobeCommand = `"${ffprobePath}" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioFilePath}"`;
+      console.log('Running ffprobe command:', ffprobeCommand);
+      
+      const { stdout } = await execAsync(ffprobeCommand);
       return parseFloat(stdout.trim());
     } catch (error) {
       console.error('Error getting audio duration:', error);
