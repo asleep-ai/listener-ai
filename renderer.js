@@ -113,14 +113,15 @@ window.addEventListener('DOMContentLoaded', async () => {
   autoModeToggle.addEventListener('change', async () => {
     await window.electronAPI.saveConfig({ autoMode: autoModeToggle.checked });
   });
-});
-
-recordButton.addEventListener('click', async () => {
-  if (!isRecording) {
-    startRecording();
-  } else {
-    stopRecording();
-  }
+  
+  // Setup record button listener
+  recordButton.addEventListener('click', async () => {
+    if (!isRecording) {
+      startRecording();
+    } else {
+      stopRecording();
+    }
+  });
 });
 
 async function startRecording() {
