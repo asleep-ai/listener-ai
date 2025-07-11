@@ -29,33 +29,35 @@ function findFFmpegBinary(): string | null {
   // In production, check various locations
   const possiblePaths = [
     // Check in extraResources (most likely location)
-    path.join(process.resourcesPath, 'ffmpeg-static', ffmpegBinary),
-    path.join(process.resourcesPath, 'ffmpeg-static', 'bin', platform, arch, ffmpegBinary),
-    path.join(process.resourcesPath, 'ffmpeg-static', platform, arch, ffmpegBinary),
+    path.join(process.resourcesPath, 'bin', ffmpegBinary),
+    // Legacy locations for backward compatibility
+    path.join(process.resourcesPath, ffmpegBinary),
     // Check in app.asar.unpacked
     path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', ffmpegBinary),
     path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'bin', platform, arch, ffmpegBinary),
-    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', '@ffmpeg-installer', 'ffmpeg', platform + '-' + arch, ffmpegBinary),
-    // Check in resources
-    path.join(process.resourcesPath, ffmpegBinary),
-    path.join(process.resourcesPath, 'bin', ffmpegBinary),
   ];
   
   // Platform specific paths
   if (platform === 'darwin') {
     possiblePaths.push(
-      path.join(app.getAppPath(), '..', '..', 'Resources', ffmpegBinary),
-      path.join(app.getAppPath(), '..', '..', 'Resources', 'bin', ffmpegBinary)
+      path.join(app.getAppPath(), '..', '..', 'Resources', 'bin', ffmpegBinary),
+      path.join(app.getAppPath(), '..', '..', 'Resources', ffmpegBinary)
     );
   } else if (platform === 'win32') {
     possiblePaths.push(
-      path.join(path.dirname(app.getPath('exe')), ffmpegBinary),
+      path.join(path.dirname(app.getPath('exe')), 'resources', 'bin', ffmpegBinary),
       path.join(path.dirname(app.getPath('exe')), 'resources', ffmpegBinary)
     );
   }
   
   console.log('Searching for FFmpeg binary...');
+  console.log('App packaged:', app.isPackaged);
+  console.log('Resource path:', process.resourcesPath);
+  console.log('App path:', app.getAppPath());
+  console.log('Exe path:', app.getPath('exe'));
+  
   for (const p of possiblePaths) {
+    console.log('Checking path:', p, 'exists:', fs.existsSync(p));
     if (fs.existsSync(p)) {
       console.log('Found FFmpeg at:', p);
       // Make executable on Unix
@@ -71,6 +73,7 @@ function findFFmpegBinary(): string | null {
   }
   
   console.log('FFmpeg not found in bundled locations');
+  console.log('All checked paths:', possiblePaths);
   return null;
 }
 
@@ -122,6 +125,20 @@ export class SimpleAudioRecorder {
         }
       }
       
+      // Check if we found any audio devices
+      if (audioDevices.length === 0) {
+        const { dialog } = require('electron');
+        dialog.showErrorBox(
+          'No Audio Devices Found',
+          'No microphone or audio input devices were detected.\n\n' +
+          'Please check:\n' +
+          '1. A microphone is connected\n' +
+          '2. Microphone permissions are granted to Listener.AI\n' +
+          '3. The microphone is not disabled in System Preferences'
+        );
+        throw new Error('No audio devices found');
+      }
+      
       // Try to find the built-in microphone first
       const builtInMic = audioDevices.find(d => 
         d.name.toLowerCase().includes('macbook') ||
@@ -141,13 +158,36 @@ export class SimpleAudioRecorder {
       
       return `:${audioDeviceIndex}`;
     } catch (error) {
-      console.error('Error detecting audio device, using MacBook Pro Microphone as default');
-      return ':2'; // Default to MacBook Pro Microphone based on the output
+      console.error('Error detecting audio device:', error);
+      throw error; // Re-throw to handle in the caller
     }
   }
 
   async startRecording(meetingTitle: string): Promise<{ success: boolean; filePath?: string; error?: string }> {
     try {
+      // Check microphone permissions on macOS
+      if (process.platform === 'darwin') {
+        const { systemPreferences } = require('electron');
+        const microphoneAccess = systemPreferences.getMediaAccessStatus('microphone');
+        
+        if (microphoneAccess === 'denied') {
+          const { dialog } = require('electron');
+          dialog.showErrorBox(
+            'Microphone Access Denied',
+            'Listener.AI does not have permission to access your microphone.\n\n' +
+            'Please grant microphone access in:\n' +
+            'System Preferences > Security & Privacy > Privacy > Microphone\n\n' +
+            'Then restart Listener.AI.'
+          );
+          return { success: false, error: 'Microphone permission denied' };
+        } else if (microphoneAccess === 'not-determined') {
+          // Request permission
+          const granted = await systemPreferences.askForMediaAccess('microphone');
+          if (!granted) {
+            return { success: false, error: 'Microphone permission denied' };
+          }
+        }
+      }
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       // Sanitize filename while preserving Korean characters and other Unicode
       const sanitizedTitle = meetingTitle
@@ -161,16 +201,48 @@ export class SimpleAudioRecorder {
       
       // Check if FFmpeg exists
       if (!fs.existsSync(ffmpegPath) && ffmpegPath !== 'ffmpeg' && ffmpegPath !== 'ffmpeg.exe') {
-        const { dialog } = require('electron');
-        dialog.showErrorBox(
-          'FFmpeg Not Found', 
-          'The audio recording component (FFmpeg) could not be found.\n\n' +
-          'Please try:\n' +
-          '1. Reinstalling the application\n' +
-          '2. Installing FFmpeg manually (https://ffmpeg.org)\n\n' +
-          'Searched path: ' + ffmpegPath
-        );
-        throw new Error('FFmpeg not found. The bundled FFmpeg may have failed to load.');
+        const { dialog, shell } = require('electron');
+        const platform = process.platform;
+        let installInstructions = '';
+        
+        if (platform === 'win32') {
+          installInstructions = 'For Windows:\n' +
+            '1. Download FFmpeg from: https://www.gyan.dev/ffmpeg/builds/\n' +
+            '2. Download the "release essentials" build\n' +
+            '3. Extract to C:\\ffmpeg\n' +
+            '4. The ffmpeg.exe should be at C:\\ffmpeg\\bin\\ffmpeg.exe\n\n' +
+            'Or install using winget: winget install ffmpeg';
+        } else if (platform === 'darwin') {
+          installInstructions = 'For macOS:\n' +
+            'Install using Homebrew: brew install ffmpeg\n\n' +
+            'If you don\'t have Homebrew, install it first from https://brew.sh';
+        } else {
+          installInstructions = 'For Linux:\n' +
+            'Install using your package manager:\n' +
+            'Ubuntu/Debian: sudo apt install ffmpeg\n' +
+            'Fedora: sudo dnf install ffmpeg\n' +
+            'Arch: sudo pacman -S ffmpeg';
+        }
+        
+        const result = dialog.showMessageBoxSync(null, {
+          type: 'error',
+          title: 'FFmpeg Not Found',
+          message: 'The audio recording component (FFmpeg) is required but not found.',
+          detail: installInstructions + '\n\nSearched path: ' + ffmpegPath,
+          buttons: ['Download FFmpeg', 'Close'],
+          defaultId: 0
+        });
+        
+        if (result === 0) {
+          // Open FFmpeg download page
+          if (platform === 'win32') {
+            shell.openExternal('https://www.gyan.dev/ffmpeg/builds/');
+          } else {
+            shell.openExternal('https://ffmpeg.org/download.html');
+          }
+        }
+        
+        throw new Error('FFmpeg not found. Please install FFmpeg to use audio recording.');
       }
       
       // Platform-specific audio input configuration
@@ -214,21 +286,68 @@ export class SimpleAudioRecorder {
       console.log('Starting recording with command:', ffmpegPath, args.join(' '));
       
       this.recordingProcess = spawn(ffmpegPath, args);
+      
+      // Track if process started successfully
+      let processStarted = false;
+      let startupError: string | null = null;
 
       this.recordingProcess.on('error', (error) => {
         console.error('Recording process error:', error);
+        startupError = error.message;
+        
+        // Show error dialog for spawn errors (usually means FFmpeg not found)
+        if (error.message.includes('ENOENT')) {
+          const { dialog } = require('electron');
+          dialog.showErrorBox(
+            'FFmpeg Not Found',
+            'FFmpeg executable could not be found or executed.\n\n' +
+            'This usually means FFmpeg is not installed or not in the expected location.'
+          );
+        }
       });
 
       this.recordingProcess.stderr?.on('data', (data) => {
-        console.log('FFmpeg output:', data.toString());
+        const output = data.toString();
+        console.log('FFmpeg output:', output);
+        
+        // Check for common FFmpeg errors
+        if (output.includes('Permission denied')) {
+          startupError = 'Microphone permission denied';
+        } else if (output.includes('Device or resource busy')) {
+          startupError = 'Microphone is being used by another application';
+        } else if (output.includes('No such device')) {
+          startupError = 'No microphone device found';
+        } else if (output.includes('Unknown input format')) {
+          startupError = 'Audio input format not supported';
+        }
+        
+        // If we see FFmpeg version info, it started successfully
+        if (output.includes('ffmpeg version')) {
+          processStarted = true;
+        }
       });
 
       this.recordingProcess.on('close', (code) => {
         console.log('Recording process closed with code:', code);
+        if (code !== 0 && !processStarted) {
+          startupError = `FFmpeg exited with code ${code}`;
+        }
       });
 
-      // Give it a moment to start
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Wait a bit to see if FFmpeg starts successfully
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Check if there was a startup error
+      if (startupError) {
+        this.recordingProcess = null;
+        return { success: false, error: startupError };
+      }
+      
+      // Check if process is still running
+      if (this.recordingProcess.killed || this.recordingProcess.exitCode !== null) {
+        this.recordingProcess = null;
+        return { success: false, error: 'FFmpeg process terminated unexpectedly' };
+      }
 
       return { success: true, filePath: this.outputPath };
     } catch (error) {
@@ -337,6 +456,22 @@ export class SimpleAudioRecorder {
       
       console.log('Found audio devices:', audioDevices);
       
+      // Check if we found any audio devices
+      if (audioDevices.length === 0) {
+        const { dialog } = require('electron');
+        dialog.showErrorBox(
+          'No Audio Devices Found',
+          'No microphone or audio input devices were detected.\n\n' +
+          'Please check:\n' +
+          '1. A microphone is connected to your computer\n' +
+          '2. The microphone is enabled in Windows Sound Settings\n' +
+          '3. Audio drivers are properly installed\n\n' +
+          'You can check your audio devices in:\n' +
+          'Settings > System > Sound > Input devices'
+        );
+        throw new Error('No audio devices found');
+      }
+      
       // Try to find a suitable microphone
       // Prefer devices with "마이크" (microphone in Korean) or "Microphone" in the name
       // Also check for corrupted Korean text patterns
@@ -361,6 +496,7 @@ export class SimpleAudioRecorder {
       // If no preferred device, use the first available audio device
       if (audioDevices.length > 0) {
         const device = audioDevices[0];
+        console.log(`Using first available audio device: ${device.name}`);
         if (device.alternativeName) {
           // Don't add quotes around alternative names
           return `audio=${device.alternativeName}`;
@@ -368,8 +504,8 @@ export class SimpleAudioRecorder {
         return `audio="${device.name}"`;
       }
       
-      // Fallback: try to use the default audio capture device without quotes
-      return 'audio=@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{C15FA2FB-82F9-4D2A-9364-6512775A41AD}';
+      // This should never be reached due to the check above, but just in case
+      throw new Error('No suitable audio device found');
     } catch (error) {
       console.error('Error detecting Windows audio device:', error);
       // Return a generic microphone reference
@@ -380,34 +516,47 @@ export class SimpleAudioRecorder {
   private getFFmpegPath(): string {
     // First, try to use bundled FFmpeg
     if (ffmpegPath && fs.existsSync(ffmpegPath)) {
+      console.log('Using bundled FFmpeg:', ffmpegPath);
       return ffmpegPath;
     }
     
     // Fallback to system FFmpeg
     if (process.platform === 'darwin') {
-      if (fs.existsSync('/opt/homebrew/bin/ffmpeg')) {
-        return '/opt/homebrew/bin/ffmpeg';
-      } else if (fs.existsSync('/usr/local/bin/ffmpeg')) {
-        return '/usr/local/bin/ffmpeg';
+      const macPaths = [
+        '/opt/homebrew/bin/ffmpeg',
+        '/usr/local/bin/ffmpeg',
+        '/usr/bin/ffmpeg'
+      ];
+      for (const p of macPaths) {
+        if (fs.existsSync(p)) {
+          console.log('Using system FFmpeg:', p);
+          return p;
+        }
       }
     } else if (process.platform === 'win32') {
       // Common Windows ffmpeg locations
       const possiblePaths = [
         'C:\\ffmpeg\\bin\\ffmpeg.exe',
         'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
-        'C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe'
+        'C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe',
+        path.join(process.env.LOCALAPPDATA || '', 'ffmpeg', 'bin', 'ffmpeg.exe'),
+        path.join(process.env.PROGRAMFILES || '', 'ffmpeg', 'bin', 'ffmpeg.exe')
       ];
       
       for (const systemPath of possiblePaths) {
         if (fs.existsSync(systemPath)) {
+          console.log('Using system FFmpeg:', systemPath);
           return systemPath;
         }
       }
       
       // Check if ffmpeg is in PATH
       try {
-        execSync('where ffmpeg', { encoding: 'utf8' });
-        return 'ffmpeg.exe';
+        const result = execSync('where ffmpeg.exe', { encoding: 'utf8' }).trim();
+        if (result) {
+          console.log('Using FFmpeg from PATH:', result.split('\n')[0]);
+          return result.split('\n')[0];
+        }
       } catch (e) {
         // ffmpeg not in PATH
       }
@@ -415,11 +564,13 @@ export class SimpleAudioRecorder {
     
     // Last resort - try bundled FFmpeg again (might be in production build)
     if (ffmpegPath) {
+      console.log('Using fallback bundled FFmpeg:', ffmpegPath);
       return ffmpegPath;
     }
     
     // Final fallback
-    return 'ffmpeg';
+    console.log('WARNING: No bundled FFmpeg found, falling back to system ffmpeg command');
+    return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
   }
 
   getRecordingsPath(): string {
@@ -429,6 +580,29 @@ export class SimpleAudioRecorder {
   // Alternative recording method (platform-specific optimizations)
   async startRecordingCoreAudio(meetingTitle: string): Promise<{ success: boolean; filePath?: string; error?: string }> {
     try {
+      // Check microphone permissions on macOS
+      if (process.platform === 'darwin') {
+        const { systemPreferences } = require('electron');
+        const microphoneAccess = systemPreferences.getMediaAccessStatus('microphone');
+        
+        if (microphoneAccess === 'denied') {
+          const { dialog } = require('electron');
+          dialog.showErrorBox(
+            'Microphone Access Denied',
+            'Listener.AI does not have permission to access your microphone.\n\n' +
+            'Please grant microphone access in:\n' +
+            'System Preferences > Security & Privacy > Privacy > Microphone\n\n' +
+            'Then restart Listener.AI.'
+          );
+          return { success: false, error: 'Microphone permission denied' };
+        } else if (microphoneAccess === 'not-determined') {
+          // Request permission
+          const granted = await systemPreferences.askForMediaAccess('microphone');
+          if (!granted) {
+            return { success: false, error: 'Microphone permission denied' };
+          }
+        }
+      }
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       // Sanitize filename while preserving Korean characters and other Unicode
       const sanitizedTitle = meetingTitle
@@ -442,16 +616,48 @@ export class SimpleAudioRecorder {
       
       // Check if FFmpeg exists
       if (!fs.existsSync(ffmpegPath) && ffmpegPath !== 'ffmpeg' && ffmpegPath !== 'ffmpeg.exe') {
-        const { dialog } = require('electron');
-        dialog.showErrorBox(
-          'FFmpeg Not Found', 
-          'The audio recording component (FFmpeg) could not be found.\n\n' +
-          'Please try:\n' +
-          '1. Reinstalling the application\n' +
-          '2. Installing FFmpeg manually (https://ffmpeg.org)\n\n' +
-          'Searched path: ' + ffmpegPath
-        );
-        throw new Error('FFmpeg not found. The bundled FFmpeg may have failed to load.');
+        const { dialog, shell } = require('electron');
+        const platform = process.platform;
+        let installInstructions = '';
+        
+        if (platform === 'win32') {
+          installInstructions = 'For Windows:\n' +
+            '1. Download FFmpeg from: https://www.gyan.dev/ffmpeg/builds/\n' +
+            '2. Download the "release essentials" build\n' +
+            '3. Extract to C:\\ffmpeg\n' +
+            '4. The ffmpeg.exe should be at C:\\ffmpeg\\bin\\ffmpeg.exe\n\n' +
+            'Or install using winget: winget install ffmpeg';
+        } else if (platform === 'darwin') {
+          installInstructions = 'For macOS:\n' +
+            'Install using Homebrew: brew install ffmpeg\n\n' +
+            'If you don\'t have Homebrew, install it first from https://brew.sh';
+        } else {
+          installInstructions = 'For Linux:\n' +
+            'Install using your package manager:\n' +
+            'Ubuntu/Debian: sudo apt install ffmpeg\n' +
+            'Fedora: sudo dnf install ffmpeg\n' +
+            'Arch: sudo pacman -S ffmpeg';
+        }
+        
+        const result = dialog.showMessageBoxSync(null, {
+          type: 'error',
+          title: 'FFmpeg Not Found',
+          message: 'The audio recording component (FFmpeg) is required but not found.',
+          detail: installInstructions + '\n\nSearched path: ' + ffmpegPath,
+          buttons: ['Download FFmpeg', 'Close'],
+          defaultId: 0
+        });
+        
+        if (result === 0) {
+          // Open FFmpeg download page
+          if (platform === 'win32') {
+            shell.openExternal('https://www.gyan.dev/ffmpeg/builds/');
+          } else {
+            shell.openExternal('https://ffmpeg.org/download.html');
+          }
+        }
+        
+        throw new Error('FFmpeg not found. Please install FFmpeg to use audio recording.');
       }
       
       // Platform-specific audio input configuration
