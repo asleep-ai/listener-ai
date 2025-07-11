@@ -75,7 +75,62 @@ function findFFprobeBinary(): string | null {
   return 'ffprobe';
 }
 
-// Initialize ffprobe path
+// Helper function to find FFmpeg binary
+function findFFmpegBinary(): string | null {
+  const platform = process.platform;
+  const arch = process.arch;
+  const ffmpegBinary = platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+  
+  // First, try ffmpeg-static in development
+  if (!app.isPackaged) {
+    try {
+      const staticPath = require('ffmpeg-static');
+      if (staticPath && fs.existsSync(staticPath)) {
+        console.log('Using ffmpeg-static in development:', staticPath);
+        return staticPath;
+      }
+    } catch (e) {
+      console.log('ffmpeg-static not available in development');
+    }
+  }
+  
+  // In production, check various locations
+  const possiblePaths = [
+    // Check in extraResources (most likely location)
+    path.join(process.resourcesPath, 'bin', ffmpegBinary),
+    // Legacy locations for backward compatibility
+    path.join(process.resourcesPath, ffmpegBinary),
+    // Check in app.asar.unpacked
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', ffmpegBinary),
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'bin', platform, arch, ffmpegBinary),
+  ];
+  
+  // Platform specific paths
+  if (platform === 'darwin') {
+    possiblePaths.push(
+      path.join(app.getAppPath(), '..', '..', 'Resources', 'bin', ffmpegBinary),
+      path.join(app.getAppPath(), '..', '..', 'Resources', ffmpegBinary)
+    );
+  } else if (platform === 'win32') {
+    possiblePaths.push(
+      path.join(path.dirname(app.getPath('exe')), 'resources', 'bin', ffmpegBinary),
+      path.join(path.dirname(app.getPath('exe')), 'resources', ffmpegBinary)
+    );
+  }
+  
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      console.log('Found FFmpeg at:', p);
+      return p;
+    }
+  }
+  
+  // Fallback to system FFmpeg
+  return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+}
+
+// Initialize paths
+const ffmpegPath = findFFmpegBinary();
 ffprobePath = findFFprobeBinary();
 
 export interface TranscriptionResult {
@@ -93,6 +148,11 @@ export class GeminiService {
   private segmentModel: GenerativeModel;
   private fileManager: GoogleAIFileManager;
   private apiKey: string;
+  
+  // Get FFmpeg path for this service
+  private getFFmpegPath(): string {
+    return ffmpegPath || 'ffmpeg';
+  }
 
   constructor(apiKey: string) {
     this.apiKey = apiKey;
@@ -218,10 +278,13 @@ export class GeminiService {
     
     const segmentPath = path.join(outputDir, `${baseName}_segment_%03d${ext}`);
     
+    // Get the bundled FFmpeg path
+    const ffmpegPath = this.getFFmpegPath();
+    
     try {
       // Split audio into segments
       await execAsync(
-        `ffmpeg -i "${audioFilePath}" -f segment -segment_time ${segmentDuration} -c copy "${segmentPath}"`
+        `"${ffmpegPath}" -i "${audioFilePath}" -f segment -segment_time ${segmentDuration} -c copy "${segmentPath}"`
       );
       
       // Find all created segment files

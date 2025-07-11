@@ -1,15 +1,26 @@
+// Global error handler to catch any uncaught errors
+window.addEventListener('error', (event) => {
+  console.error('Renderer error:', event.error);
+  // Only show alert in production
+  if (!window.location.href.includes('localhost')) {
+    alert(`Application error: ${event.error?.message || 'Unknown error'}\n\nPlease restart the application.`);
+  }
+});
+
+// Check if electronAPI is available
+if (!window.electronAPI) {
+  console.error('electronAPI not found! Preload script may have failed.');
+  document.body.innerHTML = '<div style="padding: 20px; color: red;">Error: Application failed to load properly. Please restart.</div>';
+  throw new Error('electronAPI not available');
+}
+
 let isRecording = false;
 let recordingStartTime = null;
 let timerInterval = null;
 let isAutoModeProcessing = false; // Track if auto mode is processing
 
-const recordButton = document.getElementById('recordButton');
-const statusIndicator = document.getElementById('statusIndicator');
-const statusText = document.getElementById('statusText');
-const recordingTime = document.getElementById('recordingTime');
-const meetingTitle = document.getElementById('meetingTitle');
-const recordingsList = document.getElementById('recordingsList');
-const autoModeToggle = document.getElementById('autoModeToggle');
+// Initialize these after DOM loads to avoid null errors
+let recordButton, statusIndicator, statusText, recordingTime, meetingTitle, recordingsList, autoModeToggle;
 let progressContainer = null;
 let progressFill = null;
 let progressText = null;
@@ -24,6 +35,20 @@ window.electronAPI.onTranscriptionProgress((progress) => {
 
 // Check for API keys on startup
 window.addEventListener('DOMContentLoaded', async () => {
+  try {
+    // Initialize main UI elements
+    recordButton = document.getElementById('recordButton');
+    statusIndicator = document.getElementById('statusIndicator');
+    statusText = document.getElementById('statusText');
+    recordingTime = document.getElementById('recordingTime');
+    meetingTitle = document.getElementById('meetingTitle');
+    recordingsList = document.getElementById('recordingsList');
+    autoModeToggle = document.getElementById('autoModeToggle');
+    
+    // Verify critical elements exist
+    if (!recordButton) {
+      throw new Error('Record button not found in DOM');
+    }
   // Initialize modal elements first
   configModal = document.getElementById('configModal');
   transcriptionModal = document.getElementById('transcriptionModal');
@@ -62,6 +87,21 @@ window.addEventListener('DOMContentLoaded', async () => {
   
   // Load existing recordings
   await loadRecordings();
+  
+  // Hide loading indicator
+  const loadingIndicator = document.getElementById('loadingIndicator');
+  if (loadingIndicator) {
+    loadingIndicator.style.display = 'none';
+  }
+  
+  } catch (error) {
+    console.error('Failed to initialize app:', error);
+    document.body.innerHTML = `<div style="padding: 20px; color: red;">
+      <h2>Failed to start application</h2>
+      <p>${error.message}</p>
+      <p>Please restart the application.</p>
+    </div>`;
+  }
   
   // Load auto mode preference
   const config = await window.electronAPI.getConfig();

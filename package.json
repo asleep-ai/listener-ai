@@ -54,20 +54,27 @@
       "index.html",
       "styles.css",
       "renderer.js",
-      "package.json"
+      "package.json",
+      "assets/icon.png",
+      "assets/icon.icns",
+      "!node_modules/ffmpeg-static/**/*",
+      "!node_modules/@ffmpeg-installer/**/*",
+      "!node_modules/ffprobe-static/**/*",
+      "!ffmpeg-binaries/**/*",
+      "!scripts/**/*",
+      "!release/**/*",
+      "!src/**/*",
+      "!.git/**/*",
+      "!**/*.ts",
+      "!**/*.map",
+      "!.gitignore",
+      "!.eslintrc",
+      "!README.md",
+      "!CLAUDE.md",
+      "!tsconfig.json",
+      "!build/**/*"
     ],
-    "asarUnpack": [
-      "node_modules/ffmpeg-static/**/*",
-      "node_modules/@ffmpeg-installer/**/*",
-      "node_modules/ffprobe-static/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "node_modules/ffmpeg-static/ffmpeg",
-        "to": "bin/ffmpeg",
-        "filter": ["**/*"]
-      }
-    ],
+    "asarUnpack": [],
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icon.png",
@@ -92,6 +99,11 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "extraResources": [
+        {
+          "from": "ffmpeg-binaries/darwin/${arch}/ffmpeg-darwin-${arch}",
+          "to": "bin/ffmpeg",
+          "filter": ["**/*"]
+        },
         {
           "from": "node_modules/ffprobe-static/bin/darwin/${arch}/ffprobe",
           "to": "bin/ffprobe",
@@ -127,6 +139,10 @@
         {
           "from": "node_modules/ffprobe-static/bin/win32/x64/ffprobe.exe",
           "to": "bin/ffprobe.exe"
+        },
+        {
+          "from": "WINDOWS_FFMPEG.txt",
+          "to": "WINDOWS_FFMPEG.txt"
         }
       ]
     },
