@@ -226,8 +226,11 @@ ipcMain.handle('upload-to-notion', async (event, data: { title: string; transcri
       });
     }
     
+    // Add "by L.AI" to the title for distinction
+    const titleWithSuffix = `${data.title} by L.AI`;
+    
     const result = await notionService.createMeetingNote(
-      data.title,
+      titleWithSuffix,
       new Date(),
       data.transcriptionData,
       data.audioFilePath
