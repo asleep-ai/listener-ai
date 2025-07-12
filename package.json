@@ -1,6 +1,6 @@
 {
   "name": "listener-ai",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "A lightweight desktop application for recording and transcribing meetings with AI-powered notes.",
   "main": "dist/main.js",
   "scripts": {
@@ -102,12 +102,16 @@
         {
           "from": "ffmpeg-binaries/darwin/${arch}/ffmpeg-darwin-${arch}",
           "to": "bin/ffmpeg",
-          "filter": ["**/*"]
+          "filter": [
+            "**/*"
+          ]
         },
         {
           "from": "node_modules/ffprobe-static/bin/darwin/${arch}/ffprobe",
           "to": "bin/ffprobe",
-          "filter": ["**/*"]
+          "filter": [
+            "**/*"
+          ]
         }
       ]
     },
