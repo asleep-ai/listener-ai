@@ -72,6 +72,9 @@ jobs:
         env:
           CSC_LINK: ${{ secrets.SIGNING_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -108,9 +111,7 @@ jobs:
             ### Installation
             1. Download the appropriate DMG for your Mac
             2. Open the DMG and drag to Applications
-            3. **First launch**: Right-click and select "Open"
-            
-            Note: App is code signed but not notarized. First launch requires right-click → Open.
+            3. Open the app normally - it's fully signed and notarized!
           draft: false
           artifacts: |
             release-artifacts/mac-build/*.dmg
