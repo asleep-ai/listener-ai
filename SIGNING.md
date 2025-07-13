@@ -31,7 +31,22 @@ CSC_KEY_PASSWORD=certificate-password  # Optional: Certificate password
 npm run dist:mac
 ```
 
-The app will be automatically signed and notarized.
+The app will be automatically signed and notarized using the configured notarize.js script.
+
+### Notarization
+
+Notarization is automatically handled during the build process when the required environment variables are set:
+- `APPLE_ID`: Your Apple ID email
+- `APPLE_ID_PASSWORD`: App-specific password (not your Apple ID password)
+- `APPLE_TEAM_ID`: Your Apple Developer Team ID
+
+The notarization process:
+1. Uploads the signed app to Apple's notarization service
+2. Waits for Apple to scan and approve the app
+3. Staples the notarization ticket to the app
+4. Creates a DMG that can be opened without security warnings
+
+Note: Notarization requires a valid Apple Developer account and can take 5-15 minutes.
 
 ## Windows Code Signing
 
@@ -74,10 +89,18 @@ Note: Self-signed apps still show warnings but can be opened more easily.
 ## GitHub Actions (Automated Signing)
 
 Add secrets to your GitHub repository:
-- `APPLE_ID`
-- `APPLE_ID_PASSWORD`
-- `APPLE_TEAM_ID`
-- `CSC_LINK` (base64 encoded certificate)
-- `CSC_KEY_PASSWORD`
 
-The provided GitHub Actions workflow will automatically sign releases.
+### For macOS (Signing & Notarization)
+
+- `SIGNING_CERTIFICATE` - Base64 encoded .p12 certificate
+- `CERT_PASSWORD` - Certificate password
+- `APPLE_ID` - Your Apple ID email
+- `APPLE_ID_PASSWORD` - App-specific password from appleid.apple.com
+- `APPLE_TEAM_ID` - Your 10-character Team ID from Apple Developer account
+
+### For Windows (if needed)
+
+- `WIN_CSC_LINK` - Base64 encoded .pfx certificate
+- `WIN_CSC_KEY_PASSWORD` - Windows certificate password
+
+The GitHub Actions workflow will automatically sign and notarize releases.

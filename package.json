@@ -79,7 +79,7 @@
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icon.png",
-      "hardenedRuntime": false,
+      "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "extendInfo": {
@@ -156,6 +156,7 @@
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": true
     },
+    "afterSign": "build/notarize.js",
     "linux": {
       "target": "AppImage",
       "icon": "assets/icon.png"
