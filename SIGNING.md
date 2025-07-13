@@ -18,7 +18,7 @@ This guide explains how to sign Listener.AI to eliminate security warnings.
 ```bash
 # macOS signing
 APPLE_ID=your-apple-id@example.com
-APPLE_ID_PASSWORD=xxxx-xxxx-xxxx-xxxx  # App-specific password
+APPLE_APP_SPECIFIC_PASSWORD=xxxx-xxxx-xxxx-xxxx  # App-specific password
 APPLE_TEAM_ID=XXXXXXXXXX  # Your Team ID
 CSC_LINK=path/to/certificate.p12  # Optional: Path to certificate
 CSC_KEY_PASSWORD=certificate-password  # Optional: Certificate password
@@ -37,7 +37,7 @@ The app will be automatically signed and notarized using the configured notarize
 
 Notarization is automatically handled during the build process when the required environment variables are set:
 - `APPLE_ID`: Your Apple ID email
-- `APPLE_ID_PASSWORD`: App-specific password (not your Apple ID password)
+- `APPLE_APP_SPECIFIC_PASSWORD`: App-specific password (not your Apple ID password)
 - `APPLE_TEAM_ID`: Your Apple Developer Team ID
 
 The notarization process:
