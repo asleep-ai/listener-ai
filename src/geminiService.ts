@@ -151,6 +151,41 @@ export class GeminiService {
   
   // Get FFmpeg path for this service
   private getFFmpegPath(): string {
+    if (ffmpegPath && fs.existsSync(ffmpegPath)) {
+      return ffmpegPath;
+    }
+    
+    // On Windows, check common installation paths
+    if (process.platform === 'win32') {
+      const possiblePaths = [
+        'C:\\ffmpeg\\bin\\ffmpeg.exe',
+        'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
+        'C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe'
+      ];
+      
+      for (const p of possiblePaths) {
+        if (fs.existsSync(p)) {
+          console.log('Found Windows FFmpeg at:', p);
+          return p;
+        }
+      }
+      
+      // Check if ffmpeg is in PATH
+      try {
+        const { execSync } = require('child_process');
+        const result = execSync('where ffmpeg.exe', { encoding: 'utf8' }).trim();
+        if (result) {
+          console.log('Found FFmpeg in PATH:', result.split('\n')[0]);
+          return result.split('\n')[0];
+        }
+      } catch (e) {
+        // ffmpeg not in PATH
+      }
+      
+      // FFmpeg not found on Windows - return 'ffmpeg.exe' and let error handling in splitAudioIntoSegments show dialog
+      return 'ffmpeg.exe';
+    }
+    
     return ffmpegPath || 'ffmpeg';
   }
 
@@ -295,8 +330,47 @@ export class GeminiService {
       
       console.log(`Split audio into ${segmentFiles.length} segments`);
       return segmentFiles;
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error splitting audio:', error);
+      
+      // Check if it's a Windows FFmpeg not found error
+      if (process.platform === 'win32' && 
+          (error.message?.includes('is not recognized') || 
+           error.message?.includes('ffmpeg.exe') ||
+           error.code === 'ENOENT')) {
+        const { dialog, shell } = require('electron');
+        
+        dialog.showErrorBox(
+          'FFmpeg Not Found',
+          'FFmpeg is required for audio transcription but was not found.\n\n' +
+          'To install FFmpeg on Windows:\n\n' +
+          'Option 1 (Recommended):\n' +
+          '1. Open PowerShell as Administrator\n' +
+          '2. Run: winget install ffmpeg\n' +
+          '3. Restart Listener.AI\n\n' +
+          'Option 2 (Manual):\n' +
+          '1. Download from: https://www.gyan.dev/ffmpeg/builds/\n' +
+          '2. Download "release essentials" build\n' +
+          '3. Extract to C:\\ffmpeg\n' +
+          '4. The ffmpeg.exe should be at C:\\ffmpeg\\bin\\ffmpeg.exe\n' +
+          '5. Restart Listener.AI'
+        );
+        
+        // Offer to open download page
+        const result = dialog.showMessageBoxSync(null, {
+          type: 'question',
+          buttons: ['Open Download Page', 'Cancel'],
+          defaultId: 0,
+          message: 'Open FFmpeg download page?'
+        });
+        
+        if (result === 0) {
+          shell.openExternal('https://www.gyan.dev/ffmpeg/builds/');
+        }
+        
+        throw new Error('FFmpeg not found. Please install FFmpeg and restart Listener.AI.');
+      }
+      
       throw error;
     }
   }
