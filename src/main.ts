@@ -135,12 +135,9 @@ async function renameAudioFile(oldPath: string, suggestedTitle: string): Promise
 }
 
 // IPC handlers for recording functionality
-ipcMain.handle('start-recording', async (event, meetingTitle: string, useAlternativeMethod: boolean = false) => {
+ipcMain.handle('start-recording', async (event, meetingTitle: string) => {
   try {
-    // Try the CoreAudio method if alternative is requested or as a fallback
-    const result = useAlternativeMethod 
-      ? await audioRecorder.startRecordingCoreAudio(meetingTitle)
-      : await audioRecorder.startRecording(meetingTitle);
+    const result = await audioRecorder.startRecording(meetingTitle);
     
     // If recording failed, show error dialog
     if (!result.success) {

@@ -375,18 +375,6 @@ export class GeminiService {
     }
   }
 
-  // Helper function to format time
-  private formatTime(seconds: number): string {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  }
-  
-  // Get duration for segment calculation
-  private getSegmentDuration(audioFilePath: string): number {
-    return 300; // 5 minutes in seconds
-  }
 
   // Two-step transcription approach for all audio files
   private async transcribeWithTwoSteps(audioFilePath: string, duration: number, progressCallback?: (percent: number, message: string) => void): Promise<TranscriptionResult> {
@@ -642,7 +630,13 @@ IMPORTANT:
           
           // Add segment time range header
           const segmentEndTime = Math.min(segmentStartTime + 300, duration);
-          const segmentHeader = `[Segment ${i + 1}: ${this.formatTime(segmentStartTime)} ~ ${this.formatTime(segmentEndTime)}]\n\n`;
+          const formatTime = (seconds: number) => {
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+          };
+          const segmentHeader = `[Segment ${i + 1}: ${formatTime(segmentStartTime)} ~ ${formatTime(segmentEndTime)}]\n\n`;
           
           return {
             index: i,
@@ -703,16 +697,4 @@ IMPORTANT:
     }
   }
 
-  // Test the API connection
-  async testConnection(): Promise<boolean> {
-    try {
-      const result = await this.model.generateContent('Hello, please respond with "Connection successful"');
-      const response = await result.response;
-      const text = response.text();
-      return text.toLowerCase().includes('connection successful');
-    } catch (error) {
-      console.error('API connection test failed:', error);
-      return false;
-    }
-  }
 }

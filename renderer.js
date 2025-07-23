@@ -284,36 +284,6 @@ function stopTimer() {
   recordingTime.textContent = '00:00';
 }
 
-function addRecordingToList(title, date, filePath) {
-  // Remove the "no recordings" message if it exists
-  const noRecordings = recordingsList.querySelector('.no-recordings');
-  if (noRecordings) {
-    noRecordings.remove();
-  }
-  
-  const recordingItem = document.createElement('div');
-  recordingItem.className = 'recording-item';
-  recordingItem.innerHTML = `
-    <div class="recording-info">
-      <div class="recording-title">${title}</div>
-      <div class="recording-date">${date.toLocaleString()}</div>
-    </div>
-    <button class="transcribe-button" data-filepath="${filePath}" data-title="${title}">
-      Transcribe
-    </button>
-  `;
-  
-  recordingsList.insertBefore(recordingItem, recordingsList.firstChild);
-  
-  // Add event listener to transcribe button
-  const transcribeBtn = recordingItem.querySelector('.transcribe-button');
-  transcribeBtn.addEventListener('click', () => {
-    console.log('Transcribe button clicked');
-    console.log('File path:', filePath);
-    console.log('Title:', title);
-    handleTranscribe(filePath, title);
-  });
-}
 
 // Listen for recording status updates
 window.electronAPI.onRecordingStatus((status) => {
@@ -559,50 +529,6 @@ async function showConfigModal() {
   }
 }
 
-// Function to prompt for individual API keys
-async function promptForApiKeys(missingKeys) {
-  const config = {};
-  
-  for (const key of missingKeys) {
-    let value = '';
-    let promptMessage = '';
-    let configKey = '';
-    
-    switch (key) {
-      case 'Gemini API Key':
-        promptMessage = 'Enter your Gemini API key:\n(Get one at https://makersuite.google.com/app/apikey)';
-        configKey = 'geminiApiKey';
-        break;
-      case 'Notion Integration Token':
-        promptMessage = 'Enter your Notion Integration token:\n(Create one at https://www.notion.so/my-integrations)';
-        configKey = 'notionApiKey';
-        break;
-      case 'Notion Database ID':
-        promptMessage = 'Enter your Notion Database ID:\n(Found in your database URL after the workspace name)';
-        configKey = 'notionDatabaseId';
-        break;
-    }
-    
-    value = prompt(promptMessage);
-    if (value && value.trim()) {
-      config[configKey] = value.trim();
-    }
-  }
-  
-  // Save the configuration
-  if (Object.keys(config).length > 0) {
-    const result = await window.electronAPI.saveConfig(config);
-    if (result.success) {
-      alert('API keys saved successfully!');
-      
-      // Show platform-specific config location
-      const configPath = result.configPath || 'application data directory';
-      alert(`Configuration saved to:\n${configPath}\n\nThis location is specific to your operating system.`);
-    } else {
-      alert('Failed to save API keys: ' + result.error);
-    }
-  }
-}
 
 // Function to load and display recordings
 async function loadRecordings() {

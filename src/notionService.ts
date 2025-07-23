@@ -273,30 +273,4 @@ export class NotionService {
     return blocks;
   }
 
-  // Test the connection to Notion
-  async testConnection(): Promise<boolean> {
-    try {
-      const response = await this.notion.databases.retrieve({
-        database_id: this.databaseId
-      });
-      console.log('Successfully connected to Notion database');
-      return true;
-    } catch (error) {
-      console.error('Failed to connect to Notion:', error);
-      return false;
-    }
-  }
-
-  // Get the database schema to help with setup
-  async getDatabaseSchema() {
-    try {
-      const response = await this.notion.databases.retrieve({
-        database_id: this.databaseId
-      });
-      return response.properties;
-    } catch (error) {
-      console.error('Failed to get database schema:', error);
-      throw error;
-    }
-  }
 }
