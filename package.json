@@ -7,10 +7,11 @@
     "start": "npm run build && electron .",
     "dev": "tsc && electron .",
     "build": "tsc",
+    "prebuild:mac": "node scripts/download-ffmpeg-all.js",
     "dist": "npm run build && electron-builder",
-    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:mac": "npm run prebuild:mac && npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
-    "dist:all": "npm run build && electron-builder -mw",
+    "dist:all": "npm run prebuild:mac && npm run build && electron-builder -mw",
     "version:bump": "node scripts/bump-version.js",
     "release": "npm run version:bump && npm run dist:all",
     "postinstall": "electron-builder install-app-deps"
