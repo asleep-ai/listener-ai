@@ -18,11 +18,16 @@ Listener.AI requires FFmpeg for audio recording functionality. To keep the repos
 - Downloaded binaries are placed in `ffmpeg-binaries/darwin/{x64,arm64}/`
 - The build process bundles these binaries into the app's Resources folder
 - Users get a fully self-contained app with no additional installation required
+- Includes fallback detection for system FFmpeg if bundled version fails
 
 #### Windows
 - Currently, Windows users must install FFmpeg separately
 - The app includes `WINDOWS_FFMPEG.txt` with installation instructions
-- The app will detect and use system-installed FFmpeg from common locations
+- The app automatically detects system-installed FFmpeg from:
+  - PATH environment variable
+  - Common installation directories (C:\ffmpeg, C:\Program Files\ffmpeg, etc.)
+  - User-specified locations
+- Full support for Korean language in DirectShow audio device names
 
 ### Build Commands
 
@@ -54,8 +59,23 @@ If FFmpeg binaries are missing during build:
 2. Check internet connection (downloads from GitHub)
 3. Verify the download script has proper permissions
 
+## Audio Recording Features
+
+### Platform-Specific Implementation
+- **macOS**: Uses AVFoundation for device detection
+- **Windows**: DirectShow integration with full Unicode support
+- **Linux**: ALSA audio system integration
+
+### Audio Quality Enhancements
+- MP3 encoding with optimized bitrate (128k)
+- Volume boost (+10dB) for clearer recordings
+- Audio limiter to prevent clipping
+- Real-time recording duration tracking
+
 ## Future Improvements
 
 - Add Windows FFmpeg bundling support
 - Implement fallback download mirrors
 - Add checksum verification for downloaded binaries
+- Support for additional audio formats
+- Advanced audio processing options
