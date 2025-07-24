@@ -124,6 +124,30 @@
     </div>
   </div>
   
+  <!-- FFmpeg Download Progress Overlay -->
+  <div id="ffmpegDownloadOverlay" class="modal" style="display: none;">
+    <div class="ffmpeg-download-card">
+      <h3>Setting up audio recording...</h3>
+      <p class="download-status" id="downloadStatus">Downloading FFmpeg for audio recording...</p>
+      
+      <div class="progress-container">
+        <div class="progress-bar">
+          <div class="progress-fill animated-stripes" id="ffmpegProgressFill" style="width: 0%"></div>
+        </div>
+        <span class="progress-percent" id="ffmpegProgressPercent">0%</span>
+      </div>
+      
+      <div class="download-stats">
+        <span class="download-speed" id="downloadSpeed">0 MB/s</span>
+        <span class="download-eta" id="downloadEta">Calculating...</span>
+      </div>
+      
+      <p class="download-info">FFmpeg is required for audio recording. This is a one-time download.</p>
+      
+      <button id="cancelDownload" class="cancel-button">Cancel</button>
+    </div>
+  </div>
+  
   <script src="renderer.js"></script>
 </body>
 </html>

@@ -3,135 +3,10 @@ import { GoogleAIFileManager } from '@google/generative-ai/server';
 import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
+import { FFmpegManager } from './services/ffmpegManager';
 
-// Import ffprobe path
-let ffprobePath: string | null = null;
-
-// Helper function to find ffprobe binary
-function findFFprobeBinary(): string | null {
-  const platform = process.platform;
-  const arch = process.arch;
-  const ffprobeBinary = platform === 'win32' ? 'ffprobe.exe' : 'ffprobe';
-  
-  // First, try ffprobe-static in development
-  if (!app.isPackaged) {
-    try {
-      const staticPath = require('ffprobe-static').path;
-      if (staticPath && fs.existsSync(staticPath)) {
-        console.log('Using ffprobe-static in development:', staticPath);
-        return staticPath;
-      }
-    } catch (e) {
-      console.log('ffprobe-static not available in development');
-    }
-  }
-  
-  // In production, check various locations
-  const possiblePaths = [
-    // Check in extraResources (most likely location)
-    path.join(process.resourcesPath, 'bin', ffprobeBinary),
-    // Legacy locations for backward compatibility
-    path.join(process.resourcesPath, ffprobeBinary),
-    // Check in app.asar.unpacked
-    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffprobe-static', ffprobeBinary),
-    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffprobe-static', 'bin', platform, arch, ffprobeBinary),
-  ];
-  
-  // Platform specific paths
-  if (platform === 'darwin') {
-    possiblePaths.push(
-      path.join(app.getAppPath(), '..', '..', 'Resources', 'bin', ffprobeBinary),
-      path.join(app.getAppPath(), '..', '..', 'Resources', ffprobeBinary)
-    );
-  } else if (platform === 'win32') {
-    possiblePaths.push(
-      path.join(path.dirname(app.getPath('exe')), 'resources', 'bin', ffprobeBinary),
-      path.join(path.dirname(app.getPath('exe')), 'resources', ffprobeBinary)
-    );
-  }
-  
-  console.log('Searching for ffprobe binary...');
-  console.log('Platform:', platform, 'Arch:', arch);
-  console.log('App packaged:', app.isPackaged);
-  
-  for (const p of possiblePaths) {
-    console.log('Checking ffprobe path:', p, 'exists:', fs.existsSync(p));
-    if (fs.existsSync(p)) {
-      console.log('Found ffprobe at:', p);
-      // Make executable on Unix
-      if (platform !== 'win32') {
-        try {
-          fs.chmodSync(p, 0o755);
-        } catch (e) {
-          console.error('Failed to chmod ffprobe:', e);
-        }
-      }
-      return p;
-    }
-  }
-  
-  console.log('ffprobe not found in bundled locations, trying system ffprobe');
-  // Try system ffprobe as fallback
-  return 'ffprobe';
-}
-
-// Helper function to find FFmpeg binary
-function findFFmpegBinary(): string | null {
-  const platform = process.platform;
-  const arch = process.arch;
-  const ffmpegBinary = platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
-  
-  // First, try ffmpeg-static in development
-  if (!app.isPackaged) {
-    try {
-      const staticPath = require('ffmpeg-static');
-      if (staticPath && fs.existsSync(staticPath)) {
-        console.log('Using ffmpeg-static in development:', staticPath);
-        return staticPath;
-      }
-    } catch (e) {
-      console.log('ffmpeg-static not available in development');
-    }
-  }
-  
-  // In production, check various locations
-  const possiblePaths = [
-    // Check in extraResources (most likely location)
-    path.join(process.resourcesPath, 'bin', ffmpegBinary),
-    // Legacy locations for backward compatibility
-    path.join(process.resourcesPath, ffmpegBinary),
-    // Check in app.asar.unpacked
-    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', ffmpegBinary),
-    path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'bin', platform, arch, ffmpegBinary),
-  ];
-  
-  // Platform specific paths
-  if (platform === 'darwin') {
-    possiblePaths.push(
-      path.join(app.getAppPath(), '..', '..', 'Resources', 'bin', ffmpegBinary),
-      path.join(app.getAppPath(), '..', '..', 'Resources', ffmpegBinary)
-    );
-  } else if (platform === 'win32') {
-    possiblePaths.push(
-      path.join(path.dirname(app.getPath('exe')), 'resources', 'bin', ffmpegBinary),
-      path.join(path.dirname(app.getPath('exe')), 'resources', ffmpegBinary)
-    );
-  }
-  
-  for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
-      console.log('Found FFmpeg at:', p);
-      return p;
-    }
-  }
-  
-  // Fallback to system FFmpeg
-  return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
-}
-
-// Initialize paths
-const ffmpegPath = findFFmpegBinary();
-ffprobePath = findFFprobeBinary();
+// Use FFmpegManager for FFmpeg path resolution
+const ffmpegManager = new FFmpegManager();
 
 export interface TranscriptionResult {
   transcript: string;
@@ -150,43 +25,14 @@ export class GeminiService {
   private apiKey: string;
   
   // Get FFmpeg path for this service
-  private getFFmpegPath(): string {
-    if (ffmpegPath && fs.existsSync(ffmpegPath)) {
+  private async getFFmpegPath(): Promise<string> {
+    const ffmpegPath = await ffmpegManager.ensureFFmpeg();
+    if (ffmpegPath) {
       return ffmpegPath;
     }
     
-    // On Windows, check common installation paths
-    if (process.platform === 'win32') {
-      const possiblePaths = [
-        'C:\\ffmpeg\\bin\\ffmpeg.exe',
-        'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
-        'C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe'
-      ];
-      
-      for (const p of possiblePaths) {
-        if (fs.existsSync(p)) {
-          console.log('Found Windows FFmpeg at:', p);
-          return p;
-        }
-      }
-      
-      // Check if ffmpeg is in PATH
-      try {
-        const { execSync } = require('child_process');
-        const result = execSync('where ffmpeg.exe', { encoding: 'utf8' }).trim();
-        if (result) {
-          console.log('Found FFmpeg in PATH:', result.split('\n')[0]);
-          return result.split('\n')[0];
-        }
-      } catch (e) {
-        // ffmpeg not in PATH
-      }
-      
-      // FFmpeg not found on Windows - return 'ffmpeg.exe' and let error handling in splitAudioIntoSegments show dialog
-      return 'ffmpeg.exe';
-    }
-    
-    return ffmpegPath || 'ffmpeg';
+    // FFmpeg not found - return default and let error handling in splitAudioIntoSegments show dialog
+    return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
   }
 
   constructor(apiKey: string) {
@@ -258,7 +104,7 @@ export class GeminiService {
         progressCallback(15, `Processing ${fileSizeInMB.toFixed(1)} MB audio file...`);
       }
       
-      // Get audio duration using ffprobe
+      // Get audio duration using ffmpeg
       const duration = await this.getAudioDuration(audioFilePath);
       console.log(`Audio duration: ${duration} seconds`);
       
@@ -290,14 +136,39 @@ export class GeminiService {
     const execAsync = promisify(exec);
     
     try {
-      const ffprobeCommand = `"${ffprobePath}" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioFilePath}"`;
-      console.log('Running ffprobe command:', ffprobeCommand);
+      // Get the bundled FFmpeg path (use same FFmpeg as for splitting)
+      const ffmpegPath = await this.getFFmpegPath();
       
-      const { stdout } = await execAsync(ffprobeCommand);
-      return parseFloat(stdout.trim());
+      // Use ffmpeg to get duration (instead of ffprobe)
+      const ffmpegCommand = `"${ffmpegPath}" -i "${audioFilePath}" -hide_banner -loglevel error -show_entries format=duration -v quiet -of csv="p=0"`;
+      console.log('Running ffmpeg command for duration:', ffmpegCommand);
+      
+      const { stdout, stderr } = await execAsync(ffmpegCommand).catch((e: any) => {
+        // FFmpeg might exit with non-zero code but still output duration in stderr
+        return e;
+      });
+      
+      // Try to extract duration from stderr (where ffmpeg outputs file info)
+      const durationMatch = stderr?.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/);
+      if (durationMatch) {
+        const hours = parseInt(durationMatch[1]);
+        const minutes = parseInt(durationMatch[2]);
+        const seconds = parseFloat(durationMatch[3]);
+        return hours * 3600 + minutes * 60 + seconds;
+      }
+      
+      // If we got stdout, try parsing it
+      if (stdout && !isNaN(parseFloat(stdout.trim()))) {
+        return parseFloat(stdout.trim());
+      }
+      
+      // Default to 0 if we can't determine duration
+      console.warn('Could not determine audio duration, defaulting to 0');
+      return 0;
     } catch (error) {
       console.error('Error getting audio duration:', error);
-      throw error;
+      // Return 0 as fallback to continue processing
+      return 0;
     }
   }
 
@@ -314,7 +185,7 @@ export class GeminiService {
     const segmentPath = path.join(outputDir, `${baseName}_segment_%03d${ext}`);
     
     // Get the bundled FFmpeg path
-    const ffmpegPath = this.getFFmpegPath();
+    const ffmpegPath = await this.getFFmpegPath();
     
     try {
       // Split audio into segments

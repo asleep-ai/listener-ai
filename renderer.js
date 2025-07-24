@@ -131,6 +131,14 @@ async function startRecording() {
     return;
   }
   
+  // Check if FFmpeg is available
+  const ffmpegCheck = await window.electronAPI.checkFFmpeg();
+  if (!ffmpegCheck.available) {
+    // Show download dialog
+    await showFFmpegDownloadDialog();
+    return;
+  }
+  
   const title = meetingTitle.value.trim() || 'Untitled_Meeting';
 
   try {
@@ -146,6 +154,24 @@ async function startRecording() {
       recordingTime.classList.add('active');
       
       startTimer();
+    } else {
+      // Handle error - check what type of error
+      if (result.error && result.error.includes('FFmpeg not found')) {
+        // FFmpeg check should have already happened above, but just in case
+        await showFFmpegDownloadDialog();
+      } else if (result.error && result.error.includes('Microphone permission denied')) {
+        // Show permission error with button to open settings
+        if (confirm('Microphone access is required to record audio.\n\nWould you like to open System Settings to grant permission?\n\nAfter granting permission, please restart Listener.AI.')) {
+          await window.electronAPI.openMicrophoneSettings();
+        }
+      } else if (result.error && result.error.includes('No audio devices found')) {
+        // This might be due to permissions or no microphone connected
+        if (confirm('No microphone was detected.\n\nThis could be because:\n1. Microphone permissions are denied\n2. No microphone is connected\n3. Audio drivers need updating\n\nWould you like to check System Settings?')) {
+          await window.electronAPI.openMicrophoneSettings();
+        }
+      } else {
+        alert('Failed to start recording: ' + (result.error || 'Unknown error'));
+      }
     }
   } catch (error) {
     alert('Failed to start recording: ' + error.message);
@@ -594,4 +620,100 @@ function formatFileSize(bytes) {
 // Function to refresh recordings list after a new recording
 async function refreshRecordingsList() {
   await loadRecordings();
+}
+
+// FFmpeg download management
+async function showFFmpegDownloadDialog() {
+  const overlay = document.getElementById('ffmpegDownloadOverlay');
+  if (!overlay) return;
+
+  // Show the overlay
+  overlay.style.display = 'block';
+
+  // Reset progress
+  const progressFillEl = document.getElementById('ffmpegProgressFill');
+  const progressPercentEl = document.getElementById('ffmpegProgressPercent');
+  const downloadSpeedEl = document.getElementById('downloadSpeed');
+  const downloadEtaEl = document.getElementById('downloadEta');
+  const downloadStatusEl = document.getElementById('downloadStatus');
+  
+  if (progressFillEl) progressFillEl.style.width = '0%';
+  if (progressPercentEl) progressPercentEl.textContent = '0%';
+  if (downloadSpeedEl) downloadSpeedEl.textContent = '0 MB/s';
+  if (downloadEtaEl) downloadEtaEl.textContent = 'Calculating...';
+  if (downloadStatusEl) downloadStatusEl.textContent = 'Downloading FFmpeg for audio recording...';
+
+  // Setup cancel button
+  const cancelBtn = document.getElementById('cancelDownload');
+  if (cancelBtn) {
+    cancelBtn.onclick = async () => {
+      await window.electronAPI.cancelFFmpegDownload();
+      overlay.style.display = 'none';
+    };
+  }
+
+  // Listen for progress updates
+  const progressHandler = (progress) => {
+    switch (progress.status) {
+      case 'preparing':
+        if (downloadStatusEl) downloadStatusEl.textContent = 'Preparing download...';
+        break;
+      case 'downloading':
+        if (downloadStatusEl) downloadStatusEl.textContent = 'Downloading FFmpeg...';
+        if (progressFillEl) progressFillEl.style.width = `${progress.percent}%`;
+        if (progressPercentEl) progressPercentEl.textContent = `${progress.percent}%`;
+        if (downloadSpeedEl) downloadSpeedEl.textContent = progress.speed;
+        if (downloadEtaEl) downloadEtaEl.textContent = progress.eta;
+        break;
+      case 'extracting':
+        if (downloadStatusEl) downloadStatusEl.textContent = 'Extracting FFmpeg...';
+        if (progressFillEl) progressFillEl.style.width = '90%';
+        if (progressPercentEl) progressPercentEl.textContent = '90%';
+        break;
+      case 'verifying':
+        if (downloadStatusEl) downloadStatusEl.textContent = 'Verifying installation...';
+        if (progressFillEl) progressFillEl.style.width = '95%';
+        if (progressPercentEl) progressPercentEl.textContent = '95%';
+        break;
+      case 'complete':
+        if (downloadStatusEl) downloadStatusEl.textContent = 'FFmpeg installed successfully!';
+        if (progressFillEl) progressFillEl.style.width = '100%';
+        if (progressPercentEl) progressPercentEl.textContent = '100%';
+        setTimeout(() => {
+          overlay.style.display = 'none';
+          // Try to start recording again
+          startRecording();
+        }, 1000);
+        break;
+      case 'error':
+        if (downloadStatusEl) {
+          downloadStatusEl.textContent = 'Download failed. Please try again.';
+          downloadStatusEl.style.color = '#e74c3c';
+        }
+        if (cancelBtn) cancelBtn.textContent = 'Close';
+        break;
+    }
+  };
+
+  // Register progress handler
+  window.electronAPI.onFFmpegDownloadProgress(progressHandler);
+
+  // Start download
+  try {
+    const result = await window.electronAPI.downloadFFmpeg();
+    if (!result.success) {
+      if (downloadStatusEl) {
+        downloadStatusEl.textContent = `Download failed: ${result.error}`;
+        downloadStatusEl.style.color = '#e74c3c';
+      }
+      if (cancelBtn) cancelBtn.textContent = 'Close';
+    }
+  } catch (error) {
+    const downloadStatus = document.getElementById('downloadStatus');
+    if (downloadStatus) {
+      downloadStatus.textContent = `Download error: ${error.message}`;
+      downloadStatus.style.color = '#e74c3c';
+    }
+    if (cancelBtn) cancelBtn.textContent = 'Close';
+  }
 }

@@ -567,6 +567,103 @@ h1 {
   margin-bottom: 10px;
 }
 
+/* FFmpeg Download Progress Styles */
+.ffmpeg-download-card {
+  background: white;
+  padding: 30px;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 450px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+  margin: 20px auto;
+}
+
+.ffmpeg-download-card h3 {
+  margin: 0 0 10px 0;
+  color: #2c3e50;
+  font-size: 20px;
+}
+
+.ffmpeg-download-card .download-status {
+  color: #7f8c8d;
+  margin-bottom: 20px;
+  font-size: 14px;
+}
+
+.ffmpeg-download-card .progress-container {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  margin: 20px 0;
+  padding: 0;
+  background: none;
+}
+
+.ffmpeg-download-card .progress-bar {
+  flex: 1;
+  height: 28px;
+  background: #ecf0f1;
+  position: relative;
+}
+
+.ffmpeg-download-card .progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3498db, #2980b9);
+  transition: width 0.3s ease;
+  position: relative;
+}
+
+/* Animated stripes for progress bar */
+.animated-stripes::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 10px,
+    rgba(255, 255, 255, 0.15) 10px,
+    rgba(255, 255, 255, 0.15) 20px
+  );
+  animation: progress-stripes 1s linear infinite;
+}
+
+@keyframes progress-stripes {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(20px); }
+}
+
+.ffmpeg-download-card .progress-percent {
+  font-weight: 600;
+  color: #2c3e50;
+  min-width: 45px;
+  text-align: right;
+}
+
+.download-stats {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #7f8c8d;
+  margin-bottom: 15px;
+}
+
+.download-info {
+  font-size: 12px;
+  color: #95a5a6;
+  text-align: center;
+  margin: 20px 0;
+  font-style: italic;
+}
+
+#ffmpegDownloadOverlay {
+  background: rgba(0, 0, 0, 0.8);
+  z-index: 10000;
+}
+
 .progress-fill {
   height: 100%;
   background-color: #3498db;

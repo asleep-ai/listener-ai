@@ -18,5 +18,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRecordings: () => ipcRenderer.invoke('get-recordings'),
   onTranscriptionProgress: (callback: (progress: { percent: number; message: string }) => void) => {
     ipcRenderer.on('transcription-progress', (_, progress) => callback(progress));
-  }
+  },
+  // FFmpeg management
+  checkFFmpeg: () => ipcRenderer.invoke('check-ffmpeg'),
+  downloadFFmpeg: () => ipcRenderer.invoke('download-ffmpeg'),
+  cancelFFmpegDownload: () => ipcRenderer.invoke('cancel-ffmpeg-download'),
+  onFFmpegDownloadProgress: (callback: (progress: any) => void) => {
+    ipcRenderer.on('ffmpeg-download-progress', (_, progress) => callback(progress));
+  },
+  
+  // System settings
+  openMicrophoneSettings: () => ipcRenderer.invoke('open-microphone-settings')
 });

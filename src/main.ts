@@ -5,10 +5,12 @@ import { SimpleAudioRecorder } from './simpleAudioRecorder';
 import { GeminiService } from './geminiService';
 import { ConfigService } from './configService';
 import { NotionService } from './notionService';
+import { FFmpegManager } from './services/ffmpegManager';
 
 let mainWindow: BrowserWindow | null = null;
 const audioRecorder = new SimpleAudioRecorder();
 const configService = new ConfigService();
+const ffmpegManager = new FFmpegManager();
 let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
 
@@ -150,34 +152,43 @@ async function renameAudioFile(oldPath: string, suggestedTitle: string): Promise
 }
 
 // IPC handlers for recording functionality
-ipcMain.handle('start-recording', async (event, meetingTitle: string) => {
+// FFmpeg handlers
+ipcMain.handle('check-ffmpeg', async () => {
+  const ffmpegPath = await ffmpegManager.ensureFFmpeg();
+  return { available: !!ffmpegPath, path: ffmpegPath };
+});
+
+ipcMain.handle('download-ffmpeg', async () => {
+  try {
+    const ffmpegPath = await ffmpegManager.downloadFFmpeg((progress) => {
+      if (mainWindow) {
+        mainWindow.webContents.send('ffmpeg-download-progress', progress);
+      }
+    });
+    return { success: true, path: ffmpegPath };
+  } catch (error) {
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : String(error) 
+    };
+  }
+});
+
+ipcMain.handle('cancel-ffmpeg-download', async () => {
+  ffmpegManager.cancelDownload();
+  return { success: true };
+});
+
+ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
   try {
     const result = await audioRecorder.startRecording(meetingTitle);
     
-    // If recording failed, show error dialog
-    if (!result.success) {
-      dialog.showErrorBox(
-        'Recording Failed',
-        `Failed to start recording: ${result.error || 'Unknown error'}\n\n` +
-        'Please check:\n' +
-        '1. Microphone permissions are granted\n' +
-        '2. FFmpeg is installed (if on Windows)\n' +
-        '3. No other app is using the microphone'
-      );
-    }
+    // Return the result without showing dialog - let renderer handle it
     
     return result;
   } catch (error) {
     console.error('Error starting recording:', error);
     const errorMessage = error instanceof Error ? error.message : String(error);
-    
-    // Show error dialog for unexpected errors
-    dialog.showErrorBox(
-      'Recording Error',
-      `An unexpected error occurred: ${errorMessage}\n\n` +
-      'Please try restarting the application.'
-    );
-    
     return { success: false, error: errorMessage };
   }
 });
@@ -194,7 +205,7 @@ ipcMain.handle('stop-recording', async () => {
 
 // Configuration handlers
 
-ipcMain.handle('save-config', async (event, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean }) => {
+ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean }) => {
   try {
     if (config.geminiApiKey) {
       configService.setGeminiApiKey(config.geminiApiKey);
@@ -244,7 +255,7 @@ ipcMain.handle('check-config', async () => {
 });
 
 // Transcription handler
-ipcMain.handle('transcribe-audio', async (event, filePath: string) => {
+ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
   try {
     console.log('Transcription requested for:', filePath);
     
@@ -296,7 +307,7 @@ ipcMain.handle('transcribe-audio', async (event, filePath: string) => {
 });
 
 // Notion upload handler
-ipcMain.handle('upload-to-notion', async (event, data: { title: string; transcriptionData: any; audioFilePath?: string }) => {
+ipcMain.handle('upload-to-notion', async (_, data: { title: string; transcriptionData: any; audioFilePath?: string }) => {
   try {
     console.log('Uploading to Notion:', data.title);
     
@@ -333,7 +344,7 @@ ipcMain.handle('upload-to-notion', async (event, data: { title: string; transcri
 });
 
 // Open external URL
-ipcMain.handle('open-external', async (event, url: string) => {
+ipcMain.handle('open-external', async (_, url: string) => {
   shell.openExternal(url);
 });
 
@@ -397,4 +408,16 @@ ipcMain.handle('get-recordings', async () => {
     console.error('Error getting recordings:', error);
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
+});
+
+// Open system settings for microphone permissions
+ipcMain.handle('open-microphone-settings', async () => {
+  if (process.platform === 'darwin') {
+    // Open System Preferences > Security & Privacy > Privacy > Microphone
+    shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone');
+  } else if (process.platform === 'win32') {
+    // Open Windows Settings > Privacy > Microphone
+    shell.openExternal('ms-settings:privacy-microphone');
+  }
+  // For Linux, there's no standard way to open microphone settings
 });

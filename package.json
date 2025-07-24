@@ -5,15 +5,16 @@
   "main": "dist/main.js",
   "scripts": {
     "start": "npm run build && electron .",
-    "dev": "tsc && electron .",
+    "dev": "npm run build && electron .",
     "build": "tsc",
-    "prebuild:mac": "node scripts/download-ffmpeg-all.js",
+    "build:main": "tsc",
+    "build:renderer": "echo 'Renderer uses plain JS'",
     "dist": "npm run build && electron-builder",
-    "dist:mac": "npm run prebuild:mac && npm run build && electron-builder --mac",
-    "dist:mac-x64": "npm run prebuild:mac && npm run build && electron-builder --mac --x64",
-    "dist:mac-arm64": "npm run prebuild:mac && npm run build && electron-builder --mac --arm64",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:mac-x64": "npm run build && electron-builder --mac --x64",
+    "dist:mac-arm64": "npm run build && electron-builder --mac --arm64",
     "dist:win": "npm run build && electron-builder --win",
-    "dist:all": "npm run prebuild:mac && npm run build && electron-builder -mw",
+    "dist:all": "npm run build && electron-builder -mw",
     "version:bump": "node scripts/bump-version.js",
     "release": "npm run version:bump && npm run dist:all",
     "postinstall": "electron-builder install-app-deps"
@@ -32,6 +33,7 @@
   "devDependencies": {
     "@electron/notarize": "^3.0.1",
     "@types/node": "^24.0.12",
+    "@types/fs-extra": "^11.0.4",
     "dotenv": "^17.2.0",
     "electron": "^37.2.0",
     "electron-builder": "^26.0.12",
@@ -41,8 +43,7 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@notionhq/client": "^4.0.0",
-    "ffmpeg-static": "^5.2.0",
-    "ffprobe-static": "^3.1.0"
+    "fs-extra": "^11.2.0"
   },
   "build": {
     "appId": "com.listenerai.app",
@@ -60,9 +61,6 @@
       "assets/icon.png",
       "assets/icon.icns",
       "!node_modules/ffmpeg-static/**/*",
-      "!node_modules/@ffmpeg-installer/**/*",
-      "!node_modules/ffprobe-static/**/*",
-      "!ffmpeg-binaries/**/*",
       "!scripts/**/*",
       "!release/**/*",
       "!src/**/*",
@@ -98,23 +96,7 @@
         }
       ],
       "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist",
-      "extraResources": [
-        {
-          "from": "ffmpeg-binaries/darwin/${arch}/ffmpeg-darwin-${arch}",
-          "to": "bin/ffmpeg",
-          "filter": [
-            "**/*"
-          ]
-        },
-        {
-          "from": "node_modules/ffprobe-static/bin/darwin/${arch}/ffprobe",
-          "to": "bin/ffprobe",
-          "filter": [
-            "**/*"
-          ]
-        }
-      ]
+      "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "dmg": {
       "contents": [
