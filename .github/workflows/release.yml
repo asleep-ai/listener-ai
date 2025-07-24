@@ -27,7 +27,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '22'
 
       - name: Bump version
         id: version
@@ -51,7 +51,16 @@ jobs:
     needs: prepare
     strategy:
       matrix:
-        os: [macos-latest]
+        include:
+          - os: macos-latest
+            arch: x64
+            name: mac-x64
+          - os: macos-latest
+            arch: arm64
+            name: mac-arm64
+          - os: windows-latest
+            arch: x64
+            name: win-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -61,14 +70,15 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Build for macOS
-        run: npm run dist:mac -- --publish never
+      - name: Build for macOS x64
+        if: matrix.os == 'macos-latest' && matrix.arch == 'x64'
+        run: npm run dist:mac-x64 -- --publish never
         env:
           CSC_LINK: ${{ secrets.SIGNING_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.CERT_PASSWORD }}
@@ -76,12 +86,29 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      - name: Build for macOS arm64
+        if: matrix.os == 'macos-latest' && matrix.arch == 'arm64'
+        run: npm run dist:mac-arm64 -- --publish never
+        env:
+          CSC_LINK: ${{ secrets.SIGNING_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Build for Windows
+        if: matrix.os == 'windows-latest'
+        run: |
+          npm run build
+          npx electron-builder --win --publish never
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mac-build
+          name: ${{ matrix.name }}-build
           path: |
             release/*.dmg
+            release/*.exe
 
   release:
     needs: [prepare, build]
@@ -105,14 +132,26 @@ jobs:
             ## Release v${{ needs.prepare.outputs.version }}
             
             ### macOS Downloads
-            - Intel: `Listener.AI-${{ needs.prepare.outputs.version }}.dmg`
+            - Intel: `Listener.AI-${{ needs.prepare.outputs.version }}-x64.dmg`
             - Apple Silicon: `Listener.AI-${{ needs.prepare.outputs.version }}-arm64.dmg`
             
+            ### Windows Downloads
+            - x64: `Listener.AI Setup ${{ needs.prepare.outputs.version }}.exe`
+            
             ### Installation
+            
+            #### macOS
             1. Download the appropriate DMG for your Mac
             2. Open the DMG and drag to Applications
             3. Open the app normally - it's fully signed and notarized!
+            
+            #### Windows
+            1. Download the installer
+            2. Run the installer
+            3. Note: You'll need to install FFmpeg separately (instructions included in the app)
           draft: false
           artifacts: |
-            release-artifacts/mac-build/*.dmg
+            release-artifacts/mac-x64-build/*.dmg
+            release-artifacts/mac-arm64-build/*.dmg
+            release-artifacts/win-x64-build/*.exe
           token: ${{ secrets.GITHUB_TOKEN }}
