@@ -15,12 +15,14 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      branch: ${{ steps.branch.outputs.branch }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,23 +31,39 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Bump version
+      - name: Install semver
+        run: npm install -g semver
+
+      - name: Calculate new version
         id: version
         run: |
+          # Calculate new version without modifying files yet
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          NEW_VERSION=$(npx semver $CURRENT_VERSION -i ${{ github.event.inputs.version_type }})
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "New version will be: $NEW_VERSION"
+
+      - name: Create release branch
+        id: branch
+        run: |
+          BRANCH_NAME="release/v${{ steps.version.outputs.version }}"
+          echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           
-          # Bump version
-          npm version ${{ github.event.inputs.version_type }} --no-git-tag-version
+          # Create and switch to release branch
+          git checkout -b $BRANCH_NAME
           
-          # Get new version
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # Bump version on release branch
+          npm version ${{ steps.version.outputs.version }} --no-git-tag-version
           
-          # Commit and push
+          # Commit version bump
           git add package.json package-lock.json
-          git commit -m "chore: bump version to $VERSION"
-          git push
+          git commit -m "chore: bump version to ${{ steps.version.outputs.version }}"
+          
+          # Push release branch
+          git push origin $BRANCH_NAME
 
   build:
     needs: prepare
@@ -65,7 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main  # Get the latest commit with version bump
+          ref: ${{ needs.prepare.outputs.branch }}  # Get the release branch
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -116,7 +134,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ needs.prepare.outputs.branch }}
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -155,3 +173,53 @@ jobs:
             release-artifacts/mac-arm64-build/*.dmg
             release-artifacts/win-x64-build/*.exe
           token: ${{ secrets.GITHUB_TOKEN }}
+          makeLatest: true
+
+  merge-to-main:
+    needs: [prepare, build, release]  # Ensure release completes first
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch release branch
+        run: |
+          git fetch origin ${{ needs.prepare.outputs.branch }}:${{ needs.prepare.outputs.branch }}
+
+      - name: Create PR and merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if PR already exists
+          PR_URL=$(gh pr list --base main --head ${{ needs.prepare.outputs.branch }} --json url --jq '.[0].url' || echo "")
+          
+          if [ -z "$PR_URL" ]; then
+            # Create PR from release branch to main
+            gh pr create \
+              --base main \
+              --head ${{ needs.prepare.outputs.branch }} \
+              --title "Release v${{ needs.prepare.outputs.version }}" \
+              --body "Automated release PR for version ${{ needs.prepare.outputs.version }}"
+          fi
+          
+          # Auto-merge the PR
+          gh pr merge ${{ needs.prepare.outputs.branch }} \
+            --merge \
+            --delete-branch \
+            --subject "Release v${{ needs.prepare.outputs.version }}"
+
+  cleanup-on-failure:
+    needs: [prepare, build, release]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Delete release branch on failure
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Delete the release branch if something failed
+          git push origin --delete ${{ needs.prepare.outputs.branch }} || true
