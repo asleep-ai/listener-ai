@@ -4,20 +4,20 @@
   "description": "A lightweight desktop application for recording and transcribing meetings with AI-powered notes.",
   "main": "dist/main.js",
   "scripts": {
-    "start": "npm run build && electron .",
-    "dev": "npm run build && electron .",
+    "start": "pnpm run build && electron .",
+    "dev": "pnpm run build && electron .",
     "build": "tsc",
     "build:main": "tsc",
     "build:renderer": "echo 'Renderer uses plain JS'",
-    "dist": "npm run build && electron-builder",
-    "dist:mac": "npm run build && electron-builder --mac",
-    "dist:mac-x64": "npm run build && electron-builder --mac --x64",
-    "dist:mac-arm64": "npm run build && electron-builder --mac --arm64",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:all": "npm run build && electron-builder -mw",
+    "dist": "pnpm run build && electron-builder",
+    "dist:mac": "pnpm run build && electron-builder --mac",
+    "dist:mac-x64": "pnpm run build && electron-builder --mac --x64",
+    "dist:mac-arm64": "pnpm run build && electron-builder --mac --arm64",
+    "dist:win": "pnpm run build && electron-builder --win",
+    "dist:all": "pnpm run build && electron-builder -mw",
     "version:bump": "node scripts/bump-version.js",
-    "release": "npm run version:bump && npm run dist:all",
-    "postinstall": "electron-builder install-app-deps"
+    "release": "pnpm run version:bump && pnpm run dist:all",
+    "postinstall": "electron-builder install-app-deps && cd node_modules/electron && node install.js || cd node_modules/.pnpm/electron*/node_modules/electron && node install.js || true"
   },
   "repository": {
     "type": "git",
@@ -32,10 +32,10 @@
   "homepage": "https://github.com/asleep-ai/listener-ai#readme",
   "devDependencies": {
     "@electron/notarize": "^3.0.1",
-    "@types/node": "^24.0.12",
     "@types/fs-extra": "^11.0.4",
+    "@types/node": "^24.0.12",
     "dotenv": "^17.2.0",
-    "electron": "^37.2.0",
+    "electron": "^37.2.4",
     "electron-builder": "^26.0.12",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"

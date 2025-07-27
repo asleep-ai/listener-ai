@@ -22,10 +22,10 @@ git clone https://github.com/asleep-ai/listener-ai.git
 cd listener-ai
 
 # Install dependencies
-npm install
+pnpm install
 
 # Run the application
-npm start
+pnpm start
 ```
 
 ## Prerequisites
@@ -120,13 +120,13 @@ The app will automatically:
 
 ```bash
 # Install dependencies
-npm install
+pnpm install
 
 # Run in development mode
-npm run dev
+pnpm run dev
 
 # Build for production
-npm run build
+pnpm run build
 ```
 
 ## License

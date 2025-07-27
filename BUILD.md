@@ -3,9 +3,13 @@
 ## Prerequisites
 
 1. Install Node.js (v18 or higher)
-2. Install dependencies:
+2. Install pnpm globally:
    ```bash
-   npm install
+   npm install -g pnpm
+   ```
+3. Install dependencies:
+   ```bash
+   pnpm install
    ```
 
 ## Building for Distribution
@@ -15,7 +19,7 @@
 To build a DMG file for macOS:
 
 ```bash
-npm run dist:mac
+pnpm run dist:mac
 ```
 
 This will create:
@@ -27,7 +31,7 @@ This will create:
 To build an EXE installer for Windows:
 
 ```bash
-npm run dist:win
+pnpm run dist:win
 ```
 
 This will create:
@@ -38,7 +42,7 @@ This will create:
 To build for both macOS and Windows:
 
 ```bash
-npm run dist:all
+pnpm run dist:all
 ```
 
 ## Important Notes

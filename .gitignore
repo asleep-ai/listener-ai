@@ -7,5 +7,3 @@ release/
 recordings/
 *.wav
 *.mp3
-ffmpeg-binaries/
-pnpm-lock.yaml

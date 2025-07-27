@@ -28,7 +28,7 @@ CSC_KEY_PASSWORD=certificate-password  # Optional: Certificate password
 
 5. **Build signed app**:
 ```bash
-npm run dist:mac
+pnpm run dist:mac
 ```
 
 The app will be automatically signed and notarized using the configured notarize.js script.
@@ -65,7 +65,7 @@ WIN_CSC_KEY_PASSWORD=certificate-password
 
 2. **Build signed app**:
 ```bash
-npm run dist:win
+pnpm run dist:win
 ```
 
 ## Self-Signing (Free Alternative)
