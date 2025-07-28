@@ -144,13 +144,48 @@ jobs:
             release/*.dmg
             release/*.exe
 
-  release:
+  merge-to-main:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch release branch
+        run: |
+          git fetch origin ${{ needs.prepare.outputs.branch }}:${{ needs.prepare.outputs.branch }}
+
+      - name: Create PR and merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if PR already exists
+          PR_URL=$(gh pr list --base main --head ${{ needs.prepare.outputs.branch }} --json url --jq '.[0].url' || echo "")
+          
+          if [ -z "$PR_URL" ]; then
+            # Create PR from release branch to main
+            gh pr create \
+              --base main \
+              --head ${{ needs.prepare.outputs.branch }} \
+              --title "Release v${{ needs.prepare.outputs.version }}" \
+              --body "Automated release PR for version ${{ needs.prepare.outputs.version }}"
+          fi
+          
+          # Auto-merge the PR
+          gh pr merge ${{ needs.prepare.outputs.branch }} \
+            --merge \
+            --delete-branch \
+            --subject "Release v${{ needs.prepare.outputs.version }}"
+
+  release:
+    needs: [prepare, build, merge-to-main]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -191,43 +226,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           makeLatest: true
 
-  merge-to-main:
-    needs: [prepare, build, release]  # Ensure release completes first
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Fetch release branch
-        run: |
-          git fetch origin ${{ needs.prepare.outputs.branch }}:${{ needs.prepare.outputs.branch }}
-
-      - name: Create PR and merge
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Check if PR already exists
-          PR_URL=$(gh pr list --base main --head ${{ needs.prepare.outputs.branch }} --json url --jq '.[0].url' || echo "")
-          
-          if [ -z "$PR_URL" ]; then
-            # Create PR from release branch to main
-            gh pr create \
-              --base main \
-              --head ${{ needs.prepare.outputs.branch }} \
-              --title "Release v${{ needs.prepare.outputs.version }}" \
-              --body "Automated release PR for version ${{ needs.prepare.outputs.version }}"
-          fi
-          
-          # Auto-merge the PR
-          gh pr merge ${{ needs.prepare.outputs.branch }} \
-            --merge \
-            --delete-branch \
-            --subject "Release v${{ needs.prepare.outputs.version }}"
 
   cleanup-on-failure:
-    needs: [prepare, build, release]
+    needs: [prepare, build, merge-to-main, release]
     if: failure()
     runs-on: ubuntu-latest
     steps:
