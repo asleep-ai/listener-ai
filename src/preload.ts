@@ -7,11 +7,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
   },
   checkConfig: () => ipcRenderer.invoke('check-config'),
-  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean }) => 
+  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean }) =>
     ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   transcribeAudio: (filePath: string) => ipcRenderer.invoke('transcribe-audio', filePath),
-  uploadToNotion: (data: { title: string; transcriptionData: any; audioFilePath?: string }) => 
+  uploadToNotion: (data: { title: string; transcriptionData: any; audioFilePath?: string }) =>
     ipcRenderer.invoke('upload-to-notion', data),
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
   openRecordingsFolder: () => ipcRenderer.invoke('open-recordings-folder'),
@@ -26,7 +26,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onFFmpegDownloadProgress: (callback: (progress: any) => void) => {
     ipcRenderer.on('ffmpeg-download-progress', (_, progress) => callback(progress));
   },
-  
+
   // System settings
-  openMicrophoneSettings: () => ipcRenderer.invoke('open-microphone-settings')
+  openMicrophoneSettings: () => ipcRenderer.invoke('open-microphone-settings'),
+
+  // Tray icon events
+  onTrayStartRecording: (callback: () => void) => {
+    ipcRenderer.on('tray-start-recording', () => callback());
+  },
+  onTrayStopRecording: (callback: () => void) => {
+    ipcRenderer.on('tray-stop-recording', () => callback());
+  },
+  onOpenConfig: (callback: () => void) => {
+    ipcRenderer.on('open-config', () => callback());
+  }
 });

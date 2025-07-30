@@ -122,6 +122,28 @@ window.addEventListener('DOMContentLoaded', async () => {
       stopRecording();
     }
   });
+
+  // Setup tray icon event handlers
+  window.electronAPI.onTrayStartRecording(() => {
+    // Programmatically click the record button if not recording
+    if (!isRecording) {
+      recordButton.click();
+    }
+  });
+
+  window.electronAPI.onTrayStopRecording(() => {
+    // Programmatically click the record button if recording
+    if (isRecording) {
+      recordButton.click();
+    }
+  });
+
+  window.electronAPI.onOpenConfig(() => {
+    // Open config modal when requested from tray
+    if (configModal) {
+      configModal.style.display = 'block';
+    }
+  });
 });
 
 async function startRecording() {
