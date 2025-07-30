@@ -1,44 +1,44 @@
 <!DOCTYPE html>
 <html>
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Listener.AI</title>
   <link rel="stylesheet" href="styles.css">
 </head>
+
 <body>
   <!-- Loading indicator -->
-  <div id="loadingIndicator" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.9); display: flex; align-items: center; justify-content: center; z-index: 9999;">
+  <div id="loadingIndicator"
+    style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.9); display: flex; align-items: center; justify-content: center; z-index: 9999;">
     <div style="text-align: center;">
       <h2>Loading Listener.AI...</h2>
       <p style="color: #666;">Please wait</p>
     </div>
   </div>
-  
+
   <div class="container">
     <div class="header">
       <h1>Listener.AI</h1>
       <button id="settingsButton" class="settings-button" title="API Settings">⚙️</button>
     </div>
     <p class="subtitle">Record and transcribe your meetings with AI</p>
-    
+
     <div class="recording-section">
       <div class="status-indicator" id="statusIndicator">
         <span class="status-dot"></span>
         <span id="statusText">Ready to record</span>
       </div>
-      
-      <input type="text" 
-             id="meetingTitle" 
-             placeholder="Enter meeting title..." 
-             class="meeting-title-input">
-      
+
+      <input type="text" id="meetingTitle" placeholder="Enter meeting title..." class="meeting-title-input">
+
       <button id="recordButton" class="record-button">
         Start Recording
       </button>
-      
+
       <div id="recordingTime" class="recording-time">00:00</div>
-      
+
       <div class="auto-mode-container">
         <label class="toggle-container">
           <input type="checkbox" id="autoModeToggle">
@@ -46,8 +46,16 @@
           <span class="toggle-description">Automatically transcribe and upload to Notion after recording</span>
         </label>
       </div>
+
+      <div class="drag-drop-zone" id="dragDropZone">
+        <div class="drag-drop-content">
+          <span class="drag-drop-icon">📁</span>
+          <p>Drag and drop or paste audio files here</p>
+          <p class="drag-drop-formats">Supports MP3 and M4A formats • Use Cmd+V (or Ctrl+V)</p>
+        </div>
+      </div>
     </div>
-    
+
     <div class="recordings-section">
       <div class="recordings-header">
         <h2>Recent Recordings</h2>
@@ -59,19 +67,21 @@
         <p class="no-recordings">No recordings yet</p>
       </div>
     </div>
-    
+
     <div id="configModal" class="modal">
       <div class="modal-content">
         <h2>API Configuration</h2>
         <div class="form-group">
           <label for="geminiApiKey">Gemini API Key:</label>
           <input type="password" id="geminiApiKey" placeholder="Enter your Gemini API key">
-          <small>Get your API key from <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI Studio</a></small>
+          <small>Get your API key from <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI
+              Studio</a></small>
         </div>
         <div class="form-group">
           <label for="notionApiKey">Notion Integration Token:</label>
           <input type="password" id="notionApiKey" placeholder="Enter your Notion integration token">
-          <small>Create an integration at <a href="https://www.notion.so/my-integrations" target="_blank">Notion Integrations</a></small>
+          <small>Create an integration at <a href="https://www.notion.so/my-integrations" target="_blank">Notion
+              Integrations</a></small>
         </div>
         <div class="form-group">
           <label for="notionDatabaseId">Notion Database ID:</label>
@@ -89,7 +99,7 @@
         </div>
       </div>
     </div>
-    
+
     <div id="transcriptionModal" class="modal">
       <div class="modal-content transcription-content">
         <span class="close">&times;</span>
@@ -128,31 +138,32 @@
       </div>
     </div>
   </div>
-  
+
   <!-- FFmpeg Download Progress Overlay -->
   <div id="ffmpegDownloadOverlay" class="modal" style="display: none;">
     <div class="ffmpeg-download-card">
       <h3>Setting up audio recording...</h3>
       <p class="download-status" id="downloadStatus">Downloading FFmpeg for audio recording...</p>
-      
+
       <div class="progress-container">
         <div class="progress-bar">
           <div class="progress-fill animated-stripes" id="ffmpegProgressFill" style="width: 0%"></div>
         </div>
         <span class="progress-percent" id="ffmpegProgressPercent">0%</span>
       </div>
-      
+
       <div class="download-stats">
         <span class="download-speed" id="downloadSpeed">0 MB/s</span>
         <span class="download-eta" id="downloadEta">Calculating...</span>
       </div>
-      
+
       <p class="download-info">FFmpeg is required for audio recording. This is a one-time download.</p>
-      
+
       <button id="cancelDownload" class="cancel-button">Cancel</button>
     </div>
   </div>
-  
+
   <script src="renderer.js"></script>
 </body>
+
 </html>

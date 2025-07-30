@@ -789,3 +789,81 @@ h1 {
     opacity: 1;
   }
 }
+
+/* Drag and drop zone styles */
+.drag-drop-zone {
+  margin-top: 20px;
+  padding: 30px;
+  border: 2px dashed #e0e0e0;
+  border-radius: 8px;
+  background-color: #fafafa;
+  transition: all 0.3s ease;
+  text-align: center;
+  cursor: pointer;
+}
+
+.drag-drop-zone:hover {
+  border-color: #3498db;
+  background-color: #f0f8ff;
+}
+
+.drag-drop-zone.drag-over {
+  border-color: #3498db;
+  background-color: #e3f2fd;
+  transform: scale(1.02);
+}
+
+.drag-drop-content {
+  pointer-events: none;
+}
+
+.drag-drop-icon {
+  font-size: 48px;
+  display: block;
+  margin-bottom: 10px;
+}
+
+.drag-drop-zone p {
+  margin: 5px 0;
+  color: #666;
+}
+
+.drag-drop-zone p:first-of-type {
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.drag-drop-formats {
+  font-size: 12px;
+  color: #95a5a6;
+}
+
+/* Paste hint styles */
+.paste-hint {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: #3498db;
+  color: white;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  animation: fadeIn 0.2s ease-in;
+  pointer-events: none;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.drag-drop-zone[data-paste-hint="true"] {
+  position: relative;
+}

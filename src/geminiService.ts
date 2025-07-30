@@ -361,7 +361,12 @@ Return as JSON:
         }
 
         const fileExt = path.extname(audioFilePath).toLowerCase();
-        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+        let mimeType = 'audio/mp3';
+        if (fileExt === '.wav') {
+          mimeType = 'audio/wav';
+        } else if (fileExt === '.m4a') {
+          mimeType = 'audio/mp4';
+        }
 
         const uploadResult = await this.fileManager.uploadFile(audioFilePath, {
           mimeType: mimeType,
@@ -415,7 +420,12 @@ IMPORTANT:
       let result;
       if (fileUri) {
         const fileExt = path.extname(audioFilePath).toLowerCase();
-        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+        let mimeType = 'audio/mp3';
+        if (fileExt === '.wav') {
+          mimeType = 'audio/wav';
+        } else if (fileExt === '.m4a') {
+          mimeType = 'audio/mp4';
+        }
 
         result = await this.segmentModel.generateContent([
           {
@@ -430,7 +440,12 @@ IMPORTANT:
         const audioData = fs.readFileSync(audioFilePath);
         const base64Audio = audioData.toString('base64');
         const fileExt = path.extname(audioFilePath).toLowerCase();
-        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+        let mimeType = 'audio/mp3';
+        if (fileExt === '.wav') {
+          mimeType = 'audio/wav';
+        } else if (fileExt === '.m4a') {
+          mimeType = 'audio/mp4';
+        }
 
         result = await this.segmentModel.generateContent([
           {

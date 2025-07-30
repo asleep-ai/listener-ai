@@ -518,7 +518,7 @@ ipcMain.handle('get-recordings', async () => {
       .filter((file: string) => {
         // Filter out segment files
         if (file.includes('_segment_')) return false;
-        return file.endsWith('.mp3') || file.endsWith('.wav');
+        return file.endsWith('.mp3') || file.endsWith('.wav') || file.endsWith('.m4a');
       })
       .map((file: string) => {
         const filePath = path.join(recordingsDir, file);
@@ -559,4 +559,35 @@ ipcMain.handle('open-microphone-settings', async () => {
     shell.openExternal('ms-settings:privacy-microphone');
   }
   // For Linux, there's no standard way to open microphone settings
+});
+
+// Save audio file from buffer to recordings directory
+ipcMain.handle('save-audio-file', async (_, fileData: { name: string; data: number[] }) => {
+  try {
+    const recordingsDir = path.join(app.getPath('userData'), 'recordings');
+    
+    // Ensure directory exists
+    if (!fs.existsSync(recordingsDir)) {
+      fs.mkdirSync(recordingsDir, { recursive: true });
+    }
+    
+    // Get file info
+    const fileName = fileData.name;
+    const fileExt = path.extname(fileName);
+    const fileNameWithoutExt = path.basename(fileName, fileExt);
+    
+    // Generate unique filename with timestamp
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').split('.')[0];
+    const newFileName = `${fileNameWithoutExt}_${timestamp}${fileExt}`;
+    const destPath = path.join(recordingsDir, newFileName);
+    
+    // Convert array back to buffer and save
+    const buffer = Buffer.from(fileData.data);
+    fs.writeFileSync(destPath, buffer);
+    
+    return { success: true, filePath: destPath };
+  } catch (error) {
+    console.error('Error saving audio file:', error);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
 });

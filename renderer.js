@@ -24,6 +24,7 @@ let recordButton, statusIndicator, statusText, recordingTime, meetingTitle, reco
 let progressContainer = null;
 let progressFill = null;
 let progressText = null;
+let dragDropZone = null;
 
 // Listen for transcription progress
 window.electronAPI.onTranscriptionProgress((progress) => {
@@ -63,9 +64,16 @@ window.addEventListener('DOMContentLoaded', async () => {
     progressContainer = document.getElementById('transcriptionProgress');
     progressFill = document.getElementById('progressFill');
     progressText = document.getElementById('progressText');
+    dragDropZone = document.getElementById('dragDropZone');
 
     // Setup event listeners
     setupEventListeners();
+
+    // Setup drag and drop listeners
+    setupDragAndDrop();
+    
+    // Setup paste listener
+    setupPasteListener();
 
     // Check for API configuration
     await checkAndPromptForConfig();
@@ -377,18 +385,18 @@ function setupEventListeners() {
 
     globalShortcutInput.addEventListener('keydown', async (e) => {
       e.preventDefault();
-      
+
       const modifiers = [];
       if (e.metaKey || e.ctrlKey) modifiers.push('CommandOrControl');
       if (e.altKey) modifiers.push('Alt');
       if (e.shiftKey) modifiers.push('Shift');
-      
+
       // Get the key (excluding modifier keys)
       let key = e.key;
       if (['Control', 'Alt', 'Shift', 'Meta', 'Command'].includes(key)) {
         return; // Don't capture modifier keys alone
       }
-      
+
       // Convert special keys
       if (key === ' ') key = 'Space';
       if (key === 'ArrowUp') key = 'Up';
@@ -396,11 +404,11 @@ function setupEventListeners() {
       if (key === 'ArrowLeft') key = 'Left';
       if (key === 'ArrowRight') key = 'Right';
       if (key.length === 1) key = key.toUpperCase();
-      
+
       if (modifiers.length > 0) {
         const shortcut = [...modifiers, key].join('+');
         globalShortcutInput.value = shortcut;
-        
+
         // Validate the shortcut
         const result = await window.electronAPI.validateShortcut(shortcut);
         if (!result.valid) {
@@ -895,4 +903,211 @@ async function showFFmpegDownloadDialog() {
     }
     if (cancelBtn) cancelBtn.textContent = 'Close';
   }
+}
+
+// Setup drag and drop functionality
+function setupDragAndDrop() {
+  if (!dragDropZone) return;
+
+  // Prevent default drag behaviors
+  ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+    dragDropZone.addEventListener(eventName, preventDefaults, false);
+    document.body.addEventListener(eventName, preventDefaults, false);
+  });
+
+  // Highlight drop zone when item is dragged over it
+  ['dragenter', 'dragover'].forEach(eventName => {
+    dragDropZone.addEventListener(eventName, highlight, false);
+  });
+
+  ['dragleave', 'drop'].forEach(eventName => {
+    dragDropZone.addEventListener(eventName, unhighlight, false);
+  });
+
+  // Handle dropped files
+  dragDropZone.addEventListener('drop', handleDrop, false);
+
+  // Allow clicking the zone to open file dialog
+  dragDropZone.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.mp3,.m4a';
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        handleAudioFile(file);
+      }
+    };
+    input.click();
+  });
+}
+
+function preventDefaults(e) {
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+function highlight(e) {
+  dragDropZone.classList.add('drag-over');
+}
+
+function unhighlight(e) {
+  dragDropZone.classList.remove('drag-over');
+}
+
+function handleDrop(e) {
+  const dt = e.dataTransfer;
+  const files = dt.files;
+
+  ([...files]).forEach(handleAudioFile);
+}
+
+async function handleAudioFile(file) {
+  // Check if file is audio (mp3 or m4a)
+  const validTypes = ['audio/mp3', 'audio/mpeg', 'audio/mp4', 'audio/x-m4a'];
+  const validExtensions = ['.mp3', '.m4a'];
+  
+  const fileExtension = file.name.toLowerCase().substring(file.name.lastIndexOf('.'));
+  
+  if (!validTypes.includes(file.type) && !validExtensions.includes(fileExtension)) {
+    showToast('Please drop an MP3 or M4A audio file', 'error');
+    return;
+  }
+
+  // Update status
+  statusText.textContent = 'Processing audio file...';
+
+  try {
+    // Read file as buffer
+    const buffer = await file.arrayBuffer();
+    const uint8Array = new Uint8Array(buffer);
+    
+    // Send file data to main process
+    const result = await window.electronAPI.saveAudioFile({
+      name: file.name,
+      data: Array.from(uint8Array)
+    });
+    
+    if (result.success) {
+      // Extract title from filename (remove extension)
+      const title = file.name.replace(/\.[^/.]+$/, '');
+      
+      // Refresh recordings list
+      await refreshRecordingsList();
+      
+      // Ask if user wants to transcribe immediately
+      if (confirm(`Audio file "${title}" has been added. Would you like to transcribe it now?`)) {
+        handleTranscribe(result.filePath, title);
+      }
+      
+      statusText.textContent = 'Ready to record';
+    } else {
+      showToast('Failed to process audio file: ' + result.error, 'error');
+      statusText.textContent = 'Ready to record';
+    }
+  } catch (error) {
+    showToast('Error processing audio file: ' + error.message, 'error');
+    statusText.textContent = 'Ready to record';
+  }
+}
+
+// Setup paste listener for audio files
+function setupPasteListener() {
+  document.addEventListener('paste', async (e) => {
+    // Check if user is typing in a text field
+    const activeElement = document.activeElement;
+    const isTextInput = activeElement && (
+      activeElement.tagName === 'INPUT' || 
+      activeElement.tagName === 'TEXTAREA' || 
+      activeElement.contentEditable === 'true'
+    );
+    
+    // If user is in a text field, allow normal paste behavior
+    if (isTextInput) {
+      return;
+    }
+    
+    e.preventDefault();
+    
+    const items = e.clipboardData.items;
+    let audioFile = null;
+    
+    // Look for audio files in clipboard
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      
+      // Check if it's an audio file
+      if (item.type.startsWith('audio/') || 
+          item.type === 'audio/mp3' || 
+          item.type === 'audio/mpeg' || 
+          item.type === 'audio/mp4' || 
+          item.type === 'audio/x-m4a') {
+        audioFile = item.getAsFile();
+        break;
+      }
+    }
+    
+    // If no direct audio file, check for file items
+    if (!audioFile) {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === 'file') {
+          const file = item.getAsFile();
+          if (file && file.name) {
+            const ext = file.name.toLowerCase().substring(file.name.lastIndexOf('.'));
+            if (ext === '.mp3' || ext === '.m4a') {
+              audioFile = file;
+              break;
+            }
+          }
+        }
+      }
+    }
+    
+    if (audioFile) {
+      // Show visual feedback
+      if (dragDropZone) {
+        dragDropZone.classList.add('drag-over');
+        setTimeout(() => {
+          dragDropZone.classList.remove('drag-over');
+        }, 500);
+      }
+      
+      handleAudioFile(audioFile);
+    } else {
+      // Check if clipboard contains file paths (text)
+      const text = e.clipboardData.getData('text');
+      if (text && (text.toLowerCase().endsWith('.mp3') || text.toLowerCase().endsWith('.m4a'))) {
+        showToast('Please copy the actual audio file, not just its path', 'error');
+      }
+    }
+  });
+  
+  // Add keyboard shortcut hint
+  document.addEventListener('keydown', (e) => {
+    // Show hint when Cmd/Ctrl is pressed
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+      if (dragDropZone && !dragDropZone.hasAttribute('data-paste-hint')) {
+        dragDropZone.setAttribute('data-paste-hint', 'true');
+        const hintElement = document.createElement('div');
+        hintElement.className = 'paste-hint';
+        hintElement.textContent = 'Press Cmd+V to paste audio files';
+        if (process.platform === 'win32') {
+          hintElement.textContent = 'Press Ctrl+V to paste audio files';
+        }
+        dragDropZone.appendChild(hintElement);
+      }
+    }
+  });
+  
+  document.addEventListener('keyup', (e) => {
+    // Remove hint when Cmd/Ctrl is released
+    if (!e.metaKey && !e.ctrlKey) {
+      const hint = document.querySelector('.paste-hint');
+      if (hint) {
+        hint.remove();
+        dragDropZone.removeAttribute('data-paste-hint');
+      }
+    }
+  });
 }

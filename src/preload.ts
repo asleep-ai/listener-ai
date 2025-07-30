@@ -42,5 +42,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   onOpenConfig: (callback: () => void) => {
     ipcRenderer.on('open-config', () => callback());
-  }
+  },
+  
+  // File handling
+  saveAudioFile: (fileData: { name: string; data: number[] }) => ipcRenderer.invoke('save-audio-file', fileData)
 });
