@@ -57,6 +57,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     geminiApiKeyInput = document.getElementById('geminiApiKey');
     notionApiKeyInput = document.getElementById('notionApiKey');
     notionDatabaseIdInput = document.getElementById('notionDatabaseId');
+    globalShortcutInput = document.getElementById('globalShortcut');
     closeTranscriptionBtn = document.querySelector('.close');
     uploadToNotionBtn = document.getElementById('uploadToNotion');
     progressContainer = document.getElementById('transcriptionProgress');
@@ -340,7 +341,7 @@ window.electronAPI.onRecordingStatus((status) => {
 
 // Modal elements - will be initialized after DOM loads
 let configModal, transcriptionModal, saveConfigBtn, cancelConfigBtn;
-let geminiApiKeyInput, notionApiKeyInput, notionDatabaseIdInput;
+let geminiApiKeyInput, notionApiKeyInput, notionDatabaseIdInput, globalShortcutInput;
 let closeTranscriptionBtn, uploadToNotionBtn;
 
 
@@ -349,12 +350,14 @@ function setupEventListeners() {
     const geminiKey = geminiApiKeyInput.value.trim();
     const notionKey = notionApiKeyInput.value.trim();
     const notionDb = notionDatabaseIdInput.value.trim();
+    const globalShortcut = globalShortcutInput.value.trim();
 
     if (geminiKey) {
       await window.electronAPI.saveConfig({
         geminiApiKey: geminiKey,
         notionApiKey: notionKey,
-        notionDatabaseId: notionDb
+        notionDatabaseId: notionDb,
+        globalShortcut: globalShortcut
       });
       configModal.style.display = 'none';
     } else {
@@ -365,6 +368,54 @@ function setupEventListeners() {
   cancelConfigBtn.addEventListener('click', () => {
     configModal.style.display = 'none';
   });
+
+  // Global shortcut input handling
+  if (globalShortcutInput) {
+    globalShortcutInput.addEventListener('focus', () => {
+      globalShortcutInput.placeholder = 'Press your shortcut keys...';
+    });
+
+    globalShortcutInput.addEventListener('keydown', async (e) => {
+      e.preventDefault();
+      
+      const modifiers = [];
+      if (e.metaKey || e.ctrlKey) modifiers.push('CommandOrControl');
+      if (e.altKey) modifiers.push('Alt');
+      if (e.shiftKey) modifiers.push('Shift');
+      
+      // Get the key (excluding modifier keys)
+      let key = e.key;
+      if (['Control', 'Alt', 'Shift', 'Meta', 'Command'].includes(key)) {
+        return; // Don't capture modifier keys alone
+      }
+      
+      // Convert special keys
+      if (key === ' ') key = 'Space';
+      if (key === 'ArrowUp') key = 'Up';
+      if (key === 'ArrowDown') key = 'Down';
+      if (key === 'ArrowLeft') key = 'Left';
+      if (key === 'ArrowRight') key = 'Right';
+      if (key.length === 1) key = key.toUpperCase();
+      
+      if (modifiers.length > 0) {
+        const shortcut = [...modifiers, key].join('+');
+        globalShortcutInput.value = shortcut;
+        
+        // Validate the shortcut
+        const result = await window.electronAPI.validateShortcut(shortcut);
+        if (!result.valid) {
+          globalShortcutInput.style.borderColor = '#ff4444';
+          alert('This shortcut is already in use or invalid. Please try another combination.');
+        } else {
+          globalShortcutInput.style.borderColor = '';
+        }
+      }
+    });
+
+    globalShortcutInput.addEventListener('blur', () => {
+      globalShortcutInput.placeholder = 'Press shortcut keys';
+    });
+  }
 
   closeTranscriptionBtn.addEventListener('click', () => {
     transcriptionModal.style.display = 'none';
@@ -607,6 +658,9 @@ async function showConfigModal() {
   }
   if (notionDatabaseIdInput && config.notionDatabaseId) {
     notionDatabaseIdInput.value = config.notionDatabaseId;
+  }
+  if (globalShortcutInput && config.globalShortcut) {
+    globalShortcutInput.value = config.globalShortcut;
   }
 
   // Show the modal

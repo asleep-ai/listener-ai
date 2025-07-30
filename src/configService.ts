@@ -7,6 +7,7 @@ export interface AppConfig {
   notionApiKey?: string;
   notionDatabaseId?: string;
   autoMode?: boolean;
+  globalShortcut?: string;
 }
 
 export class ConfigService {
@@ -87,12 +88,22 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getGlobalShortcut(): string {
+    return this.config.globalShortcut || 'CommandOrControl+Shift+L';
+  }
+
+  setGlobalShortcut(shortcut: string): void {
+    this.config.globalShortcut = shortcut;
+    this.saveConfig();
+  }
+
   getAllConfig(): AppConfig {
     return {
       geminiApiKey: this.getGeminiApiKey(),
       notionApiKey: this.getNotionApiKey(),
       notionDatabaseId: this.getNotionDatabaseId(),
-      autoMode: this.getAutoMode()
+      autoMode: this.getAutoMode(),
+      globalShortcut: this.getGlobalShortcut()
     };
   }
 }

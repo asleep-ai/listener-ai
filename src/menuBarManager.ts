@@ -125,7 +125,7 @@ export class MenuBarManager {
     }
   }
 
-  private async startQuickRecording() {
+  async startQuickRecording() {
     // Instead of starting recording directly, send a message to the renderer
     // to click the start button, which will handle all the logic
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
@@ -139,7 +139,7 @@ export class MenuBarManager {
     }
   }
 
-  private async stopRecording() {
+  async stopRecording() {
     // Instead of stopping recording directly, send a message to the renderer
     // to click the stop button, which will handle all the logic
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {

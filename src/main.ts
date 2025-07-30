@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, dialog, Menu, globalShortcut, systemPreferences } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
@@ -21,6 +21,59 @@ const ffmpegManager = new FFmpegManager();
 const menuBarManager = new MenuBarManager();
 let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
+
+function registerGlobalShortcut() {
+  try {
+    const shortcut = configService.getGlobalShortcut();
+    
+    // Check if accessibility permissions are granted on macOS
+    if (process.platform === 'darwin') {
+      if (!systemPreferences.isTrustedAccessibilityClient(false)) {
+        console.log('Accessibility permission not granted for global shortcuts');
+        // Request permission
+        systemPreferences.isTrustedAccessibilityClient(true);
+        return;
+      }
+    }
+    
+    // Unregister any existing shortcut first
+    globalShortcut.unregisterAll();
+    
+    const success = globalShortcut.register(shortcut, () => {
+      handleGlobalShortcutTrigger();
+    });
+    
+    if (success) {
+      console.log(`Global shortcut ${shortcut} registered successfully`);
+    } else {
+      console.error(`Failed to register global shortcut ${shortcut}`);
+    }
+  } catch (error) {
+    console.error('Error registering global shortcut:', error);
+  }
+}
+
+function handleGlobalShortcutTrigger() {
+  if (!mainWindow) return;
+  
+  // Apply same logic as tray click
+  if (audioRecorder.isRecording()) {
+    // Stop recording
+    menuBarManager.stopRecording();
+  } else {
+    // Show window and start recording
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    if (!mainWindow.isVisible()) {
+      mainWindow.show();
+    }
+    mainWindow.focus();
+    
+    // Start quick recording
+    menuBarManager.startQuickRecording();
+  }
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -148,6 +201,9 @@ app.whenReady().then(() => {
     menuBarManager.init(mainWindow, audioRecorder);
   }
 
+  // Register global shortcut
+  registerGlobalShortcut();
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -167,6 +223,11 @@ app.on('window-all-closed', () => {
 // Handle app quit
 app.on('before-quit', () => {
   global.isQuitting = true;
+});
+
+// Unregister all shortcuts when app quits
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
 });
 
 // Helper function to rename audio file with generated title
@@ -261,7 +322,7 @@ ipcMain.handle('stop-recording', async () => {
 
 // Configuration handlers
 
-ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean }) => {
+ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; globalShortcut?: string }) => {
   try {
     if (config.geminiApiKey) {
       configService.setGeminiApiKey(config.geminiApiKey);
@@ -279,6 +340,12 @@ ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionA
 
     if (config.autoMode !== undefined) {
       configService.setAutoMode(config.autoMode);
+    }
+
+    if (config.globalShortcut !== undefined) {
+      configService.setGlobalShortcut(config.globalShortcut);
+      // Re-register the global shortcut with the new value
+      registerGlobalShortcut();
     }
 
     // Initialize Notion service if both required fields are present
@@ -308,6 +375,22 @@ ipcMain.handle('check-config', async () => {
     hasConfig: configService.hasRequiredConfig(),
     missing: configService.getMissingConfigs()
   };
+});
+
+// Global shortcut handlers
+ipcMain.handle('validate-shortcut', async (_, shortcut: string) => {
+  try {
+    // Temporarily register the shortcut to check if it's valid
+    const isValid = globalShortcut.register(shortcut, () => {});
+    if (isValid) {
+      globalShortcut.unregister(shortcut);
+    }
+    // Re-register the current shortcut
+    registerGlobalShortcut();
+    return { valid: isValid };
+  } catch (error) {
+    return { valid: false, error: error instanceof Error ? error.message : 'Invalid shortcut' };
+  }
 });
 
 // Transcription handler

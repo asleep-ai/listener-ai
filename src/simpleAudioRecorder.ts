@@ -241,6 +241,10 @@ export class SimpleAudioRecorder {
     }
   }
 
+  isRecording(): boolean {
+    return this.recordingProcess !== null;
+  }
+
   async stopRecording(): Promise<{ success: boolean; filePath?: string; error?: string }> {
     try {
       if (this.recordingProcess) {
