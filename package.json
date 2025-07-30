@@ -1,6 +1,6 @@
 {
   "name": "listener-ai",
-  "version": "1.0.10",
+  "version": "1.1.0",
   "description": "A lightweight desktop application for recording and transcribing meetings with AI-powered notes.",
   "main": "dist/main.js",
   "scripts": {
@@ -37,6 +37,7 @@
     "dotenv": "^17.2.0",
     "electron": "^37.2.4",
     "electron-builder": "^26.0.12",
+    "semver": "^7.7.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
   },
