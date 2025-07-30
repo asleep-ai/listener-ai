@@ -486,6 +486,100 @@ let currentTranscriptionData = null;
 let currentMeetingTitle = '';
 let currentFilePath = '';
 
+// Function to show saved transcript
+function showSavedTranscript(filePath, title, metadata) {
+  // Make sure modal elements are loaded
+  if (!transcriptionModal) {
+    transcriptionModal = document.getElementById('transcriptionModal');
+  }
+
+  // Show transcription modal
+  if (transcriptionModal) {
+    transcriptionModal.style.display = 'block';
+    document.getElementById('transcriptionTitle').textContent = `Transcription - ${title}`;
+
+    // Hide progress bar since we're showing saved data
+    if (progressContainer) {
+      progressContainer.style.display = 'none';
+    }
+
+    // Store transcription data for Notion upload
+    currentTranscriptionData = {
+      transcript: metadata.transcript,
+      summary: metadata.summary,
+      keyPoints: metadata.keyPoints || [],
+      actionItems: metadata.actionItems || [],
+      suggestedTitle: metadata.suggestedTitle
+    };
+    currentMeetingTitle = title;
+    currentFilePath = filePath;
+
+    // Update the UI with transcription results
+    // Format transcript with proper line breaks
+    const formattedTranscript = (metadata.transcript || '')
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0)
+      .join('\n');
+
+    // Update transcript
+    const transcriptDiv = document.getElementById('transcript');
+    transcriptDiv.innerHTML = `
+      <button class="copy-button" data-copy-target="transcript">
+        📋 Copy
+      </button>
+      <div class="transcript-content">${formattedTranscript}</div>
+    `;
+
+    // Update summary
+    const summaryDiv = document.getElementById('summary');
+    summaryDiv.innerHTML = `
+      <button class="copy-button" data-copy-target="summary">
+        📋 Copy
+      </button>
+      <p class="summary-content">${metadata.summary || 'No summary available'}</p>
+    `;
+
+    // Key points
+    const keyPointsList = (metadata.keyPoints || []).map(point => `<li>${point}</li>`).join('');
+    const keyPointsDiv = document.getElementById('keypoints');
+    if (keyPointsList) {
+      keyPointsDiv.innerHTML = `
+        <button class="copy-button" data-copy-target="keypoints">
+          📋 Copy
+        </button>
+        <ul class="keypoints-content">${keyPointsList}</ul>
+      `;
+    } else {
+      keyPointsDiv.innerHTML = '<p>No key points identified</p>';
+    }
+
+    // Action items
+    const actionItemsList = (metadata.actionItems || []).map(item => `<li>${item}</li>`).join('');
+    const actionsDiv = document.getElementById('actions');
+    if (actionItemsList) {
+      actionsDiv.innerHTML = `
+        <button class="copy-button" data-copy-target="actions">
+          📋 Copy
+        </button>
+        <ul class="actions-content">${actionItemsList}</ul>
+      `;
+    } else {
+      actionsDiv.innerHTML = '<p>No action items identified</p>';
+    }
+
+    // Setup copy button event listeners
+    setupCopyButtons(currentTranscriptionData);
+
+    // Show upload to Notion button if configured
+    window.electronAPI.getConfig().then(config => {
+      if (config.notionApiKey && config.notionDatabaseId) {
+        uploadToNotionBtn.style.display = 'flex';
+      }
+    });
+  }
+}
+
 async function handleTranscribe(filePath, title) {
   console.log('handleTranscribe called with:', { filePath, title });
 
@@ -686,10 +780,11 @@ async function loadRecordings() {
     if (result.success && result.recordings.length > 0) {
       recordingsList.innerHTML = '';
 
-      result.recordings.forEach(recording => {
-        const recordingItem = createRecordingItem(recording);
-        recordingsList.appendChild(recordingItem);
-      });
+      // Use Promise.all to handle async createRecordingItem
+      const items = await Promise.all(
+        result.recordings.map(recording => createRecordingItem(recording))
+      );
+      items.forEach(item => recordingsList.appendChild(item));
     } else {
       recordingsList.innerHTML = '<p class="no-recordings">No recordings yet</p>';
     }
@@ -700,7 +795,7 @@ async function loadRecordings() {
 }
 
 // Function to create a recording item element
-function createRecordingItem(recording) {
+async function createRecordingItem(recording) {
   const item = document.createElement('div');
   item.className = 'recording-item';
 
@@ -709,23 +804,50 @@ function createRecordingItem(recording) {
   const timeStr = date.toLocaleTimeString();
   const sizeStr = formatFileSize(recording.size);
 
+  // Check if metadata exists for this recording
+  const metadataResult = await window.electronAPI.getMetadata(recording.path);
+  const hasTranscript = metadataResult.success && metadataResult.data && metadataResult.data.transcript;
+
   item.innerHTML = `
     <div class="recording-info">
       <h3>${recording.title}</h3>
       <p class="recording-meta">${dateStr} ${timeStr} • ${sizeStr}</p>
     </div>
     <div class="recording-actions">
-      <button class="action-button transcribe-btn" data-path="${recording.path}" data-title="${recording.title}">
-        Transcribe
-      </button>
+      ${hasTranscript ? `
+        <button class="action-button view-transcript-btn" data-path="${recording.path}" data-title="${recording.title}">
+          View Transcript
+        </button>
+        <button class="action-button regenerate-btn" data-path="${recording.path}" data-title="${recording.title}" title="Regenerate transcript">
+          🔄
+        </button>
+      ` : `
+        <button class="action-button transcribe-btn" data-path="${recording.path}" data-title="${recording.title}">
+          Transcribe
+        </button>
+      `}
     </div>
   `;
 
-  // Add event listener to transcribe button
-  const transcribeBtn = item.querySelector('.transcribe-btn');
-  transcribeBtn.addEventListener('click', () => {
-    handleTranscribe(recording.path, recording.title);
-  });
+  // Add event listeners based on available actions
+  if (hasTranscript) {
+    const viewBtn = item.querySelector('.view-transcript-btn');
+    viewBtn.addEventListener('click', () => {
+      showSavedTranscript(recording.path, recording.title, metadataResult.data);
+    });
+
+    const regenerateBtn = item.querySelector('.regenerate-btn');
+    regenerateBtn.addEventListener('click', () => {
+      if (confirm('Are you sure you want to regenerate the transcript? This will overwrite the existing one.')) {
+        handleTranscribe(recording.path, recording.title);
+      }
+    });
+  } else {
+    const transcribeBtn = item.querySelector('.transcribe-btn');
+    transcribeBtn.addEventListener('click', () => {
+      handleTranscribe(recording.path, recording.title);
+    });
+  }
 
   return item;
 }

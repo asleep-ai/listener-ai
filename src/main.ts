@@ -7,6 +7,7 @@ import { ConfigService } from './configService';
 import { NotionService } from './notionService';
 import { FFmpegManager } from './services/ffmpegManager';
 import { MenuBarManager } from './menuBarManager';
+import { metadataService } from './services/metadataService';
 
 // Global flag to track if app is quitting
 declare global {
@@ -25,7 +26,7 @@ let notionService: NotionService | null = null;
 function registerGlobalShortcut() {
   try {
     const shortcut = configService.getGlobalShortcut();
-    
+
     // Check if accessibility permissions are granted on macOS
     if (process.platform === 'darwin') {
       if (!systemPreferences.isTrustedAccessibilityClient(false)) {
@@ -35,14 +36,14 @@ function registerGlobalShortcut() {
         return;
       }
     }
-    
+
     // Unregister any existing shortcut first
     globalShortcut.unregisterAll();
-    
+
     const success = globalShortcut.register(shortcut, () => {
       handleGlobalShortcutTrigger();
     });
-    
+
     if (success) {
       console.log(`Global shortcut ${shortcut} registered successfully`);
     } else {
@@ -55,7 +56,7 @@ function registerGlobalShortcut() {
 
 function handleGlobalShortcutTrigger() {
   if (!mainWindow) return;
-  
+
   // Apply same logic as tray click
   if (audioRecorder.isRecording()) {
     // Stop recording
@@ -69,7 +70,7 @@ function handleGlobalShortcutTrigger() {
       mainWindow.show();
     }
     mainWindow.focus();
-    
+
     // Start quick recording
     menuBarManager.startQuickRecording();
   }
@@ -77,7 +78,7 @@ function handleGlobalShortcutTrigger() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 800,
+    width: 1000,
     height: 700,
     webPreferences: {
       nodeIntegration: false,
@@ -381,7 +382,7 @@ ipcMain.handle('check-config', async () => {
 ipcMain.handle('validate-shortcut', async (_, shortcut: string) => {
   try {
     // Temporarily register the shortcut to check if it's valid
-    const isValid = globalShortcut.register(shortcut, () => {});
+    const isValid = globalShortcut.register(shortcut, () => { });
     if (isValid) {
       globalShortcut.unregister(shortcut);
     }
@@ -430,11 +431,36 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
 
     const result = await geminiService.transcribeAudio(filePath, progressCallback);
     console.log('Transcription completed successfully');
+    console.log('Saving metadata for:', filePath);
+
+    // Save transcript data to metadata
+    try {
+      await metadataService.saveMetadata(filePath, {
+        title: path.basename(filePath, path.extname(filePath)),
+        transcript: result.transcript,
+        summary: result.summary,
+        keyPoints: result.keyPoints,
+        actionItems: result.actionItems,
+        suggestedTitle: result.suggestedTitle,
+        transcribedAt: new Date().toISOString()
+      });
+      console.log('Metadata saved successfully');
+    } catch (error) {
+      console.error('Failed to save metadata:', error);
+    }
 
     // Check if we need to rename the file (if it was untitled)
     const fileName = path.basename(filePath);
     if (fileName.includes('Untitled_Meeting') && result.suggestedTitle) {
       const newFilePath = await renameAudioFile(filePath, result.suggestedTitle);
+
+      // Update metadata with new file path
+      const metadata = await metadataService.getMetadata(filePath);
+      if (metadata) {
+        await metadataService.deleteMetadata(filePath);
+        await metadataService.saveMetadata(newFilePath, metadata);
+      }
+
       return { success: true, data: result, newFilePath };
     }
 
@@ -485,6 +511,25 @@ ipcMain.handle('upload-to-notion', async (_, data: { title: string; transcriptio
 // Open external URL
 ipcMain.handle('open-external', async (_, url: string) => {
   shell.openExternal(url);
+});
+
+// Metadata handlers
+ipcMain.handle('get-metadata', async (_, filePath: string) => {
+  try {
+    const metadata = await metadataService.getMetadata(filePath);
+    return { success: true, data: metadata };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('save-metadata', async (_, filePath: string, metadata: any) => {
+  try {
+    await metadataService.saveMetadata(filePath, metadata);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
 });
 
 // Open recordings folder
@@ -565,26 +610,26 @@ ipcMain.handle('open-microphone-settings', async () => {
 ipcMain.handle('save-audio-file', async (_, fileData: { name: string; data: number[] }) => {
   try {
     const recordingsDir = path.join(app.getPath('userData'), 'recordings');
-    
+
     // Ensure directory exists
     if (!fs.existsSync(recordingsDir)) {
       fs.mkdirSync(recordingsDir, { recursive: true });
     }
-    
+
     // Get file info
     const fileName = fileData.name;
     const fileExt = path.extname(fileName);
     const fileNameWithoutExt = path.basename(fileName, fileExt);
-    
+
     // Generate unique filename with timestamp
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').split('.')[0];
     const newFileName = `${fileNameWithoutExt}_${timestamp}${fileExt}`;
     const destPath = path.join(recordingsDir, newFileName);
-    
+
     // Convert array back to buffer and save
     const buffer = Buffer.from(fileData.data);
     fs.writeFileSync(destPath, buffer);
-    
+
     return { success: true, filePath: destPath };
   } catch (error) {
     console.error('Error saving audio file:', error);
