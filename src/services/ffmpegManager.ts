@@ -78,6 +78,7 @@ export class FFmpegManager {
     return null;
   }
 
+
   async downloadFFmpeg(onProgress: (progress: DownloadProgress) => void): Promise<string> {
     try {
       // Find appropriate release
@@ -240,13 +241,13 @@ export class FFmpegManager {
   private getRelease(): FFmpegRelease | null {
     const arch = process.arch as string;
     const platform = process.platform;
-    
+
     // Handle architecture mapping
     let targetArch = arch;
     if (arch === 'ia32') targetArch = 'x64'; // 32-bit x86 -> use x64 build
     if (arch === 'x32') targetArch = 'x64'; // x32 ABI -> use x64 build
-    
-    return FFMPEG_RELEASES.find(r => 
+
+    return FFMPEG_RELEASES.find(r =>
       r.platform === platform && r.arch === targetArch
     ) || null;
   }
@@ -311,6 +312,7 @@ export class FFmpegManager {
 
     return null;
   }
+
 
   cancelDownload(): void {
     this.downloadController?.abort();
