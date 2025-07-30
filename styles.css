@@ -88,9 +88,17 @@ h1 {
 }
 
 @keyframes pulse {
-  0% { opacity: 1; }
-  50% { opacity: 0.5; }
-  100% { opacity: 1; }
+  0% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.5;
+  }
+
+  100% {
+    opacity: 1;
+  }
 }
 
 .meeting-title-input {
@@ -315,7 +323,8 @@ h1 {
   margin-top: 20px;
 }
 
-.save-button, .cancel-button {
+.save-button,
+.cancel-button {
   padding: 10px 20px;
   border: none;
   border-radius: 6px;
@@ -378,15 +387,30 @@ h1 {
 .tab-pane {
   display: none;
   animation: fadeIn 0.3s;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .tab-pane.active {
   display: block;
 }
 
+/* Make specific content selectable */
+#summary,
+#keypoints,
+#actions {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 @keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
 
 .loading {
@@ -397,12 +421,18 @@ h1 {
 }
 
 /* Transcript formatting */
+#transcript .transcript-content,
 #transcript {
   font-family: 'Courier New', Courier, monospace;
   font-size: 14px;
   line-height: 1.8;
   white-space: pre-wrap;
   word-wrap: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+#transcript .transcript-content {
   background-color: #f8f9fa;
   padding: 20px;
   border-radius: 8px;
@@ -621,19 +651,22 @@ h1 {
   left: 0;
   right: 0;
   bottom: 0;
-  background-image: repeating-linear-gradient(
-    45deg,
-    transparent,
-    transparent 10px,
-    rgba(255, 255, 255, 0.15) 10px,
-    rgba(255, 255, 255, 0.15) 20px
-  );
+  background-image: repeating-linear-gradient(45deg,
+      transparent,
+      transparent 10px,
+      rgba(255, 255, 255, 0.15) 10px,
+      rgba(255, 255, 255, 0.15) 20px);
   animation: progress-stripes 1s linear infinite;
 }
 
 @keyframes progress-stripes {
-  0% { transform: translateX(0); }
-  100% { transform: translateX(20px); }
+  0% {
+    transform: translateX(0);
+  }
+
+  100% {
+    transform: translateX(20px);
+  }
 }
 
 .ffmpeg-download-card .progress-percent {
@@ -677,4 +710,67 @@ h1 {
   color: #2c3e50;
   font-size: 14px;
   margin: 0;
+}
+
+/* Copy button styles */
+.section-header {
+  position: relative;
+  margin-bottom: 10px;
+}
+
+.copy-button {
+  position: absolute;
+  top: 0;
+  right: 0;
+  opacity: 0;
+  transition: opacity 0.2s;
+  background: #3498db;
+  color: white;
+  border: none;
+  padding: 5px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.copy-button:hover {
+  background: #2980b9;
+}
+
+.tab-pane {
+  position: relative;
+}
+
+.tab-pane:hover .copy-button {
+  opacity: 1;
+}
+
+/* Toast notification styles */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #2c3e50;
+  color: white;
+  padding: 12px 20px;
+  border-radius: 6px;
+  font-size: 14px;
+  z-index: 10000;
+  animation: slideUp 0.3s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    bottom: -50px;
+    opacity: 0;
+  }
+
+  to {
+    bottom: 20px;
+    opacity: 1;
+  }
 }
