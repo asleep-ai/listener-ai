@@ -17,7 +17,7 @@ let notionService: NotionService | null = null;
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 800,
-    height: 600,
+    height: 700,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
