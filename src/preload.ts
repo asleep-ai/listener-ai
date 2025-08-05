@@ -49,5 +49,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Metadata handling
   getMetadata: (filePath: string) => ipcRenderer.invoke('get-metadata', filePath),
-  saveMetadata: (filePath: string, metadata: any) => ipcRenderer.invoke('save-metadata', filePath, metadata)
+  saveMetadata: (filePath: string, metadata: any) => ipcRenderer.invoke('save-metadata', filePath, metadata),
+
+  // Update handling
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  dismissUpdateVersion: (version: string) => ipcRenderer.invoke('dismiss-update-version', version),
+  getUpdatePreferences: () => ipcRenderer.invoke('get-update-preferences'),
+  setUpdateCheckEnabled: (enabled: boolean) => ipcRenderer.invoke('set-update-check-enabled', enabled),
+  onUpdateAvailable: (callback: (updateInfo: any) => void) => {
+    ipcRenderer.on('update-available', (_, updateInfo) => callback(updateInfo));
+  }
 });
