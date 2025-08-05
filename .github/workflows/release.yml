@@ -38,9 +38,7 @@ jobs:
           cache: 'pnpm'
 
       - name: Install dependencies
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm add -D semver
+        run: pnpm install --frozen-lockfile
 
       - name: Calculate new version
         id: version

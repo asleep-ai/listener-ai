@@ -1,7 +1,7 @@
-const semver = require('semver');
 import { app, BrowserWindow } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs-extra';
+import * as semver from 'semver';
 import { GitHubAPI } from './githubAPI';
 import { 
   UpdateCheckResult, 
