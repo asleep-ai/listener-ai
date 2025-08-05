@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  platform: process.platform,
   startRecording: (meetingTitle: string) => ipcRenderer.invoke('start-recording', meetingTitle),
   stopRecording: () => ipcRenderer.invoke('stop-recording'),
   onRecordingStatus: (callback: (status: string) => void) => {

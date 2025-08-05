@@ -1214,7 +1214,7 @@ function setupPasteListener() {
         const hintElement = document.createElement('div');
         hintElement.className = 'paste-hint';
         hintElement.textContent = 'Press Cmd+V to paste audio files';
-        if (process.platform === 'win32') {
+        if (window.electronAPI.platform === 'win32') {
           hintElement.textContent = 'Press Ctrl+V to paste audio files';
         }
         dragDropZone.appendChild(hintElement);
