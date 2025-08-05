@@ -1,6 +1,6 @@
 {
   "name": "listener-ai",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "A lightweight desktop application for recording and transcribing meetings with AI-powered notes.",
   "main": "dist/main.js",
   "scripts": {
@@ -38,14 +38,14 @@
     "dotenv": "^17.2.0",
     "electron": "^37.2.4",
     "electron-builder": "^26.0.12",
+    "semver": "^7.7.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@notionhq/client": "^4.0.0",
-    "fs-extra": "^11.2.0",
-    "semver": "^7.7.2"
+    "fs-extra": "^11.2.0"
   },
   "build": {
     "appId": "com.listenerai.app",
