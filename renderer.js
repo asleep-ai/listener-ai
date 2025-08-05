@@ -1,11 +1,6 @@
-// Global error handler to catch any uncaught errors
-window.addEventListener('error', (event) => {
-  console.error('Renderer error:', event.error);
-  // Only show alert in production
-  if (!window.location.href.includes('localhost')) {
-    alert(`Application error: ${event.error?.message || 'Unknown error'}\n\nPlease restart the application.`);
-  }
-});
+// Import and install error handler
+const errorHandler = require('./errorHandler.js');
+errorHandler.install();
 
 // Check if electronAPI is available
 if (!window.electronAPI) {
@@ -71,7 +66,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     // Setup drag and drop listeners
     setupDragAndDrop();
-    
+
     // Setup paste listener
     setupPasteListener();
 
@@ -1088,9 +1083,9 @@ async function handleAudioFile(file) {
   // Check if file is audio (mp3 or m4a)
   const validTypes = ['audio/mp3', 'audio/mpeg', 'audio/mp4', 'audio/x-m4a'];
   const validExtensions = ['.mp3', '.m4a'];
-  
+
   const fileExtension = file.name.toLowerCase().substring(file.name.lastIndexOf('.'));
-  
+
   if (!validTypes.includes(file.type) && !validExtensions.includes(fileExtension)) {
     showToast('Please drop an MP3 or M4A audio file', 'error');
     return;
@@ -1103,25 +1098,25 @@ async function handleAudioFile(file) {
     // Read file as buffer
     const buffer = await file.arrayBuffer();
     const uint8Array = new Uint8Array(buffer);
-    
+
     // Send file data to main process
     const result = await window.electronAPI.saveAudioFile({
       name: file.name,
       data: Array.from(uint8Array)
     });
-    
+
     if (result.success) {
       // Extract title from filename (remove extension)
       const title = file.name.replace(/\.[^/.]+$/, '');
-      
+
       // Refresh recordings list
       await refreshRecordingsList();
-      
+
       // Ask if user wants to transcribe immediately
       if (confirm(`Audio file "${title}" has been added. Would you like to transcribe it now?`)) {
         handleTranscribe(result.filePath, title);
       }
-      
+
       statusText.textContent = 'Ready to record';
     } else {
       showToast('Failed to process audio file: ' + result.error, 'error');
@@ -1139,36 +1134,36 @@ function setupPasteListener() {
     // Check if user is typing in a text field
     const activeElement = document.activeElement;
     const isTextInput = activeElement && (
-      activeElement.tagName === 'INPUT' || 
-      activeElement.tagName === 'TEXTAREA' || 
+      activeElement.tagName === 'INPUT' ||
+      activeElement.tagName === 'TEXTAREA' ||
       activeElement.contentEditable === 'true'
     );
-    
+
     // If user is in a text field, allow normal paste behavior
     if (isTextInput) {
       return;
     }
-    
+
     e.preventDefault();
-    
+
     const items = e.clipboardData.items;
     let audioFile = null;
-    
+
     // Look for audio files in clipboard
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      
+
       // Check if it's an audio file
-      if (item.type.startsWith('audio/') || 
-          item.type === 'audio/mp3' || 
-          item.type === 'audio/mpeg' || 
-          item.type === 'audio/mp4' || 
-          item.type === 'audio/x-m4a') {
+      if (item.type.startsWith('audio/') ||
+        item.type === 'audio/mp3' ||
+        item.type === 'audio/mpeg' ||
+        item.type === 'audio/mp4' ||
+        item.type === 'audio/x-m4a') {
         audioFile = item.getAsFile();
         break;
       }
     }
-    
+
     // If no direct audio file, check for file items
     if (!audioFile) {
       for (let i = 0; i < items.length; i++) {
@@ -1185,7 +1180,7 @@ function setupPasteListener() {
         }
       }
     }
-    
+
     if (audioFile) {
       // Show visual feedback
       if (dragDropZone) {
@@ -1194,7 +1189,7 @@ function setupPasteListener() {
           dragDropZone.classList.remove('drag-over');
         }, 500);
       }
-      
+
       handleAudioFile(audioFile);
     } else {
       // Check if clipboard contains file paths (text)
@@ -1204,7 +1199,7 @@ function setupPasteListener() {
       }
     }
   });
-  
+
   // Add keyboard shortcut hint
   document.addEventListener('keydown', (e) => {
     // Show hint when Cmd/Ctrl is pressed
@@ -1214,14 +1209,14 @@ function setupPasteListener() {
         const hintElement = document.createElement('div');
         hintElement.className = 'paste-hint';
         hintElement.textContent = 'Press Cmd+V to paste audio files';
-        if (process.platform === 'win32') {
+        if (window.electronAPI.platform === 'win32') {
           hintElement.textContent = 'Press Ctrl+V to paste audio files';
         }
         dragDropZone.appendChild(hintElement);
       }
     }
   });
-  
+
   document.addEventListener('keyup', (e) => {
     // Remove hint when Cmd/Ctrl is released
     if (!e.metaKey && !e.ctrlKey) {
@@ -1244,16 +1239,16 @@ function initUpdateNotifications() {
   const remindLaterButton = document.getElementById('remindLater');
   const dismissButton = document.getElementById('dismissUpdate');
   const dontShowAgainCheckbox = document.getElementById('dontShowAgain');
-  
+
   let currentUpdateInfo = null;
-  
+
   // Listen for update available events
   window.electronAPI.onUpdateAvailable((updateInfo) => {
     currentUpdateInfo = updateInfo;
-    
+
     // Update UI with version info
     updateVersion.textContent = `Version ${updateInfo.version} is ready to download`;
-    
+
     // Show stability indicator if stable
     if (updateInfo.stabilitySince) {
       updateStability.style.display = 'flex';
@@ -1262,14 +1257,14 @@ function initUpdateNotifications() {
     } else {
       updateStability.style.display = 'none';
     }
-    
+
     // Show notification
     updateNotification.style.display = 'block';
-    
+
     // Reset checkbox
     dontShowAgainCheckbox.checked = false;
   });
-  
+
   // Download button handler
   downloadButton.addEventListener('click', async () => {
     if (currentUpdateInfo && currentUpdateInfo.downloadUrl) {
@@ -1278,13 +1273,13 @@ function initUpdateNotifications() {
       updateNotification.style.display = 'none';
     }
   });
-  
+
   // Remind later button handler
   remindLaterButton.addEventListener('click', () => {
     updateNotification.style.display = 'none';
     // Will be reminded on next check (1 hour)
   });
-  
+
   // Dismiss button handler
   dismissButton.addEventListener('click', async () => {
     if (dontShowAgainCheckbox.checked && currentUpdateInfo) {
@@ -1293,7 +1288,7 @@ function initUpdateNotifications() {
     }
     updateNotification.style.display = 'none';
   });
-  
+
   // Check for updates on startup (after a short delay)
   setTimeout(async () => {
     const result = await window.electronAPI.checkForUpdates();
@@ -1324,7 +1319,7 @@ if (!window.location.href.includes('app://')) {
         stabilitySince: new Date(Date.now() - 2 * 60 * 60 * 1000)
       });
     },
-    
+
     // Test unstable update (less than 3 hours old)
     unstable: () => {
       window.electronAPI.onUpdateAvailable({
@@ -1335,7 +1330,7 @@ if (!window.location.href.includes('app://')) {
         stabilitySince: undefined
       });
     },
-    
+
     // Force check for updates
     check: async () => {
       const result = await window.electronAPI.checkForUpdates();
@@ -1343,7 +1338,7 @@ if (!window.location.href.includes('app://')) {
       return result;
     }
   };
-  
+
   console.log('🧪 Update test helpers available:');
   console.log('  window.testUpdate.stable()   - Show stable update notification');
   console.log('  window.testUpdate.unstable() - Show unstable update notification');

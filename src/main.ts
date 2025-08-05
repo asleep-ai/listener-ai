@@ -642,6 +642,23 @@ ipcMain.handle('set-update-check-enabled', async (_, enabled: boolean) => {
   return { success: true };
 });
 
+// Error dialog handler
+ipcMain.handle('show-error-dialog', async (_, title: string, content: string, detail?: string) => {
+  const options: Electron.MessageBoxOptions = {
+    type: 'error',
+    title: title,
+    message: content,
+    buttons: ['OK']
+  };
+
+  if (detail) {
+    options.detail = detail;
+  }
+
+  dialog.showMessageBox(mainWindow!, options);
+  return { success: true };
+});
+
 // Removed get-platform-download-url handler - now always using release page URL
 
 // Open recordings folder
