@@ -76,7 +76,6 @@
       "!tsconfig.json",
       "!build/**/*"
     ],
-    "asarUnpack": [],
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icon.png",
