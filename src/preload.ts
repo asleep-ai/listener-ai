@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  platform: process.platform,
   startRecording: (meetingTitle: string) => ipcRenderer.invoke('start-recording', meetingTitle),
   stopRecording: () => ipcRenderer.invoke('stop-recording'),
   onRecordingStatus: (callback: (status: string) => void) => {
@@ -58,5 +59,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setUpdateCheckEnabled: (enabled: boolean) => ipcRenderer.invoke('set-update-check-enabled', enabled),
   onUpdateAvailable: (callback: (updateInfo: any) => void) => {
     ipcRenderer.on('update-available', (_, updateInfo) => callback(updateInfo));
-  }
+  },
+
+  // Error dialog
+  showErrorDialog: (title: string, content: string, detail?: string) =>
+    ipcRenderer.invoke('show-error-dialog', title, content, detail)
 });
