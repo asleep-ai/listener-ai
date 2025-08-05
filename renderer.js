@@ -1233,3 +1233,119 @@ function setupPasteListener() {
     }
   });
 }
+
+// Update Notification Handlers
+function initUpdateNotifications() {
+  const updateNotification = document.getElementById('updateNotification');
+  const updateVersion = document.getElementById('updateVersion');
+  const updateStability = document.getElementById('updateStability');
+  const stabilityText = document.getElementById('stabilityText');
+  const downloadButton = document.getElementById('downloadUpdate');
+  const remindLaterButton = document.getElementById('remindLater');
+  const dismissButton = document.getElementById('dismissUpdate');
+  const dontShowAgainCheckbox = document.getElementById('dontShowAgain');
+  
+  let currentUpdateInfo = null;
+  
+  // Listen for update available events
+  window.electronAPI.onUpdateAvailable((updateInfo) => {
+    currentUpdateInfo = updateInfo;
+    
+    // Update UI with version info
+    updateVersion.textContent = `Version ${updateInfo.version} is ready to download`;
+    
+    // Show stability indicator if stable
+    if (updateInfo.stabilitySince) {
+      updateStability.style.display = 'flex';
+      const hoursStable = Math.floor((Date.now() - new Date(updateInfo.stabilitySince).getTime()) / (1000 * 60 * 60));
+      stabilityText.textContent = `This version has been stable for ${hoursStable}+ hours`;
+    } else {
+      updateStability.style.display = 'none';
+    }
+    
+    // Show notification
+    updateNotification.style.display = 'block';
+    
+    // Reset checkbox
+    dontShowAgainCheckbox.checked = false;
+  });
+  
+  // Download button handler
+  downloadButton.addEventListener('click', async () => {
+    if (currentUpdateInfo && currentUpdateInfo.downloadUrl) {
+      // Open download URL in browser
+      await window.electronAPI.openExternal(currentUpdateInfo.downloadUrl);
+      updateNotification.style.display = 'none';
+    }
+  });
+  
+  // Remind later button handler
+  remindLaterButton.addEventListener('click', () => {
+    updateNotification.style.display = 'none';
+    // Will be reminded on next check (1 hour)
+  });
+  
+  // Dismiss button handler
+  dismissButton.addEventListener('click', async () => {
+    if (dontShowAgainCheckbox.checked && currentUpdateInfo) {
+      // Dismiss this version permanently
+      await window.electronAPI.dismissUpdateVersion(currentUpdateInfo.version);
+    }
+    updateNotification.style.display = 'none';
+  });
+  
+  // Check for updates on startup (after a short delay)
+  setTimeout(async () => {
+    const result = await window.electronAPI.checkForUpdates();
+    if (result.success && result.data.hasUpdate) {
+      // Update will be shown automatically via the onUpdateAvailable listener
+      console.log('Update available:', result.data.latestVersion);
+    }
+  }, 5000); // Check 5 seconds after app starts
+}
+
+// Initialize update notifications when DOM is ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initUpdateNotifications);
+} else {
+  initUpdateNotifications();
+}
+
+// Development helpers (only available in dev mode)
+if (!window.location.href.includes('app://')) {
+  window.testUpdate = {
+    // Test stable update (4+ hours old)
+    stable: () => {
+      window.electronAPI.onUpdateAvailable({
+        version: '2.0.0',
+        releaseNotes: '## What\'s New\n\n- Amazing new features\n- Performance improvements\n- Bug fixes',
+        downloadUrl: 'https://github.com/asleep-ai/listener-ai/releases/tag/v2.0.0',
+        publishedAt: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+        stabilitySince: new Date(Date.now() - 2 * 60 * 60 * 1000)
+      });
+    },
+    
+    // Test unstable update (less than 3 hours old)
+    unstable: () => {
+      window.electronAPI.onUpdateAvailable({
+        version: '2.1.0-beta',
+        releaseNotes: '## Beta Release\n\n- Experimental features\n- Not yet stable',
+        downloadUrl: 'https://github.com/asleep-ai/listener-ai/releases/tag/v2.1.0-beta',
+        publishedAt: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+        stabilitySince: undefined
+      });
+    },
+    
+    // Force check for updates
+    check: async () => {
+      const result = await window.electronAPI.checkForUpdates();
+      console.log('Update check result:', result);
+      return result;
+    }
+  };
+  
+  console.log('🧪 Update test helpers available:');
+  console.log('  window.testUpdate.stable()   - Show stable update notification');
+  console.log('  window.testUpdate.unstable() - Show unstable update notification');
+  console.log('  window.testUpdate.check()    - Force check for updates');
+}

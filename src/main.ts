@@ -8,6 +8,7 @@ import { NotionService } from './notionService';
 import { FFmpegManager } from './services/ffmpegManager';
 import { MenuBarManager } from './menuBarManager';
 import { metadataService } from './services/metadataService';
+import { UpdateService } from './services/updateService';
 
 // Global flag to track if app is quitting
 declare global {
@@ -20,6 +21,7 @@ const audioRecorder = new SimpleAudioRecorder();
 const configService = new ConfigService();
 const ffmpegManager = new FFmpegManager();
 const menuBarManager = new MenuBarManager();
+const updateService = new UpdateService();
 let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
 
@@ -174,11 +176,90 @@ app.whenReady().then(() => {
     }
   ];
 
+  // Add Help menu for non-macOS platforms
+  if (process.platform !== 'darwin') {
+    template.push({
+      label: 'Help',
+      submenu: [
+        {
+          label: 'Check for Updates...',
+          click: async () => {
+            try {
+              const result = await updateService.checkForUpdate(true); // Bypass stability for manual checks
+              console.log('[Main] Manual update check result:', result);
+
+              if (!result.hasUpdate) {
+                // Show notification that app is up to date
+                dialog.showMessageBox(mainWindow!, {
+                  type: 'info',
+                  title: 'Listener.AI',
+                  message: 'You\'re up to date!',
+                  detail: `Listener.AI ${result.currentVersion} is currently the newest version available.`,
+                  buttons: ['OK']
+                });
+              }
+              // If there's an update, the notification will be shown automatically
+            } catch (error) {
+              console.error('[Main] Error checking for updates:', error);
+              dialog.showErrorBox('Update Check Failed',
+                'Unable to check for updates. Please check your internet connection and try again.');
+            }
+          }
+        } as any,
+        { type: 'separator' } as any,
+        {
+          label: 'About Listener.AI',
+          click: () => {
+            dialog.showMessageBox(mainWindow!, {
+              type: 'info',
+              title: 'About Listener.AI',
+              message: 'Listener.AI',
+              detail: `Version ${app.getVersion()}\n\nA lightweight desktop application for recording and transcribing meetings with AI-powered notes.`,
+              buttons: ['OK']
+            });
+          }
+        } as any
+      ]
+    } as any);
+  }
+
   if (process.platform === 'darwin') {
     template.unshift({
       label: app.getName(),
       submenu: [
         { role: 'about' } as any,
+        { type: 'separator' } as any,
+        {
+          label: 'Check for Updates...',
+          click: async () => {
+            try {
+              const result = await updateService.checkForUpdate(true); // Bypass stability for manual checks
+              console.log('[Main] Manual update check result:', result);
+
+              if (!result.hasUpdate) {
+                // Show notification that app is up to date
+                dialog.showMessageBox(mainWindow!, {
+                  type: 'info',
+                  title: 'Listener.AI',
+                  message: 'You\'re up to date!',
+                  detail: `Listener.AI ${result.currentVersion} is currently the newest version available.`,
+                  buttons: ['OK']
+                });
+              }
+              // If there's an update, the notification will be shown automatically
+            } catch (error) {
+              console.error('[Main] Error checking for updates:', error);
+              dialog.showErrorBox('Update Check Failed',
+                'Unable to check for updates. Please check your internet connection and try again.');
+            }
+          }
+        } as any,
+        { type: 'separator' } as any,
+        { role: 'services', submenu: [] } as any,
+        { type: 'separator' } as any,
+        { role: 'hide' } as any,
+        { role: 'hideOthers' } as any,
+        { role: 'unhide' } as any,
         { type: 'separator' } as any,
         {
           label: 'Quit Listener.AI',
@@ -199,11 +280,15 @@ app.whenReady().then(() => {
 
   // Initialize menu bar manager
   if (mainWindow) {
-    menuBarManager.init(mainWindow, audioRecorder);
+    menuBarManager.init(mainWindow, audioRecorder, updateService);
   }
 
   // Register global shortcut
   registerGlobalShortcut();
+
+  // Initialize update service
+  console.log('[Main] Initializing update service periodic checks...');
+  updateService.startPeriodicCheck();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -531,6 +616,33 @@ ipcMain.handle('save-metadata', async (_, filePath: string, metadata: any) => {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
+
+// Update handlers
+ipcMain.handle('check-for-updates', async () => {
+  try {
+    const result = await updateService.checkForUpdate();
+    return { success: true, data: result };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('dismiss-update-version', async (_, version: string) => {
+  updateService.dismissVersion(version);
+  return { success: true };
+});
+
+ipcMain.handle('get-update-preferences', async () => {
+  const preferences = updateService.getPreferences();
+  return { success: true, data: preferences };
+});
+
+ipcMain.handle('set-update-check-enabled', async (_, enabled: boolean) => {
+  updateService.setCheckEnabled(enabled);
+  return { success: true };
+});
+
+// Removed get-platform-download-url handler - now always using release page URL
 
 // Open recordings folder
 ipcMain.handle('open-recordings-folder', async () => {

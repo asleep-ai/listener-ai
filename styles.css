@@ -888,3 +888,146 @@ h1 {
 .drag-drop-zone[data-paste-hint="true"] {
   position: relative;
 }
+
+/* Update Notification Styles */
+.update-notification {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  max-width: 400px;
+  z-index: 1000;
+  animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(400px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.update-content {
+  padding: 20px;
+}
+
+.update-header {
+  display: flex;
+  align-items: start;
+  margin-bottom: 15px;
+  gap: 12px;
+}
+
+.update-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.update-info {
+  flex: 1;
+}
+
+.update-info h3 {
+  font-size: 16px;
+  color: #2c3e50;
+  margin-bottom: 4px;
+}
+
+.update-info p {
+  font-size: 14px;
+  color: #666;
+  margin: 0;
+}
+
+.update-dismiss {
+  background: none;
+  border: none;
+  font-size: 20px;
+  color: #999;
+  cursor: pointer;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+}
+
+.update-dismiss:hover {
+  background-color: #f0f0f0;
+  color: #666;
+}
+
+.update-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.update-download-btn,
+.update-later-btn {
+  padding: 10px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.update-download-btn {
+  background-color: #4CAF50;
+  color: white;
+}
+
+.update-download-btn:hover {
+  background-color: #45a049;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(76, 175, 80, 0.3);
+}
+
+.update-later-btn {
+  background-color: #f0f0f0;
+  color: #666;
+}
+
+.update-later-btn:hover {
+  background-color: #e0e0e0;
+}
+
+.update-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #666;
+  cursor: pointer;
+  user-select: none;
+}
+
+.update-checkbox input[type="checkbox"] {
+  cursor: pointer;
+}
+
+.update-stability {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #eee;
+  font-size: 13px;
+  color: #4CAF50;
+}
+
+.stability-icon {
+  font-size: 16px;
+}

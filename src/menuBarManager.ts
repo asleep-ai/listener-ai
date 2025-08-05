@@ -1,6 +1,7 @@
 import { Tray, Menu, nativeImage, app, BrowserWindow, Notification } from 'electron';
 import path from 'path';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
+import { UpdateService } from './services/updateService';
 
 
 export class MenuBarManager {
@@ -8,13 +9,15 @@ export class MenuBarManager {
   private isRecording = false;
   private mainWindow: BrowserWindow | null = null;
   private audioRecorder: SimpleAudioRecorder | null = null;
+  private updateService: UpdateService | null = null;
   private currentRecordingTitle = 'Quick Recording';
 
   constructor() { }
 
-  init(mainWindow: BrowserWindow, audioRecorder: SimpleAudioRecorder) {
+  init(mainWindow: BrowserWindow, audioRecorder: SimpleAudioRecorder, updateService?: UpdateService) {
     this.mainWindow = mainWindow;
     this.audioRecorder = audioRecorder;
+    this.updateService = updateService || null;
 
     try {
       this.createTray();
@@ -203,6 +206,36 @@ export class MenuBarManager {
     });
 
     menuItems.push({ type: 'separator' });
+
+    // Only show Check for Updates if updateService is available
+    if (this.updateService) {
+      menuItems.push({
+        label: 'Check for Updates...',
+        click: async () => {
+          try {
+            const result = await this.updateService!.checkForUpdate(true); // Bypass stability for manual checks
+            console.log('[MenuBar] Manual update check result:', result);
+
+            if (!result.hasUpdate) {
+              // Show notification that app is up to date
+              new Notification({
+                title: 'Listener.AI',
+                body: `You're running the latest version (${result.currentVersion})`
+              }).show();
+            }
+            // If there's an update, the notification will be shown automatically
+          } catch (error) {
+            console.error('[MenuBar] Error checking for updates:', error);
+            new Notification({
+              title: 'Update Check Failed',
+              body: 'Unable to check for updates. Please try again later.'
+            }).show();
+          }
+        }
+      });
+
+      menuItems.push({ type: 'separator' });
+    }
 
     menuItems.push({
       label: 'Quit Listener.AI',

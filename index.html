@@ -139,6 +139,32 @@
     </div>
   </div>
 
+  <!-- Update Notification Banner -->
+  <div id="updateNotification" class="update-notification" style="display: none;">
+    <div class="update-content">
+      <div class="update-header">
+        <span class="update-icon">🎉</span>
+        <div class="update-info">
+          <h3>New version available!</h3>
+          <p id="updateVersion">Version 1.2.0 is ready to download</p>
+        </div>
+        <button id="dismissUpdate" class="update-dismiss" title="Dismiss">✕</button>
+      </div>
+      <div class="update-actions">
+        <button id="downloadUpdate" class="update-download-btn">View Release</button>
+        <button id="remindLater" class="update-later-btn">Remind Me Later</button>
+        <label class="update-checkbox">
+          <input type="checkbox" id="dontShowAgain">
+          <span>Don't show notifications for this version</span>
+        </label>
+      </div>
+      <div id="updateStability" class="update-stability" style="display: none;">
+        <span class="stability-icon">✓</span>
+        <span id="stabilityText">This version has been stable for 3+ hours</span>
+      </div>
+    </div>
+  </div>
+
   <!-- FFmpeg Download Progress Overlay -->
   <div id="ffmpegDownloadOverlay" class="modal" style="display: none;">
     <div class="ffmpeg-download-card">
