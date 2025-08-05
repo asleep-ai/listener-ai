@@ -467,25 +467,22 @@ IMPORTANT:
     }
   }
 
-  // Get segmented transcript (renamed from transcribeAudioSegmented)
-  private async getSegmentedTranscript(audioFilePath: string, duration: number, progressCallback?: (percent: number, message: string) => void): Promise<string> {
-    try {
-      // Split audio into 5-minute segments
-      const segmentFiles = await this.splitAudioIntoSegments(audioFilePath, 300);
+  // Format time in HH:MM:SS format
+  private formatTime(seconds: number): string {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
 
-      if (progressCallback) {
-        progressCallback(20, `Processing ${segmentFiles.length} segments...`);
-      }
+  // Create segment header with time range
+  private createSegmentHeader(segmentIndex: number, segmentStartTime: number, segmentEndTime: number): string {
+    return `[Segment ${segmentIndex + 1}: ${this.formatTime(segmentStartTime)} ~ ${this.formatTime(segmentEndTime)}]\n\n`;
+  }
 
-      // Create promises for all segment transcriptions with staggered delays
-      const transcriptionPromises = segmentFiles.map(async (segmentFile, i) => {
-        // Add 1.5 second delay between starting each segment to avoid rate limits
-        await new Promise(resolve => setTimeout(resolve, i * 1500));
-
-        const segmentStartTime = i * 300; // 5 minutes in seconds
-
-        // Create segment-specific prompt
-        const segmentPrompt = `Please transcribe audio segment ${i + 1} of ${segmentFiles.length} with proper speaker identification.
+  // Create prompt for segment transcription
+  private createSegmentPrompt(segmentIndex: number, totalSegments: number): string {
+    return `Please transcribe audio segment ${segmentIndex + 1} of ${totalSegments} with proper speaker identification.
 
 Format requirements:
 1. IDENTIFY different speakers and label them as 참가자1, 참가자2, etc.
@@ -507,52 +504,95 @@ IMPORTANT:
 - DO NOT include timestamps
 - Keep the transcription in the original spoken language
 - Return ONLY the transcription text, no JSON formatting`;
+  }
 
-        try {
-          console.log(`Starting transcription for segment ${i + 1}/${segmentFiles.length}...`);
+  // Transcribe a single segment with retry logic
+  private async transcribeSingleSegment(
+    segmentFile: string, 
+    segmentIndex: number, 
+    totalSegments: number,
+    segmentStartTime: number,
+    segmentEndTime: number
+  ): Promise<{ index: number; content: string }> {
+    const maxRetries = 3;
+    let lastError: any = null;
+    const segmentPrompt = this.createSegmentPrompt(segmentIndex, totalSegments);
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`Starting transcription for segment ${segmentIndex + 1}/${totalSegments} (attempt ${attempt}/${maxRetries})...`);
 
-          const audioData = fs.readFileSync(segmentFile);
-          const base64Audio = audioData.toString('base64');
-          const fileExt = path.extname(segmentFile).toLowerCase();
-          const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+        const audioData = fs.readFileSync(segmentFile);
+        const base64Audio = audioData.toString('base64');
+        const fileExt = path.extname(segmentFile).toLowerCase();
+        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
 
-          const result = await this.segmentModel.generateContent([
-            {
-              inlineData: {
-                mimeType: mimeType,
-                data: base64Audio
-              }
-            },
-            segmentPrompt
-          ]);
+        const result = await this.segmentModel.generateContent([
+          {
+            inlineData: {
+              mimeType: mimeType,
+              data: base64Audio
+            }
+          },
+          segmentPrompt
+        ]);
 
-          const response = result.response;
-          const transcript = response.text();
+        const response = result.response;
+        const transcript = response.text();
 
-          console.log(`Completed transcription for segment ${i + 1}/${segmentFiles.length}`);
+        console.log(`Completed transcription for segment ${segmentIndex + 1}/${totalSegments}`);
 
-          // Add segment time range header
-          const segmentEndTime = Math.min(segmentStartTime + 300, duration);
-          const formatTime = (seconds: number) => {
-            const hours = Math.floor(seconds / 3600);
-            const minutes = Math.floor((seconds % 3600) / 60);
-            const secs = Math.floor(seconds % 60);
-            return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-          };
-          const segmentHeader = `[Segment ${i + 1}: ${formatTime(segmentStartTime)} ~ ${formatTime(segmentEndTime)}]\n\n`;
+        // Add segment time range header
+        const segmentHeader = this.createSegmentHeader(segmentIndex, segmentStartTime, segmentEndTime);
 
-          return {
-            index: i,
-            content: segmentHeader + transcript
-          };
+        return {
+          index: segmentIndex,
+          content: segmentHeader + transcript
+        };
 
-        } catch (segmentError) {
-          console.error(`Error transcribing segment ${i + 1}:`, segmentError);
-          return {
-            index: i,
-            content: `[Segment ${i + 1} transcription failed]`
-          };
+      } catch (segmentError) {
+        lastError = segmentError;
+        console.error(`Error transcribing segment ${segmentIndex + 1} (attempt ${attempt}/${maxRetries}):`, segmentError);
+        
+        if (attempt < maxRetries) {
+          // Wait before retry with exponential backoff
+          const retryDelay = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // Max 10 seconds
+          console.log(`Retrying segment ${segmentIndex + 1} in ${retryDelay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
         }
+      }
+    }
+    
+    // All retries failed
+    console.error(`Failed to transcribe segment ${segmentIndex + 1} after ${maxRetries} attempts:`, lastError);
+    return {
+      index: segmentIndex,
+      content: `[Segment ${segmentIndex + 1} transcription failed after ${maxRetries} attempts]`
+    };
+  }
+
+  // Get segmented transcript (renamed from transcribeAudioSegmented)
+  private async getSegmentedTranscript(audioFilePath: string, duration: number, progressCallback?: (percent: number, message: string) => void): Promise<string> {
+    try {
+      // Split audio into 5-minute segments
+      const segmentFiles = await this.splitAudioIntoSegments(audioFilePath, 300);
+
+      if (progressCallback) {
+        progressCallback(20, `Processing ${segmentFiles.length} segments...`);
+      }
+
+      // Create promises for all segment transcriptions
+      const transcriptionPromises = segmentFiles.map(async (segmentFile, i) => {
+        const segmentStartTime = i * 300; // 5 minutes in seconds
+        const segmentEndTime = Math.min(segmentStartTime + 300, duration);
+
+        return this.transcribeSingleSegment(
+          segmentFile, 
+          i, 
+          segmentFiles.length,
+          segmentStartTime,
+          segmentEndTime
+        );
       });
 
       // Track progress of concurrent transcriptions
