@@ -8,6 +8,7 @@ import { NotionService } from './notionService';
 import { FFmpegManager } from './services/ffmpegManager';
 import { MenuBarManager } from './menuBarManager';
 import { metadataService } from './services/metadataService';
+import { FileHandlerService } from './services/fileHandlerService';
 
 // Global flag to track if app is quitting
 declare global {
@@ -20,6 +21,7 @@ const audioRecorder = new SimpleAudioRecorder();
 const configService = new ConfigService();
 const ffmpegManager = new FFmpegManager();
 const menuBarManager = new MenuBarManager();
+const fileHandlerService = new FileHandlerService();
 let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
 
@@ -88,6 +90,7 @@ function createWindow() {
     title: 'Listener.AI',
     icon: path.join(__dirname, '../assets/icon.png')
   });
+
 
   // Load the index.html file
   const indexPath = path.join(__dirname, '../index.html');
@@ -606,33 +609,5 @@ ipcMain.handle('open-microphone-settings', async () => {
   // For Linux, there's no standard way to open microphone settings
 });
 
-// Save audio file from buffer to recordings directory
-ipcMain.handle('save-audio-file', async (_, fileData: { name: string; data: number[] }) => {
-  try {
-    const recordingsDir = path.join(app.getPath('userData'), 'recordings');
-
-    // Ensure directory exists
-    if (!fs.existsSync(recordingsDir)) {
-      fs.mkdirSync(recordingsDir, { recursive: true });
-    }
-
-    // Get file info
-    const fileName = fileData.name;
-    const fileExt = path.extname(fileName);
-    const fileNameWithoutExt = path.basename(fileName, fileExt);
-
-    // Generate unique filename with timestamp
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').split('.')[0];
-    const newFileName = `${fileNameWithoutExt}_${timestamp}${fileExt}`;
-    const destPath = path.join(recordingsDir, newFileName);
-
-    // Convert array back to buffer and save
-    const buffer = Buffer.from(fileData.data);
-    fs.writeFileSync(destPath, buffer);
-
-    return { success: true, filePath: destPath };
-  } catch (error) {
-    console.error('Error saving audio file:', error);
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
-  }
-});
+// Register file handler service
+fileHandlerService.registerHandlers();

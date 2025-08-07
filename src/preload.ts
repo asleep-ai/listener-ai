@@ -47,6 +47,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // File handling
   saveAudioFile: (fileData: { name: string; data: number[] }) => ipcRenderer.invoke('save-audio-file', fileData),
+  saveAudioFileBase64: (fileData: { name: string; dataBase64: string }) => ipcRenderer.invoke('save-audio-file-base64', fileData),
+  copyAudioFile: (fileData: { sourcePath: string; name: string }) => ipcRenderer.invoke('copy-audio-file', fileData),
+  selectAudioFile: () => ipcRenderer.invoke('select-audio-file'),
+  getFileInfo: (filePath: string) => ipcRenderer.invoke('get-file-info', filePath),
 
   // Metadata handling
   getMetadata: (filePath: string) => ipcRenderer.invoke('get-metadata', filePath),

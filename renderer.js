@@ -71,7 +71,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     // Setup drag and drop listeners
     setupDragAndDrop();
-    
+
     // Setup paste listener
     setupPasteListener();
 
@@ -1050,17 +1050,15 @@ function setupDragAndDrop() {
   dragDropZone.addEventListener('drop', handleDrop, false);
 
   // Allow clicking the zone to open file dialog
-  dragDropZone.addEventListener('click', () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.mp3,.m4a';
-    input.onchange = (e) => {
-      const file = e.target.files[0];
-      if (file) {
-        handleAudioFile(file);
+  dragDropZone.addEventListener('click', async () => {
+    try {
+      const result = await window.fileHandler.selectFileViaDialog();
+      if (result && result.success) {
+        await handleFileSuccess(result.filePath, window.fileHandler.extractTitle(result.filePath));
       }
-    };
-    input.click();
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
   });
 }
 
@@ -1081,54 +1079,51 @@ function handleDrop(e) {
   const dt = e.dataTransfer;
   const files = dt.files;
 
+  // Simply handle each dropped file
   ([...files]).forEach(handleAudioFile);
 }
 
-async function handleAudioFile(file) {
-  // Check if file is audio (mp3 or m4a)
-  const validTypes = ['audio/mp3', 'audio/mpeg', 'audio/mp4', 'audio/x-m4a'];
-  const validExtensions = ['.mp3', '.m4a'];
-  
-  const fileExtension = file.name.toLowerCase().substring(file.name.lastIndexOf('.'));
-  
-  if (!validTypes.includes(file.type) && !validExtensions.includes(fileExtension)) {
-    showToast('Please drop an MP3 or M4A audio file', 'error');
-    return;
+// Handle successful file save
+async function handleFileSuccess(filePath, fileName) {
+  // Extract title from filename
+  const title = window.fileHandler.extractTitle(fileName);
+
+  // Refresh recordings list
+  try {
+    await refreshRecordingsList();
+  } catch (refreshError) {
+    console.error('Error refreshing recordings list:', refreshError);
   }
 
+  // Ask if user wants to transcribe immediately
+  if (confirm(`Audio file "${title}" has been added. Would you like to transcribe it now?`)) {
+    try {
+      await handleTranscribe(filePath, title);
+    } catch (transcribeError) {
+      console.error('Error starting transcription:', transcribeError);
+      showToast('Failed to start transcription', 'error');
+    }
+  }
+
+  statusText.textContent = 'Ready to record';
+}
+
+async function handleAudioFile(file) {
   // Update status
   statusText.textContent = 'Processing audio file...';
 
   try {
-    // Read file as buffer
-    const buffer = await file.arrayBuffer();
-    const uint8Array = new Uint8Array(buffer);
-    
-    // Send file data to main process
-    const result = await window.electronAPI.saveAudioFile({
-      name: file.name,
-      data: Array.from(uint8Array)
-    });
-    
-    if (result.success) {
-      // Extract title from filename (remove extension)
-      const title = file.name.replace(/\.[^/.]+$/, '');
-      
-      // Refresh recordings list
-      await refreshRecordingsList();
-      
-      // Ask if user wants to transcribe immediately
-      if (confirm(`Audio file "${title}" has been added. Would you like to transcribe it now?`)) {
-        handleTranscribe(result.filePath, title);
-      }
-      
-      statusText.textContent = 'Ready to record';
+    const result = await window.fileHandler.processAudioFile(file);
+
+    if (result && result.success) {
+      await handleFileSuccess(result.filePath, file.name);
     } else {
-      showToast('Failed to process audio file: ' + result.error, 'error');
+      const errorMsg = result ? result.error : 'Unknown error';
+      showToast(`Failed to save audio file: ${errorMsg}`, 'error');
       statusText.textContent = 'Ready to record';
     }
   } catch (error) {
-    showToast('Error processing audio file: ' + error.message, 'error');
+    showToast(error.message, 'error');
     statusText.textContent = 'Ready to record';
   }
 }
@@ -1139,36 +1134,36 @@ function setupPasteListener() {
     // Check if user is typing in a text field
     const activeElement = document.activeElement;
     const isTextInput = activeElement && (
-      activeElement.tagName === 'INPUT' || 
-      activeElement.tagName === 'TEXTAREA' || 
+      activeElement.tagName === 'INPUT' ||
+      activeElement.tagName === 'TEXTAREA' ||
       activeElement.contentEditable === 'true'
     );
-    
+
     // If user is in a text field, allow normal paste behavior
     if (isTextInput) {
       return;
     }
-    
+
     e.preventDefault();
-    
+
     const items = e.clipboardData.items;
     let audioFile = null;
-    
+
     // Look for audio files in clipboard
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      
+
       // Check if it's an audio file
-      if (item.type.startsWith('audio/') || 
-          item.type === 'audio/mp3' || 
-          item.type === 'audio/mpeg' || 
-          item.type === 'audio/mp4' || 
-          item.type === 'audio/x-m4a') {
+      if (item.type.startsWith('audio/') ||
+        item.type === 'audio/mp3' ||
+        item.type === 'audio/mpeg' ||
+        item.type === 'audio/mp4' ||
+        item.type === 'audio/x-m4a') {
         audioFile = item.getAsFile();
         break;
       }
     }
-    
+
     // If no direct audio file, check for file items
     if (!audioFile) {
       for (let i = 0; i < items.length; i++) {
@@ -1185,7 +1180,7 @@ function setupPasteListener() {
         }
       }
     }
-    
+
     if (audioFile) {
       // Show visual feedback
       if (dragDropZone) {
@@ -1194,7 +1189,7 @@ function setupPasteListener() {
           dragDropZone.classList.remove('drag-over');
         }, 500);
       }
-      
+
       handleAudioFile(audioFile);
     } else {
       // Check if clipboard contains file paths (text)
@@ -1204,7 +1199,7 @@ function setupPasteListener() {
       }
     }
   });
-  
+
   // Add keyboard shortcut hint
   document.addEventListener('keydown', (e) => {
     // Show hint when Cmd/Ctrl is pressed
@@ -1221,7 +1216,7 @@ function setupPasteListener() {
       }
     }
   });
-  
+
   document.addEventListener('keyup', (e) => {
     // Remove hint when Cmd/Ctrl is released
     if (!e.metaKey && !e.ctrlKey) {
