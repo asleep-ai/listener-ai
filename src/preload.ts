@@ -54,5 +54,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Metadata handling
   getMetadata: (filePath: string) => ipcRenderer.invoke('get-metadata', filePath),
-  saveMetadata: (filePath: string, metadata: any) => ipcRenderer.invoke('save-metadata', filePath, metadata)
+  saveMetadata: (filePath: string, metadata: any) => ipcRenderer.invoke('save-metadata', filePath, metadata),
+
+  // Auto-update events
+  onUpdateStatus: (callback: (updateInfo: { event: string; data?: any }) => void) => {
+    ipcRenderer.on('update-status', (_, updateInfo) => callback(updateInfo));
+  }
 });

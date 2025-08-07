@@ -34,6 +34,50 @@ window.electronAPI.onTranscriptionProgress((progress) => {
   }
 });
 
+// Listen for auto-update events
+if (window.electronAPI.onUpdateStatus) {
+  window.electronAPI.onUpdateStatus((updateInfo) => {
+    switch (updateInfo.event) {
+      case 'checking-for-update':
+        showNotification('Checking for updates...', 'info');
+        break;
+      case 'download-progress':
+        if (updateInfo.data?.percent) {
+          showNotification(`Downloading update: ${updateInfo.data.percent.toFixed(2)}%`, 'info');
+        }
+        break;
+      case 'update-error':
+        showNotification(`Update error: ${updateInfo.data}`, 'error');
+        break;
+    }
+  });
+}
+
+function showNotification(message, type = 'info') {
+  const notification = document.createElement('div');
+  notification.className = `notification notification-${type}`;
+  notification.textContent = message;
+  notification.style.cssText = `
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 12px 20px;
+    background: ${type === 'error' ? '#ef4444' : '#3b82f6'};
+    color: white;
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    z-index: 10000;
+    animation: slideIn 0.3s ease-out;
+  `;
+  
+  document.body.appendChild(notification);
+  
+  setTimeout(() => {
+    notification.style.animation = 'slideOut 0.3s ease-out';
+    setTimeout(() => notification.remove(), 300);
+  }, 5000);
+}
+
 // Check for API keys on startup
 window.addEventListener('DOMContentLoaded', async () => {
   try {

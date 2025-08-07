@@ -9,6 +9,7 @@ import { FFmpegManager } from './services/ffmpegManager';
 import { MenuBarManager } from './menuBarManager';
 import { metadataService } from './services/metadataService';
 import { FileHandlerService } from './services/fileHandlerService';
+import { autoUpdaterService } from './services/autoUpdaterService';
 
 // Global flag to track if app is quitting
 declare global {
@@ -131,6 +132,9 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // Initialize auto-updater
+  autoUpdaterService.checkForUpdates();
+  
   // Create menu with DevTools option
   const template = [
     {
@@ -184,6 +188,13 @@ app.whenReady().then(() => {
         { role: 'about' } as any,
         { type: 'separator' } as any,
         {
+          label: 'Check for Updates...',
+          click: () => {
+            autoUpdaterService.checkForUpdatesManually();
+          }
+        },
+        { type: 'separator' } as any,
+        {
           label: 'Quit Listener.AI',
           accelerator: 'Cmd+Q',
           click: () => {
@@ -203,6 +214,8 @@ app.whenReady().then(() => {
   // Initialize menu bar manager
   if (mainWindow) {
     menuBarManager.init(mainWindow, audioRecorder);
+    // Set main window for auto-updater
+    autoUpdaterService.setMainWindow(mainWindow);
   }
 
   // Register global shortcut

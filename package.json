@@ -44,6 +44,7 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@notionhq/client": "^4.0.0",
+    "electron-updater": "^6.6.2",
     "fs-extra": "^11.2.0"
   },
   "build": {
@@ -52,6 +53,13 @@
     "directories": {
       "output": "release"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "asleep-ai",
+        "repo": "listener-ai"
+      }
+    ],
     "files": [
       "dist/**/*",
       "node_modules/**/*",
