@@ -210,14 +210,20 @@ jobs:
             ### Installation
             
             #### macOS
-            1. Download the appropriate DMG for your Mac
-            2. Open the DMG and drag to Applications
-            3. Open the app normally - it's fully signed and notarized!
+            1. Download the appropriate DMG for your Mac (x64 for Intel, arm64 for Apple Silicon)
+            2. Open the DMG and drag Listener.AI to Applications
+            3. Open the app - it's fully signed and notarized!
+            4. FFmpeg will be automatically downloaded on first use
             
             #### Windows
-            1. Download the installer
-            2. Run the installer
-            3. Note: You'll need to install FFmpeg separately (instructions included in the app)
+            1. Download and run the installer
+            2. Follow the installation wizard
+            3. FFmpeg will be automatically downloaded on first use
+            
+            ### First Run
+            1. Enter your Google Gemini API key
+            2. Enter your Notion API key and database ID
+            3. Start recording!
           draft: false
           artifacts: |
             release-artifacts/mac-x64-build/*.dmg

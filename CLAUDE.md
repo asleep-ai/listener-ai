@@ -51,26 +51,60 @@ Listener.AI is a lightweight desktop application for recording audio and transcr
 
 ## Technical Stack
 - Desktop framework: Electron (v37.2.0)
-- Audio recording: ffmpeg with bundled binaries for macOS
+- Audio recording: ffmpeg (auto-downloaded on first use)
 - AI Service: Google Gemini 2.5 Flash
 - Integration: Notion API
 - Language: TypeScript
+- Package Manager: pnpm
+- Node.js: v22.x
 
 ## Current Implementation Status
-✅ 1. Basic recording functionality with ffmpeg
-✅ 2. Simple UI for start/stop and title management
-✅ 3. Gemini API integration for transcription
-✅ 4. Notion API integration for note storage
-✅ 5. Polish UI and error handling
+✅ 1. Audio recording with ffmpeg (auto-download support)
+✅ 2. Clean UI with recording controls and title management
+✅ 3. Gemini API integration for transcription with segmentation
+✅ 4. Notion API integration for structured note storage
+✅ 5. Error handling and progress tracking
+✅ 6. System tray integration with global shortcuts
+✅ 7. File drag-and-drop support for external audio files
+✅ 8. Metadata persistence for recordings
 
 ## Additional Implemented Features
 - Auto mode for hands-free operation
 - Korean language optimization
 - Cross-platform builds (macOS x64/arm64, Windows, Linux)
-- Secure API key storage
+- Secure API key storage in system config directory
 - macOS code signing and notarization support
 - Real-time transcription progress tracking
-- Fallback mechanisms for FFmpeg detection
+- Automatic FFmpeg download with progress indicator
+- System tray/menu bar integration
+- Global keyboard shortcuts (configurable)
+- Audio file segmentation for long recordings (>5 minutes)
+- Automatic title generation from meeting content
+- File import via drag-and-drop or file dialog
+- Metadata storage for transcription results
+
+## Architecture Overview
+
+### Main Process (`src/main.ts`)
+- Window management and IPC handlers
+- Menu bar/system tray integration
+- Global shortcut registration
+- File operations coordination
+
+### Services
+- `simpleAudioRecorder.ts`: FFmpeg-based audio recording
+- `geminiService.ts`: Google Gemini API integration with chunking
+- `notionService.ts`: Notion API integration with block splitting
+- `configService.ts`: Secure configuration management
+- `ffmpegManager.ts`: FFmpeg download and management
+- `fileHandlerService.ts`: File import/export operations
+- `metadataService.ts`: Recording metadata persistence
+- `menuBarManager.ts`: System tray and menu management
+
+### Renderer Process
+- `renderer.js`: UI logic and IPC communication
+- `index.html`: Main application UI
+- `styles.css`: Application styling
 
 ## Future Enhancements (Optional)
 - Live transcription during recording
@@ -78,4 +112,6 @@ Listener.AI is a lightweight desktop application for recording audio and transcr
 - Full multi-language support (currently Korean-focused)
 - Export to other formats (PDF, Markdown)
 - Cloud backup of audio files
-- Windows FFmpeg bundling
+- Bundled FFmpeg binaries for all platforms
+- Speaker diarization improvements
+- Meeting analytics and insights

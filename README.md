@@ -32,8 +32,10 @@ pnpm start
 
 - Google Gemini API key
 - Notion API key and database ID
+- Node.js 22.x or higher (for development)
+- pnpm package manager (for development)
 
-**Note**: FFmpeg is now bundled with the application, so you don't need to install it separately!
+**Note**: FFmpeg will be automatically downloaded on first use, or you can install it system-wide.
 
 ## Configuration
 
@@ -80,9 +82,9 @@ NOTION_DATABASE_ID=your_notion_database_id
    - Click "..." → "Connections" → Add your integration
 6. Get database ID from URL: `notion.so/workspace/DATABASE_ID`
 
-### Prerequisites
+### FFmpeg Setup
 
-Ensure ffmpeg is installed:
+The app will automatically download FFmpeg on first use. Alternatively, you can install it system-wide:
 
 #### macOS
 ```bash
@@ -90,14 +92,15 @@ brew install ffmpeg
 ```
 
 #### Windows
-1. Download ffmpeg from [ffmpeg.org](https://ffmpeg.org/download.html)
-2. Extract to `C:\ffmpeg`
-3. Add `C:\ffmpeg\bin` to your PATH environment variable
-4. Verify installation: `ffmpeg -version`
+1. The app will prompt to download FFmpeg automatically on first use
+2. Or download manually from [ffmpeg.org](https://ffmpeg.org/download.html)
+3. Extract to `C:\ffmpeg` and add to PATH
 
 #### Linux
 ```bash
-sudo apt-get install ffmpeg
+sudo apt-get install ffmpeg  # Debian/Ubuntu
+sudo dnf install ffmpeg       # Fedora
+sudo pacman -S ffmpeg         # Arch
 ```
 
 ## Usage
@@ -125,8 +128,48 @@ pnpm install
 # Run in development mode
 pnpm run dev
 
-# Build for production
+# Build TypeScript
 pnpm run build
+
+# Build distributables
+pnpm run dist:mac      # macOS
+pnpm run dist:win      # Windows
+pnpm run dist:all      # All platforms
+```
+
+## Building from Source
+
+### macOS
+```bash
+pnpm run dist:mac-x64    # Intel Macs
+pnpm run dist:mac-arm64  # Apple Silicon
+```
+
+### Windows
+```bash
+pnpm run dist:win
+```
+
+### Linux
+```bash
+pnpm run dist  # Builds AppImage
+```
+
+## Project Structure
+
+```
+listener-ai/
+├── src/                   # TypeScript source files
+│   ├── main.ts           # Main process entry
+│   ├── preload.ts        # Preload script
+│   ├── services/         # Service modules
+│   └── ...
+├── dist/                  # Compiled JavaScript
+├── release/              # Built distributables
+├── assets/               # Icons and resources
+├── index.html            # Main UI
+├── renderer.js           # Renderer process
+└── styles.css            # Application styles
 ```
 
 ## License
