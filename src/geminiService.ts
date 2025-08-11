@@ -1,5 +1,4 @@
-import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
-import { GoogleAIFileManager } from '@google/generative-ai/server';
+import { GoogleGenAI } from '@google/genai';
 import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
@@ -18,10 +17,7 @@ export interface TranscriptionResult {
 }
 
 export class GeminiService {
-  private genAI: GoogleGenerativeAI;
-  private model: GenerativeModel;
-  private segmentModel: GenerativeModel;
-  private fileManager: GoogleAIFileManager;
+  private ai: GoogleGenAI;
   private apiKey: string;
 
   // Get FFmpeg path for this service
@@ -37,60 +33,7 @@ export class GeminiService {
 
   constructor(apiKey: string) {
     this.apiKey = apiKey;
-    this.genAI = new GoogleGenerativeAI(apiKey);
-    this.fileManager = new GoogleAIFileManager(apiKey);
-    // Define the schema for structured output
-    const transcriptionSchema = {
-      type: "object",
-      properties: {
-        transcript: {
-          type: "string",
-          description: "Full transcription with timestamps and speaker labels"
-        },
-        summary: {
-          type: "string",
-          description: "Meeting summary in Korean"
-        },
-        keyPoints: {
-          type: "array",
-          items: { type: "string" },
-          description: "Key points discussed in Korean"
-        },
-        actionItems: {
-          type: "array",
-          items: { type: "string" },
-          description: "Action items in Korean"
-        },
-        emoji: {
-          type: "string",
-          description: "Single emoji representing the meeting"
-        }
-      },
-      required: ["transcript", "summary", "keyPoints", "actionItems", "emoji"]
-    };
-
-    this.model = this.genAI.getGenerativeModel({
-      model: "gemini-2.5-flash",  // Using Gemini 2.5 Flash model
-      generationConfig: {
-        temperature: 0.7,
-        topK: 40,
-        topP: 0.95,
-        maxOutputTokens: 32768,  // Increased for very long transcriptions
-        responseMimeType: "application/json"  // Force JSON response
-        // responseSchema: transcriptionSchema as any  // Temporarily disabled for debugging
-      }
-    });
-
-    // Initialize segment model without JSON response mode for plain text transcription
-    this.segmentModel = this.genAI.getGenerativeModel({
-      model: "gemini-2.5-flash",
-      generationConfig: {
-        temperature: 0.7,
-        topK: 40,
-        topP: 0.95,
-        maxOutputTokens: 32768  // Increased for comprehensive 5-minute segments
-      }
-    });
+    this.ai = new GoogleGenAI({ apiKey: apiKey });
   }
 
   async transcribeAudio(audioFilePath: string, progressCallback?: (percent: number, message: string) => void): Promise<TranscriptionResult> {
@@ -299,9 +242,18 @@ Return as JSON:
   "emoji": "📝"
 }`;
 
-      const summaryResult = await this.model.generateContent([summaryPrompt, fullTranscript]);
-      const summaryResponse = summaryResult.response;
-      const summaryText = summaryResponse.text();
+      const summaryResult = await this.ai.models.generateContent({
+        model: "gemini-2.5-pro",
+        contents: [
+          { role: "user", parts: [{ text: summaryPrompt }, { text: fullTranscript }] }
+        ],
+        config: {
+          temperature: 0.2,
+          maxOutputTokens: 32768,
+          responseMimeType: "application/json"
+        }
+      });
+      const summaryText = summaryResult.text || '';
 
       let summaryData = {
         suggestedTitle: '',
@@ -368,20 +320,20 @@ Return as JSON:
           mimeType = 'audio/mp4';
         }
 
-        const uploadResult = await this.fileManager.uploadFile(audioFilePath, {
-          mimeType: mimeType,
-          displayName: path.basename(audioFilePath),
+        const fileData = fs.readFileSync(audioFilePath);
+        const uploadResult = await this.ai.files.upload({
+          file: new Blob([fileData], { type: mimeType })
         });
 
-        fileUri = uploadResult.file.uri;
+        fileUri = uploadResult.uri || '';
 
         // Wait for file to be active
-        let file = await this.fileManager.getFile(uploadResult.file.name);
+        let file = await this.ai.files.get({ name: uploadResult.name || '' });
         let retries = 0;
         while (file.state === "PROCESSING" && retries < 30) {
           console.log(`Waiting for file to be processed... (attempt ${retries + 1}/30)`);
           await new Promise(resolve => setTimeout(resolve, 2000));
-          file = await this.fileManager.getFile(uploadResult.file.name);
+          file = await this.ai.files.get({ name: uploadResult.name || '' });
           retries++;
         }
 
@@ -427,15 +379,27 @@ IMPORTANT:
           mimeType = 'audio/mp4';
         }
 
-        result = await this.segmentModel.generateContent([
-          {
-            fileData: {
-              fileUri: fileUri,
-              mimeType: mimeType
+        result = await this.ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  fileData: {
+                    fileUri: fileUri,
+                    mimeType: mimeType
+                  }
+                },
+                { text: transcriptPrompt }
+              ]
             }
-          },
-          transcriptPrompt
-        ]);
+          ],
+          config: {
+            temperature: 0.2,
+            maxOutputTokens: 32768
+          }
+        });
       } else {
         const audioData = fs.readFileSync(audioFilePath);
         const base64Audio = audioData.toString('base64');
@@ -447,19 +411,30 @@ IMPORTANT:
           mimeType = 'audio/mp4';
         }
 
-        result = await this.segmentModel.generateContent([
-          {
-            inlineData: {
-              mimeType: mimeType,
-              data: base64Audio
+        result = await this.ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: mimeType,
+                    data: base64Audio
+                  }
+                },
+                { text: transcriptPrompt }
+              ]
             }
-          },
-          transcriptPrompt
-        ]);
+          ],
+          config: {
+            temperature: 0.2,
+            maxOutputTokens: 32768
+          }
+        });
       }
 
-      const response = result.response;
-      return response.text();
+      return result.text || '';
 
     } catch (error) {
       console.error('Error transcribing short audio:', error);
@@ -508,8 +483,8 @@ IMPORTANT:
 
   // Transcribe a single segment with retry logic
   private async transcribeSingleSegment(
-    segmentFile: string, 
-    segmentIndex: number, 
+    segmentFile: string,
+    segmentIndex: number,
     totalSegments: number,
     segmentStartTime: number,
     segmentEndTime: number
@@ -517,7 +492,7 @@ IMPORTANT:
     const maxRetries = 3;
     let lastError: any = null;
     const segmentPrompt = this.createSegmentPrompt(segmentIndex, totalSegments);
-    
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         console.log(`Starting transcription for segment ${segmentIndex + 1}/${totalSegments} (attempt ${attempt}/${maxRetries})...`);
@@ -527,18 +502,29 @@ IMPORTANT:
         const fileExt = path.extname(segmentFile).toLowerCase();
         const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
 
-        const result = await this.segmentModel.generateContent([
-          {
-            inlineData: {
-              mimeType: mimeType,
-              data: base64Audio
+        const result = await this.ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: mimeType,
+                    data: base64Audio
+                  }
+                },
+                { text: segmentPrompt }
+              ]
             }
-          },
-          segmentPrompt
-        ]);
+          ],
+          config: {
+            temperature: 0.2,
+            maxOutputTokens: 32768
+          }
+        });
 
-        const response = result.response;
-        const transcript = response.text();
+        const transcript = result.text || '';
 
         console.log(`Completed transcription for segment ${segmentIndex + 1}/${totalSegments}`);
 
@@ -553,7 +539,7 @@ IMPORTANT:
       } catch (segmentError) {
         lastError = segmentError;
         console.error(`Error transcribing segment ${segmentIndex + 1} (attempt ${attempt}/${maxRetries}):`, segmentError);
-        
+
         if (attempt < maxRetries) {
           // Wait before retry with exponential backoff
           const retryDelay = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // Max 10 seconds
@@ -562,7 +548,7 @@ IMPORTANT:
         }
       }
     }
-    
+
     // All retries failed
     console.error(`Failed to transcribe segment ${segmentIndex + 1} after ${maxRetries} attempts:`, lastError);
     return {
@@ -587,8 +573,8 @@ IMPORTANT:
         const segmentEndTime = Math.min(segmentStartTime + 300, duration);
 
         return this.transcribeSingleSegment(
-          segmentFile, 
-          i, 
+          segmentFile,
+          i,
           segmentFiles.length,
           segmentStartTime,
           segmentEndTime

@@ -42,7 +42,7 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
+    "@google/genai": "^1.13.0",
     "@notionhq/client": "^4.0.0",
     "electron-updater": "^6.6.2",
     "fs-extra": "^11.2.0"
