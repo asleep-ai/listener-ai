@@ -135,10 +135,6 @@
         {
           "from": "node_modules/ffprobe-static/bin/win32/x64/ffprobe.exe",
           "to": "bin/ffprobe.exe"
-        },
-        {
-          "from": "WINDOWS_FFMPEG.txt",
-          "to": "WINDOWS_FFMPEG.txt"
         }
       ]
     },
