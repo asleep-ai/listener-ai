@@ -34,7 +34,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'pnpm'
 
       - name: Install dependencies
@@ -45,7 +45,6 @@ jobs:
       - name: Calculate new version
         id: version
         run: |
-          # Calculate new version without modifying files yet
           CURRENT_VERSION=$(node -p "require('./package.json').version")
           NEW_VERSION=$(pnpm exec semver $CURRENT_VERSION -i ${{ github.event.inputs.version_type }})
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
@@ -56,24 +55,16 @@ jobs:
         run: |
           BRANCH_NAME="release/v${{ steps.version.outputs.version }}"
           echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          
+
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          
-          # Create and switch to release branch
+
           git checkout -b $BRANCH_NAME
-          
-          # Bump version on release branch using npm (pnpm delegates to npm for version command)
           npm version ${{ steps.version.outputs.version }} --no-git-tag-version
-          
-          # Update pnpm lock file with new version
           pnpm install --lockfile-only
-          
-          # Commit version bump
+
           git add package.json pnpm-lock.yaml
           git commit -m "chore: bump version to ${{ steps.version.outputs.version }}"
-          
-          # Push release branch
           git push origin $BRANCH_NAME
 
   build:
@@ -82,19 +73,16 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            arch: x64
-            name: mac-x64
-          - os: macos-latest
-            arch: arm64
-            name: mac-arm64
+            name: mac
+            cmd: electron-builder --mac --x64 --arm64 --publish never
           - os: windows-latest
-            arch: x64
-            name: win-x64
+            name: win
+            cmd: electron-builder --win --publish never
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.branch }}  # Get the release branch
+          ref: ${{ needs.prepare.outputs.branch }}
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -104,44 +92,22 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'pnpm'
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build for macOS x64
-        if: matrix.os == 'macos-latest' && matrix.arch == 'x64'
+      - name: Build
         run: |
           pnpm run build
-          pnpm exec electron-builder --mac --x64 --publish never
-          node scripts/generate-update-metadata.js mac
+          pnpm exec ${{ matrix.cmd }}
         env:
           CSC_LINK: ${{ secrets.SIGNING_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.CERT_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-
-      - name: Build for macOS arm64
-        if: matrix.os == 'macos-latest' && matrix.arch == 'arm64'
-        run: |
-          pnpm run build
-          pnpm exec electron-builder --mac --arm64 --publish never
-          node scripts/generate-update-metadata.js mac
-        env:
-          CSC_LINK: ${{ secrets.SIGNING_CERTIFICATE }}
-          CSC_KEY_PASSWORD: ${{ secrets.CERT_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-
-      - name: Build for Windows
-        if: matrix.os == 'windows-latest'
-        run: |
-          pnpm run build
-          pnpm exec electron-builder --win --publish never
-          node scripts/generate-update-metadata.js win
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -163,26 +129,22 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Fetch release branch
-        run: |
-          git fetch origin ${{ needs.prepare.outputs.branch }}:${{ needs.prepare.outputs.branch }}
+        run: git fetch origin ${{ needs.prepare.outputs.branch }}:${{ needs.prepare.outputs.branch }}
 
       - name: Create PR and merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Check if PR already exists
           PR_URL=$(gh pr list --base main --head ${{ needs.prepare.outputs.branch }} --json url --jq '.[0].url' || echo "")
-          
+
           if [ -z "$PR_URL" ]; then
-            # Create PR from release branch to main
             gh pr create \
               --base main \
               --head ${{ needs.prepare.outputs.branch }} \
               --title "Release v${{ needs.prepare.outputs.version }}" \
               --body "Automated release PR for version ${{ needs.prepare.outputs.version }}"
           fi
-          
-          # Auto-merge the PR
+
           gh pr merge ${{ needs.prepare.outputs.branch }} \
             --merge \
             --delete-branch \
@@ -208,43 +170,40 @@ jobs:
           name: Release v${{ needs.prepare.outputs.version }}
           body: |
             ## Release v${{ needs.prepare.outputs.version }}
-            
+
             ### macOS Downloads
             - Intel: `Listener.AI-${{ needs.prepare.outputs.version }}-x64.dmg`
             - Apple Silicon: `Listener.AI-${{ needs.prepare.outputs.version }}-arm64.dmg`
-            
+
             ### Windows Downloads
             - x64: `Listener.AI Setup ${{ needs.prepare.outputs.version }}.exe`
-            
+
             ### Installation
-            
+
             #### macOS
             1. Download the appropriate DMG for your Mac (x64 for Intel, arm64 for Apple Silicon)
             2. Open the DMG and drag Listener.AI to Applications
             3. Open the app - it's fully signed and notarized!
             4. FFmpeg will be automatically downloaded on first use
-            
+
             #### Windows
             1. Download and run the installer
             2. Follow the installation wizard
             3. FFmpeg will be automatically downloaded on first use
-            
+
             ### First Run
             1. Enter your Google Gemini API key
             2. Enter your Notion API key and database ID
             3. Start recording!
           draft: false
           artifacts: |
-            release-artifacts/mac-x64-build/*.dmg
-            release-artifacts/mac-arm64-build/*.dmg
-            release-artifacts/win-x64-build/*.exe
-            release-artifacts/mac-x64-build/*.yml
-            release-artifacts/mac-arm64-build/*.yml
-            release-artifacts/win-x64-build/*.yml
+            release-artifacts/mac-build/*.dmg
+            release-artifacts/mac-build/*.yml
+            release-artifacts/win-build/*.exe
+            release-artifacts/win-build/*.yml
             release-artifacts/*/*.blockmap
           token: ${{ secrets.GITHUB_TOKEN }}
           makeLatest: true
-
 
   cleanup-on-failure:
     needs: [prepare, build, merge-to-main, release]
@@ -256,6 +215,4 @@ jobs:
       - name: Delete release branch on failure
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Delete the release branch if something failed
-          git push origin --delete ${{ needs.prepare.outputs.branch }} || true
+        run: git push origin --delete ${{ needs.prepare.outputs.branch }} || true

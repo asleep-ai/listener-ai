@@ -56,7 +56,7 @@ Listener.AI is a lightweight desktop application for recording audio and transcr
 - Integration: Notion API
 - Language: TypeScript
 - Package Manager: pnpm
-- Node.js: v22.x
+- Node.js: v24.x
 
 ## Current Implementation Status
 ✅ 1. Audio recording with ffmpeg (auto-download support)
@@ -105,6 +105,12 @@ Listener.AI is a lightweight desktop application for recording audio and transcr
 - `renderer.js`: UI logic and IPC communication
 - `index.html`: Main application UI
 - `styles.css`: Application styling
+
+### Release & Auto-Update
+- macOS x64 and arm64 must be built together in single job (`--mac --x64 --arm64`)
+- Reason: electron-builder generates `latest-mac.yml` with both architectures listed
+- If built separately, each job overwrites the yml and one architecture gets wrong binary
+- electron-updater uses filename patterns (x64/arm64) to serve correct binary to each user
 
 ## Future Enhancements (Optional)
 - Live transcription during recording
