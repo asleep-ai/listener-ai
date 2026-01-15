@@ -1,5 +1,7 @@
 import { autoUpdater } from 'electron-updater';
-import { BrowserWindow, dialog, app } from 'electron';
+import { BrowserWindow, dialog, app, shell } from 'electron';
+
+const RELEASES_URL = 'https://github.com/asleep-ai/listener-ai/releases/latest';
 
 export class AutoUpdaterService {
   private mainWindow: BrowserWindow | null = null;
@@ -56,6 +58,7 @@ export class AutoUpdaterService {
     autoUpdater.on('error', (err) => {
       console.error('Update error:', err);
       this.sendStatusToWindow('update-error', err.message);
+      this.showUpdateFailedDialog(err.message);
     });
 
     autoUpdater.on('download-progress', (progressObj) => {
@@ -124,7 +127,23 @@ export class AutoUpdaterService {
         });
       }
     }).catch((err) => {
-      dialog.showErrorBox('Update Check Failed', `Failed to check for updates: ${err.message}`);
+      this.showUpdateFailedDialog(err.message);
+    });
+  }
+
+  private showUpdateFailedDialog(errorMessage: string) {
+    dialog.showMessageBox(this.mainWindow || new BrowserWindow({ show: false }), {
+      type: 'error',
+      title: 'Update Failed',
+      message: 'Failed to update automatically.',
+      detail: `${errorMessage}\n\nYou can download the latest version manually from GitHub.`,
+      buttons: ['Open GitHub Releases', 'Later'],
+      defaultId: 0,
+      cancelId: 1
+    }).then((result) => {
+      if (result.response === 0) {
+        shell.openExternal(RELEASES_URL);
+      }
     });
   }
 
