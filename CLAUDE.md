@@ -111,6 +111,9 @@ Listener.AI is a lightweight desktop application for recording audio and transcr
 - Reason: electron-builder generates `latest-mac.yml` with both architectures listed
 - If built separately, each job overwrites the yml and one architecture gets wrong binary
 - electron-updater uses filename patterns (x64/arm64) to serve correct binary to each user
+- Auto-update is disabled when `app.isPackaged === false` (dev mode)
+- To test auto-update, must use packaged build (not `pnpm start`)
+- Browser fallback: when auto-update fails, show dialog with link to GitHub releases
 
 ## Future Enhancements (Optional)
 - Live transcription during recording
