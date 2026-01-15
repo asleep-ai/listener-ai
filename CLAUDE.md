@@ -114,6 +114,9 @@ Listener.AI is a lightweight desktop application for recording audio and transcr
 - Auto-update is disabled when `app.isPackaged === false` (dev mode)
 - To test auto-update, must use packaged build (not `pnpm start`)
 - Browser fallback: when auto-update fails, show dialog with link to GitHub releases
+- macOS auto-update requires ZIP files (not DMG) - electron-updater downloads ZIP for in-place updates
+- Blockmaps (*.blockmap) enable differential updates - users download only changed blocks
+- GitHub workflow must upload both ZIP and blockmap files alongside DMG for auto-update to work
 
 ## Future Enhancements (Optional)
 - Live transcription during recording

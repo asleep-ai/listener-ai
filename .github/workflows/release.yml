@@ -115,6 +115,7 @@ jobs:
           name: ${{ matrix.name }}-build
           path: |
             release/*.dmg
+            release/*.zip
             release/*.exe
             release/*.yml
             release/*.blockmap
@@ -198,6 +199,7 @@ jobs:
           draft: false
           artifacts: |
             release-artifacts/mac-build/*.dmg
+            release-artifacts/mac-build/*.zip
             release-artifacts/mac-build/*.yml
             release-artifacts/win-build/*.exe
             release-artifacts/win-build/*.yml
