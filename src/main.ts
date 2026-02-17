@@ -339,7 +339,7 @@ ipcMain.handle('stop-recording', async () => {
 
 // Configuration handlers
 
-ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; globalShortcut?: string; knownWords?: string[] }) => {
+ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string }) => {
   try {
     if (config.knownWords !== undefined) {
       configService.setKnownWords(config.knownWords);
@@ -373,6 +373,10 @@ ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionA
       configService.setGlobalShortcut(config.globalShortcut);
       // Re-register the global shortcut with the new value
       registerGlobalShortcut();
+    }
+
+    if (config.summaryPrompt !== undefined) {
+      configService.setSummaryPrompt(config.summaryPrompt);
     }
 
     // Initialize Notion service if both required fields are present
@@ -455,7 +459,8 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
       }
     };
 
-    const result = await geminiService.transcribeAudio(filePath, progressCallback);
+    const summaryPrompt = configService.getSummaryPrompt();
+    const result = await geminiService.transcribeAudio(filePath, progressCallback, summaryPrompt);
     console.log('Transcription completed successfully');
     console.log('Saving metadata for:', filePath);
 

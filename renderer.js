@@ -14,6 +14,23 @@ if (!window.electronAPI) {
   throw new Error('electronAPI not available');
 }
 
+const DEFAULT_SUMMARY_PROMPT = `Based on this meeting transcript, provide:
+
+1. A concise meeting title in Korean (10-20 characters that captures the main topic)
+2. A concise summary in Korean (2-3 paragraphs)
+3. Key points discussed in Korean (as a bullet list)
+4. Action items mentioned in Korean (as a bullet list)
+5. An appropriate emoji that represents the meeting
+
+Return as JSON:
+{
+  "suggestedTitle": "concise title in Korean",
+  "summary": "summary in Korean",
+  "keyPoints": ["point 1", "point 2"],
+  "actionItems": ["action 1", "action 2"],
+  "emoji": "📝"
+}`;
+
 let isRecording = false;
 let recordingStartTime = null;
 let timerInterval = null;
@@ -407,6 +424,8 @@ function setupEventListeners() {
     const knownWords = knownWordsInput
       ? knownWordsInput.value.split('\n').map(w => w.trim()).filter(w => w.length > 0)
       : [];
+    const summaryPromptInput = document.getElementById('summaryPrompt');
+    const summaryPrompt = summaryPromptInput ? summaryPromptInput.value.trim() : '';
 
     if (geminiKey) {
       await window.electronAPI.saveConfig({
@@ -414,7 +433,8 @@ function setupEventListeners() {
         notionApiKey: notionKey,
         notionDatabaseId: notionDb,
         globalShortcut: globalShortcut,
-        knownWords: knownWords
+        knownWords: knownWords,
+        summaryPrompt: summaryPrompt || DEFAULT_SUMMARY_PROMPT
       });
       configModal.style.display = 'none';
     } else {
@@ -815,6 +835,22 @@ async function showConfigModal() {
   }
   if (knownWordsInput) {
     knownWordsInput.value = (config.knownWords || []).join('\n');
+  }
+
+  // Pre-fill summary prompt
+  const summaryPromptInput = document.getElementById('summaryPrompt');
+  if (summaryPromptInput) {
+    summaryPromptInput.value = config.summaryPrompt || DEFAULT_SUMMARY_PROMPT;
+  }
+
+  // Reset to default button
+  const resetPromptBtn = document.getElementById('resetPrompt');
+  if (resetPromptBtn) {
+    resetPromptBtn.onclick = () => {
+      if (summaryPromptInput) {
+        summaryPromptInput.value = DEFAULT_SUMMARY_PROMPT;
+      }
+    };
   }
 
   // Show the modal

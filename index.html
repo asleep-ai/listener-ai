@@ -98,6 +98,14 @@
           <textarea id="knownWords" rows="4" placeholder="Enter words or phrases, one per line&#10;e.g. Listener.AI&#10;GPT-4o"></textarea>
           <small>Proper nouns, names, and terms to improve transcription accuracy (one per line)</small>
         </div>
+        <div class="form-group">
+          <div class="prompt-label-row">
+            <label for="summaryPrompt">Summary Prompt:</label>
+            <button type="button" id="resetPrompt" class="reset-prompt-button">Reset to Default</button>
+          </div>
+          <textarea id="summaryPrompt" rows="10" placeholder="Enter your custom summary prompt..."></textarea>
+          <small>Customize the prompt sent to Gemini for generating summaries. The JSON response format (suggestedTitle, summary, keyPoints, actionItems, emoji) should be preserved.</small>
+        </div>
         <div class="modal-buttons">
           <button id="saveConfig" class="save-button">Save</button>
           <button id="cancelConfig" class="cancel-button">Cancel</button>

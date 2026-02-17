@@ -8,7 +8,25 @@ export interface AppConfig {
   autoMode?: boolean;
   globalShortcut?: string;
   knownWords?: string[];
+  summaryPrompt?: string;
 }
+
+export const DEFAULT_SUMMARY_PROMPT = `Based on this meeting transcript, provide:
+
+1. A concise meeting title in Korean (10-20 characters that captures the main topic)
+2. A concise summary in Korean (2-3 paragraphs)
+3. Key points discussed in Korean (as a bullet list)
+4. Action items mentioned in Korean (as a bullet list)
+5. An appropriate emoji that represents the meeting
+
+Return as JSON:
+{
+  "suggestedTitle": "concise title in Korean",
+  "summary": "summary in Korean",
+  "keyPoints": ["point 1", "point 2"],
+  "actionItems": ["action 1", "action 2"],
+  "emoji": "📝"
+}`;
 
 export class ConfigService {
   private configPath: string;
@@ -120,6 +138,15 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getSummaryPrompt(): string {
+    return this.config.summaryPrompt || DEFAULT_SUMMARY_PROMPT;
+  }
+
+  setSummaryPrompt(prompt: string): void {
+    this.config.summaryPrompt = prompt;
+    this.saveConfig();
+  }
+
   getAllConfig(): AppConfig {
     return {
       geminiApiKey: this.getGeminiApiKey(),
@@ -127,7 +154,8 @@ export class ConfigService {
       notionDatabaseId: this.getNotionDatabaseId(),
       autoMode: this.getAutoMode(),
       globalShortcut: this.getGlobalShortcut(),
-      knownWords: this.getKnownWords()
+      knownWords: this.getKnownWords(),
+      summaryPrompt: this.getSummaryPrompt()
     };
   }
 }

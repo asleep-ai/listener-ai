@@ -338,6 +338,46 @@ h1 {
   text-decoration: none;
 }
 
+.form-group textarea {
+  width: 100%;
+  padding: 10px;
+  border: 2px solid #e0e0e0;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: 'Courier New', Courier, monospace;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.form-group textarea:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.prompt-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.prompt-label-row label {
+  margin-bottom: 0;
+}
+
+.reset-prompt-button {
+  background: none;
+  border: none;
+  color: #3498db;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.reset-prompt-button:hover {
+  text-decoration: underline;
+}
+
 .modal-buttons {
   display: flex;
   justify-content: flex-end;
