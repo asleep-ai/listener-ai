@@ -5,7 +5,7 @@ import * as path from 'path';
 import { getDataPath } from './dataPath';
 import { ConfigService } from './configService';
 import { GeminiService } from './geminiService';
-import { saveTranscription, getTranscriptionsDir } from './outputService';
+import { saveTranscription } from './outputService';
 
 const SUPPORTED_EXTENSIONS = new Set([
   '.mp3', '.m4a', '.wav', '.ogg', '.flac', '.aac', '.wma', '.opus', '.webm',

@@ -55,6 +55,8 @@ export function formatTranscript(result: TranscriptionResult, title: string): st
 interface SummaryFrontmatter {
   title: string;
   suggestedTitle?: string;
+  summary: string;
+  transcript: string;
   keyPoints?: string[];
   actionItems?: string[];
   audioFilePath?: string;
@@ -67,6 +69,8 @@ function buildFrontmatter(meta: SummaryFrontmatter): string {
   if (meta.suggestedTitle) {
     lines.push(`suggestedTitle: ${yamlQuote(meta.suggestedTitle)}`);
   }
+  lines.push(`summary: ${yamlQuote(meta.summary)}`);
+  lines.push(`transcript: ${yamlQuote(meta.transcript)}`);
   if (meta.keyPoints?.length) {
     lines.push('keyPoints:');
     for (const p of meta.keyPoints) lines.push(`  - ${yamlQuote(p)}`);
@@ -78,29 +82,31 @@ function buildFrontmatter(meta: SummaryFrontmatter): string {
   if (meta.audioFilePath) {
     lines.push(`audioFilePath: ${yamlQuote(meta.audioFilePath)}`);
   }
-  lines.push(`transcribedAt: ${meta.transcribedAt}`);
+  lines.push(`transcribedAt: ${yamlQuote(meta.transcribedAt)}`);
   lines.push('---');
   return lines.join('\n');
 }
 
 /** Minimal YAML quoting: wrap in double quotes if value contains special chars */
 function yamlQuote(value: string): string {
-  if (/[:#\[\]{}&*!|>'"%@`,\n]/.test(value) || value.startsWith('-') || value.startsWith(' ')) {
-    return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  if (/[:#\[\]{}&*!|>'"%@`,\n\r]/.test(value) || value.startsWith('-') || value.startsWith(' ')) {
+    return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
   }
   return value;
 }
 
 export function parseFrontmatter(content: string): { meta: Record<string, unknown>; body: string } {
-  if (!content.startsWith('---')) {
+  // Normalize line endings
+  content = content.replace(/\r\n/g, '\n');
+  if (!content.startsWith('---\n')) {
     return { meta: {}, body: content };
   }
-  const end = content.indexOf('\n---', 3);
+  const end = content.indexOf('\n---', 4);
   if (end === -1) {
     return { meta: {}, body: content };
   }
-  const yamlBlock = content.slice(4, end); // skip opening "---\n"
-  const body = content.slice(end + 4).trimStart(); // skip closing "---\n"
+  const yamlBlock = content.slice(4, end);
+  const body = content.slice(end + 4).trimStart();
 
   const meta: Record<string, unknown> = {};
   let currentArrayKey: string | null = null;
@@ -142,7 +148,11 @@ export function parseFrontmatter(content: string): { meta: Record<string, unknow
 
 function yamlUnquote(value: string): string {
   if (value.startsWith('"') && value.endsWith('"')) {
-    return value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    return value.slice(1, -1)
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\r')
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, '\\');
   }
   return value;
 }
@@ -171,10 +181,12 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
 
   const transcribedAt = new Date().toISOString();
 
-  // summary.md with frontmatter
+  // summary.md with frontmatter (stores all raw data for machine reading)
   const frontmatter = buildFrontmatter({
     title: opts.title,
     suggestedTitle: opts.result.suggestedTitle,
+    summary: opts.result.summary,
+    transcript: opts.result.transcript,
     keyPoints: opts.result.keyPoints,
     actionItems: opts.result.actionItems,
     audioFilePath: opts.audioFilePath,
@@ -202,27 +214,22 @@ export interface ReadTranscriptionResult {
 
 /**
  * Read transcription data from a transcription folder.
- * Parses frontmatter from summary.md and reads transcript.md.
+ * Returns raw data from frontmatter (machine-readable), not the markdown body.
  */
 export function readTranscription(folderPath: string): ReadTranscriptionResult | null {
   try {
     const summaryPath = path.join(folderPath, 'summary.md');
-    const transcriptPath = path.join(folderPath, 'transcript.md');
 
     if (!fs.existsSync(summaryPath)) return null;
 
     const summaryContent = fs.readFileSync(summaryPath, 'utf-8');
-    const { meta, body } = parseFrontmatter(summaryContent);
-
-    const transcript = fs.existsSync(transcriptPath)
-      ? fs.readFileSync(transcriptPath, 'utf-8')
-      : '';
+    const { meta } = parseFrontmatter(summaryContent);
 
     return {
       title: (meta.title as string) || path.basename(folderPath),
       suggestedTitle: meta.suggestedTitle as string | undefined,
-      transcript,
-      summary: body,
+      transcript: (meta.transcript as string) || '',
+      summary: (meta.summary as string) || '',
       keyPoints: meta.keyPoints as string[] | undefined,
       actionItems: meta.actionItems as string[] | undefined,
       audioFilePath: meta.audioFilePath as string | undefined,

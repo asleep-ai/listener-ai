@@ -480,14 +480,27 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
       console.error('Failed to save transcription files:', error);
     }
 
-    // Save slim metadata pointing to transcription folder
+    // Save metadata - slim if transcription files saved, inline fallback otherwise
     try {
-      await metadataService.saveMetadata(filePath, {
-        title,
-        suggestedTitle: result.suggestedTitle,
-        transcriptionPath,
-        transcribedAt: new Date().toISOString()
-      });
+      if (transcriptionPath) {
+        await metadataService.saveMetadata(filePath, {
+          title,
+          suggestedTitle: result.suggestedTitle,
+          transcriptionPath,
+          transcribedAt: new Date().toISOString()
+        });
+      } else {
+        // Fallback: store inline data when file write failed
+        await metadataService.saveMetadata(filePath, {
+          title,
+          suggestedTitle: result.suggestedTitle,
+          transcript: result.transcript,
+          summary: result.summary,
+          keyPoints: result.keyPoints,
+          actionItems: result.actionItems,
+          transcribedAt: new Date().toISOString()
+        });
+      }
       console.log('Metadata saved successfully');
     } catch (error) {
       console.error('Failed to save metadata:', error);
@@ -578,9 +591,10 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
           }
         };
       }
+      console.warn('Transcription folder missing or unreadable:', metadata.transcriptionPath);
     }
 
-    // Old format: inline data already in metadata
+    // Old format or missing folder fallback: inline data in metadata
     return { success: true, data: metadata };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
