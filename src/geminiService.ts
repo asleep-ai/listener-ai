@@ -1,11 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import * as fs from 'fs';
 import * as path from 'path';
-import { app } from 'electron';
 import { FFmpegManager } from './services/ffmpegManager';
-
-// Use FFmpegManager for FFmpeg path resolution
-const ffmpegManager = new FFmpegManager();
 
 export interface TranscriptionResult {
   transcript: string;
@@ -19,10 +15,11 @@ export interface TranscriptionResult {
 export class GeminiService {
   private ai: GoogleGenAI;
   private apiKey: string;
+  private ffmpegManager: FFmpegManager;
 
   // Get FFmpeg path for this service
   private async getFFmpegPath(): Promise<string> {
-    const ffmpegPath = await ffmpegManager.ensureFFmpeg();
+    const ffmpegPath = await this.ffmpegManager.ensureFFmpeg();
     if (ffmpegPath) {
       return ffmpegPath;
     }
@@ -31,9 +28,10 @@ export class GeminiService {
     return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
   }
 
-  constructor(apiKey: string) {
+  constructor(apiKey: string, dataPath?: string) {
     this.apiKey = apiKey;
     this.ai = new GoogleGenAI({ apiKey: apiKey });
+    this.ffmpegManager = new FFmpegManager(dataPath);
   }
 
   async transcribeAudio(audioFilePath: string, progressCallback?: (percent: number, message: string) => void): Promise<TranscriptionResult> {
@@ -166,7 +164,12 @@ export class GeminiService {
         (error.message?.includes('is not recognized') ||
           error.message?.includes('ffmpeg.exe') ||
           error.code === 'ENOENT')) {
-        const { dialog, shell } = require('electron');
+        let dialog: any, shell: any;
+        try {
+          ({ dialog, shell } = require('electron'));
+        } catch {
+          throw new Error('FFmpeg not found. Please install FFmpeg.');
+        }
 
         dialog.showErrorBox(
           'FFmpeg Not Found',

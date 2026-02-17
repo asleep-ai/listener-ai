@@ -3,6 +3,9 @@
   "version": "1.2.3",
   "description": "A lightweight desktop application for recording and transcribing meetings with AI-powered notes.",
   "main": "dist/main.js",
+  "bin": {
+    "listener": "dist/cli.js"
+  },
   "scripts": {
     "start": "pnpm run build && electron .",
     "dev": "pnpm run build && electron .",
@@ -17,6 +20,7 @@
     "dist:all": "pnpm run build && electron-builder -mw",
     "version:bump": "node scripts/bump-version.js",
     "release": "pnpm run version:bump && pnpm run dist:all",
+    "cli": "pnpm run build && node dist/cli.js",
     "postinstall": "electron-builder install-app-deps && cd node_modules/electron && node install.js || cd node_modules/.pnpm/electron*/node_modules/electron && node install.js || true"
   },
   "repository": {

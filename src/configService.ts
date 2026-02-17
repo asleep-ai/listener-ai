@@ -1,4 +1,3 @@
-import { app } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -14,8 +13,17 @@ export class ConfigService {
   private configPath: string;
   private config: AppConfig = {};
 
-  constructor() {
-    const userDataPath = app.getPath('userData');
+  constructor(dataPath?: string) {
+    let userDataPath: string;
+    if (dataPath) {
+      userDataPath = dataPath;
+    } else {
+      try {
+        userDataPath = require('electron').app.getPath('userData');
+      } catch {
+        throw new Error('ConfigService requires dataPath when running outside Electron.');
+      }
+    }
     this.configPath = path.join(userDataPath, 'config.json');
     this.loadConfig();
   }

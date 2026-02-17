@@ -1,4 +1,3 @@
-import { app, net } from 'electron';
 import * as fs from 'fs-extra';
 import * as path from 'path';
 
@@ -57,8 +56,18 @@ export class FFmpegManager {
   private ffmpegPath: string;
   private downloadController: AbortController | null = null;
 
-  constructor() {
-    this.ffmpegDir = path.join(app.getPath('userData'), 'ffmpeg');
+  constructor(dataPath?: string) {
+    let basePath: string;
+    if (dataPath) {
+      basePath = dataPath;
+    } else {
+      try {
+        basePath = require('electron').app.getPath('userData');
+      } catch {
+        throw new Error('FFmpegManager requires dataPath when running outside Electron.');
+      }
+    }
+    this.ffmpegDir = path.join(basePath, 'ffmpeg');
     const execName = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
     this.ffmpegPath = path.join(this.ffmpegDir, execName);
   }
@@ -163,12 +172,13 @@ export class FFmpegManager {
       let receivedBytes = 0;
       let totalBytes = 0;
 
+      const { net } = require('electron');
       const request = net.request({
         url,
         redirect: 'follow'
       });
 
-      request.on('response', (response) => {
+      request.on('response', (response: any) => {
         if (response.statusCode !== 200) {
           reject(new Error(`Download failed with status ${response.statusCode}`));
           return;
@@ -177,7 +187,7 @@ export class FFmpegManager {
         totalBytes = parseInt(response.headers['content-length'] as string) || 0;
         const fileStream = fs.createWriteStream(destPath);
 
-        response.on('data', (chunk) => {
+        response.on('data', (chunk: Buffer) => {
           if (this.downloadController?.signal.aborted) {
             fileStream.destroy();
             reject(new Error('Download cancelled'));
@@ -199,7 +209,7 @@ export class FFmpegManager {
           resolve();
         });
 
-        response.on('error', (error) => {
+        response.on('error', (error: Error) => {
           fileStream.destroy();
           reject(error);
         });
