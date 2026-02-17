@@ -343,17 +343,18 @@ ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionA
   try {
     if (config.knownWords !== undefined) {
       configService.setKnownWords(config.knownWords);
-      // Recreate Gemini service to pick up new known words
-      const apiKey = configService.getGeminiApiKey();
-      if (apiKey) {
-        geminiService = new GeminiService(apiKey, undefined, config.knownWords);
-      }
     }
 
     if (config.geminiApiKey) {
       configService.setGeminiApiKey(config.geminiApiKey);
-      // Initialize Gemini service with the new API key and known words
-      geminiService = new GeminiService(config.geminiApiKey, undefined, configService.getKnownWords());
+    }
+
+    // Recreate GeminiService once if either changed
+    if (config.knownWords !== undefined || config.geminiApiKey) {
+      const apiKey = configService.getGeminiApiKey();
+      if (apiKey) {
+        geminiService = new GeminiService(apiKey, undefined, configService.getKnownWords());
+      }
     }
 
     if (config.notionApiKey) {
