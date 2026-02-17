@@ -8,9 +8,9 @@ import { GeminiService, TranscriptionResult } from './geminiService';
 
 function usage(): never {
   process.stderr.write(
-    'Usage: listener transcribe <file> [--output <path>]\n' +
+    'Usage: listener <file> [--output <path>]\n' +
     '\n' +
-    'Transcribe an audio file and generate a markdown report.\n' +
+    'Transcribe and summarize an audio file into a markdown report.\n' +
     '\n' +
     'Options:\n' +
     '  --output <path>  Custom output path for the markdown file\n'
@@ -54,7 +54,7 @@ function formatMarkdown(result: TranscriptionResult, title: string): string {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
-  if (args.length === 0 || args[0] !== 'transcribe') {
+  if (args.length === 0 || args[0].startsWith('-')) {
     usage();
   }
 
@@ -62,7 +62,7 @@ async function main(): Promise<void> {
   let filePath: string | undefined;
   let outputPath: string | undefined;
 
-  for (let i = 1; i < args.length; i++) {
+  for (let i = 0; i < args.length; i++) {
     if (args[i] === '--output' && i + 1 < args.length) {
       outputPath = args[++i];
     } else if (!args[i].startsWith('-')) {
@@ -108,7 +108,7 @@ async function main(): Promise<void> {
   // Transcribe
   const gemini = new GeminiService(apiKey, dataPath);
 
-  process.stderr.write(`Transcribing: ${filePath}\n`);
+  process.stderr.write(`Processing: ${filePath}\n`);
 
   const result = await gemini.transcribeAudio(filePath, (_percent, message) => {
     process.stderr.write(`  ${message}\n`);
