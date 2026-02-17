@@ -280,11 +280,13 @@ h1 {
 
 .modal-content {
   background-color: white;
-  margin: 15% auto;
+  margin: 5% auto;
   padding: 30px;
   border-radius: 12px;
   width: 80%;
   max-width: 500px;
+  max-height: 85vh;
+  overflow-y: auto;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
 }
 
