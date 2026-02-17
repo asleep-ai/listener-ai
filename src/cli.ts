@@ -6,6 +6,10 @@ import { getDataPath } from './dataPath';
 import { ConfigService } from './configService';
 import { GeminiService, TranscriptionResult } from './geminiService';
 
+const SUPPORTED_EXTENSIONS = new Set([
+  '.mp3', '.m4a', '.wav', '.ogg', '.flac', '.aac', '.wma', '.opus', '.webm',
+]);
+
 function usage(): never {
   process.stderr.write(
     'Usage: listener <file> [--output <dir>]\n' +
@@ -13,8 +17,11 @@ function usage(): never {
     'Transcribe and summarize an audio file.\n' +
     'Creates a folder with transcript.md and summary.md.\n' +
     '\n' +
+    'Requires FFmpeg installed on the system.\n' +
+    '\n' +
     'Options:\n' +
-    '  --output <dir>  Parent directory for the output folder\n'
+    '  --output <dir>  Parent directory for the output folder\n' +
+    '  --help          Show this help message\n'
   );
   process.exit(1);
 }
@@ -30,7 +37,8 @@ function formatTimestamp(): string {
   const d = String(now.getDate()).padStart(2, '0');
   const h = String(now.getHours()).padStart(2, '0');
   const min = String(now.getMinutes()).padStart(2, '0');
-  return `${y}${m}${d}_${h}${min}`;
+  const s = String(now.getSeconds()).padStart(2, '0');
+  return `${y}${m}${d}_${h}${min}${s}`;
 }
 
 function formatSummary(result: TranscriptionResult, title: string): string {
@@ -71,7 +79,7 @@ function formatTranscript(result: TranscriptionResult, title: string): string {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
-  if (args.length === 0 || args[0].startsWith('-')) {
+  if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
     usage();
   }
 
@@ -82,7 +90,10 @@ async function main(): Promise<void> {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--output' && i + 1 < args.length) {
       outputDir = args[++i];
-    } else if (!args[i].startsWith('-')) {
+    } else if (args[i].startsWith('-')) {
+      process.stderr.write(`Error: Unknown option: ${args[i]}\n`);
+      usage();
+    } else {
       filePath = args[i];
     }
   }
@@ -100,6 +111,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const ext = path.extname(filePath).toLowerCase();
+  if (!SUPPORTED_EXTENSIONS.has(ext)) {
+    process.stderr.write(`Error: Unsupported file type: ${ext}\n`);
+    process.stderr.write(`Supported formats: ${[...SUPPORTED_EXTENSIONS].join(', ')}\n`);
+    process.exit(1);
+  }
+
   // Default output parent to same directory as audio file
   if (!outputDir) {
     outputDir = path.dirname(filePath);
@@ -110,7 +128,7 @@ async function main(): Promise<void> {
   // Get API key
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
-  const apiKey = process.env['GEMINI_API_KEY'] || config.getGeminiApiKey();
+  const apiKey = config.getGeminiApiKey();
 
   if (!apiKey) {
     process.stderr.write(
@@ -145,6 +163,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  process.stderr.write(`Error: ${err.message}\n`);
+  process.stderr.write(`Error: ${err instanceof Error ? err.message : String(err)}\n`);
   process.exit(1);
 });

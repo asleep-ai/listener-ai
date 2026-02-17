@@ -14,7 +14,16 @@ export class ConfigService {
   private config: AppConfig = {};
 
   constructor(dataPath?: string) {
-    const userDataPath = dataPath ?? require('electron').app.getPath('userData');
+    let userDataPath: string;
+    if (dataPath) {
+      userDataPath = dataPath;
+    } else {
+      try {
+        userDataPath = require('electron').app.getPath('userData');
+      } catch {
+        throw new Error('ConfigService requires dataPath when running outside Electron.');
+      }
+    }
     this.configPath = path.join(userDataPath, 'config.json');
     this.loadConfig();
   }

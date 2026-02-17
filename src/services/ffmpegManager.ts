@@ -57,7 +57,16 @@ export class FFmpegManager {
   private downloadController: AbortController | null = null;
 
   constructor(dataPath?: string) {
-    const basePath = dataPath ?? require('electron').app.getPath('userData');
+    let basePath: string;
+    if (dataPath) {
+      basePath = dataPath;
+    } else {
+      try {
+        basePath = require('electron').app.getPath('userData');
+      } catch {
+        throw new Error('FFmpegManager requires dataPath when running outside Electron.');
+      }
+    }
     this.ffmpegDir = path.join(basePath, 'ffmpeg');
     const execName = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
     this.ffmpegPath = path.join(this.ffmpegDir, execName);
