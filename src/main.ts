@@ -10,6 +10,7 @@ import { MenuBarManager } from './menuBarManager';
 import { metadataService } from './services/metadataService';
 import { FileHandlerService } from './services/fileHandlerService';
 import { autoUpdaterService } from './services/autoUpdaterService';
+import { saveTranscription, readTranscription } from './outputService';
 
 // Global flag to track if app is quitting
 declare global {
@@ -464,17 +465,42 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
     console.log('Transcription completed successfully');
     console.log('Saving metadata for:', filePath);
 
-    // Save transcript data to metadata
+    // Save transcription files (summary.md + transcript.md)
+    const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));
+    let transcriptionPath: string | undefined;
     try {
-      await metadataService.saveMetadata(filePath, {
-        title: path.basename(filePath, path.extname(filePath)),
-        transcript: result.transcript,
-        summary: result.summary,
-        keyPoints: result.keyPoints,
-        actionItems: result.actionItems,
-        suggestedTitle: result.suggestedTitle,
-        transcribedAt: new Date().toISOString()
+      transcriptionPath = saveTranscription({
+        title,
+        result,
+        audioFilePath: filePath,
+        dataPath: app.getPath('userData'),
       });
+      console.log('Transcription saved to:', transcriptionPath);
+    } catch (error) {
+      console.error('Failed to save transcription files:', error);
+    }
+
+    // Save metadata - slim if transcription files saved, inline fallback otherwise
+    try {
+      if (transcriptionPath) {
+        await metadataService.saveMetadata(filePath, {
+          title,
+          suggestedTitle: result.suggestedTitle,
+          transcriptionPath,
+          transcribedAt: new Date().toISOString()
+        });
+      } else {
+        // Fallback: store inline data when file write failed
+        await metadataService.saveMetadata(filePath, {
+          title,
+          suggestedTitle: result.suggestedTitle,
+          transcript: result.transcript,
+          summary: result.summary,
+          keyPoints: result.keyPoints,
+          actionItems: result.actionItems,
+          transcribedAt: new Date().toISOString()
+        });
+      }
       console.log('Metadata saved successfully');
     } catch (error) {
       console.error('Failed to save metadata:', error);
@@ -485,11 +511,11 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
     if (fileName.includes('Untitled_Meeting') && result.suggestedTitle) {
       const newFilePath = await renameAudioFile(filePath, result.suggestedTitle);
 
-      // Update metadata with new file path
-      const metadata = await metadataService.getMetadata(filePath);
-      if (metadata) {
+      // Move metadata to new file path
+      const existingMetadata = await metadataService.getMetadata(filePath);
+      if (existingMetadata) {
         await metadataService.deleteMetadata(filePath);
-        await metadataService.saveMetadata(newFilePath, metadata);
+        await metadataService.saveMetadata(newFilePath, existingMetadata);
       }
 
       return { success: true, data: result, newFilePath };
@@ -548,6 +574,27 @@ ipcMain.handle('open-external', async (_, url: string) => {
 ipcMain.handle('get-metadata', async (_, filePath: string) => {
   try {
     const metadata = await metadataService.getMetadata(filePath);
+    if (!metadata) return { success: true, data: null };
+
+    // New format: read from transcription folder
+    if (metadata.transcriptionPath) {
+      const transcription = readTranscription(metadata.transcriptionPath);
+      if (transcription) {
+        return {
+          success: true,
+          data: {
+            ...metadata,
+            transcript: transcription.transcript,
+            summary: transcription.summary,
+            keyPoints: transcription.keyPoints,
+            actionItems: transcription.actionItems,
+          }
+        };
+      }
+      console.warn('Transcription folder missing or unreadable:', metadata.transcriptionPath);
+    }
+
+    // Old format or missing folder fallback: inline data in metadata
     return { success: true, data: metadata };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };

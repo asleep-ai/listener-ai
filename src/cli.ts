@@ -4,7 +4,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getDataPath } from './dataPath';
 import { ConfigService } from './configService';
-import { GeminiService, TranscriptionResult } from './geminiService';
+import { GeminiService } from './geminiService';
+import { saveTranscription } from './outputService';
 
 const SUPPORTED_EXTENSIONS = new Set([
   '.mp3', '.m4a', '.wav', '.ogg', '.flac', '.aac', '.wma', '.opus', '.webm',
@@ -22,6 +23,7 @@ function usage(): never {
     '\n' +
     'Options:\n' +
     '  --output <dir>  Parent directory for the output folder\n' +
+    '                  (default: app data transcriptions directory)\n' +
     '  --help          Show this help message\n' +
     '\n' +
     'Config commands:\n' +
@@ -31,56 +33,6 @@ function usage(): never {
     '  config path              Print config file path\n'
   );
   process.exit(1);
-}
-
-function sanitizeForPath(name: string): string {
-  return name.replace(/[\/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
-}
-
-function formatTimestamp(): string {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  const h = String(now.getHours()).padStart(2, '0');
-  const min = String(now.getMinutes()).padStart(2, '0');
-  const s = String(now.getSeconds()).padStart(2, '0');
-  return `${y}${m}${d}_${h}${min}${s}`;
-}
-
-function formatSummary(result: TranscriptionResult, title: string): string {
-  const lines: string[] = [];
-  lines.push(`# ${title}\n`);
-
-  if (result.summary) {
-    lines.push(`## Summary\n`);
-    lines.push(`${result.summary}\n`);
-  }
-
-  if (result.keyPoints?.length) {
-    lines.push(`## Key Points\n`);
-    for (const point of result.keyPoints) {
-      lines.push(`- ${point}`);
-    }
-    lines.push('');
-  }
-
-  if (result.actionItems?.length) {
-    lines.push(`## Action Items\n`);
-    for (const item of result.actionItems) {
-      lines.push(`- ${item}`);
-    }
-    lines.push('');
-  }
-
-  return lines.join('\n');
-}
-
-function formatTranscript(result: TranscriptionResult, title: string): string {
-  const lines: string[] = [];
-  lines.push(`# ${title}\n`);
-  lines.push(`${result.transcript}\n`);
-  return lines.join('\n');
 }
 
 const KNOWN_CONFIG_KEYS = ['geminiApiKey', 'notionApiKey', 'notionDatabaseId', 'autoMode', 'globalShortcut'] as const;
@@ -216,10 +168,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Default output parent to same directory as audio file
-  if (!outputDir) {
-    outputDir = path.dirname(filePath);
-  } else {
+  // Resolve --output if provided
+  if (outputDir) {
     outputDir = path.resolve(outputDir);
   }
 
@@ -245,15 +195,15 @@ async function main(): Promise<void> {
     process.stderr.write(`  ${message}\n`);
   });
 
-  // Create output folder: {title}_{timestamp}/
   const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));
-  const folderName = `${sanitizeForPath(title)}_${formatTimestamp()}`;
-  const folderPath = path.join(outputDir, folderName);
-  fs.mkdirSync(folderPath, { recursive: true });
 
-  // Write files
-  fs.writeFileSync(path.join(folderPath, 'summary.md'), formatSummary(result, title), 'utf-8');
-  fs.writeFileSync(path.join(folderPath, 'transcript.md'), formatTranscript(result, title), 'utf-8');
+  const folderPath = saveTranscription({
+    title,
+    result,
+    audioFilePath: filePath,
+    outputDir,
+    dataPath,
+  });
 
   process.stderr.write(`Done.\n`);
 
