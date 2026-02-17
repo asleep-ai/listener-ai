@@ -8,17 +8,32 @@ import { GeminiService, TranscriptionResult } from './geminiService';
 
 function usage(): never {
   process.stderr.write(
-    'Usage: listener <file> [--output <path>]\n' +
+    'Usage: listener <file> [--output <dir>]\n' +
     '\n' +
-    'Transcribe and summarize an audio file into a markdown report.\n' +
+    'Transcribe and summarize an audio file.\n' +
+    'Creates a folder with transcript.md and summary.md.\n' +
     '\n' +
     'Options:\n' +
-    '  --output <path>  Custom output path for the markdown file\n'
+    '  --output <dir>  Parent directory for the output folder\n'
   );
   process.exit(1);
 }
 
-function formatMarkdown(result: TranscriptionResult, title: string): string {
+function sanitizeForPath(name: string): string {
+  return name.replace(/[\/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
+}
+
+function formatTimestamp(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  const h = String(now.getHours()).padStart(2, '0');
+  const min = String(now.getMinutes()).padStart(2, '0');
+  return `${y}${m}${d}_${h}${min}`;
+}
+
+function formatSummary(result: TranscriptionResult, title: string): string {
   const lines: string[] = [];
   lines.push(`# ${title}\n`);
 
@@ -43,11 +58,13 @@ function formatMarkdown(result: TranscriptionResult, title: string): string {
     lines.push('');
   }
 
-  if (result.transcript) {
-    lines.push(`## Transcript\n`);
-    lines.push(`${result.transcript}\n`);
-  }
+  return lines.join('\n');
+}
 
+function formatTranscript(result: TranscriptionResult, title: string): string {
+  const lines: string[] = [];
+  lines.push(`# ${title}\n`);
+  lines.push(`${result.transcript}\n`);
   return lines.join('\n');
 }
 
@@ -60,11 +77,11 @@ async function main(): Promise<void> {
 
   // Parse arguments
   let filePath: string | undefined;
-  let outputPath: string | undefined;
+  let outputDir: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--output' && i + 1 < args.length) {
-      outputPath = args[++i];
+      outputDir = args[++i];
     } else if (!args[i].startsWith('-')) {
       filePath = args[i];
     }
@@ -83,13 +100,11 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Determine output path
-  if (!outputPath) {
-    const dir = path.dirname(filePath);
-    const base = path.basename(filePath, path.extname(filePath));
-    outputPath = path.join(dir, `${base}.md`);
+  // Default output parent to same directory as audio file
+  if (!outputDir) {
+    outputDir = path.dirname(filePath);
   } else {
-    outputPath = path.resolve(outputPath);
+    outputDir = path.resolve(outputDir);
   }
 
   // Get API key
@@ -105,7 +120,6 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Transcribe
   const gemini = new GeminiService(apiKey, dataPath);
 
   process.stderr.write(`Processing: ${filePath}\n`);
@@ -114,16 +128,20 @@ async function main(): Promise<void> {
     process.stderr.write(`  ${message}\n`);
   });
 
-  // Generate markdown
+  // Create output folder: {title}_{timestamp}/
   const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));
-  const markdown = formatMarkdown(result, title);
+  const folderName = `${sanitizeForPath(title)}_${formatTimestamp()}`;
+  const folderPath = path.join(outputDir, folderName);
+  fs.mkdirSync(folderPath, { recursive: true });
 
-  // Write output
-  fs.writeFileSync(outputPath, markdown, 'utf-8');
+  // Write files
+  fs.writeFileSync(path.join(folderPath, 'summary.md'), formatSummary(result, title), 'utf-8');
+  fs.writeFileSync(path.join(folderPath, 'transcript.md'), formatTranscript(result, title), 'utf-8');
+
   process.stderr.write(`Done.\n`);
 
-  // Print path to stdout for piping
-  process.stdout.write(`${outputPath}\n`);
+  // Print folder path to stdout for piping
+  process.stdout.write(`${folderPath}\n`);
 }
 
 main().catch((err) => {
