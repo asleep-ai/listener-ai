@@ -151,7 +151,13 @@ function handleConfig(subArgs: string[]): void {
       geminiApiKey: (v) => config.setGeminiApiKey(v),
       notionApiKey: (v) => config.setNotionApiKey(v),
       notionDatabaseId: (v) => config.setNotionDatabaseId(v),
-      autoMode: (v) => config.setAutoMode(v === 'true'),
+      autoMode: (v) => {
+        if (v !== 'true' && v !== 'false') {
+          process.stderr.write('Error: autoMode must be "true" or "false"\n');
+          process.exit(1);
+        }
+        config.setAutoMode(v === 'true');
+      },
       globalShortcut: (v) => config.setGlobalShortcut(v),
     };
     setters[key](value);
