@@ -16,6 +16,7 @@ export class GeminiService {
   private ai: GoogleGenAI;
   private apiKey: string;
   private ffmpegManager: FFmpegManager;
+  private knownWords: string[];
 
   // Get FFmpeg path for this service
   private async getFFmpegPath(): Promise<string> {
@@ -28,10 +29,17 @@ export class GeminiService {
     return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
   }
 
-  constructor(apiKey: string, dataPath?: string) {
+  constructor(apiKey: string, dataPath?: string, knownWords?: string[]) {
     this.apiKey = apiKey;
     this.ai = new GoogleGenAI({ apiKey: apiKey });
     this.ffmpegManager = new FFmpegManager(dataPath);
+    this.knownWords = knownWords || [];
+  }
+
+  private buildGlossaryBlock(): string {
+    if (this.knownWords.length === 0) return '';
+    const wordList = this.knownWords.map(w => `- ${w}`).join('\n');
+    return `The following proper nouns, names, and terms may appear in the audio. Transcribe them exactly as spelled:\n${wordList}\n\n`;
   }
 
   async transcribeAudio(audioFilePath: string, progressCallback?: (percent: number, message: string) => void): Promise<TranscriptionResult> {
@@ -349,7 +357,7 @@ Return as JSON:
         progressCallback(50, 'Transcribing audio...');
       }
 
-      const transcriptPrompt = `Please transcribe this audio recording with proper speaker identification.
+      const transcriptPrompt = `${this.buildGlossaryBlock()}Please transcribe this audio recording with proper speaker identification.
 
 Format requirements:
 1. IDENTIFY different speakers and label them as 참가자1, 참가자2, etc.
@@ -460,7 +468,7 @@ IMPORTANT:
 
   // Create prompt for segment transcription
   private createSegmentPrompt(segmentIndex: number, totalSegments: number): string {
-    return `Please transcribe audio segment ${segmentIndex + 1} of ${totalSegments} with proper speaker identification.
+    return `${this.buildGlossaryBlock()}Please transcribe audio segment ${segmentIndex + 1} of ${totalSegments} with proper speaker identification.
 
 Format requirements:
 1. IDENTIFY different speakers and label them as 참가자1, 참가자2, etc.
