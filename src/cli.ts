@@ -13,6 +13,7 @@ const SUPPORTED_EXTENSIONS = new Set([
 function usage(): never {
   process.stderr.write(
     'Usage: listener <file> [--output <dir>]\n' +
+    '       listener config list|get|set|path\n' +
     '\n' +
     'Transcribe and summarize an audio file.\n' +
     'Creates a folder with transcript.md and summary.md.\n' +
@@ -21,7 +22,13 @@ function usage(): never {
     '\n' +
     'Options:\n' +
     '  --output <dir>  Parent directory for the output folder\n' +
-    '  --help          Show this help message\n'
+    '  --help          Show this help message\n' +
+    '\n' +
+    'Config commands:\n' +
+    '  config list              Show all config values\n' +
+    '  config get <key>         Get a specific value\n' +
+    '  config set <key> <value> Set a value\n' +
+    '  config path              Print config file path\n'
   );
   process.exit(1);
 }
@@ -76,11 +83,102 @@ function formatTranscript(result: TranscriptionResult, title: string): string {
   return lines.join('\n');
 }
 
+const KNOWN_CONFIG_KEYS = ['geminiApiKey', 'notionApiKey', 'notionDatabaseId', 'autoMode', 'globalShortcut'] as const;
+type ConfigKey = typeof KNOWN_CONFIG_KEYS[number];
+
+function maskValue(key: string, value: string | undefined): string {
+  if (value == null || value === '') return '(not set)';
+  if (key.toLowerCase().includes('key')) {
+    return value.length > 4 ? '****' + value.slice(-4) : '****';
+  }
+  return value;
+}
+
+function handleConfig(subArgs: string[]): void {
+  const dataPath = getDataPath();
+  const config = new ConfigService(dataPath);
+  const sub = subArgs[0];
+
+  if (!sub || sub === '--help') {
+    usage();
+  }
+
+  if (sub === 'path') {
+    process.stdout.write(`${config.getConfigPath()}\n`);
+    return;
+  }
+
+  if (sub === 'list') {
+    const all = config.getAllConfig();
+    for (const key of KNOWN_CONFIG_KEYS) {
+      const raw = all[key as keyof typeof all];
+      const display = maskValue(key, raw == null ? undefined : String(raw));
+      process.stdout.write(`${key}=${display}\n`);
+    }
+    return;
+  }
+
+  if (sub === 'get') {
+    const key = subArgs[1] as ConfigKey;
+    if (!key) {
+      process.stderr.write('Error: Missing key. Usage: listener config get <key>\n');
+      process.exit(1);
+    }
+    if (!KNOWN_CONFIG_KEYS.includes(key)) {
+      process.stderr.write(`Error: Unknown key: ${key}\n`);
+      process.stderr.write(`Known keys: ${KNOWN_CONFIG_KEYS.join(', ')}\n`);
+      process.exit(1);
+    }
+    const all = config.getAllConfig();
+    const val = all[key as keyof typeof all];
+    process.stdout.write(`${val ?? ''}\n`);
+    return;
+  }
+
+  if (sub === 'set') {
+    const key = subArgs[1] as ConfigKey;
+    const value = subArgs[2];
+    if (!key || value == null) {
+      process.stderr.write('Error: Missing key or value. Usage: listener config set <key> <value>\n');
+      process.exit(1);
+    }
+    if (!KNOWN_CONFIG_KEYS.includes(key)) {
+      process.stderr.write(`Error: Unknown key: ${key}\n`);
+      process.stderr.write(`Known keys: ${KNOWN_CONFIG_KEYS.join(', ')}\n`);
+      process.exit(1);
+    }
+    const setters: Record<ConfigKey, (v: string) => void> = {
+      geminiApiKey: (v) => config.setGeminiApiKey(v),
+      notionApiKey: (v) => config.setNotionApiKey(v),
+      notionDatabaseId: (v) => config.setNotionDatabaseId(v),
+      autoMode: (v) => {
+        if (v !== 'true' && v !== 'false') {
+          process.stderr.write('Error: autoMode must be "true" or "false"\n');
+          process.exit(1);
+        }
+        config.setAutoMode(v === 'true');
+      },
+      globalShortcut: (v) => config.setGlobalShortcut(v),
+    };
+    setters[key](value);
+    process.stderr.write(`Set ${key}\n`);
+    return;
+  }
+
+  process.stderr.write(`Error: Unknown config command: ${sub}\n`);
+  usage();
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
   if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
     usage();
+  }
+
+  if (args[0] === 'config') {
+    handleConfig(args.slice(1));
+    return;
   }
 
   // Parse arguments
@@ -138,7 +236,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const gemini = new GeminiService(apiKey, dataPath);
+  const knownWords = config.getKnownWords();
+  const gemini = new GeminiService(apiKey, dataPath, knownWords);
 
   process.stderr.write(`Processing: ${filePath}\n`);
 

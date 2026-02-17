@@ -339,12 +339,22 @@ ipcMain.handle('stop-recording', async () => {
 
 // Configuration handlers
 
-ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; globalShortcut?: string; summaryPrompt?: string }) => {
+ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string }) => {
   try {
+    if (config.knownWords !== undefined) {
+      configService.setKnownWords(config.knownWords);
+    }
+
     if (config.geminiApiKey) {
       configService.setGeminiApiKey(config.geminiApiKey);
-      // Initialize Gemini service with the new API key
-      geminiService = new GeminiService(config.geminiApiKey);
+    }
+
+    // Recreate GeminiService once if either changed
+    if (config.knownWords !== undefined || config.geminiApiKey) {
+      const apiKey = configService.getGeminiApiKey();
+      if (apiKey) {
+        geminiService = new GeminiService(apiKey, undefined, configService.getKnownWords());
+      }
     }
 
     if (config.notionApiKey) {
@@ -432,7 +442,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
       if (!apiKey) {
         return { success: false, error: 'Gemini API key not configured' };
       }
-      geminiService = new GeminiService(apiKey);
+      geminiService = new GeminiService(apiKey, undefined, configService.getKnownWords());
     }
 
     // Send progress update

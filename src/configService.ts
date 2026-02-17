@@ -7,6 +7,7 @@ export interface AppConfig {
   notionDatabaseId?: string;
   autoMode?: boolean;
   globalShortcut?: string;
+  knownWords?: string[];
   summaryPrompt?: string;
 }
 
@@ -30,6 +31,10 @@ Return as JSON:
 export class ConfigService {
   private configPath: string;
   private config: AppConfig = {};
+
+  getConfigPath(): string {
+    return this.configPath;
+  }
 
   constructor(dataPath?: string) {
     let userDataPath: string;
@@ -60,6 +65,7 @@ export class ConfigService {
 
   private saveConfig(): void {
     try {
+      fs.mkdirSync(path.dirname(this.configPath), { recursive: true });
       fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));
     } catch (error) {
       console.error('Error saving config:', error);
@@ -123,6 +129,15 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getKnownWords(): string[] {
+    return this.config.knownWords || [];
+  }
+
+  setKnownWords(words: string[]): void {
+    this.config.knownWords = words;
+    this.saveConfig();
+  }
+
   getSummaryPrompt(): string {
     return this.config.summaryPrompt || DEFAULT_SUMMARY_PROMPT;
   }
@@ -139,6 +154,7 @@ export class ConfigService {
       notionDatabaseId: this.getNotionDatabaseId(),
       autoMode: this.getAutoMode(),
       globalShortcut: this.getGlobalShortcut(),
+      knownWords: this.getKnownWords(),
       summaryPrompt: this.getSummaryPrompt()
     };
   }
