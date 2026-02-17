@@ -13,6 +13,10 @@ export class ConfigService {
   private configPath: string;
   private config: AppConfig = {};
 
+  getConfigPath(): string {
+    return this.configPath;
+  }
+
   constructor(dataPath?: string) {
     let userDataPath: string;
     if (dataPath) {
@@ -42,6 +46,7 @@ export class ConfigService {
 
   private saveConfig(): void {
     try {
+      fs.mkdirSync(path.dirname(this.configPath), { recursive: true });
       fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));
     } catch (error) {
       console.error('Error saving config:', error);

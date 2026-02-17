@@ -67,6 +67,21 @@ Listener.AI is a lightweight desktop application for recording audio and transcr
 ✅ 6. System tray integration with global shortcuts
 ✅ 7. File drag-and-drop support for external audio files
 ✅ 8. Metadata persistence for recordings
+✅ 9. CLI for headless transcription and config management
+
+## CLI Usage
+
+```
+listener <file> [--output <dir>]    Transcribe and summarize an audio file
+listener config list                Show all config values (API keys masked)
+listener config get <key>           Get a specific value
+listener config set <key> <value>   Set a value
+listener config path                Print config file path
+```
+
+Config keys: `geminiApiKey`, `notionApiKey`, `notionDatabaseId`, `autoMode`, `globalShortcut`
+
+CLI and GUI share the same config file (`config.json` in the app data directory).
 
 ## Additional Implemented Features
 - Auto mode for hands-free operation
@@ -84,6 +99,10 @@ Listener.AI is a lightweight desktop application for recording audio and transcr
 - Metadata storage for transcription results
 
 ## Architecture Overview
+
+### CLI (`src/cli.ts`)
+- Headless transcription: `listener <file>`
+- Config management: `listener config list|get|set|path`
 
 ### Main Process (`src/main.ts`)
 - Window management and IPC handlers
