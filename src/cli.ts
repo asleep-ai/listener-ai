@@ -138,7 +138,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const gemini = new GeminiService(apiKey, dataPath);
+  const knownWords = config.getKnownWords();
+  const gemini = new GeminiService(apiKey, dataPath, knownWords);
 
   process.stderr.write(`Processing: ${filePath}\n`);
 

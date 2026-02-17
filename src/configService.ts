@@ -7,6 +7,7 @@ export interface AppConfig {
   notionDatabaseId?: string;
   autoMode?: boolean;
   globalShortcut?: string;
+  knownWords?: string[];
 }
 
 export class ConfigService {
@@ -105,13 +106,23 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getKnownWords(): string[] {
+    return this.config.knownWords || [];
+  }
+
+  setKnownWords(words: string[]): void {
+    this.config.knownWords = words;
+    this.saveConfig();
+  }
+
   getAllConfig(): AppConfig {
     return {
       geminiApiKey: this.getGeminiApiKey(),
       notionApiKey: this.getNotionApiKey(),
       notionDatabaseId: this.getNotionDatabaseId(),
       autoMode: this.getAutoMode(),
-      globalShortcut: this.getGlobalShortcut()
+      globalShortcut: this.getGlobalShortcut(),
+      knownWords: this.getKnownWords()
     };
   }
 }

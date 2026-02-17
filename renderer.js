@@ -103,6 +103,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     notionApiKeyInput = document.getElementById('notionApiKey');
     notionDatabaseIdInput = document.getElementById('notionDatabaseId');
     globalShortcutInput = document.getElementById('globalShortcut');
+    knownWordsInput = document.getElementById('knownWords');
     closeTranscriptionBtn = document.querySelector('.close');
     uploadToNotionBtn = document.getElementById('uploadToNotion');
     progressContainer = document.getElementById('transcriptionProgress');
@@ -393,7 +394,7 @@ window.electronAPI.onRecordingStatus((status) => {
 
 // Modal elements - will be initialized after DOM loads
 let configModal, transcriptionModal, saveConfigBtn, cancelConfigBtn;
-let geminiApiKeyInput, notionApiKeyInput, notionDatabaseIdInput, globalShortcutInput;
+let geminiApiKeyInput, notionApiKeyInput, notionDatabaseIdInput, globalShortcutInput, knownWordsInput;
 let closeTranscriptionBtn, uploadToNotionBtn;
 
 
@@ -403,13 +404,17 @@ function setupEventListeners() {
     const notionKey = notionApiKeyInput.value.trim();
     const notionDb = notionDatabaseIdInput.value.trim();
     const globalShortcut = globalShortcutInput.value.trim();
+    const knownWords = knownWordsInput
+      ? knownWordsInput.value.split('\n').map(w => w.trim()).filter(w => w.length > 0)
+      : [];
 
     if (geminiKey) {
       await window.electronAPI.saveConfig({
         geminiApiKey: geminiKey,
         notionApiKey: notionKey,
         notionDatabaseId: notionDb,
-        globalShortcut: globalShortcut
+        globalShortcut: globalShortcut,
+        knownWords: knownWords
       });
       configModal.style.display = 'none';
     } else {
@@ -807,6 +812,9 @@ async function showConfigModal() {
   }
   if (globalShortcutInput && config.globalShortcut) {
     globalShortcutInput.value = config.globalShortcut;
+  }
+  if (knownWordsInput) {
+    knownWordsInput.value = (config.knownWords || []).join('\n');
   }
 
   // Show the modal
