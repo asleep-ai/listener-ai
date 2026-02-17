@@ -6,6 +6,8 @@ interface RecordingMetadata {
   filePath: string;
   title: string;
   timestamp: string;
+  transcriptionPath?: string;
+  // Old format fields (kept for backward compat)
   transcript?: string;
   summary?: string;
   keyPoints?: string[];
