@@ -1,4 +1,3 @@
-import { app } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -14,8 +13,8 @@ export class ConfigService {
   private configPath: string;
   private config: AppConfig = {};
 
-  constructor() {
-    const userDataPath = app.getPath('userData');
+  constructor(dataPath?: string) {
+    const userDataPath = dataPath ?? require('electron').app.getPath('userData');
     this.configPath = path.join(userDataPath, 'config.json');
     this.loadConfig();
   }
