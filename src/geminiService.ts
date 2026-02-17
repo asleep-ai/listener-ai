@@ -34,7 +34,7 @@ export class GeminiService {
     this.ffmpegManager = new FFmpegManager(dataPath);
   }
 
-  async transcribeAudio(audioFilePath: string, progressCallback?: (percent: number, message: string) => void): Promise<TranscriptionResult> {
+  async transcribeAudio(audioFilePath: string, progressCallback?: (percent: number, message: string) => void, summaryPrompt?: string): Promise<TranscriptionResult> {
     try {
       // Check file size
       const stats = fs.statSync(audioFilePath);
@@ -56,7 +56,7 @@ export class GeminiService {
 
       // Always use the two-step approach for consistency
       console.log('Using two-step transcription approach...');
-      return await this.transcribeWithTwoSteps(audioFilePath, duration, progressCallback);
+      return await this.transcribeWithTwoSteps(audioFilePath, duration, progressCallback, summaryPrompt);
     } catch (error) {
       console.error('Error transcribing audio:', error);
 
@@ -208,7 +208,7 @@ export class GeminiService {
 
 
   // Two-step transcription approach for all audio files
-  private async transcribeWithTwoSteps(audioFilePath: string, duration: number, progressCallback?: (percent: number, message: string) => void): Promise<TranscriptionResult> {
+  private async transcribeWithTwoSteps(audioFilePath: string, duration: number, progressCallback?: (percent: number, message: string) => void, customSummaryPrompt?: string): Promise<TranscriptionResult> {
     try {
       let fullTranscript = '';
 
@@ -228,7 +228,7 @@ export class GeminiService {
         progressCallback(85, 'Generating summary and key points...');
       }
 
-      const summaryPrompt = `Based on this meeting transcript, provide:
+      const summaryPrompt = customSummaryPrompt || `Based on this meeting transcript, provide:
 
 1. A concise meeting title in Korean (10-20 characters that captures the main topic)
 2. A concise summary in Korean (2-3 paragraphs)

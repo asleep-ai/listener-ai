@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
   },
   checkConfig: () => ipcRenderer.invoke('check-config'),
-  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; globalShortcut?: string }) =>
+  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; globalShortcut?: string; summaryPrompt?: string }) =>
     ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   transcribeAudio: (filePath: string) => ipcRenderer.invoke('transcribe-audio', filePath),
