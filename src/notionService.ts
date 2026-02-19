@@ -133,6 +133,45 @@ export class NotionService {
         });
       }
 
+      // Add custom fields
+      if (transcriptionResult.customFields) {
+        for (const [key, value] of Object.entries(transcriptionResult.customFields)) {
+          const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, (s: string) => s.toUpperCase()).trim();
+
+          if (Array.isArray(value)) {
+            children.push({
+              type: 'heading_2',
+              heading_2: {
+                rich_text: [{ type: 'text', text: { content: label } }]
+              }
+            } as BlockObjectRequest);
+            for (const item of value) {
+              children.push({
+                type: 'bulleted_list_item',
+                bulleted_list_item: {
+                  rich_text: [{ type: 'text', text: { content: String(item) } }]
+                }
+              } as BlockObjectRequest);
+            }
+          } else if (typeof value === 'string' && value.trim()) {
+            children.push(
+              {
+                type: 'heading_2',
+                heading_2: {
+                  rich_text: [{ type: 'text', text: { content: label } }]
+                }
+              } as BlockObjectRequest,
+              {
+                type: 'paragraph',
+                paragraph: {
+                  rich_text: [{ type: 'text', text: { content: value } }]
+                }
+              } as BlockObjectRequest
+            );
+          }
+        }
+      }
+
       // Add Transcript section
       if (transcriptionResult.transcript) {
         children.push(

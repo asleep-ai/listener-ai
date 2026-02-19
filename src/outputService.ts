@@ -42,6 +42,23 @@ export function formatSummary(result: TranscriptionResult, title: string): strin
     lines.push('');
   }
 
+  if (result.customFields) {
+    for (const [key, value] of Object.entries(result.customFields)) {
+      const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, (s: string) => s.toUpperCase()).trim();
+      lines.push(`## ${label}\n`);
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          lines.push(`- ${String(item)}`);
+        }
+      } else if (typeof value === 'string') {
+        lines.push(value);
+      } else {
+        lines.push(JSON.stringify(value, null, 2));
+      }
+      lines.push('');
+    }
+  }
+
   return lines.join('\n');
 }
 
@@ -59,6 +76,7 @@ interface SummaryFrontmatter {
   transcript: string;
   keyPoints?: string[];
   actionItems?: string[];
+  customFields?: Record<string, unknown>;
   audioFilePath?: string;
   transcribedAt: string;
 }
@@ -78,6 +96,9 @@ function buildFrontmatter(meta: SummaryFrontmatter): string {
   if (meta.actionItems?.length) {
     lines.push('actionItems:');
     for (const a of meta.actionItems) lines.push(`  - ${yamlQuote(a)}`);
+  }
+  if (meta.customFields && Object.keys(meta.customFields).length > 0) {
+    lines.push(`customFields: ${JSON.stringify(meta.customFields)}`);
   }
   if (meta.audioFilePath) {
     lines.push(`audioFilePath: ${yamlQuote(meta.audioFilePath)}`);
@@ -189,6 +210,7 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
     transcript: opts.result.transcript,
     keyPoints: opts.result.keyPoints,
     actionItems: opts.result.actionItems,
+    customFields: opts.result.customFields,
     audioFilePath: opts.audioFilePath,
     transcribedAt,
   });
@@ -208,6 +230,7 @@ export interface ReadTranscriptionResult {
   summary: string;
   keyPoints?: string[];
   actionItems?: string[];
+  customFields?: Record<string, unknown>;
   audioFilePath?: string;
   transcribedAt?: string;
 }
@@ -225,6 +248,18 @@ export function readTranscription(folderPath: string): ReadTranscriptionResult |
     const summaryContent = fs.readFileSync(summaryPath, 'utf-8');
     const { meta } = parseFrontmatter(summaryContent);
 
+    // Parse customFields from frontmatter (stored as JSON string)
+    let customFields: Record<string, unknown> | undefined;
+    if (meta.customFields) {
+      try {
+        customFields = typeof meta.customFields === 'string'
+          ? JSON.parse(meta.customFields as string)
+          : meta.customFields as Record<string, unknown>;
+      } catch {
+        // Ignore parse errors
+      }
+    }
+
     return {
       title: (meta.title as string) || path.basename(folderPath),
       suggestedTitle: meta.suggestedTitle as string | undefined,
@@ -232,6 +267,7 @@ export function readTranscription(folderPath: string): ReadTranscriptionResult |
       summary: (meta.summary as string) || '',
       keyPoints: meta.keyPoints as string[] | undefined,
       actionItems: meta.actionItems as string[] | undefined,
+      customFields,
       audioFilePath: meta.audioFilePath as string | undefined,
       transcribedAt: meta.transcribedAt as string | undefined,
     };
