@@ -3,6 +3,7 @@ import { TranscriptionResult } from './geminiService';
 import * as fs from 'fs';
 import * as path from 'path';
 import { BlockObjectRequest } from '@notionhq/client/build/src/api-endpoints';
+import { camelToLabel } from './outputService';
 
 export interface NotionConfig {
   apiKey: string;
@@ -131,6 +132,52 @@ export class NotionService {
             }
           } as BlockObjectRequest);
         });
+      }
+
+      // Add custom fields
+      if (transcriptionResult.customFields) {
+        for (const [key, value] of Object.entries(transcriptionResult.customFields)) {
+          const label = camelToLabel(key);
+
+          if (Array.isArray(value)) {
+            children.push({
+              type: 'heading_2',
+              heading_2: {
+                rich_text: [{ type: 'text', text: { content: label } }]
+              }
+            } as BlockObjectRequest);
+            for (const item of value) {
+              const text = String(item).slice(0, 1900);
+              children.push({
+                type: 'bulleted_list_item',
+                bulleted_list_item: {
+                  rich_text: [{ type: 'text', text: { content: text } }]
+                }
+              } as BlockObjectRequest);
+            }
+          } else {
+            const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+            if (!text || !text.trim()) continue;
+
+            children.push({
+              type: 'heading_2',
+              heading_2: {
+                rich_text: [{ type: 'text', text: { content: label } }]
+              }
+            } as BlockObjectRequest);
+
+            // Split long values into chunks for Notion's 2000-char rich_text limit
+            const maxLen = 1900;
+            const chunks: { type: 'text'; text: { content: string } }[] = [];
+            for (let i = 0; i < text.length; i += maxLen) {
+              chunks.push({ type: 'text', text: { content: text.slice(i, i + maxLen) } });
+            }
+            children.push({
+              type: 'paragraph',
+              paragraph: { rich_text: chunks }
+            } as BlockObjectRequest);
+          }
+        }
       }
 
       // Add Transcript section

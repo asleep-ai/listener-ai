@@ -498,21 +498,15 @@ function setupEventListeners() {
     transcriptionModal.style.display = 'none';
   });
 
-  // Tab handling for transcription modal
-  const tabButtons = document.querySelectorAll('.tab-button');
-  const tabPanes = document.querySelectorAll('.tab-pane');
-
-  tabButtons.forEach(button => {
-    button.addEventListener('click', () => {
-      const targetTab = button.dataset.tab;
-
-      // Update active states
-      tabButtons.forEach(btn => btn.classList.remove('active'));
-      tabPanes.forEach(pane => pane.classList.remove('active'));
-
-      button.classList.add('active');
-      document.getElementById(targetTab).classList.add('active');
-    });
+  // Tab handling for transcription modal (event delegation for dynamic tabs)
+  document.querySelector('.transcription-tabs').addEventListener('click', (e) => {
+    const button = e.target.closest('.tab-button');
+    if (!button) return;
+    const targetTab = button.dataset.tab;
+    document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+    document.querySelectorAll('.tab-pane').forEach(pane => pane.classList.remove('active'));
+    button.classList.add('active');
+    document.getElementById(targetTab)?.classList.add('active');
   });
 
   // Handle upload to Notion
@@ -555,6 +549,77 @@ let currentTranscriptionData = null;
 let currentMeetingTitle = '';
 let currentFilePath = '';
 
+// Convert camelCase key to display label
+function camelToLabel(key) {
+  return key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim();
+}
+
+// Escape HTML to prevent XSS from untrusted content
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = String(str);
+  return div.innerHTML;
+}
+
+// Render dynamic field tabs (keyPoints, actionItems, and any custom fields)
+function renderDynamicFields(data) {
+  const fields = [];
+
+  if (data.keyPoints?.length) {
+    fields.push({ key: 'keypoints', label: 'Key Points', value: data.keyPoints });
+  }
+  if (data.actionItems?.length) {
+    fields.push({ key: 'actions', label: 'Action Items', value: data.actionItems });
+  }
+  if (data.customFields) {
+    for (const [key, value] of Object.entries(data.customFields)) {
+      if (value != null && (typeof value !== 'string' || value.trim())) {
+        fields.push({ key: `cf-${key}`, label: camelToLabel(key), value });
+      }
+    }
+  }
+
+  const tabsContainer = document.querySelector('.transcription-tabs');
+  const contentContainer = document.querySelector('.tab-content');
+
+  // Remove old dynamic elements and restore first tab as active
+  tabsContainer.querySelectorAll('.tab-button.dynamic').forEach(el => el.remove());
+  contentContainer.querySelectorAll('.tab-pane.dynamic').forEach(el => el.remove());
+  tabsContainer.querySelector('.tab-button')?.classList.add('active');
+  contentContainer.querySelector('.tab-pane')?.classList.add('active');
+
+  for (const field of fields) {
+    // Tab button
+    const btn = document.createElement('button');
+    btn.className = 'tab-button dynamic';
+    btn.dataset.tab = field.key;
+    btn.textContent = field.label;
+    tabsContainer.appendChild(btn);
+
+    // Tab pane
+    const pane = document.createElement('div');
+    pane.id = field.key;
+    pane.className = 'tab-pane dynamic';
+
+    const safeKey = escapeHtml(field.key);
+    const copyBtn = `<button class="copy-button" data-copy-target="${safeKey}">📋 Copy</button>`;
+
+    let content = '';
+    if (Array.isArray(field.value)) {
+      const items = field.value.map(item => `<li>${escapeHtml(item)}</li>`).join('');
+      content = items ? `${copyBtn}<ul class="${safeKey}-content">${items}</ul>`
+                      : `<p>No ${escapeHtml(field.label.toLowerCase())} identified</p>`;
+    } else if (typeof field.value === 'string') {
+      content = `${copyBtn}<p class="${safeKey}-content">${escapeHtml(field.value)}</p>`;
+    } else {
+      content = `${copyBtn}<pre class="${safeKey}-content">${escapeHtml(JSON.stringify(field.value, null, 2))}</pre>`;
+    }
+
+    pane.innerHTML = content;
+    contentContainer.appendChild(pane);
+  }
+}
+
 // Function to show saved transcript
 function showSavedTranscript(filePath, title, metadata) {
   // Make sure modal elements are loaded
@@ -578,7 +643,8 @@ function showSavedTranscript(filePath, title, metadata) {
       summary: metadata.summary,
       keyPoints: metadata.keyPoints || [],
       actionItems: metadata.actionItems || [],
-      suggestedTitle: metadata.suggestedTitle
+      suggestedTitle: metadata.suggestedTitle,
+      customFields: metadata.customFields,
     };
     currentMeetingTitle = title;
     currentFilePath = filePath;
@@ -597,7 +663,7 @@ function showSavedTranscript(filePath, title, metadata) {
       <button class="copy-button" data-copy-target="transcript">
         📋 Copy
       </button>
-      <div class="transcript-content">${formattedTranscript}</div>
+      <div class="transcript-content">${escapeHtml(formattedTranscript)}</div>
     `;
 
     // Update summary
@@ -606,36 +672,15 @@ function showSavedTranscript(filePath, title, metadata) {
       <button class="copy-button" data-copy-target="summary">
         📋 Copy
       </button>
-      <p class="summary-content">${metadata.summary || 'No summary available'}</p>
+      <p class="summary-content">${escapeHtml(metadata.summary || 'No summary available')}</p>
     `;
 
-    // Key points
-    const keyPointsList = (metadata.keyPoints || []).map(point => `<li>${point}</li>`).join('');
-    const keyPointsDiv = document.getElementById('keypoints');
-    if (keyPointsList) {
-      keyPointsDiv.innerHTML = `
-        <button class="copy-button" data-copy-target="keypoints">
-          📋 Copy
-        </button>
-        <ul class="keypoints-content">${keyPointsList}</ul>
-      `;
-    } else {
-      keyPointsDiv.innerHTML = '<p>No key points identified</p>';
-    }
-
-    // Action items
-    const actionItemsList = (metadata.actionItems || []).map(item => `<li>${item}</li>`).join('');
-    const actionsDiv = document.getElementById('actions');
-    if (actionItemsList) {
-      actionsDiv.innerHTML = `
-        <button class="copy-button" data-copy-target="actions">
-          📋 Copy
-        </button>
-        <ul class="actions-content">${actionItemsList}</ul>
-      `;
-    } else {
-      actionsDiv.innerHTML = '<p>No action items identified</p>';
-    }
+    // Render dynamic field tabs (keyPoints, actionItems, custom fields)
+    renderDynamicFields({
+      keyPoints: metadata.keyPoints,
+      actionItems: metadata.actionItems,
+      customFields: metadata.customFields,
+    });
 
     // Setup copy button event listeners
     setupCopyButtons(currentTranscriptionData);
@@ -689,8 +734,9 @@ async function handleTranscribe(filePath, title) {
   // Reset all tabs to loading state
   document.getElementById('transcript').innerHTML = '<p class="loading">Loading transcription...</p>';
   document.getElementById('summary').innerHTML = '<p class="loading">Loading summary...</p>';
-  document.getElementById('keypoints').innerHTML = '<ul class="loading">Loading key points...</ul>';
-  document.getElementById('actions').innerHTML = '<ul class="loading">Loading action items...</ul>';
+  // Remove old dynamic tabs/panes
+  document.querySelectorAll('.tab-button.dynamic').forEach(el => el.remove());
+  document.querySelectorAll('.tab-pane.dynamic').forEach(el => el.remove());
 
   // Disable the transcribe button
   const button = document.querySelector(`[data-filepath="${filePath}"]`);
@@ -738,7 +784,7 @@ async function handleTranscribe(filePath, title) {
         <button class="copy-button" data-copy-target="transcript">
           📋 Copy
         </button>
-        <div class="transcript-content">${formattedTranscript}</div>
+        <div class="transcript-content">${escapeHtml(formattedTranscript)}</div>
       `;
 
       // Update summary
@@ -747,36 +793,11 @@ async function handleTranscribe(filePath, title) {
         <button class="copy-button" data-copy-target="summary">
           📋 Copy
         </button>
-        <p class="summary-content">${result.data.summary}</p>
+        <p class="summary-content">${escapeHtml(result.data.summary)}</p>
       `;
 
-      // Key points
-      const keyPointsList = result.data.keyPoints.map(point => `<li>${point}</li>`).join('');
-      const keyPointsDiv = document.getElementById('keypoints');
-      if (keyPointsList) {
-        keyPointsDiv.innerHTML = `
-          <button class="copy-button" data-copy-target="keypoints">
-            📋 Copy
-          </button>
-          <ul class="keypoints-content">${keyPointsList}</ul>
-        `;
-      } else {
-        keyPointsDiv.innerHTML = '<p>No key points identified</p>';
-      }
-
-      // Action items
-      const actionItemsList = result.data.actionItems.map(item => `<li>${item}</li>`).join('');
-      const actionsDiv = document.getElementById('actions');
-      if (actionItemsList) {
-        actionsDiv.innerHTML = `
-          <button class="copy-button" data-copy-target="actions">
-            📋 Copy
-          </button>
-          <ul class="actions-content">${actionItemsList}</ul>
-        `;
-      } else {
-        actionsDiv.innerHTML = '<p>No action items identified</p>';
-      }
+      // Render dynamic field tabs (keyPoints, actionItems, custom fields)
+      renderDynamicFields(result.data);
 
       // Setup copy button event listeners
       setupCopyButtons(result.data);
@@ -964,23 +985,25 @@ function setupCopyButtons(transcriptionData) {
       let textToCopy = '';
       let sectionName = '';
 
-      switch (target) {
-        case 'transcript':
-          textToCopy = transcriptionData.transcript;
-          sectionName = 'Transcript';
-          break;
-        case 'summary':
-          textToCopy = transcriptionData.summary;
-          sectionName = 'Summary';
-          break;
-        case 'keypoints':
-          textToCopy = transcriptionData.keyPoints.join('\n');
-          sectionName = 'Key Points';
-          break;
-        case 'actions':
-          textToCopy = transcriptionData.actionItems.join('\n');
-          sectionName = 'Action Items';
-          break;
+      if (target === 'transcript') {
+        textToCopy = transcriptionData.transcript;
+        sectionName = 'Transcript';
+      } else if (target === 'summary') {
+        textToCopy = transcriptionData.summary;
+        sectionName = 'Summary';
+      } else if (target === 'keypoints') {
+        textToCopy = (transcriptionData.keyPoints || []).join('\n');
+        sectionName = 'Key Points';
+      } else if (target === 'actions') {
+        textToCopy = (transcriptionData.actionItems || []).join('\n');
+        sectionName = 'Action Items';
+      } else if (target.startsWith('cf-') && transcriptionData.customFields) {
+        const cfKey = target.slice(3);
+        if (Object.hasOwn(transcriptionData.customFields, cfKey)) {
+          const val = transcriptionData.customFields[cfKey];
+          textToCopy = Array.isArray(val) ? val.join('\n') : typeof val === 'string' ? val : JSON.stringify(val, null, 2);
+          sectionName = camelToLabel(cfKey);
+        }
       }
 
       try {

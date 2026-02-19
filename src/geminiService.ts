@@ -10,6 +10,7 @@ export interface TranscriptionResult {
   actionItems: string[];
   emoji: string;
   suggestedTitle?: string;
+  customFields?: Record<string, unknown>;
 }
 
 export class GeminiService {
@@ -274,8 +275,19 @@ Return as JSON:
         emoji: '📝'
       };
 
+      const KNOWN_KEYS = new Set(['suggestedTitle', 'summary', 'keyPoints', 'actionItems', 'emoji']);
+      let customFields: Record<string, unknown> = {};
+
       try {
-        summaryData = JSON.parse(summaryText);
+        const parsed = JSON.parse(summaryText);
+        summaryData = parsed;
+
+        // Extract custom fields (any keys not in the known set)
+        for (const [key, value] of Object.entries(parsed)) {
+          if (!KNOWN_KEYS.has(key)) {
+            customFields[key] = value;
+          }
+        }
       } catch (e) {
         console.error('Error parsing summary JSON:', e);
         // Try to extract manually
@@ -295,7 +307,8 @@ Return as JSON:
         keyPoints: summaryData.keyPoints,
         actionItems: summaryData.actionItems,
         emoji: summaryData.emoji,
-        suggestedTitle: summaryData.suggestedTitle
+        suggestedTitle: summaryData.suggestedTitle,
+        customFields: Object.keys(customFields).length > 0 ? customFields : undefined,
       };
 
     } catch (error) {

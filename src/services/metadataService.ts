@@ -14,6 +14,7 @@ interface RecordingMetadata {
   actionItems?: string[];
   suggestedTitle?: string;
   transcribedAt?: string;
+  customFields?: Record<string, unknown>;
 }
 
 export class MetadataService {

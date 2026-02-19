@@ -487,6 +487,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
           title,
           suggestedTitle: result.suggestedTitle,
           transcriptionPath,
+          customFields: result.customFields,
           transcribedAt: new Date().toISOString()
         });
       } else {
@@ -498,6 +499,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
           summary: result.summary,
           keyPoints: result.keyPoints,
           actionItems: result.actionItems,
+          customFields: result.customFields,
           transcribedAt: new Date().toISOString()
         });
       }
@@ -588,6 +590,7 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
             summary: transcription.summary,
             keyPoints: transcription.keyPoints,
             actionItems: transcription.actionItems,
+            customFields: transcription.customFields ?? metadata.customFields,
           }
         };
       }
