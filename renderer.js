@@ -554,6 +554,13 @@ function camelToLabel(key) {
   return key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim();
 }
 
+// Escape HTML to prevent XSS from untrusted content
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = String(str);
+  return div.innerHTML;
+}
+
 // Render dynamic field tabs (keyPoints, actionItems, and any custom fields)
 function renderDynamicFields(data) {
   const fields = [];
@@ -567,7 +574,7 @@ function renderDynamicFields(data) {
   if (data.customFields) {
     for (const [key, value] of Object.entries(data.customFields)) {
       if (value && (typeof value === 'string' ? value.trim() : true)) {
-        fields.push({ key, label: camelToLabel(key), value });
+        fields.push({ key: `cf-${key}`, label: camelToLabel(key), value });
       }
     }
   }
@@ -592,17 +599,18 @@ function renderDynamicFields(data) {
     pane.id = field.key;
     pane.className = 'tab-pane dynamic';
 
-    let content = '';
-    const copyBtn = `<button class="copy-button" data-copy-target="${field.key}">📋 Copy</button>`;
+    const safeKey = escapeHtml(field.key);
+    const copyBtn = `<button class="copy-button" data-copy-target="${safeKey}">📋 Copy</button>`;
 
+    let content = '';
     if (Array.isArray(field.value)) {
-      const items = field.value.map(item => `<li>${item}</li>`).join('');
-      content = items ? `${copyBtn}<ul class="${field.key}-content">${items}</ul>`
-                      : `<p>No ${field.label.toLowerCase()} identified</p>`;
+      const items = field.value.map(item => `<li>${escapeHtml(item)}</li>`).join('');
+      content = items ? `${copyBtn}<ul class="${safeKey}-content">${items}</ul>`
+                      : `<p>No ${escapeHtml(field.label.toLowerCase())} identified</p>`;
     } else if (typeof field.value === 'string') {
-      content = `${copyBtn}<p class="${field.key}-content">${field.value}</p>`;
+      content = `${copyBtn}<p class="${safeKey}-content">${escapeHtml(field.value)}</p>`;
     } else {
-      content = `${copyBtn}<pre class="${field.key}-content">${JSON.stringify(field.value, null, 2)}</pre>`;
+      content = `${copyBtn}<pre class="${safeKey}-content">${escapeHtml(JSON.stringify(field.value, null, 2))}</pre>`;
     }
 
     pane.innerHTML = content;
@@ -987,10 +995,13 @@ function setupCopyButtons(transcriptionData) {
       } else if (target === 'actions') {
         textToCopy = (transcriptionData.actionItems || []).join('\n');
         sectionName = 'Action Items';
-      } else if (transcriptionData.customFields && target in transcriptionData.customFields) {
-        const val = transcriptionData.customFields[target];
-        textToCopy = Array.isArray(val) ? val.join('\n') : typeof val === 'string' ? val : JSON.stringify(val, null, 2);
-        sectionName = camelToLabel(target);
+      } else if (target.startsWith('cf-') && transcriptionData.customFields) {
+        const cfKey = target.slice(3);
+        if (Object.hasOwn(transcriptionData.customFields, cfKey)) {
+          const val = transcriptionData.customFields[cfKey];
+          textToCopy = Array.isArray(val) ? val.join('\n') : typeof val === 'string' ? val : JSON.stringify(val, null, 2);
+          sectionName = camelToLabel(cfKey);
+        }
       }
 
       try {

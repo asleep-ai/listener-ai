@@ -98,7 +98,7 @@ function buildFrontmatter(meta: SummaryFrontmatter): string {
     for (const a of meta.actionItems) lines.push(`  - ${yamlQuote(a)}`);
   }
   if (meta.customFields && Object.keys(meta.customFields).length > 0) {
-    lines.push(`customFields: ${JSON.stringify(meta.customFields)}`);
+    lines.push(`customFields: ${yamlQuote(JSON.stringify(meta.customFields))}`);
   }
   if (meta.audioFilePath) {
     lines.push(`audioFilePath: ${yamlQuote(meta.audioFilePath)}`);
@@ -255,8 +255,8 @@ export function readTranscription(folderPath: string): ReadTranscriptionResult |
         customFields = typeof meta.customFields === 'string'
           ? JSON.parse(meta.customFields as string)
           : meta.customFields as Record<string, unknown>;
-      } catch {
-        // Ignore parse errors
+      } catch (e) {
+        console.warn('Failed to parse customFields from frontmatter:', e);
       }
     }
 
