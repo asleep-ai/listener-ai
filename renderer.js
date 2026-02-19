@@ -573,7 +573,7 @@ function renderDynamicFields(data) {
   }
   if (data.customFields) {
     for (const [key, value] of Object.entries(data.customFields)) {
-      if (value && (typeof value === 'string' ? value.trim() : true)) {
+      if (value != null && (typeof value !== 'string' || value.trim())) {
         fields.push({ key: `cf-${key}`, label: camelToLabel(key), value });
       }
     }
@@ -582,9 +582,11 @@ function renderDynamicFields(data) {
   const tabsContainer = document.querySelector('.transcription-tabs');
   const contentContainer = document.querySelector('.tab-content');
 
-  // Remove old dynamic elements
+  // Remove old dynamic elements and restore first tab as active
   tabsContainer.querySelectorAll('.tab-button.dynamic').forEach(el => el.remove());
   contentContainer.querySelectorAll('.tab-pane.dynamic').forEach(el => el.remove());
+  tabsContainer.querySelector('.tab-button')?.classList.add('active');
+  contentContainer.querySelector('.tab-pane')?.classList.add('active');
 
   for (const field of fields) {
     // Tab button
@@ -661,7 +663,7 @@ function showSavedTranscript(filePath, title, metadata) {
       <button class="copy-button" data-copy-target="transcript">
         📋 Copy
       </button>
-      <div class="transcript-content">${formattedTranscript}</div>
+      <div class="transcript-content">${escapeHtml(formattedTranscript)}</div>
     `;
 
     // Update summary
@@ -670,7 +672,7 @@ function showSavedTranscript(filePath, title, metadata) {
       <button class="copy-button" data-copy-target="summary">
         📋 Copy
       </button>
-      <p class="summary-content">${metadata.summary || 'No summary available'}</p>
+      <p class="summary-content">${escapeHtml(metadata.summary || 'No summary available')}</p>
     `;
 
     // Render dynamic field tabs (keyPoints, actionItems, custom fields)
@@ -782,7 +784,7 @@ async function handleTranscribe(filePath, title) {
         <button class="copy-button" data-copy-target="transcript">
           📋 Copy
         </button>
-        <div class="transcript-content">${formattedTranscript}</div>
+        <div class="transcript-content">${escapeHtml(formattedTranscript)}</div>
       `;
 
       // Update summary
@@ -791,7 +793,7 @@ async function handleTranscribe(filePath, title) {
         <button class="copy-button" data-copy-target="summary">
           📋 Copy
         </button>
-        <p class="summary-content">${result.data.summary}</p>
+        <p class="summary-content">${escapeHtml(result.data.summary)}</p>
       `;
 
       // Render dynamic field tabs (keyPoints, actionItems, custom fields)

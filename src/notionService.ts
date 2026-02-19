@@ -3,6 +3,7 @@ import { TranscriptionResult } from './geminiService';
 import * as fs from 'fs';
 import * as path from 'path';
 import { BlockObjectRequest } from '@notionhq/client/build/src/api-endpoints';
+import { camelToLabel } from './outputService';
 
 export interface NotionConfig {
   apiKey: string;
@@ -136,7 +137,7 @@ export class NotionService {
       // Add custom fields
       if (transcriptionResult.customFields) {
         for (const [key, value] of Object.entries(transcriptionResult.customFields)) {
-          const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, (s: string) => s.toUpperCase()).trim();
+          const label = camelToLabel(key);
 
           if (Array.isArray(value)) {
             children.push({

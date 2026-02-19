@@ -17,6 +17,11 @@ export function formatTimestamp(): string {
   return `${y}${m}${d}_${h}${min}${s}`;
 }
 
+/** Convert camelCase key to a display label: "keyDecisions" -> "Key Decisions" */
+export function camelToLabel(key: string): string {
+  return key.replace(/([A-Z])/g, ' $1').replace(/^./, (s: string) => s.toUpperCase()).trim();
+}
+
 export function formatSummary(result: TranscriptionResult, title: string): string {
   const lines: string[] = [];
   lines.push(`# ${title}\n`);
@@ -44,7 +49,7 @@ export function formatSummary(result: TranscriptionResult, title: string): strin
 
   if (result.customFields) {
     for (const [key, value] of Object.entries(result.customFields)) {
-      const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, (s: string) => s.toUpperCase()).trim();
+      const label = camelToLabel(key);
       lines.push(`## ${label}\n`);
       if (Array.isArray(value)) {
         for (const item of value) {
