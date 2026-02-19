@@ -6,6 +6,14 @@
   "bin": {
     "listener": "dist/cli.js"
   },
+  "files": [
+    "dist/cli.js",
+    "dist/dataPath.js",
+    "dist/configService.js",
+    "dist/geminiService.js",
+    "dist/outputService.js",
+    "dist/services/ffmpegManager.js"
+  ],
   "scripts": {
     "start": "pnpm run build && electron .",
     "dev": "pnpm run build && electron .",
@@ -21,7 +29,8 @@
     "version:bump": "node scripts/bump-version.js",
     "release": "pnpm run version:bump && pnpm run dist:all",
     "cli": "pnpm run build && node dist/cli.js",
-    "postinstall": "electron-builder install-app-deps && cd node_modules/electron && node install.js || cd node_modules/.pnpm/electron*/node_modules/electron && node install.js || true"
+    "prepublishOnly": "tsc",
+    "postinstall": "node -e \"require.resolve('electron')\" 2>/dev/null && electron-builder install-app-deps && (cd node_modules/electron && node install.js || cd node_modules/.pnpm/electron*/node_modules/electron && node install.js || true) || true"
   },
   "repository": {
     "type": "git",
@@ -47,9 +56,11 @@
   },
   "dependencies": {
     "@google/genai": "^1.13.0",
-    "@notionhq/client": "^4.0.0",
-    "electron-updater": "^6.6.2",
     "fs-extra": "^11.2.0"
+  },
+  "optionalDependencies": {
+    "@notionhq/client": "^4.0.0",
+    "electron-updater": "^6.6.2"
   },
   "build": {
     "appId": "com.listenerai.app",

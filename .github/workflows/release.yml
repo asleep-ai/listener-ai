@@ -16,6 +16,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  id-token: write  # npm provenance via OIDC
 
 jobs:
   prepare:
@@ -192,6 +193,11 @@ jobs:
             2. Follow the installation wizard
             3. FFmpeg will be automatically downloaded on first use
 
+            ### CLI (npm)
+            ```
+            npx listener-ai <audio-file>
+            ```
+
             ### First Run
             1. Enter your Google Gemini API key
             2. Enter your Notion API key and database ID
@@ -207,8 +213,33 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           makeLatest: true
 
+  npm-publish:
+    needs: [prepare, merge-to-main]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install and publish
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          npm publish --access public
+
   cleanup-on-failure:
-    needs: [prepare, build, merge-to-main, release]
+    needs: [prepare, build, merge-to-main, release, npm-publish]
     if: failure()
     runs-on: ubuntu-latest
     steps:
