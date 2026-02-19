@@ -30,7 +30,7 @@
     "release": "pnpm run version:bump && pnpm run dist:all",
     "cli": "pnpm run build && node dist/cli.js",
     "prepublishOnly": "tsc",
-    "postinstall": "node -e \"try{require.resolve('electron')}catch{process.exit(0)}\" && electron-builder install-app-deps && (cd node_modules/electron && node install.js || cd node_modules/.pnpm/electron*/node_modules/electron && node install.js || true)"
+    "postinstall": "node -e \"require.resolve('electron')\" 2>/dev/null && electron-builder install-app-deps && (cd node_modules/electron && node install.js || cd node_modules/.pnpm/electron*/node_modules/electron && node install.js || true) || true"
   },
   "repository": {
     "type": "git",

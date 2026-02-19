@@ -60,9 +60,9 @@ The desktop app includes one-click recording, auto-transcription, Notion upload,
 ## Configuration
 
 Config is stored in your system application data folder:
-- **macOS**: `~/Library/Application Support/listener-ai/config.json`
-- **Windows**: `%APPDATA%/listener-ai/config.json`
-- **Linux**: `~/.config/listener-ai/config.json`
+- **macOS**: `~/Library/Application Support/Listener.AI/config.json`
+- **Windows**: `%APPDATA%/Listener.AI/config.json`
+- **Linux**: `~/.config/Listener.AI/config.json`
 
 CLI and desktop app share the same config file.
 

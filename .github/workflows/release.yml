@@ -235,7 +235,7 @@ jobs:
 
       - name: Install and publish
         run: |
-          pnpm install --frozen-lockfile
+          pnpm install --frozen-lockfile --ignore-scripts
           npm publish --access public
 
   cleanup-on-failure:
