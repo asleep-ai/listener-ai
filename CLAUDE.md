@@ -137,6 +137,20 @@ CLI and GUI share the same config file (`config.json` in the app data directory)
 - Blockmaps (*.blockmap) enable differential updates - users download only changed blocks
 - GitHub workflow must upload both ZIP and blockmap files alongside DMG for auto-update to work
 
+## FFmpeg Licensing
+- FFmpeg binaries are downloaded at runtime from `eugeneware/ffmpeg-static` GitHub releases (not bundled)
+- The `ffmpeg-static` npm package/repo is **GPL-3.0** licensed
+- FFmpeg itself is LGPL 2.1+ for default builds; our use case (MP3 via libmp3lame) stays within LGPL
+- Do NOT add `ffmpeg-static` as an npm dependency -- it would impose GPL-3.0 on the project
+- For CLI npm distribution: prefer requiring user-installed ffmpeg, or keep the current runtime download approach
+- Runtime download (current): legally better than bundling, but still downloads from a GPL-3.0-wrapped repo
+- SHA256 checksums in `ffmpegManager.ts` are empty (`// TODO`) -- should be filled for integrity verification
+
+## npm Distribution
+- Package name: `listener-ai`
+- Only the CLI portion is published to npm (Electron app uses GitHub Releases)
+- Electron-only runtime deps (`electron-updater`, `@notionhq/client`) are in `optionalDependencies` -- honest semantics for a package serving both Electron and CLI users. `build.files` includes `node_modules/**/*`, so they're still bundled in Electron builds.
+
 ## Future Enhancements (Optional)
 - Live transcription during recording
 - Advanced keyword extraction and tagging
