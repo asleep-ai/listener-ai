@@ -89,6 +89,7 @@ interface SummaryFrontmatter {
 function buildFrontmatter(meta: SummaryFrontmatter): string {
   const lines: string[] = ['---'];
   lines.push(`title: ${yamlQuote(meta.title)}`);
+  lines.push(`transcribedAt: ${yamlQuote(meta.transcribedAt)}`);
   if (meta.suggestedTitle) {
     lines.push(`suggestedTitle: ${yamlQuote(meta.suggestedTitle)}`);
   }
@@ -108,7 +109,6 @@ function buildFrontmatter(meta: SummaryFrontmatter): string {
   if (meta.audioFilePath) {
     lines.push(`audioFilePath: ${yamlQuote(meta.audioFilePath)}`);
   }
-  lines.push(`transcribedAt: ${yamlQuote(meta.transcribedAt)}`);
   lines.push('---');
   return lines.join('\n');
 }
@@ -226,6 +226,68 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
   fs.writeFileSync(path.join(folderPath, 'transcript.md'), formatTranscript(opts.result, opts.title), 'utf-8');
 
   return folderPath;
+}
+
+export interface TranscriptionEntry {
+  folderPath: string;
+  folderName: string;
+  title: string;
+  transcribedAt: string;
+}
+
+/**
+ * List transcription folders sorted by most-recent-first.
+ * Performs a lightweight line scan of each summary.md to extract only title and transcribedAt.
+ */
+export function listTranscriptions(dataPath: string, limit?: number): TranscriptionEntry[] {
+  const dir = getTranscriptionsDir(dataPath);
+  if (!fs.existsSync(dir)) return [];
+
+  const entries: TranscriptionEntry[] = [];
+  for (const name of fs.readdirSync(dir)) {
+    const folderPath = path.join(dir, name);
+    if (!fs.statSync(folderPath).isDirectory()) continue;
+    const summaryPath = path.join(folderPath, 'summary.md');
+    if (!fs.existsSync(summaryPath)) continue;
+
+    let title = name;
+    let transcribedAt = '';
+
+    // Lightweight line scan -- read only frontmatter, not the full file
+    const fd = fs.openSync(summaryPath, 'r');
+    try {
+      const buf = Buffer.alloc(2048);
+      const bytesRead = fs.readSync(fd, buf, 0, 2048, 0);
+      const head = buf.toString('utf-8', 0, bytesRead);
+
+      for (const line of head.split('\n')) {
+        const titleMatch = line.match(/^title:\s*(.+)$/);
+        if (titleMatch) title = yamlUnquote(titleMatch[1]);
+        const dateMatch = line.match(/^transcribedAt:\s*(.+)$/);
+        if (dateMatch) transcribedAt = yamlUnquote(dateMatch[1]);
+        // Stop after closing frontmatter delimiter
+        if (line === '---' && transcribedAt) break;
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    // Fall back to folder name timestamp suffix (e.g. _20260219_143000)
+    if (!transcribedAt) {
+      const tsMatch = name.match(/(\d{8}_\d{6})$/);
+      if (tsMatch) {
+        const s = tsMatch[1];
+        transcribedAt = `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T${s.slice(9, 11)}:${s.slice(11, 13)}:${s.slice(13, 15)}`;
+      }
+    }
+
+    entries.push({ folderPath, folderName: name, title, transcribedAt });
+  }
+
+  entries.sort((a, b) => (b.transcribedAt || '').localeCompare(a.transcribedAt || ''));
+
+  const max = limit === 0 ? entries.length : (limit ?? 20);
+  return entries.slice(0, max);
 }
 
 export interface ReadTranscriptionResult {

@@ -5,7 +5,7 @@ import * as path from 'path';
 import { getDataPath } from './dataPath';
 import { ConfigService } from './configService';
 import { GeminiService } from './geminiService';
-import { saveTranscription } from './outputService';
+import { saveTranscription, listTranscriptions, parseFrontmatter, getTranscriptionsDir } from './outputService';
 
 const SUPPORTED_EXTENSIONS = new Set([
   '.mp3', '.m4a', '.wav', '.ogg', '.flac', '.aac', '.wma', '.opus', '.webm',
@@ -13,24 +13,21 @@ const SUPPORTED_EXTENSIONS = new Set([
 
 function usage(): never {
   process.stderr.write(
-    'Usage: listener <file> [--output <dir>]\n' +
-    '       listener config list|get|set|path\n' +
+    'Usage: listener <file> [--output <dir>]    Transcribe an audio file\n' +
+    '       listener list [--limit <n>]         List past transcriptions\n' +
+    '       listener show <ref>                 Print summary to stdout\n' +
+    '       listener export <ref> [<path>] [--json] [--transcript]\n' +
+    '                                           Export transcription\n' +
+    '       listener config list|get|set|path   Manage configuration\n' +
     '\n' +
-    'Transcribe and summarize an audio file.\n' +
-    'Creates a folder with transcript.md and summary.md.\n' +
-    '\n' +
-    'Requires FFmpeg installed on the system.\n' +
+    '<ref> is a number from `listener list` or a folder name.\n' +
     '\n' +
     'Options:\n' +
-    '  --output <dir>  Parent directory for the output folder\n' +
-    '                  (default: app data transcriptions directory)\n' +
-    '  --help          Show this help message\n' +
-    '\n' +
-    'Config commands:\n' +
-    '  config list              Show all config values\n' +
-    '  config get <key>         Get a specific value\n' +
-    '  config set <key> <value> Set a value\n' +
-    '  config path              Print config file path\n'
+    '  --output <dir>   Parent directory for the output folder\n' +
+    '  --limit <n>      Max results (0 = all, default: 20)\n' +
+    '  --json           Export as JSON instead of markdown\n' +
+    '  --transcript     Include full transcript in export output\n' +
+    '  --help           Show this help message\n'
   );
   process.exit(1);
 }
@@ -121,6 +118,158 @@ function handleConfig(subArgs: string[]): void {
   usage();
 }
 
+function resolveRef(ref: string, dataPath: string): string {
+  if (/^\d+$/.test(ref)) {
+    const index = parseInt(ref, 10);
+    const entries = listTranscriptions(dataPath, 0);
+    if (entries.length === 0) {
+      process.stderr.write('Error: No transcriptions found.\n');
+      process.exit(1);
+    }
+    if (index < 1 || index > entries.length) {
+      process.stderr.write(`Error: Invalid index ${index}. Run 'listener list' to see available entries (1-${entries.length}).\n`);
+      process.exit(1);
+    }
+    return entries[index - 1].folderPath;
+  }
+  const folderPath = path.join(getTranscriptionsDir(dataPath), ref);
+  if (!fs.existsSync(folderPath)) {
+    process.stderr.write(`Error: Folder not found: ${ref}\n`);
+    process.exit(1);
+  }
+  return folderPath;
+}
+
+function handleList(args: string[]): void {
+  const dataPath = getDataPath();
+  let limit: number | undefined;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--limit' && i + 1 < args.length) {
+      limit = parseInt(args[++i], 10);
+      if (isNaN(limit) || limit < 0) {
+        process.stderr.write('Error: --limit must be a non-negative integer\n');
+        process.exit(1);
+      }
+    }
+  }
+  const entries = listTranscriptions(dataPath, limit);
+  if (entries.length === 0) {
+    process.stderr.write('No transcriptions found.\n');
+    return;
+  }
+  process.stdout.write(' #  Date        Title\n');
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    const num = String(i + 1).padStart(2, ' ');
+    const date = e.transcribedAt ? e.transcribedAt.slice(0, 10) : '          ';
+    const title = e.title.length > 60 ? e.title.slice(0, 57) + '...' : e.title;
+    process.stdout.write(`${num}  ${date}  ${title}\n`);
+  }
+}
+
+function handleShow(args: string[]): void {
+  const ref = args[0];
+  if (!ref) {
+    process.stderr.write('Error: Missing ref. Usage: listener show <ref>\n');
+    process.exit(1);
+  }
+  const dataPath = getDataPath();
+  const folderPath = resolveRef(ref, dataPath);
+  const summaryPath = path.join(folderPath, 'summary.md');
+  if (!fs.existsSync(summaryPath)) {
+    process.stderr.write(`Error: summary.md not found in ${folderPath}\n`);
+    process.exit(1);
+  }
+  const content = fs.readFileSync(summaryPath, 'utf-8');
+  const { body } = parseFrontmatter(content);
+  process.stdout.write(body);
+}
+
+function handleExport(args: string[]): void {
+  let ref: string | undefined;
+  let targetPath: string | undefined;
+  let json = false;
+  let includeTranscript = false;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--json') { json = true; continue; }
+    if (args[i] === '--transcript') { includeTranscript = true; continue; }
+    if (args[i].startsWith('-')) {
+      process.stderr.write(`Error: Unknown option: ${args[i]}\n`);
+      process.exit(1);
+    }
+    if (!ref) { ref = args[i]; continue; }
+    if (!targetPath) { targetPath = args[i]; continue; }
+  }
+
+  if (!ref) {
+    process.stderr.write('Error: Missing ref. Usage: listener export <ref> [<path>] [--json] [--transcript]\n');
+    process.exit(1);
+  }
+
+  const dataPath = getDataPath();
+  const folderPath = resolveRef(ref, dataPath);
+  const summaryPath = path.join(folderPath, 'summary.md');
+
+  if (!fs.existsSync(summaryPath)) {
+    process.stderr.write(`Error: summary.md not found in ${folderPath}\n`);
+    process.exit(1);
+  }
+
+  // Copy files to target path
+  if (targetPath && (json || includeTranscript)) {
+    process.stderr.write('Error: --json and --transcript are only supported when writing to stdout (omit <path>)\n');
+    process.exit(1);
+  }
+  if (targetPath) {
+    targetPath = path.resolve(targetPath);
+    fs.mkdirSync(targetPath, { recursive: true });
+    fs.copyFileSync(summaryPath, path.join(targetPath, 'summary.md'));
+    const transcriptPath = path.join(folderPath, 'transcript.md');
+    if (fs.existsSync(transcriptPath)) {
+      fs.copyFileSync(transcriptPath, path.join(targetPath, 'transcript.md'));
+    }
+    process.stderr.write(`Exported to ${targetPath}\n`);
+    return;
+  }
+
+  // Output to stdout
+  const content = fs.readFileSync(summaryPath, 'utf-8');
+  const { meta, body } = parseFrontmatter(content);
+
+  if (json) {
+    let customFields: Record<string, unknown> = {};
+    if (meta.customFields) {
+      try {
+        customFields = typeof meta.customFields === 'string'
+          ? JSON.parse(meta.customFields as string)
+          : meta.customFields as Record<string, unknown>;
+      } catch { /* ignore */ }
+    }
+    const obj: Record<string, unknown> = {
+      title: meta.title || '',
+      transcribedAt: meta.transcribedAt || '',
+      summary: meta.summary || '',
+      keyPoints: meta.keyPoints || [],
+      actionItems: meta.actionItems || [],
+      customFields,
+    };
+    if (includeTranscript) {
+      obj.transcript = meta.transcript || '';
+    }
+    process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
+  } else {
+    process.stdout.write(body);
+    if (includeTranscript) {
+      const transcriptPath = path.join(folderPath, 'transcript.md');
+      if (fs.existsSync(transcriptPath)) {
+        const transcriptContent = fs.readFileSync(transcriptPath, 'utf-8');
+        process.stdout.write('\n' + transcriptContent);
+      }
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
@@ -130,6 +279,21 @@ async function main(): Promise<void> {
 
   if (args[0] === 'config') {
     handleConfig(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'list') {
+    handleList(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'show') {
+    handleShow(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'export') {
+    handleExport(args.slice(1));
     return;
   }
 
