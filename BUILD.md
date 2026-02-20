@@ -35,7 +35,7 @@ pnpm run dist:win
 ```
 
 This will create:
-- `release/Listener.AI Setup 1.0.0.exe`
+- `release/Listener.AI-Setup-1.0.0.exe`
 
 ### Build for All Platforms
 
