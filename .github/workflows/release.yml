@@ -178,7 +178,7 @@ jobs:
             - Apple Silicon: `Listener.AI-${{ needs.prepare.outputs.version }}-arm64.dmg`
 
             ### Windows Downloads
-            - x64: `Listener.AI Setup ${{ needs.prepare.outputs.version }}.exe`
+            - x64: `Listener.AI-Setup-${{ needs.prepare.outputs.version }}.exe`
 
             ### Installation
 
