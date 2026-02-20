@@ -16,10 +16,7 @@
   ],
   "scripts": {
     "start": "pnpm run build && electron .",
-    "dev": "pnpm run build && electron .",
     "build": "tsc",
-    "build:main": "tsc",
-    "build:renderer": "echo 'Renderer uses plain JS'",
     "dist": "pnpm run build && electron-builder",
     "dist:mac": "pnpm run build && electron-builder --mac",
     "dist:mac-x64": "pnpm run build && electron-builder --mac --x64",
@@ -50,9 +47,7 @@
     "dotenv": "^17.2.0",
     "electron": "^37.3.1",
     "electron-builder": "^26.8.1",
-    "electron-builder-squirrel-windows": "^26.8.1",
     "semver": "^7.7.2",
-    "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
   },
   "dependencies": {
@@ -84,7 +79,6 @@
       "renderer.js",
       "package.json",
       "assets/icon.png",
-      "assets/icon.icns",
       "!node_modules/ffmpeg-static/**/*",
       "!scripts/**/*",
       "!release/**/*",
@@ -153,13 +147,7 @@
           ]
         }
       ],
-      "icon": "assets/icon.png",
-      "extraResources": [
-        {
-          "from": "node_modules/ffprobe-static/bin/win32/x64/ffprobe.exe",
-          "to": "bin/ffprobe.exe"
-        }
-      ]
+      "icon": "assets/icon.png"
     },
     "nsis": {
       "oneClick": false,
