@@ -85,7 +85,7 @@ CLI and desktop app share the same config file.
 
 ```bash
 pnpm install
-pnpm run dev          # Run Electron app
+pnpm run start        # Run Electron app
 pnpm run cli          # Run CLI locally
 pnpm run dist:mac     # Build macOS
 pnpm run dist:win     # Build Windows
