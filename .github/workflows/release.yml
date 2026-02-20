@@ -16,7 +16,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  id-token: write  # npm provenance via OIDC
 
 jobs:
   prepare:
@@ -39,9 +38,7 @@ jobs:
           cache: 'pnpm'
 
       - name: Install dependencies
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm add -D semver
+        run: pnpm install --frozen-lockfile
 
       - name: Calculate new version
         id: version
@@ -214,8 +211,11 @@ jobs:
           makeLatest: true
 
   npm-publish:
-    needs: [prepare, merge-to-main]
+    needs: [prepare, build, merge-to-main]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -231,12 +231,11 @@ jobs:
         with:
           node-version: '24'
           cache: 'pnpm'
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Install and publish
         run: |
           pnpm install --frozen-lockfile --ignore-scripts
-          npm publish --access public
+          npm publish --provenance --access public
 
   cleanup-on-failure:
     needs: [prepare, build, merge-to-main, release, npm-publish]
