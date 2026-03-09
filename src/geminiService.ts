@@ -13,6 +13,14 @@ export interface TranscriptionResult {
   customFields?: Record<string, unknown>;
 }
 
+export interface GeminiServiceOptions {
+  apiKey: string;
+  dataPath?: string;
+  knownWords?: string[];
+  proModel: string;
+  flashModel: string;
+}
+
 export class GeminiService {
   private ai: GoogleGenAI;
   private apiKey: string;
@@ -32,13 +40,13 @@ export class GeminiService {
     return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
   }
 
-  constructor(apiKey: string, dataPath?: string, knownWords?: string[], proModel?: string, flashModel?: string) {
-    this.apiKey = apiKey;
-    this.ai = new GoogleGenAI({ apiKey: apiKey });
-    this.ffmpegManager = new FFmpegManager(dataPath);
-    this.knownWords = knownWords || [];
-    this.proModel = proModel || 'gemini-2.5-pro';
-    this.flashModel = flashModel || 'gemini-2.5-flash';
+  constructor(options: GeminiServiceOptions) {
+    this.apiKey = options.apiKey;
+    this.ai = new GoogleGenAI({ apiKey: options.apiKey });
+    this.ffmpegManager = new FFmpegManager(options.dataPath);
+    this.knownWords = options.knownWords || [];
+    this.proModel = options.proModel;
+    this.flashModel = options.flashModel;
   }
 
   private buildGlossaryBlock(): string {

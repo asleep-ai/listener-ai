@@ -167,6 +167,15 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  updateConfig(partial: Partial<AppConfig>): void {
+    for (const [key, value] of Object.entries(partial)) {
+      if (value !== undefined) {
+        (this.config as Record<string, unknown>)[key] = value;
+      }
+    }
+    this.saveConfig();
+  }
+
   getAllConfig(): AppConfig {
     return {
       geminiApiKey: this.getGeminiApiKey(),
