@@ -13,11 +13,21 @@ export interface TranscriptionResult {
   customFields?: Record<string, unknown>;
 }
 
+export interface GeminiServiceOptions {
+  apiKey: string;
+  dataPath?: string;
+  knownWords?: string[];
+  proModel: string;
+  flashModel: string;
+}
+
 export class GeminiService {
   private ai: GoogleGenAI;
   private apiKey: string;
   private ffmpegManager: FFmpegManager;
   private knownWords: string[];
+  private proModel: string;
+  private flashModel: string;
 
   // Get FFmpeg path for this service
   private async getFFmpegPath(): Promise<string> {
@@ -30,11 +40,13 @@ export class GeminiService {
     return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
   }
 
-  constructor(apiKey: string, dataPath?: string, knownWords?: string[]) {
-    this.apiKey = apiKey;
-    this.ai = new GoogleGenAI({ apiKey: apiKey });
-    this.ffmpegManager = new FFmpegManager(dataPath);
-    this.knownWords = knownWords || [];
+  constructor(options: GeminiServiceOptions) {
+    this.apiKey = options.apiKey;
+    this.ai = new GoogleGenAI({ apiKey: options.apiKey });
+    this.ffmpegManager = new FFmpegManager(options.dataPath);
+    this.knownWords = options.knownWords || [];
+    this.proModel = options.proModel;
+    this.flashModel = options.flashModel;
   }
 
   private buildGlossaryBlock(): string {
@@ -255,7 +267,7 @@ Return as JSON:
 }`;
 
       const summaryResult = await this.ai.models.generateContent({
-        model: "gemini-2.5-pro",
+        model: this.proModel,
         contents: [
           { role: "user", parts: [{ text: summaryPrompt }, { text: fullTranscript }] }
         ],
@@ -404,7 +416,7 @@ IMPORTANT:
         }
 
         result = await this.ai.models.generateContent({
-          model: "gemini-2.5-flash",
+          model: this.flashModel,
           contents: [
             {
               role: "user",
@@ -436,7 +448,7 @@ IMPORTANT:
         }
 
         result = await this.ai.models.generateContent({
-          model: "gemini-2.5-flash",
+          model: this.flashModel,
           contents: [
             {
               role: "user",
@@ -527,7 +539,7 @@ IMPORTANT:
         const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
 
         const result = await this.ai.models.generateContent({
-          model: "gemini-2.5-flash",
+          model: this.flashModel,
           contents: [
             {
               role: "user",

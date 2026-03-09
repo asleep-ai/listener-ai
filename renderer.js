@@ -117,6 +117,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     saveConfigBtn = document.getElementById('saveConfig');
     cancelConfigBtn = document.getElementById('cancelConfig');
     geminiApiKeyInput = document.getElementById('geminiApiKey');
+    geminiModelInput = document.getElementById('geminiModel');
+    geminiFlashModelInput = document.getElementById('geminiFlashModel');
     notionApiKeyInput = document.getElementById('notionApiKey');
     notionDatabaseIdInput = document.getElementById('notionDatabaseId');
     globalShortcutInput = document.getElementById('globalShortcut');
@@ -411,13 +413,15 @@ window.electronAPI.onRecordingStatus((status) => {
 
 // Modal elements - will be initialized after DOM loads
 let configModal, transcriptionModal, saveConfigBtn, cancelConfigBtn;
-let geminiApiKeyInput, notionApiKeyInput, notionDatabaseIdInput, globalShortcutInput, knownWordsInput;
+let geminiApiKeyInput, geminiModelInput, geminiFlashModelInput, notionApiKeyInput, notionDatabaseIdInput, globalShortcutInput, knownWordsInput;
 let closeTranscriptionBtn, uploadToNotionBtn;
 
 
 function setupEventListeners() {
   saveConfigBtn.addEventListener('click', async () => {
     const geminiKey = geminiApiKeyInput.value.trim();
+    const geminiModel = geminiModelInput ? geminiModelInput.value.trim() : '';
+    const geminiFlashModel = geminiFlashModelInput ? geminiFlashModelInput.value.trim() : '';
     const notionKey = notionApiKeyInput.value.trim();
     const notionDb = notionDatabaseIdInput.value.trim();
     const globalShortcut = globalShortcutInput.value.trim();
@@ -430,6 +434,8 @@ function setupEventListeners() {
     if (geminiKey) {
       await window.electronAPI.saveConfig({
         geminiApiKey: geminiKey,
+        geminiModel: geminiModel,
+        geminiFlashModel: geminiFlashModel,
         notionApiKey: notionKey,
         notionDatabaseId: notionDb,
         globalShortcut: globalShortcut,
@@ -845,6 +851,12 @@ async function showConfigModal() {
   if (geminiApiKeyInput && config.geminiApiKey) {
     geminiApiKeyInput.value = config.geminiApiKey;
   }
+  if (geminiModelInput) {
+    geminiModelInput.value = config.geminiModel || '';
+  }
+  if (geminiFlashModelInput) {
+    geminiFlashModelInput.value = config.geminiFlashModel || '';
+  }
   if (notionApiKeyInput && config.notionApiKey) {
     notionApiKeyInput.value = config.notionApiKey;
   }
@@ -864,7 +876,19 @@ async function showConfigModal() {
     summaryPromptInput.value = config.summaryPrompt || DEFAULT_SUMMARY_PROMPT;
   }
 
-  // Reset to default button
+  // Reset to default buttons
+  const resetGeminiModelBtn = document.getElementById('resetGeminiModel');
+  if (resetGeminiModelBtn) {
+    resetGeminiModelBtn.onclick = () => {
+      if (geminiModelInput) geminiModelInput.value = '';
+    };
+  }
+  const resetGeminiFlashModelBtn = document.getElementById('resetGeminiFlashModel');
+  if (resetGeminiFlashModelBtn) {
+    resetGeminiFlashModelBtn.onclick = () => {
+      if (geminiFlashModelInput) geminiFlashModelInput.value = '';
+    };
+  }
   const resetPromptBtn = document.getElementById('resetPrompt');
   if (resetPromptBtn) {
     resetPromptBtn.onclick = () => {

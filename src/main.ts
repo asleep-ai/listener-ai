@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
 import { GeminiService } from './geminiService';
-import { ConfigService } from './configService';
+import { AppConfig, ConfigService } from './configService';
 import { NotionService } from './notionService';
 import { FFmpegManager } from './services/ffmpegManager';
 import { MenuBarManager } from './menuBarManager';
@@ -26,6 +26,17 @@ const menuBarManager = new MenuBarManager();
 const fileHandlerService = new FileHandlerService();
 let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
+
+function createGeminiService(): GeminiService | null {
+  const apiKey = configService.getGeminiApiKey();
+  if (!apiKey) return null;
+  return new GeminiService({
+    apiKey,
+    knownWords: configService.getKnownWords(),
+    proModel: configService.getGeminiModel(),
+    flashModel: configService.getGeminiFlashModel(),
+  });
+}
 
 function registerGlobalShortcut() {
   try {
@@ -340,52 +351,26 @@ ipcMain.handle('stop-recording', async () => {
 
 // Configuration handlers
 
-ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string }) => {
+ipcMain.handle('save-config', async (_, config: Partial<AppConfig>) => {
   try {
-    if (config.knownWords !== undefined) {
-      configService.setKnownWords(config.knownWords);
-    }
+    configService.updateConfig(config);
 
-    if (config.geminiApiKey) {
-      configService.setGeminiApiKey(config.geminiApiKey);
-    }
-
-    // Recreate GeminiService once if either changed
-    if (config.knownWords !== undefined || config.geminiApiKey) {
-      const apiKey = configService.getGeminiApiKey();
-      if (apiKey) {
-        geminiService = new GeminiService(apiKey, undefined, configService.getKnownWords());
-      }
-    }
-
-    if (config.notionApiKey) {
-      configService.setNotionApiKey(config.notionApiKey);
-    }
-
-    if (config.notionDatabaseId) {
-      configService.setNotionDatabaseId(config.notionDatabaseId);
-    }
-
-    if (config.autoMode !== undefined) {
-      configService.setAutoMode(config.autoMode);
+    // Recreate GeminiService if any relevant setting changed
+    if (config.knownWords !== undefined || config.geminiApiKey !== undefined || config.geminiModel !== undefined || config.geminiFlashModel !== undefined) {
+      geminiService = createGeminiService();
     }
 
     if (config.globalShortcut !== undefined) {
-      configService.setGlobalShortcut(config.globalShortcut);
-      // Re-register the global shortcut with the new value
       registerGlobalShortcut();
     }
 
-    if (config.summaryPrompt !== undefined) {
-      configService.setSummaryPrompt(config.summaryPrompt);
-    }
-
-    // Initialize Notion service if both required fields are present
-    if (config.notionApiKey && config.notionDatabaseId) {
-      notionService = new NotionService({
-        apiKey: config.notionApiKey,
-        databaseId: config.notionDatabaseId
-      });
+    // Recreate Notion service if either field changed
+    if (config.notionApiKey !== undefined || config.notionDatabaseId !== undefined) {
+      const apiKey = configService.getNotionApiKey();
+      const databaseId = configService.getNotionDatabaseId();
+      if (apiKey && databaseId) {
+        notionService = new NotionService({ apiKey, databaseId });
+      }
     }
 
     return {
@@ -443,7 +428,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
       if (!apiKey) {
         return { success: false, error: 'Gemini API key not configured' };
       }
-      geminiService = new GeminiService(apiKey, undefined, configService.getKnownWords());
+      geminiService = createGeminiService()!;
     }
 
     // Send progress update

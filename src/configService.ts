@@ -3,6 +3,8 @@ import * as path from 'path';
 
 export interface AppConfig {
   geminiApiKey?: string;
+  geminiModel?: string;
+  geminiFlashModel?: string;
   notionApiKey?: string;
   notionDatabaseId?: string;
   autoMode?: boolean;
@@ -138,6 +140,24 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getGeminiModel(): string {
+    return this.config.geminiModel || 'gemini-2.5-pro';
+  }
+
+  setGeminiModel(model: string): void {
+    this.config.geminiModel = model;
+    this.saveConfig();
+  }
+
+  getGeminiFlashModel(): string {
+    return this.config.geminiFlashModel || 'gemini-2.5-flash';
+  }
+
+  setGeminiFlashModel(model: string): void {
+    this.config.geminiFlashModel = model;
+    this.saveConfig();
+  }
+
   getSummaryPrompt(): string {
     return this.config.summaryPrompt || DEFAULT_SUMMARY_PROMPT;
   }
@@ -147,9 +167,20 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  updateConfig(partial: Partial<AppConfig>): void {
+    for (const [key, value] of Object.entries(partial)) {
+      if (value !== undefined) {
+        (this.config as Record<string, unknown>)[key] = value;
+      }
+    }
+    this.saveConfig();
+  }
+
   getAllConfig(): AppConfig {
     return {
       geminiApiKey: this.getGeminiApiKey(),
+      geminiModel: this.getGeminiModel(),
+      geminiFlashModel: this.getGeminiFlashModel(),
       notionApiKey: this.getNotionApiKey(),
       notionDatabaseId: this.getNotionDatabaseId(),
       autoMode: this.getAutoMode(),
