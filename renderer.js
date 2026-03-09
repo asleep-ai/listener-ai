@@ -434,8 +434,8 @@ function setupEventListeners() {
     if (geminiKey) {
       await window.electronAPI.saveConfig({
         geminiApiKey: geminiKey,
-        geminiModel: geminiModel || undefined,
-        geminiFlashModel: geminiFlashModel || undefined,
+        geminiModel: geminiModel,
+        geminiFlashModel: geminiFlashModel,
         notionApiKey: notionKey,
         notionDatabaseId: notionDb,
         globalShortcut: globalShortcut,
@@ -876,7 +876,19 @@ async function showConfigModal() {
     summaryPromptInput.value = config.summaryPrompt || DEFAULT_SUMMARY_PROMPT;
   }
 
-  // Reset to default button
+  // Reset to default buttons
+  const resetGeminiModelBtn = document.getElementById('resetGeminiModel');
+  if (resetGeminiModelBtn) {
+    resetGeminiModelBtn.onclick = () => {
+      if (geminiModelInput) geminiModelInput.value = '';
+    };
+  }
+  const resetGeminiFlashModelBtn = document.getElementById('resetGeminiFlashModel');
+  if (resetGeminiFlashModelBtn) {
+    resetGeminiFlashModelBtn.onclick = () => {
+      if (geminiFlashModelInput) geminiFlashModelInput.value = '';
+    };
+  }
   const resetPromptBtn = document.getElementById('resetPrompt');
   if (resetPromptBtn) {
     resetPromptBtn.onclick = () => {
