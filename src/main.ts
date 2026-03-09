@@ -340,7 +340,7 @@ ipcMain.handle('stop-recording', async () => {
 
 // Configuration handlers
 
-ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string }) => {
+ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; geminiModel?: string; geminiFlashModel?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string }) => {
   try {
     if (config.knownWords !== undefined) {
       configService.setKnownWords(config.knownWords);
@@ -350,11 +350,19 @@ ipcMain.handle('save-config', async (_, config: { geminiApiKey?: string; notionA
       configService.setGeminiApiKey(config.geminiApiKey);
     }
 
-    // Recreate GeminiService once if either changed
-    if (config.knownWords !== undefined || config.geminiApiKey) {
+    if (config.geminiModel !== undefined) {
+      configService.setGeminiModel(config.geminiModel);
+    }
+
+    if (config.geminiFlashModel !== undefined) {
+      configService.setGeminiFlashModel(config.geminiFlashModel);
+    }
+
+    // Recreate GeminiService once if any relevant setting changed
+    if (config.knownWords !== undefined || config.geminiApiKey || config.geminiModel !== undefined || config.geminiFlashModel !== undefined) {
       const apiKey = configService.getGeminiApiKey();
       if (apiKey) {
-        geminiService = new GeminiService(apiKey, undefined, configService.getKnownWords());
+        geminiService = new GeminiService(apiKey, undefined, configService.getKnownWords(), configService.getGeminiModel(), configService.getGeminiFlashModel());
       }
     }
 
@@ -443,7 +451,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
       if (!apiKey) {
         return { success: false, error: 'Gemini API key not configured' };
       }
-      geminiService = new GeminiService(apiKey, undefined, configService.getKnownWords());
+      geminiService = new GeminiService(apiKey, undefined, configService.getKnownWords(), configService.getGeminiModel(), configService.getGeminiFlashModel());
     }
 
     // Send progress update

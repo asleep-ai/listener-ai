@@ -32,7 +32,7 @@ function usage(): never {
   process.exit(1);
 }
 
-const KNOWN_CONFIG_KEYS = ['geminiApiKey', 'notionApiKey', 'notionDatabaseId', 'autoMode', 'globalShortcut'] as const;
+const KNOWN_CONFIG_KEYS = ['geminiApiKey', 'geminiModel', 'geminiFlashModel', 'notionApiKey', 'notionDatabaseId', 'autoMode', 'globalShortcut'] as const;
 type ConfigKey = typeof KNOWN_CONFIG_KEYS[number];
 
 function maskValue(key: string, value: string | undefined): string {
@@ -98,6 +98,8 @@ function handleConfig(subArgs: string[]): void {
     }
     const setters: Record<ConfigKey, (v: string) => void> = {
       geminiApiKey: (v) => config.setGeminiApiKey(v),
+      geminiModel: (v) => config.setGeminiModel(v),
+      geminiFlashModel: (v) => config.setGeminiFlashModel(v),
       notionApiKey: (v) => config.setNotionApiKey(v),
       notionDatabaseId: (v) => config.setNotionDatabaseId(v),
       autoMode: (v) => {
@@ -351,7 +353,7 @@ async function main(): Promise<void> {
   }
 
   const knownWords = config.getKnownWords();
-  const gemini = new GeminiService(apiKey, dataPath, knownWords);
+  const gemini = new GeminiService(apiKey, dataPath, knownWords, config.getGeminiModel(), config.getGeminiFlashModel());
 
   process.stderr.write(`Processing: ${filePath}\n`);
 
