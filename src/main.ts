@@ -11,6 +11,7 @@ import { metadataService } from './services/metadataService';
 import { FileHandlerService } from './services/fileHandlerService';
 import { MeetingDetectorService } from './meetingDetectorService';
 import { autoUpdaterService } from './services/autoUpdaterService';
+import { notificationService } from './services/notificationService';
 import { saveTranscription, readTranscription } from './outputService';
 
 // Global flag to track if app is quitting
@@ -229,8 +230,9 @@ app.whenReady().then(() => {
   // Initialize menu bar manager
   if (mainWindow) {
     menuBarManager.init(mainWindow, audioRecorder);
-    // Set main window for auto-updater
+    // Set main window for auto-updater and notifications
     autoUpdaterService.setMainWindow(mainWindow);
+    notificationService.setMainWindow(mainWindow);
   }
 
   // Register global shortcut
@@ -242,6 +244,7 @@ app.whenReady().then(() => {
   }
 
   meetingDetector.on('meeting-started', (info: { app: string; detectedAt: Date }) => {
+    notificationService.notifyMeetingDetected(info.app);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('meeting-status-changed', { active: true, app: info.app });
 
@@ -254,6 +257,7 @@ app.whenReady().then(() => {
   });
 
   meetingDetector.on('meeting-ended', (info: { app: string; duration: number }) => {
+    notificationService.notifyMeetingEnded(info.app);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('meeting-status-changed', { active: false, app: info.app });
 
@@ -268,6 +272,9 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+      if (mainWindow) {
+        notificationService.setMainWindow(mainWindow);
+      }
     }
   });
 });
@@ -358,6 +365,7 @@ ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
     // Update menu bar icon state
     if (result.success) {
       menuBarManager.updateRecordingState(true, meetingTitle);
+      notificationService.notifyRecordingStarted(meetingTitle);
     }
 
     return result;
@@ -375,6 +383,7 @@ ipcMain.handle('stop-recording', async () => {
     // Update menu bar icon state
     menuBarManager.updateRecordingState(false);
     meetingAutoStartedRecording = false;
+    notificationService.notifyRecordingStopped();
 
     return result;
   } catch (error) {
@@ -540,6 +549,8 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
       console.error('Failed to save metadata:', error);
     }
 
+    notificationService.notifyTranscriptionComplete(result.suggestedTitle || 'Meeting');
+
     // Check if we need to rename the file (if it was untitled)
     const fileName = path.basename(filePath);
     if (fileName.includes('Untitled_Meeting') && result.suggestedTitle) {
@@ -558,6 +569,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
     return { success: true, data: result };
   } catch (error) {
     console.error('Error transcribing audio:', error);
+    notificationService.notifyTranscriptionFailed(error instanceof Error ? error.message : 'Unknown error');
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -592,9 +604,11 @@ ipcMain.handle('upload-to-notion', async (_, data: { title: string; transcriptio
       data.audioFilePath
     );
 
+    notificationService.notifyUploadComplete(data.title);
     return result;
   } catch (error) {
     console.error('Error uploading to Notion:', error);
+    notificationService.notifyUploadFailed(error instanceof Error ? error.message : 'Unknown error');
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
