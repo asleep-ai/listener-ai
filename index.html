@@ -42,9 +42,21 @@
       <div class="auto-mode-container">
         <label class="toggle-container">
           <input type="checkbox" id="autoModeToggle">
-          <span class="toggle-label">Auto Mode</span>
+          <span class="toggle-label">Auto Upload</span>
           <span class="toggle-description">Automatically transcribe and upload to Notion after recording</span>
         </label>
+      </div>
+
+      <div class="auto-mode-container" id="meetingDetectionContainer">
+        <label class="toggle-container">
+          <input type="checkbox" id="meetingDetectionToggle">
+          <span class="toggle-label">Meeting Detection</span>
+          <span class="toggle-description">Auto-detect Zoom, Meet, Teams calls and start recording</span>
+        </label>
+        <div id="meetingDetectionStatus" class="meeting-detection-status" style="display: none;">
+          <span class="status-dot recording"></span>
+          <span id="meetingDetectionApp">Meeting detected</span>
+        </div>
       </div>
 
       <div class="drag-drop-zone" id="dragDropZone">

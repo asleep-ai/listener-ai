@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
   },
   checkConfig: () => ipcRenderer.invoke('check-config'),
-  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string }) =>
+  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; meetingDetection?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string }) =>
     ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   transcribeAudio: (filePath: string) => ipcRenderer.invoke('transcribe-audio', filePath),
@@ -59,5 +59,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Auto-update events
   onUpdateStatus: (callback: (updateInfo: { event: string; data?: any }) => void) => {
     ipcRenderer.on('update-status', (_, updateInfo) => callback(updateInfo));
+  },
+
+  // Meeting detection
+  getMeetingStatus: () => ipcRenderer.invoke('get-meeting-status'),
+  onMeetingStatusChanged: (callback: (status: { active: boolean; app?: string }) => void) => {
+    ipcRenderer.on('meeting-status-changed', (_, status) => callback(status));
   }
 });
