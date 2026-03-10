@@ -1,4 +1,4 @@
-import { Tray, Menu, nativeImage, app, BrowserWindow, Notification } from 'electron';
+import { Tray, Menu, nativeImage, app, BrowserWindow } from 'electron';
 import path from 'path';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
 
