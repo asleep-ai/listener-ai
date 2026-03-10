@@ -123,11 +123,13 @@ export class MeetingDetectorService extends EventEmitter {
   }
 
   private async checkGoogleMeetMacOS(): Promise<string | null> {
+    // Two-step: first get running process names (fast), then only check windows of matching browsers
     const script = `
 tell application "System Events"
+  set allProcs to name of every process
   set browserList to {"Google Chrome", "Arc", "Microsoft Edge", "Brave Browser", "Safari", "ChatGPT Atlas", "Comet", "Opera", "Vivaldi", "Zen Browser", "Orion", "Sidekick", "Wavebox", "Naver Whale", "Firefox"}
   repeat with browserName in browserList
-    if exists (process browserName) then
+    if allProcs contains browserName then
       tell process browserName
         repeat with w in windows
           set winName to name of w
@@ -141,7 +143,7 @@ tell application "System Events"
 end tell
 return "none"`;
     try {
-      const { stdout } = await execFileAsync('osascript', ['-e', script], { timeout: 3000 });
+      const { stdout } = await execFileAsync('osascript', ['-e', script], { timeout: 5000 });
       const result = stdout.trim();
       return result !== 'none' && result !== '' ? result : null;
     } catch {
