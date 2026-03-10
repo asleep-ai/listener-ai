@@ -58,6 +58,11 @@
     "@notionhq/client": "^4.0.0",
     "electron-updater": "^6.6.2"
   },
+  "pnpm": {
+    "overrides": {
+      "js-yaml@>=4.0.0 <4.1.1": ">=4.1.1"
+    }
+  },
   "build": {
     "appId": "com.listenerai.app",
     "productName": "Listener.AI",
