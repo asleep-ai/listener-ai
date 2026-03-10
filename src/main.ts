@@ -273,6 +273,7 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
       if (mainWindow) {
+        autoUpdaterService.setMainWindow(mainWindow);
         notificationService.setMainWindow(mainWindow);
       }
     }
@@ -383,7 +384,9 @@ ipcMain.handle('stop-recording', async () => {
     // Update menu bar icon state
     menuBarManager.updateRecordingState(false);
     meetingAutoStartedRecording = false;
-    notificationService.notifyRecordingStopped();
+    if (result.success) {
+      notificationService.notifyRecordingStopped();
+    }
 
     return result;
   } catch (error) {
@@ -569,7 +572,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
     return { success: true, data: result };
   } catch (error) {
     console.error('Error transcribing audio:', error);
-    notificationService.notifyTranscriptionFailed(error instanceof Error ? error.message : 'Unknown error');
+    notificationService.notifyTranscriptionFailed('Transcription failed. Check the app for details.');
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -608,7 +611,7 @@ ipcMain.handle('upload-to-notion', async (_, data: { title: string; transcriptio
     return result;
   } catch (error) {
     console.error('Error uploading to Notion:', error);
-    notificationService.notifyUploadFailed(error instanceof Error ? error.message : 'Unknown error');
+    notificationService.notifyUploadFailed('Upload failed. Check the app for details.');
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
