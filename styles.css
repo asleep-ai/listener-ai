@@ -952,3 +952,16 @@ h1 {
 .drag-drop-zone[data-paste-hint="true"] {
   position: relative;
 }
+
+/* Meeting detection status */
+.meeting-detection-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: 6px;
+  font-size: 13px;
+  color: #ef4444;
+}

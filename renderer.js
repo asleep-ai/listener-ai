@@ -187,6 +187,29 @@ window.addEventListener('DOMContentLoaded', async () => {
     await window.electronAPI.saveConfig({ autoMode: autoModeToggle.checked });
   });
 
+  // Meeting detection toggle
+  const meetingDetectionToggle = document.getElementById('meetingDetectionToggle');
+  const meetingDetectionStatus = document.getElementById('meetingDetectionStatus');
+  const meetingDetectionApp = document.getElementById('meetingDetectionApp');
+
+  if (config.meetingDetection !== undefined) {
+    meetingDetectionToggle.checked = config.meetingDetection;
+  }
+
+  meetingDetectionToggle.addEventListener('change', async () => {
+    await window.electronAPI.saveConfig({ meetingDetection: meetingDetectionToggle.checked });
+  });
+
+  // Listen for meeting status changes
+  window.electronAPI.onMeetingStatusChanged((status) => {
+    if (status.active) {
+      meetingDetectionStatus.style.display = 'flex';
+      meetingDetectionApp.textContent = `${status.app} meeting detected`;
+    } else {
+      meetingDetectionStatus.style.display = 'none';
+    }
+  });
+
   // Setup record button listener
   recordButton.addEventListener('click', async () => {
     if (!isRecording) {

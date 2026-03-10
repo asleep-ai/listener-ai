@@ -8,6 +8,7 @@ export interface AppConfig {
   notionApiKey?: string;
   notionDatabaseId?: string;
   autoMode?: boolean;
+  meetingDetection?: boolean;
   globalShortcut?: string;
   knownWords?: string[];
   summaryPrompt?: string;
@@ -122,6 +123,10 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getMeetingDetection(): boolean {
+    return this.config.meetingDetection || false;
+  }
+
   getGlobalShortcut(): string {
     return this.config.globalShortcut || 'CommandOrControl+Shift+L';
   }
@@ -184,6 +189,7 @@ export class ConfigService {
       notionApiKey: this.getNotionApiKey(),
       notionDatabaseId: this.getNotionDatabaseId(),
       autoMode: this.getAutoMode(),
+      meetingDetection: this.getMeetingDetection(),
       globalShortcut: this.getGlobalShortcut(),
       knownWords: this.getKnownWords(),
       summaryPrompt: this.getSummaryPrompt()

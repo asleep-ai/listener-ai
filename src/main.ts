@@ -9,6 +9,7 @@ import { FFmpegManager } from './services/ffmpegManager';
 import { MenuBarManager } from './menuBarManager';
 import { metadataService } from './services/metadataService';
 import { FileHandlerService } from './services/fileHandlerService';
+import { MeetingDetectorService } from './meetingDetectorService';
 import { autoUpdaterService } from './services/autoUpdaterService';
 import { saveTranscription, readTranscription } from './outputService';
 
@@ -24,6 +25,8 @@ const configService = new ConfigService();
 const ffmpegManager = new FFmpegManager();
 const menuBarManager = new MenuBarManager();
 const fileHandlerService = new FileHandlerService();
+const meetingDetector = new MeetingDetectorService();
+let meetingAutoStartedRecording = false;
 let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
 
@@ -233,6 +236,35 @@ app.whenReady().then(() => {
   // Register global shortcut
   registerGlobalShortcut();
 
+  // Initialize meeting detector
+  if (configService.getMeetingDetection()) {
+    meetingDetector.start();
+  }
+
+  meetingDetector.on('meeting-started', (info: { app: string; detectedAt: Date }) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('meeting-status-changed', { active: true, app: info.app });
+
+      // Auto-start recording if not already recording
+      if (!audioRecorder.isRecording()) {
+        meetingAutoStartedRecording = true;
+        mainWindow.webContents.send('tray-start-recording');
+      }
+    }
+  });
+
+  meetingDetector.on('meeting-ended', (info: { app: string; duration: number }) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('meeting-status-changed', { active: false, app: info.app });
+
+      // Only stop recording if we auto-started it (don't interrupt manual recordings)
+      if (meetingAutoStartedRecording && audioRecorder.isRecording()) {
+        meetingAutoStartedRecording = false;
+        mainWindow.webContents.send('tray-stop-recording');
+      }
+    }
+  });
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -251,6 +283,7 @@ app.on('window-all-closed', () => {
 
 // Handle app quit
 app.on('before-quit', () => {
+  meetingDetector.stop();
   global.isQuitting = true;
 });
 
@@ -341,6 +374,7 @@ ipcMain.handle('stop-recording', async () => {
 
     // Update menu bar icon state
     menuBarManager.updateRecordingState(false);
+    meetingAutoStartedRecording = false;
 
     return result;
   } catch (error) {
@@ -362,6 +396,10 @@ ipcMain.handle('save-config', async (_, config: Partial<AppConfig>) => {
 
     if (config.globalShortcut !== undefined) {
       registerGlobalShortcut();
+    }
+
+    if (config.meetingDetection !== undefined) {
+      meetingDetector.setEnabled(config.meetingDetection);
     }
 
     // Recreate Notion service if either field changed
@@ -408,6 +446,15 @@ ipcMain.handle('validate-shortcut', async (_, shortcut: string) => {
   } catch (error) {
     return { valid: false, error: error instanceof Error ? error.message : 'Invalid shortcut' };
   }
+});
+
+ipcMain.handle('get-meeting-status', async () => {
+  const meeting = meetingDetector.getActiveMeeting();
+  return {
+    enabled: configService.getMeetingDetection(),
+    active: meetingDetector.isActive(),
+    app: meeting?.app
+  };
 });
 
 // Transcription handler
