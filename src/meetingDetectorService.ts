@@ -31,6 +31,13 @@ export class MeetingDetectorService extends EventEmitter {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
     }
+    if (this.currentMeeting) {
+      const duration = Date.now() - this.currentMeeting.detectedAt.getTime();
+      const app = this.currentMeeting.app;
+      this.currentMeeting = null;
+      this.emit('meeting-ended', { app, duration });
+      console.log(`Meeting ended: ${app} (${Math.round(duration / 1000)}s)`);
+    }
     this.consecutiveDetections = 0;
     this.consecutiveNonDetections = 0;
     console.log('Meeting detector stopped');
@@ -152,13 +159,22 @@ return "none"`;
   }
 
   private async detectWindows(): Promise<string | null> {
+    const [hasZoom, hasTeams] = await Promise.all([
+      this.tasklistExists('CptHost.exe'),
+      Promise.all([this.tasklistExists('ms-teams.exe'), this.tasklistExists('Teams.exe')])
+        .then(([a, b]) => a || b)
+    ]);
+    if (hasZoom) return 'Zoom';
+    if (hasTeams) return 'Microsoft Teams';
+    return null;
+  }
+
+  private async tasklistExists(imageName: string): Promise<boolean> {
     try {
-      const { stdout } = await execFileAsync('tasklist', ['/FO', 'CSV', '/NH']);
-      if (stdout.includes('"CptHost.exe"')) return 'Zoom';
-      if (stdout.includes('"ms-teams.exe"') || stdout.includes('"Teams.exe"')) return 'Microsoft Teams';
-      return null;
+      const { stdout } = await execFileAsync('tasklist', ['/FI', `IMAGENAME eq ${imageName}`, '/NH']);
+      return stdout.includes(imageName);
     } catch {
-      return null;
+      return false;
     }
   }
 }
