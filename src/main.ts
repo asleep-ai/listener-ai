@@ -387,10 +387,10 @@ ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
       const maxMinutes = configService.getMaxRecordingMinutes();
       if (maxMinutes > 0) {
         recordingMaxTimer = setTimeout(async () => {
+          clearRecordingTimers();
           if (audioRecorder.isRecording()) {
             try {
               const stopResult = await audioRecorder.stopRecording();
-              clearRecordingTimers();
               menuBarManager.updateRecordingState(false);
               meetingAutoStartedRecording = false;
               if (stopResult.success) {
@@ -400,7 +400,6 @@ ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
                 mainWindow.webContents.send('recording-auto-stopped', stopResult);
               }
             } catch (error) {
-              clearRecordingTimers();
               console.error('Error auto-stopping recording:', error);
             }
           }
