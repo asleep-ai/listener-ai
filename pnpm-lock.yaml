@@ -17,13 +17,6 @@ importers:
       fs-extra:
         specifier: ^11.2.0
         version: 11.3.0
-    optionalDependencies:
-      '@notionhq/client':
-        specifier: ^4.0.0
-        version: 4.0.1
-      electron-updater:
-        specifier: ^6.6.2
-        version: 6.6.2
     devDependencies:
       '@electron/notarize':
         specifier: ^3.0.1
@@ -49,6 +42,13 @@ importers:
       typescript:
         specifier: ^5.8.3
         version: 5.8.3
+    optionalDependencies:
+      '@notionhq/client':
+        specifier: ^4.0.0
+        version: 4.0.1
+      electron-updater:
+        specifier: ^6.6.2
+        version: 6.6.2
 
 packages:
 
