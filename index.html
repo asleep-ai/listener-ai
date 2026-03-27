@@ -122,6 +122,14 @@
           <small>Click the input and press your desired shortcut combination</small>
         </div>
         <div class="form-group">
+          <label for="maxRecordingMinutes">Max Recording Length (minutes)</label>
+          <input type="number" id="maxRecordingMinutes" min="0" step="1" placeholder="0 = disabled">
+        </div>
+        <div class="form-group">
+          <label for="recordingReminderMinutes">Recording Reminder Interval (minutes)</label>
+          <input type="number" id="recordingReminderMinutes" min="0" step="1" placeholder="0 = disabled">
+        </div>
+        <div class="form-group">
           <label for="knownWords">Known Words:</label>
           <textarea id="knownWords" rows="4" placeholder="Enter words or phrases, one per line&#10;e.g. Listener.AI&#10;GPT-4o"></textarea>
           <small>Proper nouns, names, and terms to improve transcription accuracy (one per line)</small>

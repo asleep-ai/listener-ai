@@ -296,115 +296,99 @@ async function startRecording() {
   }
 }
 
+function resetRecordingUI() {
+  isRecording = false;
+  stopTimer();
+  recordButton.textContent = 'Start Recording';
+  recordButton.classList.remove('recording');
+  statusIndicator.classList.remove('recording');
+  statusText.textContent = 'Ready to record';
+  recordingTime.classList.remove('active');
+}
+
+async function processAutoMode(audioPath, recordingTitle) {
+  if (!autoModeToggle.checked || !audioPath) return;
+
+  isAutoModeProcessing = true;
+  recordButton.disabled = true;
+  recordButton.style.opacity = '0.5';
+  recordButton.style.cursor = 'not-allowed';
+  statusText.textContent = 'Auto mode: Processing recording...';
+
+  try {
+    console.log('Auto mode: Starting transcription...');
+    const transcriptionResult = await window.electronAPI.transcribeAudio(audioPath);
+
+    if (transcriptionResult.success) {
+      console.log('Auto mode: Transcription complete');
+
+      let finalAudioPath = audioPath;
+      if (transcriptionResult.newFilePath) {
+        finalAudioPath = transcriptionResult.newFilePath;
+        console.log('Auto mode: File renamed to:', finalAudioPath);
+      }
+
+      const notionConfig = await window.electronAPI.getConfig();
+      if (notionConfig.notionApiKey && notionConfig.notionDatabaseId) {
+        console.log('Auto mode: Uploading to Notion...');
+
+        const finalTitle = (recordingTitle === '' || recordingTitle === 'Untitled_Meeting') && transcriptionResult.data.suggestedTitle
+          ? transcriptionResult.data.suggestedTitle
+          : (recordingTitle || transcriptionResult.data.suggestedTitle || 'Untitled Meeting');
+
+        const uploadResult = await window.electronAPI.uploadToNotion({
+          title: finalTitle,
+          transcriptionData: transcriptionResult.data,
+          audioFilePath: finalAudioPath
+        });
+
+        if (uploadResult.success) {
+          statusText.textContent = 'Auto mode: Successfully uploaded to Notion!';
+          if (uploadResult.url) {
+            window.electronAPI.openExternal(uploadResult.url);
+          }
+        } else {
+          statusText.textContent = 'Auto mode: Failed to upload to Notion';
+          console.error('Auto mode: Notion upload failed:', uploadResult.error);
+        }
+      } else {
+        statusText.textContent = 'Auto mode: Transcription complete (Notion not configured)';
+      }
+
+      await refreshRecordingsList();
+    } else {
+      statusText.textContent = 'Auto mode: Transcription failed';
+      console.error('Auto mode: Transcription failed:', transcriptionResult.error);
+    }
+  } catch (error) {
+    statusText.textContent = 'Auto mode: Error processing recording';
+    console.error('Auto mode error:', error);
+    console.error('Error details:', error.message, error.stack);
+  } finally {
+    isAutoModeProcessing = false;
+    recordButton.disabled = false;
+    recordButton.style.opacity = '';
+    recordButton.style.cursor = '';
+  }
+
+  setTimeout(() => {
+    statusText.textContent = 'Ready to record';
+  }, 5000);
+}
+
+async function handleRecordingStopped(audioPath) {
+  resetRecordingUI();
+  const recordingTitle = meetingTitle.value.trim() || 'Untitled_Meeting';
+  meetingTitle.value = '';
+  await refreshRecordingsList();
+  await processAutoMode(audioPath, recordingTitle);
+}
+
 async function stopRecording() {
   try {
     const result = await window.electronAPI.stopRecording();
     if (result.success) {
-      isRecording = false;
-
-      recordButton.textContent = 'Start Recording';
-      recordButton.classList.remove('recording');
-      statusIndicator.classList.remove('recording');
-      statusText.textContent = 'Ready to record';
-      recordingTime.classList.remove('active');
-
-      stopTimer();
-
-      // Store the title before clearing
-      const recordingTitle = meetingTitle.value.trim() || 'Untitled_Meeting';
-      let audioPath = result.filePath;
-
-      // Clear the title input
-      meetingTitle.value = '';
-
-      // Refresh the recordings list
-      await refreshRecordingsList();
-
-      // Auto mode: transcribe and upload automatically
-      if (autoModeToggle.checked && audioPath) {
-        // Set auto mode processing flag and disable record button
-        isAutoModeProcessing = true;
-        recordButton.disabled = true;
-        recordButton.style.opacity = '0.5';
-        recordButton.style.cursor = 'not-allowed';
-
-        // Show a notification that auto mode is running
-        statusText.textContent = 'Auto mode: Processing recording...';
-
-        try {
-          // Start transcription
-          console.log('Auto mode: Starting transcription...');
-          const transcriptionResult = await window.electronAPI.transcribeAudio(audioPath);
-
-          if (transcriptionResult.success) {
-            console.log('Auto mode: Transcription complete');
-
-            // Update audioPath if file was renamed
-            let finalAudioPath = audioPath;
-            if (transcriptionResult.newFilePath) {
-              finalAudioPath = transcriptionResult.newFilePath;
-              console.log('Auto mode: File renamed to:', finalAudioPath);
-            }
-
-            // Check if Notion is configured
-            const notionConfig = await window.electronAPI.getConfig();
-            if (notionConfig.notionApiKey && notionConfig.notionDatabaseId) {
-              console.log('Auto mode: Uploading to Notion...');
-
-              // Use generated title if recording was untitled
-              const finalTitle = (recordingTitle === '' || recordingTitle === 'Untitled_Meeting') && transcriptionResult.data.suggestedTitle
-                ? transcriptionResult.data.suggestedTitle
-                : (recordingTitle || transcriptionResult.data.suggestedTitle || 'Untitled Meeting');
-
-              console.log('Auto mode: Final title for Notion:', finalTitle);
-              console.log('Auto mode: Recording title was:', recordingTitle);
-              console.log('Auto mode: Suggested title was:', transcriptionResult.data.suggestedTitle);
-
-              // Upload to Notion with the correct file path
-              const uploadResult = await window.electronAPI.uploadToNotion({
-                title: finalTitle,
-                transcriptionData: transcriptionResult.data,
-                audioFilePath: finalAudioPath
-              });
-
-              if (uploadResult.success) {
-                statusText.textContent = 'Auto mode: Successfully uploaded to Notion!';
-
-                // Open the Notion page if URL is available
-                if (uploadResult.url) {
-                  window.electronAPI.openExternal(uploadResult.url);
-                }
-              } else {
-                statusText.textContent = 'Auto mode: Failed to upload to Notion';
-                console.error('Auto mode: Notion upload failed:', uploadResult.error);
-              }
-            } else {
-              statusText.textContent = 'Auto mode: Transcription complete (Notion not configured)';
-            }
-
-            // Refresh recordings list to show the renamed file
-            await refreshRecordingsList();
-          } else {
-            statusText.textContent = 'Auto mode: Transcription failed';
-            console.error('Auto mode: Transcription failed:', transcriptionResult.error);
-          }
-        } catch (error) {
-          statusText.textContent = 'Auto mode: Error processing recording';
-          console.error('Auto mode error:', error);
-          console.error('Error details:', error.message, error.stack);
-        } finally {
-          // Clear auto mode processing flag and re-enable record button
-          isAutoModeProcessing = false;
-          recordButton.disabled = false;
-          recordButton.style.opacity = '';
-          recordButton.style.cursor = '';
-        }
-
-        // Reset status after 5 seconds
-        setTimeout(() => {
-          statusText.textContent = 'Ready to record';
-        }, 5000);
-      }
+      await handleRecordingStopped(result.filePath);
     }
   } catch (error) {
     alert('Failed to stop recording: ' + error.message);
@@ -434,6 +418,13 @@ window.electronAPI.onRecordingStatus((status) => {
   console.log('Recording status:', status);
 });
 
+if (window.electronAPI.onRecordingAutoStopped) {
+  window.electronAPI.onRecordingAutoStopped(async (data) => {
+    showToast('Recording auto-stopped - reached time limit');
+    await handleRecordingStopped(data?.filePath);
+  });
+}
+
 // Modal elements - will be initialized after DOM loads
 let configModal, transcriptionModal, saveConfigBtn, cancelConfigBtn;
 let geminiApiKeyInput, geminiModelInput, geminiFlashModelInput, notionApiKeyInput, notionDatabaseIdInput, globalShortcutInput, knownWordsInput;
@@ -453,6 +444,10 @@ function setupEventListeners() {
       : [];
     const summaryPromptInput = document.getElementById('summaryPrompt');
     const summaryPrompt = summaryPromptInput ? summaryPromptInput.value.trim() : '';
+    const maxRecordingMinutesEl = document.getElementById('maxRecordingMinutes');
+    const maxRecordingMinutes = Math.max(0, Math.floor(parseInt(maxRecordingMinutesEl?.value) || 0));
+    const recordingReminderMinutesEl = document.getElementById('recordingReminderMinutes');
+    const recordingReminderMinutes = Math.max(0, Math.floor(parseInt(recordingReminderMinutesEl?.value) || 0));
 
     if (geminiKey) {
       await window.electronAPI.saveConfig({
@@ -463,7 +458,9 @@ function setupEventListeners() {
         notionDatabaseId: notionDb,
         globalShortcut: globalShortcut,
         knownWords: knownWords,
-        summaryPrompt: summaryPrompt || DEFAULT_SUMMARY_PROMPT
+        summaryPrompt: summaryPrompt || DEFAULT_SUMMARY_PROMPT,
+        maxRecordingMinutes: maxRecordingMinutes,
+        recordingReminderMinutes: recordingReminderMinutes
       });
       configModal.style.display = 'none';
     } else {
@@ -891,6 +888,14 @@ async function showConfigModal() {
   }
   if (knownWordsInput) {
     knownWordsInput.value = (config.knownWords || []).join('\n');
+  }
+  const maxRecordingMinutesInput = document.getElementById('maxRecordingMinutes');
+  if (maxRecordingMinutesInput) {
+    maxRecordingMinutesInput.value = config.maxRecordingMinutes || '';
+  }
+  const recordingReminderMinutesInput = document.getElementById('recordingReminderMinutes');
+  if (recordingReminderMinutesInput) {
+    recordingReminderMinutesInput.value = config.recordingReminderMinutes || '';
   }
 
   // Pre-fill summary prompt

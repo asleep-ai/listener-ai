@@ -12,6 +12,8 @@ export interface AppConfig {
   globalShortcut?: string;
   knownWords?: string[];
   summaryPrompt?: string;
+  maxRecordingMinutes?: number;
+  recordingReminderMinutes?: number;
 }
 
 export const DEFAULT_SUMMARY_PROMPT = `Based on this meeting transcript, provide:
@@ -163,6 +165,24 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getMaxRecordingMinutes(): number {
+    return this.config.maxRecordingMinutes || 0;
+  }
+
+  setMaxRecordingMinutes(minutes: number): void {
+    this.config.maxRecordingMinutes = Math.max(0, Math.floor(minutes));
+    this.saveConfig();
+  }
+
+  getRecordingReminderMinutes(): number {
+    return this.config.recordingReminderMinutes || 0;
+  }
+
+  setRecordingReminderMinutes(minutes: number): void {
+    this.config.recordingReminderMinutes = Math.max(0, Math.floor(minutes));
+    this.saveConfig();
+  }
+
   getSummaryPrompt(): string {
     return this.config.summaryPrompt || DEFAULT_SUMMARY_PROMPT;
   }
@@ -192,7 +212,9 @@ export class ConfigService {
       meetingDetection: this.getMeetingDetection(),
       globalShortcut: this.getGlobalShortcut(),
       knownWords: this.getKnownWords(),
-      summaryPrompt: this.getSummaryPrompt()
+      summaryPrompt: this.getSummaryPrompt(),
+      maxRecordingMinutes: this.getMaxRecordingMinutes(),
+      recordingReminderMinutes: this.getRecordingReminderMinutes()
     };
   }
 }

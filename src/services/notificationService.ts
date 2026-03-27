@@ -61,6 +61,14 @@ export class NotificationService {
   notifyMeetingEnded(appName: string) {
     this.notify('Meeting Ended', appName);
   }
+
+  notifyRecordingReminder(elapsedMinutes: number) {
+    this.notify('Recording In Progress', `Recording has been running for ${elapsedMinutes} minutes`);
+  }
+
+  notifyRecordingAutoStopped(maxMinutes: number) {
+    this.notify('Recording Auto-Stopped', `Recording reached the ${maxMinutes}-minute limit and was automatically stopped`);
+  }
 }
 
 export const notificationService = new NotificationService();
