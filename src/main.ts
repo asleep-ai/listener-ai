@@ -30,6 +30,8 @@ const meetingDetector = new MeetingDetectorService();
 let meetingAutoStartedRecording = false;
 let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
+let recordingMaxTimer: NodeJS.Timeout | null = null;
+let recordingReminderTimer: NodeJS.Timeout | null = null;
 
 function createGeminiService(): GeminiService | null {
   const apiKey = configService.getGeminiApiKey();
@@ -79,6 +81,7 @@ function handleGlobalShortcutTrigger() {
   // Apply same logic as tray click
   if (audioRecorder.isRecording()) {
     // Stop recording
+    clearRecordingTimers();
     menuBarManager.stopRecording();
   } else {
     // Show window and start recording
@@ -264,6 +267,7 @@ app.whenReady().then(() => {
       // Only stop recording if we auto-started it (don't interrupt manual recordings)
       if (meetingAutoStartedRecording && audioRecorder.isRecording()) {
         meetingAutoStartedRecording = false;
+        clearRecordingTimers();
         mainWindow.webContents.send('tray-stop-recording');
       }
     }
@@ -331,6 +335,17 @@ async function renameAudioFile(oldPath: string, suggestedTitle: string): Promise
   }
 }
 
+function clearRecordingTimers() {
+  if (recordingMaxTimer) {
+    clearTimeout(recordingMaxTimer);
+    recordingMaxTimer = null;
+  }
+  if (recordingReminderTimer) {
+    clearInterval(recordingReminderTimer);
+    recordingReminderTimer = null;
+  }
+}
+
 // IPC handlers for recording functionality
 // FFmpeg handlers
 ipcMain.handle('check-ffmpeg', async () => {
@@ -367,6 +382,41 @@ ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
     if (result.success) {
       menuBarManager.updateRecordingState(true, meetingTitle);
       notificationService.notifyRecordingStarted(meetingTitle);
+
+      // Set up recording limit timer
+      const maxMinutes = configService.getMaxRecordingMinutes();
+      if (maxMinutes > 0) {
+        recordingMaxTimer = setTimeout(async () => {
+          clearRecordingTimers();
+          if (audioRecorder.isRecording()) {
+            try {
+              const stopResult = await audioRecorder.stopRecording();
+              menuBarManager.updateRecordingState(false);
+              meetingAutoStartedRecording = false;
+              if (stopResult.success) {
+                notificationService.notifyRecordingAutoStopped(maxMinutes);
+              }
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('recording-auto-stopped', stopResult);
+              }
+            } catch (error) {
+              console.error('Error auto-stopping recording:', error);
+            }
+          }
+        }, maxMinutes * 60 * 1000);
+      }
+
+      // Set up recording reminder interval
+      const reminderMinutes = configService.getRecordingReminderMinutes();
+      if (reminderMinutes > 0) {
+        let elapsed = 0;
+        recordingReminderTimer = setInterval(() => {
+          elapsed += reminderMinutes;
+          if (audioRecorder.isRecording()) {
+            notificationService.notifyRecordingReminder(elapsed);
+          }
+        }, reminderMinutes * 60 * 1000);
+      }
     }
 
     return result;
@@ -379,6 +429,7 @@ ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
 
 ipcMain.handle('stop-recording', async () => {
   try {
+    clearRecordingTimers();
     const result = await audioRecorder.stopRecording();
 
     // Update menu bar icon state
