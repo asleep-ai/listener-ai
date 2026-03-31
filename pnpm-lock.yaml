@@ -17,13 +17,9 @@ importers:
       fs-extra:
         specifier: ^11.2.0
         version: 11.3.0
-    optionalDependencies:
-      '@notionhq/client':
-        specifier: ^4.0.0
-        version: 4.0.1
-      electron-updater:
-        specifier: ^6.6.2
-        version: 6.6.2
+      marked:
+        specifier: ^15.0.0
+        version: 15.0.12
     devDependencies:
       '@electron/notarize':
         specifier: ^3.0.1
@@ -49,6 +45,13 @@ importers:
       typescript:
         specifier: ^5.8.3
         version: 5.8.3
+    optionalDependencies:
+      '@notionhq/client':
+        specifier: ^4.0.0
+        version: 4.0.1
+      electron-updater:
+        specifier: ^6.6.2
+        version: 6.6.2
 
 packages:
 
@@ -891,6 +894,11 @@ packages:
   make-fetch-happen@14.0.3:
     resolution: {integrity: sha512-QMjGbFTP0blj97EeidG5hk/QhKQ3T4ICckQGLgz38QF7Vgbk6e6FTARN8KhKxyBbWn8R0HU+bnw8aSoFPD4qtQ==}
     engines: {node: ^18.17.0 || >=20.5.0}
+
+  marked@15.0.12:
+    resolution: {integrity: sha512-8dD6FusOQSrpv9Z1rdNMdlSgQOIP880DHqnohobOmYLElGEqAL/JvxvuxZO16r4HtjTlfPRDC1hbvxC9dPN2nA==}
+    engines: {node: '>= 18'}
+    hasBin: true
 
   matcher@3.0.0:
     resolution: {integrity: sha512-OkeDaAZ/bQCxeFAozM55PKcKU0yJMPGifLwV4Qgjitu+5MoAfSQN4lsLJeXZ1b8w0x+/Emda6MZgXS1jvsapng==}
@@ -2526,6 +2534,8 @@ snapshots:
       ssri: 12.0.0
     transitivePeerDependencies:
       - supports-color
+
+  marked@15.0.12: {}
 
   matcher@3.0.0:
     dependencies:

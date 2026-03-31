@@ -161,22 +161,26 @@
         </div>
         <div class="transcription-header">
           <div class="transcription-tabs">
-            <button class="tab-button active" data-tab="transcript">Transcript</button>
+            <button class="tab-button active" data-tab="all">All</button>
             <button class="tab-button" data-tab="summary">Summary</button>
             <!-- dynamic tabs inserted here by JS -->
+            <button class="tab-button" data-tab="transcript">Transcript</button>
           </div>
           <button id="uploadToNotion" class="notion-button" style="display: none;">
             <span class="notion-icon">📝</span> Upload to Notion
           </button>
         </div>
         <div class="tab-content">
-          <div id="transcript" class="tab-pane active">
-            <p class="loading">Loading transcription...</p>
+          <div id="all" class="tab-pane active">
+            <p class="loading">Loading...</p>
           </div>
           <div id="summary" class="tab-pane">
             <p class="loading">Loading summary...</p>
           </div>
           <!-- dynamic panes inserted here by JS -->
+          <div id="transcript" class="tab-pane">
+            <p class="loading">Loading transcription...</p>
+          </div>
         </div>
       </div>
     </div>
@@ -206,6 +210,7 @@
     </div>
   </div>
 
+  <script src="./node_modules/marked/lib/marked.umd.js"></script>
   <script src="js/fileHandler.js"></script>
   <script src="renderer.js"></script>
 </body>

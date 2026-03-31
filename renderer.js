@@ -587,6 +587,78 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// Convert structured transcription data to a markdown string
+function structuredToMarkdown(data, section) {
+  const lines = [];
+
+  if (section === 'all' || section === 'summary') {
+    if (data.summary) {
+      if (section === 'all') lines.push('## Summary\n');
+      lines.push(data.summary);
+      lines.push('');
+    }
+  }
+
+  if (section === 'all' || section === 'keypoints') {
+    if (data.keyPoints?.length) {
+      if (section === 'all') lines.push('## Key Points\n');
+      for (const point of data.keyPoints) {
+        lines.push(`- ${point}`);
+      }
+      lines.push('');
+    }
+  }
+
+  if (section === 'all' || section === 'actions') {
+    if (data.actionItems?.length) {
+      if (section === 'all') lines.push('## Action Items\n');
+      for (const item of data.actionItems) {
+        lines.push(`- ${item}`);
+      }
+      lines.push('');
+    }
+  }
+
+  if (section === 'all' && data.customFields) {
+    for (const [key, value] of Object.entries(data.customFields)) {
+      if (value == null) continue;
+      lines.push(`## ${camelToLabel(key)}\n`);
+      if (Array.isArray(value)) {
+        for (const v of value) lines.push(`- ${v}`);
+      } else if (typeof value === 'string') {
+        lines.push(value);
+      } else {
+        lines.push('```json\n' + JSON.stringify(value, null, 2) + '\n```');
+      }
+      lines.push('');
+    }
+  }
+
+  if (section?.startsWith('cf-') && data.customFields) {
+    const cfKey = section.slice(3);
+    const value = data.customFields[cfKey];
+    if (Array.isArray(value)) {
+      for (const v of value) lines.push(`- ${v}`);
+    } else if (typeof value === 'string') {
+      lines.push(value);
+    } else if (value != null) {
+      lines.push('```json\n' + JSON.stringify(value, null, 2) + '\n```');
+    }
+    lines.push('');
+  }
+
+  if (section === 'transcript') {
+    lines.push(data.transcript || '');
+  }
+
+  return lines.join('\n').trim();
+}
+
+// Render markdown string to HTML
+function renderMarkdown(md) {
+  return marked.parse(md || '', { breaks: true });
+}
+
 // Render dynamic field tabs (keyPoints, actionItems, and any custom fields)
 function renderDynamicFields(data) {
   const fields = [];
@@ -614,13 +686,16 @@ function renderDynamicFields(data) {
   tabsContainer.querySelector('.tab-button')?.classList.add('active');
   contentContainer.querySelector('.tab-pane')?.classList.add('active');
 
+  const transcriptBtn = tabsContainer.querySelector('[data-tab="transcript"]');
+  const transcriptPane = document.getElementById('transcript');
+
   for (const field of fields) {
     // Tab button
     const btn = document.createElement('button');
     btn.className = 'tab-button dynamic';
     btn.dataset.tab = field.key;
     btn.textContent = field.label;
-    tabsContainer.appendChild(btn);
+    tabsContainer.insertBefore(btn, transcriptBtn);
 
     // Tab pane
     const pane = document.createElement('div');
@@ -629,21 +704,44 @@ function renderDynamicFields(data) {
 
     const safeKey = escapeHtml(field.key);
     const copyBtn = `<button class="copy-button" data-copy-target="${safeKey}">📋 Copy</button>`;
-
-    let content = '';
-    if (Array.isArray(field.value)) {
-      const items = field.value.map(item => `<li>${escapeHtml(item)}</li>`).join('');
-      content = items ? `${copyBtn}<ul class="${safeKey}-content">${items}</ul>`
-                      : `<p>No ${escapeHtml(field.label.toLowerCase())} identified</p>`;
-    } else if (typeof field.value === 'string') {
-      content = `${copyBtn}<p class="${safeKey}-content">${escapeHtml(field.value)}</p>`;
-    } else {
-      content = `${copyBtn}<pre class="${safeKey}-content">${escapeHtml(JSON.stringify(field.value, null, 2))}</pre>`;
-    }
-
-    pane.innerHTML = content;
-    contentContainer.appendChild(pane);
+    const md = structuredToMarkdown(data, field.key);
+    pane.innerHTML = `${copyBtn}<div class="${safeKey}-content markdown-body">${renderMarkdown(md)}</div>`;
+    contentContainer.insertBefore(pane, transcriptPane);
   }
+}
+
+// Populate all transcription tabs with data and set up copy handlers
+function populateTranscriptionUI(data) {
+  // All tab
+  const allMd = structuredToMarkdown(data, 'all');
+  const allDiv = document.getElementById('all');
+  allDiv.innerHTML = allMd
+    ? `<button class="copy-button" data-copy-target="all">📋 Copy All</button>
+       <div class="all-content markdown-body">${renderMarkdown(allMd)}</div>`
+    : '<p class="loading">No content available</p>';
+
+  // Summary tab
+  const summaryMd = structuredToMarkdown(data, 'summary');
+  const summaryDiv = document.getElementById('summary');
+  summaryDiv.innerHTML = summaryMd
+    ? `<button class="copy-button" data-copy-target="summary">📋 Copy</button>
+       <div class="summary-content markdown-body">${renderMarkdown(summaryMd)}</div>`
+    : '<p class="loading">No summary available</p>';
+
+  // Transcript tab
+  const formattedTranscript = (data.transcript || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .join('\n');
+  const transcriptDiv = document.getElementById('transcript');
+  transcriptDiv.innerHTML = `
+    <button class="copy-button" data-copy-target="transcript">📋 Copy</button>
+    <div class="transcript-content">${escapeHtml(formattedTranscript)}</div>
+  `;
+
+  renderDynamicFields(data);
+  setupCopyButtons(data);
 }
 
 // Function to show saved transcript
@@ -675,41 +773,7 @@ function showSavedTranscript(filePath, title, metadata) {
     currentMeetingTitle = title;
     currentFilePath = filePath;
 
-    // Update the UI with transcription results
-    // Format transcript with proper line breaks
-    const formattedTranscript = (metadata.transcript || '')
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line.length > 0)
-      .join('\n');
-
-    // Update transcript
-    const transcriptDiv = document.getElementById('transcript');
-    transcriptDiv.innerHTML = `
-      <button class="copy-button" data-copy-target="transcript">
-        📋 Copy
-      </button>
-      <div class="transcript-content">${escapeHtml(formattedTranscript)}</div>
-    `;
-
-    // Update summary
-    const summaryDiv = document.getElementById('summary');
-    summaryDiv.innerHTML = `
-      <button class="copy-button" data-copy-target="summary">
-        📋 Copy
-      </button>
-      <p class="summary-content">${escapeHtml(metadata.summary || 'No summary available')}</p>
-    `;
-
-    // Render dynamic field tabs (keyPoints, actionItems, custom fields)
-    renderDynamicFields({
-      keyPoints: metadata.keyPoints,
-      actionItems: metadata.actionItems,
-      customFields: metadata.customFields,
-    });
-
-    // Setup copy button event listeners
-    setupCopyButtons(currentTranscriptionData);
+    populateTranscriptionUI(currentTranscriptionData);
 
     // Show upload to Notion button if configured
     window.electronAPI.getConfig().then(config => {
@@ -758,11 +822,15 @@ async function handleTranscribe(filePath, title) {
   }
 
   // Reset all tabs to loading state
-  document.getElementById('transcript').innerHTML = '<p class="loading">Loading transcription...</p>';
+  document.getElementById('all').innerHTML = '<p class="loading">Loading...</p>';
   document.getElementById('summary').innerHTML = '<p class="loading">Loading summary...</p>';
-  // Remove old dynamic tabs/panes
+  document.getElementById('transcript').innerHTML = '<p class="loading">Loading transcription...</p>';
   document.querySelectorAll('.tab-button.dynamic').forEach(el => el.remove());
   document.querySelectorAll('.tab-pane.dynamic').forEach(el => el.remove());
+  document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelector('[data-tab="all"]').classList.add('active');
+  document.getElementById('all').classList.add('active');
 
   // Disable the transcribe button
   const button = document.querySelector(`[data-filepath="${filePath}"]`);
@@ -796,37 +864,7 @@ async function handleTranscribe(filePath, title) {
       currentMeetingTitle = title;
       currentFilePath = filePath;
 
-      // Update the UI with transcription results
-      // Format transcript with proper line breaks
-      const formattedTranscript = result.data.transcript
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line.length > 0)
-        .join('\n');
-
-      // Update transcript
-      const transcriptDiv = document.getElementById('transcript');
-      transcriptDiv.innerHTML = `
-        <button class="copy-button" data-copy-target="transcript">
-          📋 Copy
-        </button>
-        <div class="transcript-content">${escapeHtml(formattedTranscript)}</div>
-      `;
-
-      // Update summary
-      const summaryDiv = document.getElementById('summary');
-      summaryDiv.innerHTML = `
-        <button class="copy-button" data-copy-target="summary">
-          📋 Copy
-        </button>
-        <p class="summary-content">${escapeHtml(result.data.summary)}</p>
-      `;
-
-      // Render dynamic field tabs (keyPoints, actionItems, custom fields)
-      renderDynamicFields(result.data);
-
-      // Setup copy button event listeners
-      setupCopyButtons(result.data);
+      populateTranscriptionUI(result.data);
 
       // Show upload to Notion button if configured
       const notionConfig = await window.electronAPI.getConfig();
@@ -1031,32 +1069,18 @@ async function refreshRecordingsList() {
 function setupCopyButtons(transcriptionData) {
   const copyButtons = document.querySelectorAll('.copy-button');
 
+  const sectionLabels = {
+    all: 'All', summary: 'Summary', keypoints: 'Key Points',
+    actions: 'Action Items', transcript: 'Transcript',
+  };
+
   copyButtons.forEach(button => {
     button.addEventListener('click', async () => {
       const target = button.dataset.copyTarget;
-      let textToCopy = '';
-      let sectionName = '';
-
-      if (target === 'transcript') {
-        textToCopy = transcriptionData.transcript;
-        sectionName = 'Transcript';
-      } else if (target === 'summary') {
-        textToCopy = transcriptionData.summary;
-        sectionName = 'Summary';
-      } else if (target === 'keypoints') {
-        textToCopy = (transcriptionData.keyPoints || []).join('\n');
-        sectionName = 'Key Points';
-      } else if (target === 'actions') {
-        textToCopy = (transcriptionData.actionItems || []).join('\n');
-        sectionName = 'Action Items';
-      } else if (target.startsWith('cf-') && transcriptionData.customFields) {
-        const cfKey = target.slice(3);
-        if (Object.hasOwn(transcriptionData.customFields, cfKey)) {
-          const val = transcriptionData.customFields[cfKey];
-          textToCopy = Array.isArray(val) ? val.join('\n') : typeof val === 'string' ? val : JSON.stringify(val, null, 2);
-          sectionName = camelToLabel(cfKey);
-        }
-      }
+      const sectionName = target.startsWith('cf-')
+        ? camelToLabel(target.slice(3))
+        : (sectionLabels[target] || target);
+      const textToCopy = structuredToMarkdown(transcriptionData, target);
 
       try {
         await navigator.clipboard.writeText(textToCopy);
