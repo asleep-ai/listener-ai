@@ -654,6 +654,9 @@ function structuredToMarkdown(data, section) {
   return lines.join('\n').trim();
 }
 
+// Strip raw HTML from markdown output to prevent XSS
+marked.use({ renderer: { html: (token) => escapeHtml(token.raw) } });
+
 // Render markdown string to HTML
 function renderMarkdown(md) {
   return marked.parse(md || '', { breaks: true });
