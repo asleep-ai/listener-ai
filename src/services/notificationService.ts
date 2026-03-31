@@ -65,19 +65,23 @@ export class NotificationService {
   notifyDisplayDetected(onAllow: () => void): Notification | null {
     if (!Notification.isSupported()) return null;
 
+    const isMac = process.platform === 'darwin';
     const notification = new Notification({
       title: 'Display Connected',
       body: 'External display detected',
-      actions: process.platform === 'darwin' ? [{ type: 'button', text: 'Allow' }] : [],
+      actions: isMac ? [{ type: 'button', text: 'Allow' }] : [],
     });
 
     notification.on('action', () => {
       onAllow();
     });
 
-    notification.on('click', () => {
-      onAllow();
-    });
+    // On Windows, actions aren't supported -- use click as fallback
+    if (!isMac) {
+      notification.on('click', () => {
+        onAllow();
+      });
+    }
 
     notification.show();
     return notification;

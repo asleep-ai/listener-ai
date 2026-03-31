@@ -78,7 +78,8 @@ export class DisplayDetectorService extends EventEmitter {
         this.consecutiveDetections = 0;
         this.consecutiveNonDetections++;
 
-        if (this.externalConnected && this.consecutiveNonDetections >= DisplayDetectorService.END_THRESHOLD) {
+        if (this.consecutiveNonDetections >= DisplayDetectorService.END_THRESHOLD) {
+          this.consecutiveNonDetections = 0;
           this.externalConnected = false;
           this.lastDisplayCount = count;
           this.emit('display-disconnected', { count });
