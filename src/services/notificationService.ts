@@ -62,6 +62,27 @@ export class NotificationService {
     this.notify('Meeting Ended', appName);
   }
 
+  notifyDisplayDetected(onAllow: () => void): Notification | null {
+    if (!Notification.isSupported()) return null;
+
+    const notification = new Notification({
+      title: 'Display Connected',
+      body: 'External display detected',
+      actions: process.platform === 'darwin' ? [{ type: 'button', text: 'Allow' }] : [],
+    });
+
+    notification.on('action', () => {
+      onAllow();
+    });
+
+    notification.on('click', () => {
+      onAllow();
+    });
+
+    notification.show();
+    return notification;
+  }
+
   notifyRecordingReminder(elapsedMinutes: number) {
     this.notify('Recording In Progress', `Recording has been running for ${elapsedMinutes} minutes`);
   }

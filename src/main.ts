@@ -10,6 +10,7 @@ import { MenuBarManager } from './menuBarManager';
 import { metadataService } from './services/metadataService';
 import { FileHandlerService } from './services/fileHandlerService';
 import { MeetingDetectorService } from './meetingDetectorService';
+import { DisplayDetectorService } from './displayDetectorService';
 import { autoUpdaterService } from './services/autoUpdaterService';
 import { notificationService } from './services/notificationService';
 import { saveTranscription, readTranscription } from './outputService';
@@ -27,7 +28,10 @@ const ffmpegManager = new FFmpegManager();
 const menuBarManager = new MenuBarManager();
 const fileHandlerService = new FileHandlerService();
 const meetingDetector = new MeetingDetectorService();
+const displayDetector = new DisplayDetectorService();
 let meetingAutoStartedRecording = false;
+let displayAutoStartedRecording = false;
+let suppressRecordingNotification = false;
 let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
 let recordingMaxTimer: NodeJS.Timeout | null = null;
@@ -273,6 +277,24 @@ app.whenReady().then(() => {
     }
   });
 
+  // Initialize display detector
+  if (configService.getDisplayDetection()) {
+    displayDetector.start();
+  }
+
+  displayDetector.on('display-connected', () => {
+    if (mainWindow && !mainWindow.isDestroyed() && !audioRecorder.isRecording()) {
+      notificationService.notifyDisplayDetected(() => {
+        // User clicked/allowed -- start recording silently
+        if (!audioRecorder.isRecording() && mainWindow && !mainWindow.isDestroyed()) {
+          displayAutoStartedRecording = true;
+          suppressRecordingNotification = true;
+          mainWindow.webContents.send('tray-start-recording');
+        }
+      });
+    }
+  });
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -296,6 +318,7 @@ app.on('window-all-closed', () => {
 // Handle app quit
 app.on('before-quit', () => {
   meetingDetector.stop();
+  displayDetector.stop();
   global.isQuitting = true;
 });
 
@@ -381,7 +404,11 @@ ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
     // Update menu bar icon state
     if (result.success) {
       menuBarManager.updateRecordingState(true, meetingTitle);
-      notificationService.notifyRecordingStarted(meetingTitle);
+      if (suppressRecordingNotification) {
+        suppressRecordingNotification = false;
+      } else {
+        notificationService.notifyRecordingStarted(meetingTitle);
+      }
 
       // Set up recording limit timer
       const maxMinutes = configService.getMaxRecordingMinutes();
@@ -393,6 +420,7 @@ ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
               const stopResult = await audioRecorder.stopRecording();
               menuBarManager.updateRecordingState(false);
               meetingAutoStartedRecording = false;
+              displayAutoStartedRecording = false;
               if (stopResult.success) {
                 notificationService.notifyRecordingAutoStopped(maxMinutes);
               }
@@ -435,6 +463,7 @@ ipcMain.handle('stop-recording', async () => {
     // Update menu bar icon state
     menuBarManager.updateRecordingState(false);
     meetingAutoStartedRecording = false;
+    displayAutoStartedRecording = false;
     if (result.success) {
       notificationService.notifyRecordingStopped();
     }
@@ -463,6 +492,10 @@ ipcMain.handle('save-config', async (_, config: Partial<AppConfig>) => {
 
     if (config.meetingDetection !== undefined) {
       meetingDetector.setEnabled(config.meetingDetection);
+    }
+
+    if (config.displayDetection !== undefined) {
+      displayDetector.setEnabled(config.displayDetection);
     }
 
     // Recreate Notion service if either field changed

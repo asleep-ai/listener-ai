@@ -200,6 +200,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     await window.electronAPI.saveConfig({ meetingDetection: meetingDetectionToggle.checked });
   });
 
+  // Display detection toggle
+  const displayDetectionToggle = document.getElementById('displayDetectionToggle');
+
+  if (config.displayDetection !== undefined) {
+    displayDetectionToggle.checked = config.displayDetection;
+  }
+
+  displayDetectionToggle.addEventListener('change', async () => {
+    await window.electronAPI.saveConfig({ displayDetection: displayDetectionToggle.checked });
+  });
+
   // Listen for meeting status changes
   window.electronAPI.onMeetingStatusChanged((status) => {
     if (status.active) {
