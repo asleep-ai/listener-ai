@@ -52,7 +52,8 @@
   },
   "dependencies": {
     "@google/genai": "^1.13.0",
-    "fs-extra": "^11.2.0"
+    "fs-extra": "^11.2.0",
+    "marked": "^15.0.0"
   },
   "optionalDependencies": {
     "@notionhq/client": "^4.0.0",
