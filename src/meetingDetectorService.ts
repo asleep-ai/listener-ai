@@ -166,9 +166,7 @@ return "none"`;
 tell application "System Events"
   if exists process "Slack" then
     tell process "Slack"
-      repeat with w in windows
-        if name of w starts with "Huddle:" then return true
-      end repeat
+      if (count of (windows whose name starts with "Huddle:")) > 0 then return true
     end tell
   end if
 end tell
