@@ -9,6 +9,7 @@ export interface AppConfig {
   notionDatabaseId?: string;
   autoMode?: boolean;
   meetingDetection?: boolean;
+  displayDetection?: boolean;
   globalShortcut?: string;
   knownWords?: string[];
   summaryPrompt?: string;
@@ -129,6 +130,15 @@ export class ConfigService {
     return this.config.meetingDetection || false;
   }
 
+  getDisplayDetection(): boolean {
+    return this.config.displayDetection || false;
+  }
+
+  setDisplayDetection(enabled: boolean): void {
+    this.config.displayDetection = enabled;
+    this.saveConfig();
+  }
+
   getGlobalShortcut(): string {
     return this.config.globalShortcut || 'CommandOrControl+Shift+L';
   }
@@ -210,6 +220,7 @@ export class ConfigService {
       notionDatabaseId: this.getNotionDatabaseId(),
       autoMode: this.getAutoMode(),
       meetingDetection: this.getMeetingDetection(),
+      displayDetection: this.getDisplayDetection(),
       globalShortcut: this.getGlobalShortcut(),
       knownWords: this.getKnownWords(),
       summaryPrompt: this.getSummaryPrompt(),
