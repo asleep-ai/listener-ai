@@ -100,11 +100,12 @@ export class MeetingDetectorService extends EventEmitter {
   private async detectMacOS(): Promise<string | null> {
     // Check native meeting apps via pgrep (lightweight, no full process list)
     // and Google Meet via AppleScript in parallel
-    const [hasZoom, hasTeamsNew, hasTeamsOld, meetBrowser] = await Promise.all([
+    const [hasZoom, hasTeamsNew, hasTeamsOld, meetBrowser, hasSlackHuddle] = await Promise.all([
       this.pgrepExists('CptHost'),
       this.pgrepExists('MSTeams'),
       this.pgrepExists('ms-teams'),
-      this.checkGoogleMeetMacOS()
+      this.checkGoogleMeetMacOS(),
+      this.checkSlackHuddleMacOS()
     ]);
     const hasTeams = hasTeamsNew || hasTeamsOld;
 
@@ -116,6 +117,8 @@ export class MeetingDetectorService extends EventEmitter {
 
     // Google Meet via browser window title
     if (meetBrowser) return 'Google Meet';
+
+    if (hasSlackHuddle) return 'Slack Huddle';
 
     return null;
   }
@@ -155,6 +158,24 @@ return "none"`;
       return result !== 'none' && result !== '' ? result : null;
     } catch {
       return null;
+    }
+  }
+
+  private async checkSlackHuddleMacOS(): Promise<boolean> {
+    const script = `
+tell application "System Events"
+  if exists process "Slack" then
+    tell process "Slack"
+      if (count of (windows whose name starts with "Huddle:")) > 0 then return true
+    end tell
+  end if
+end tell
+return false`;
+    try {
+      const { stdout } = await execFileAsync('osascript', ['-e', script], { timeout: 3000 });
+      return stdout.trim() === 'true';
+    } catch {
+      return false;
     }
   }
 
