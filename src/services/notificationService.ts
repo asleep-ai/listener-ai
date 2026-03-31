@@ -72,16 +72,15 @@ export class NotificationService {
       actions: isMac ? [{ type: 'button', text: 'Allow' }] : [],
     });
 
-    notification.on('action', () => {
+    let handled = false;
+    const handleAllow = () => {
+      if (handled) return;
+      handled = true;
       onAllow();
-    });
+    };
 
-    // On Windows, actions aren't supported -- use click as fallback
-    if (!isMac) {
-      notification.on('click', () => {
-        onAllow();
-      });
-    }
+    notification.on('action', handleAllow);
+    notification.on('click', handleAllow);
 
     notification.show();
     return notification;
