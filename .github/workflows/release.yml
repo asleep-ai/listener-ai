@@ -101,8 +101,8 @@ jobs:
           pnpm run build
           pnpm exec ${{ matrix.cmd }}
         env:
-          CSC_LINK: ${{ secrets.SIGNING_CERTIFICATE }}
-          CSC_KEY_PASSWORD: ${{ secrets.CERT_PASSWORD }}
+          CSC_LINK: ${{ matrix.name == 'mac' && secrets.SIGNING_CERTIFICATE || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.name == 'mac' && secrets.CERT_PASSWORD || '' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
