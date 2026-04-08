@@ -87,16 +87,7 @@ function handleGlobalShortcutTrigger() {
     clearRecordingTimers();
     menuBarManager.stopRecording();
   } else {
-    // Show window and start recording
-    if (mainWindow.isMinimized()) {
-      mainWindow.restore();
-    }
-    if (!mainWindow.isVisible()) {
-      mainWindow.show();
-    }
-    mainWindow.focus();
-
-    // Start quick recording
+    // Start recording without bringing the window to front
     menuBarManager.startQuickRecording();
   }
 }

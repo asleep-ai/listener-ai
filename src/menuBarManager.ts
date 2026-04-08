@@ -129,12 +129,7 @@ export class MenuBarManager {
     // Instead of starting recording directly, send a message to the renderer
     // to click the start button, which will handle all the logic
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      // Show the window if it's hidden
-      if (!this.mainWindow.isVisible()) {
-        this.mainWindow.show();
-      }
-
-      // Tell the renderer to start recording
+      // Start recording in the background -- no show/focus so the window stays hidden
       this.mainWindow.webContents.send('tray-start-recording');
     }
   }
