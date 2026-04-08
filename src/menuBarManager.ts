@@ -107,7 +107,7 @@ export class MenuBarManager {
 
     if (state === 'recording') {
       const dotR = Math.round(size * 0.09);
-      fillCircle(right + dotR + 1, bottom - dotR, dotR);
+      fillCircle(right + dotR, bottom - dotR, dotR);
     }
 
     const image = nativeImage.createFromBuffer(buf, { width: size, height: size, scaleFactor: scale });
