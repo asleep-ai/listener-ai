@@ -30,10 +30,6 @@ export class NotificationService {
     notification.show();
   }
 
-  notifyRecordingStarted(title: string) {
-    this.notify('Recording Started', title);
-  }
-
   notifyRecordingStopped() {
     this.notify('Recording Stopped', 'Your recording has been saved.');
   }
