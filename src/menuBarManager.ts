@@ -1,5 +1,4 @@
 import { Tray, Menu, nativeImage, app, BrowserWindow } from 'electron';
-import path from 'path';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
 
 
@@ -25,33 +24,7 @@ export class MenuBarManager {
   }
 
   private createTray() {
-    const iconPath = this.getIconPath('normal');
-
-    // Check if icon file exists
-    const fs = require('fs');
-    if (!fs.existsSync(iconPath)) {
-      console.error('Tray icon file not found:', iconPath);
-      return;
-    }
-
-    const icon = nativeImage.createFromPath(iconPath);
-
-    // Verify icon loaded successfully
-    if (icon.isEmpty()) {
-      console.error('ERROR: Icon is empty after loading from:', iconPath);
-      return;
-    }
-
-    // Resize the icon to appropriate tray size
-    const trayIcon = icon.resize({
-      width: process.platform === 'darwin' ? 22 : 16,
-      height: process.platform === 'darwin' ? 22 : 16
-    });
-
-    // On macOS, we need to set the icon as template for proper dark mode support
-    if (process.platform === 'darwin') {
-      trayIcon.setTemplateImage(true);
-    }
+    const trayIcon = this.createTrayIcon('normal');
 
     try {
       this.tray = new Tray(trayIcon);
@@ -97,14 +70,51 @@ export class MenuBarManager {
     });
   }
 
-  private getIconPath(state: 'normal' | 'recording'): string {
-    // Get the app root directory
-    const { app } = require('electron');
-    const appPath = app.getAppPath();
-    const assetsPath = path.join(appPath, 'assets');
+  private createTrayIcon(state: 'normal' | 'recording'): Electron.NativeImage {
+    const size = process.platform === 'darwin' ? 44 : 32;
+    const scale = process.platform === 'darwin' ? 2 : 1;
+    const buf = Buffer.alloc(size * size * 4, 0); // RGBA, all transparent
 
-    // Use the main icon - we'll resize it for the tray
-    return path.join(assetsPath, 'icon.png');
+    const setPixel = (x: number, y: number) => {
+      if (x < 0 || x >= size || y < 0 || y >= size) return;
+      const i = (y * size + x) * 4;
+      buf[i] = 0;       // R
+      buf[i + 1] = 0;   // G
+      buf[i + 2] = 0;   // B
+      buf[i + 3] = 255;  // A
+    };
+
+    const fillRect = (x: number, y: number, w: number, h: number) => {
+      for (let dy = 0; dy < h; dy++)
+        for (let dx = 0; dx < w; dx++)
+          setPixel(x + dx, y + dy);
+    };
+
+    const fillCircle = (cx: number, cy: number, r: number) => {
+      for (let dy = -r; dy <= r; dy++)
+        for (let dx = -r; dx <= r; dx++)
+          if (dx * dx + dy * dy <= r * r) setPixel(cx + dx, cy + dy);
+    };
+
+    // "L" letterform
+    const thick = Math.round(size * 0.23);
+    const margin = Math.round(size * 0.18);
+    const bottom = Math.round(size * 0.86);
+    const right = Math.round(size * 0.77);
+
+    fillRect(margin, margin, thick, bottom - margin);          // vertical bar
+    fillRect(margin, bottom - thick, right - margin, thick);   // horizontal bar
+
+    if (state === 'recording') {
+      const dotR = Math.round(size * 0.09);
+      fillCircle(right + dotR, bottom - dotR, dotR);
+    }
+
+    const image = nativeImage.createFromBuffer(buf, { width: size, height: size, scaleFactor: scale });
+    if (process.platform === 'darwin') {
+      image.setTemplateImage(true);
+    }
+    return image;
   }
 
   private updateTooltip() {
@@ -129,12 +139,7 @@ export class MenuBarManager {
     // Instead of starting recording directly, send a message to the renderer
     // to click the start button, which will handle all the logic
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      // Show the window if it's hidden
-      if (!this.mainWindow.isVisible()) {
-        this.mainWindow.show();
-      }
-
-      // Tell the renderer to start recording
+      // Start recording in the background -- no show/focus so the window stays hidden
       this.mainWindow.webContents.send('tray-start-recording');
     }
   }
@@ -150,23 +155,7 @@ export class MenuBarManager {
 
   private updateTrayIcon(state: 'normal' | 'recording') {
     if (!this.tray) return;
-
-    const iconPath = this.getIconPath(state);
-    const icon = nativeImage.createFromPath(iconPath);
-
-    if (icon.isEmpty()) return;
-
-    // Resize the icon
-    const trayIcon = icon.resize({
-      width: process.platform === 'darwin' ? 22 : 16,
-      height: process.platform === 'darwin' ? 22 : 16
-    });
-
-    if (process.platform === 'darwin') {
-      trayIcon.setTemplateImage(true);
-    }
-
-    this.tray.setImage(trayIcon);
+    this.tray.setImage(this.createTrayIcon(state));
   }
 
   private showContextMenu() {

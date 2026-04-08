@@ -98,6 +98,9 @@ CLI and GUI share the same config file (`config.json` in the app data directory)
 - File import via drag-and-drop or file dialog
 - Metadata storage for transcription results
 
+## Background Recording Policy
+Recording starts silently -- never bring the window to foreground (no `show()`/`focus()`) and never fire a "Recording Started" notification. This applies to all recording triggers: global shortcut, tray click, meeting detection, and display detection. Display detection in particular is designed to be discreet -- the user allows recording via the notification without the app becoming visible. Only explicit user actions (dock click, tray menu "Open", notification click for non-recording events) should show the window.
+
 ## Architecture Overview
 
 ### CLI (`src/cli.ts`)

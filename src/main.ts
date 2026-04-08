@@ -30,7 +30,6 @@ const fileHandlerService = new FileHandlerService();
 const meetingDetector = new MeetingDetectorService();
 const displayDetector = new DisplayDetectorService();
 let meetingAutoStartedRecording = false;
-let suppressRecordingNotification = false;
 let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
 let recordingMaxTimer: NodeJS.Timeout | null = null;
@@ -87,16 +86,7 @@ function handleGlobalShortcutTrigger() {
     clearRecordingTimers();
     menuBarManager.stopRecording();
   } else {
-    // Show window and start recording
-    if (mainWindow.isMinimized()) {
-      mainWindow.restore();
-    }
-    if (!mainWindow.isVisible()) {
-      mainWindow.show();
-    }
-    mainWindow.focus();
-
-    // Start quick recording
+    // Start recording without bringing the window to front
     menuBarManager.startQuickRecording();
   }
 }
@@ -286,7 +276,6 @@ app.whenReady().then(() => {
       notificationService.notifyDisplayDetected(() => {
         // User clicked/allowed -- start recording silently
         if (!audioRecorder.isRecording() && mainWindow && !mainWindow.isDestroyed()) {
-          suppressRecordingNotification = true;
           mainWindow.webContents.send('tray-start-recording');
         }
       });
@@ -398,15 +387,9 @@ ipcMain.handle('cancel-ffmpeg-download', async () => {
 ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
   try {
     const result = await audioRecorder.startRecording(meetingTitle);
-    const wasSuppressed = suppressRecordingNotification;
-    suppressRecordingNotification = false;
-
     // Update menu bar icon state
     if (result.success) {
       menuBarManager.updateRecordingState(true, meetingTitle);
-      if (!wasSuppressed) {
-        notificationService.notifyRecordingStarted(meetingTitle);
-      }
 
       // Set up recording limit timer
       const maxMinutes = configService.getMaxRecordingMinutes();
