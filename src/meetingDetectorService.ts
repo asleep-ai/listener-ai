@@ -100,12 +100,13 @@ export class MeetingDetectorService extends EventEmitter {
   private async detectMacOS(): Promise<string | null> {
     // Check native meeting apps via pgrep (lightweight, no full process list)
     // and Google Meet via AppleScript in parallel
-    const [hasZoom, hasTeamsNew, hasTeamsOld, meetBrowser, hasSlackHuddle] = await Promise.all([
+    const [hasZoom, hasTeamsNew, hasTeamsOld, meetBrowser, hasSlackHuddle, hasWebex] = await Promise.all([
       this.pgrepExists('CptHost'),
       this.pgrepExists('MSTeams'),
       this.pgrepExists('ms-teams'),
       this.checkGoogleMeetMacOS(),
-      this.checkSlackHuddleMacOS()
+      this.checkSlackHuddleMacOS(),
+      this.checkWebexMacOS()
     ]);
     const hasTeams = hasTeamsNew || hasTeamsOld;
 
@@ -119,6 +120,9 @@ export class MeetingDetectorService extends EventEmitter {
     if (meetBrowser) return 'Google Meet';
 
     if (hasSlackHuddle) return 'Slack Huddle';
+
+    // Cisco Webex: detect active meeting via Webex process or browser tab
+    if (hasWebex) return 'Webex';
 
     return null;
   }
@@ -179,6 +183,73 @@ return false`;
     }
   }
 
+  private async checkWebexMacOS(): Promise<boolean> {
+    // Strategy 1: Check for native Webex desktop app meeting window
+    // "Cisco Webex Meetings" spawns "Meeting Center" or the main app shows a meeting window
+    const [hasWebexApp, hasWebexMeetingCenter, webexBrowser] = await Promise.all([
+      this.pgrepExists('Webex'),
+      this.pgrepExists('Meeting Center'),
+      this.checkWebexBrowserMacOS()
+    ]);
+
+    // Native app: "Meeting Center" process indicates an active meeting
+    if (hasWebexMeetingCenter) return true;
+
+    // Native app: Check if Webex has a meeting window open
+    if (hasWebexApp) {
+      try {
+        const script = `
+tell application "System Events"
+  if exists process "Webex" then
+    tell process "Webex"
+      repeat with w in windows
+        set winName to name of w
+        if winName contains "Meeting" or winName contains "미팅" then return true
+      end repeat
+    end tell
+  end if
+end tell
+return false`;
+        const { stdout } = await execFileAsync('osascript', ['-e', script], { timeout: 3000 });
+        if (stdout.trim() === 'true') return true;
+      } catch {
+        // fall through to browser check
+      }
+    }
+
+    // Strategy 2: Browser-based Webex meeting
+    if (webexBrowser) return true;
+
+    return false;
+  }
+
+  private async checkWebexBrowserMacOS(): Promise<boolean> {
+    const script = `
+tell application "System Events"
+  set allProcs to name of every process
+  set browserList to {"Google Chrome", "Arc", "Microsoft Edge", "Brave Browser", "Safari", "Opera", "Vivaldi", "Zen Browser", "Naver Whale", "Firefox"}
+  repeat with browserName in browserList
+    if allProcs contains browserName then
+      tell process browserName
+        repeat with w in windows
+          set winName to name of w
+          if winName contains "Webex" and (winName contains "Meeting" or winName contains "미팅") then
+            return true
+          end if
+        end repeat
+      end tell
+    end if
+  end repeat
+end tell
+return false`;
+    try {
+      const { stdout } = await execFileAsync('osascript', ['-e', script], { timeout: 5000 });
+      return stdout.trim() === 'true';
+    } catch {
+      return false;
+    }
+  }
+
   private async detectWindows(): Promise<string | null> {
     const [hasZoom, hasTeams] = await Promise.all([
       this.tasklistExists('CptHost.exe'),
@@ -187,6 +258,15 @@ return false`;
     ]);
     if (hasZoom) return 'Zoom';
     if (hasTeams) return 'Microsoft Teams';
+
+    // Webex on Windows: check for native app processes
+    const [hasWebexStart, hasWebexAtmgr, hasWebexMta] = await Promise.all([
+      this.tasklistExists('CiscoWebexStart.exe'),
+      this.tasklistExists('atmgr.exe'),  // Webex Meeting Center
+      this.tasklistExists('webexmta.exe')
+    ]);
+    if (hasWebexStart || hasWebexAtmgr || hasWebexMta) return 'Webex';
+
     return null;
   }
 
