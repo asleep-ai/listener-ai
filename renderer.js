@@ -387,11 +387,16 @@ async function processAutoMode(audioPath, recordingTitle) {
   }, 5000);
 }
 
-async function handleRecordingStopped(audioPath) {
+async function handleRecordingStopped(audioPath, skipAutoUpload = false) {
   resetRecordingUI();
   const recordingTitle = meetingTitle.value.trim() || 'Untitled_Meeting';
   meetingTitle.value = '';
   await refreshRecordingsList();
+  if (skipAutoUpload) {
+    showToast('Recording too short — auto-upload skipped');
+    console.log('Skipping auto-upload: recording below minimum duration');
+    return;
+  }
   await processAutoMode(audioPath, recordingTitle);
 }
 
@@ -399,7 +404,7 @@ async function stopRecording() {
   try {
     const result = await window.electronAPI.stopRecording();
     if (result.success) {
-      await handleRecordingStopped(result.filePath);
+      await handleRecordingStopped(result.filePath, result.skipAutoUpload);
     }
   } catch (error) {
     alert('Failed to stop recording: ' + error.message);
