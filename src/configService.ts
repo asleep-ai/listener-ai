@@ -15,6 +15,7 @@ export interface AppConfig {
   summaryPrompt?: string;
   maxRecordingMinutes?: number;
   recordingReminderMinutes?: number;
+  minRecordingSeconds?: number;
 }
 
 export const DEFAULT_SUMMARY_PROMPT = `Based on this meeting transcript, provide:
@@ -193,6 +194,15 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getMinRecordingSeconds(): number {
+    return this.config.minRecordingSeconds ?? 60;
+  }
+
+  setMinRecordingSeconds(seconds: number): void {
+    this.config.minRecordingSeconds = Math.max(0, Math.floor(seconds));
+    this.saveConfig();
+  }
+
   getSummaryPrompt(): string {
     return this.config.summaryPrompt || DEFAULT_SUMMARY_PROMPT;
   }
@@ -225,7 +235,8 @@ export class ConfigService {
       knownWords: this.getKnownWords(),
       summaryPrompt: this.getSummaryPrompt(),
       maxRecordingMinutes: this.getMaxRecordingMinutes(),
-      recordingReminderMinutes: this.getRecordingReminderMinutes()
+      recordingReminderMinutes: this.getRecordingReminderMinutes(),
+      minRecordingSeconds: this.getMinRecordingSeconds()
     };
   }
 }

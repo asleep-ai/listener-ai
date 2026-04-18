@@ -30,6 +30,7 @@ const fileHandlerService = new FileHandlerService();
 const meetingDetector = new MeetingDetectorService();
 const displayDetector = new DisplayDetectorService();
 let meetingAutoStartedRecording = false;
+let recordingStartedAt: number | null = null;
 let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
 let recordingMaxTimer: NodeJS.Timeout | null = null;
@@ -389,6 +390,7 @@ ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
     const result = await audioRecorder.startRecording(meetingTitle);
     // Update menu bar icon state
     if (result.success) {
+      recordingStartedAt = Date.now();
       menuBarManager.updateRecordingState(true, meetingTitle);
 
       // Set up recording limit timer
@@ -440,6 +442,10 @@ ipcMain.handle('stop-recording', async () => {
     clearRecordingTimers();
     const result = await audioRecorder.stopRecording();
 
+    // Calculate recording duration
+    const durationSeconds = recordingStartedAt ? Math.round((Date.now() - recordingStartedAt) / 1000) : 0;
+    recordingStartedAt = null;
+
     // Update menu bar icon state
     menuBarManager.updateRecordingState(false);
     meetingAutoStartedRecording = false;
@@ -447,7 +453,14 @@ ipcMain.handle('stop-recording', async () => {
       notificationService.notifyRecordingStopped();
     }
 
-    return result;
+    // Check minimum recording duration for auto-upload
+    const minSeconds = configService.getMinRecordingSeconds();
+    const skipAutoUpload = minSeconds > 0 && durationSeconds < minSeconds;
+    if (skipAutoUpload && result.success) {
+      console.log(`Recording too short (${durationSeconds}s < ${minSeconds}s minimum) — skipping auto-upload`);
+    }
+
+    return { ...result, durationSeconds, skipAutoUpload };
   } catch (error) {
     console.error('Error stopping recording:', error);
     return { success: false, error: error instanceof Error ? error.message : String(error) };
