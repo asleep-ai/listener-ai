@@ -77,4 +77,14 @@ describe('hasSleepAssertionFrom', () => {
     assert.equal(hasSleepAssertionFrom(input, /^Microsoft Teams$/), false);
     assert.equal(hasSleepAssertionFrom(input, /Microsoft Teams/), true);
   });
+
+  it('rejects a Teams assertion name held by another process (defensive AND-check)', () => {
+    // A hostile or coincidentally-named assertion owned by a non-Teams process
+    // must not pass the strict Teams process-ownership check.
+    const input = `Listed by owning process:
+   pid 555(SomeOtherApp): [0x0009] 00:01:00 PreventUserIdleDisplaySleep named: "Microsoft Teams Call in progress"`;
+    assert.equal(hasSleepAssertionFrom(input, /^Microsoft Teams$/), false);
+    // But the raw-string check would match, which is why detectMacOS ANDs the two.
+    assert.ok(input.includes('Microsoft Teams Call in progress'));
+  });
 });

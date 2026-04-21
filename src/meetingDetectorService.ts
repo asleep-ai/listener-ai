@@ -128,7 +128,7 @@ export class MeetingDetectorService extends EventEmitter {
 
     if (hasZoom) return 'Zoom';
 
-    if (assertions.includes('Microsoft Teams Call in progress')) return 'Microsoft Teams';
+    if (hasSleepAssertionFrom(assertions, /^Microsoft Teams$/) && assertions.includes('Microsoft Teams Call in progress')) return 'Microsoft Teams';
 
     if (hasSleepAssertionFrom(assertions, /^Webex$|^Cisco Webex/i)) return 'Webex';
 
