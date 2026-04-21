@@ -27,6 +27,7 @@ export interface ReleaseSummary {
 export async function fetchReleaseNotes(version: string): Promise<ReleaseNotes | null> {
   const tag = version.startsWith('v') ? version : `v${version}`;
   const apiUrl = `https://api.github.com/repos/${REPO}/releases/tags/${tag}`;
+  console.log(`Release notes fetch: GET ${apiUrl}`);
 
   try {
     const res = await fetch(apiUrl, { headers: COMMON_HEADERS });
@@ -35,6 +36,7 @@ export async function fetchReleaseNotes(version: string): Promise<ReleaseNotes |
       return null;
     }
     const data = await res.json() as { body?: string; html_url?: string; published_at?: string | null; tag_name?: string };
+    console.log(`Release notes fetch: ok, body=${(data.body || '').length} chars`);
     return {
       version,
       tag,
@@ -50,6 +52,7 @@ export async function fetchReleaseNotes(version: string): Promise<ReleaseNotes |
 
 export async function fetchAllReleases(limit = 30): Promise<ReleaseSummary[]> {
   const apiUrl = `https://api.github.com/repos/${REPO}/releases?per_page=${Math.min(limit, 100)}`;
+  console.log(`Release list fetch: GET ${apiUrl}`);
   try {
     const res = await fetch(apiUrl, { headers: COMMON_HEADERS });
     if (!res.ok) {
@@ -65,7 +68,7 @@ export async function fetchAllReleases(limit = 30): Promise<ReleaseSummary[]> {
       prerelease?: boolean;
       draft?: boolean;
     }>;
-    return data
+    const results = data
       .filter((r) => !r.draft)
       .map((r) => ({
         tag: r.tag_name || '',
@@ -76,6 +79,8 @@ export async function fetchAllReleases(limit = 30): Promise<ReleaseSummary[]> {
         prerelease: Boolean(r.prerelease),
         draft: Boolean(r.draft)
       }));
+    console.log(`Release list fetch: ok, ${results.length} releases`);
+    return results;
   } catch (error) {
     console.error('Failed to fetch release list:', error);
     return [];

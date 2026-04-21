@@ -104,19 +104,25 @@ function compareSemver(a: string, b: string): number {
 }
 
 async function checkAndShowReleaseNotes() {
-  if (!app.isPackaged) return;
+  if (!app.isPackaged) {
+    console.log('Release notes check: skipped (not packaged, dev mode)');
+    return;
+  }
 
   const current = app.getVersion();
   const lastSeen = configService.getLastSeenVersion();
+  console.log(`Release notes check: current=${current} lastSeen=${lastSeen ?? '<none>'}`);
 
   // First-run (fresh install): record current version silently.
   if (!lastSeen) {
+    console.log('Release notes check: first-run, recording current version silently');
     configService.setLastSeenVersion(current);
     return;
   }
 
   // Same version or downgrade: bring lastSeen in sync but never show older notes.
   if (compareSemver(current, lastSeen) <= 0) {
+    console.log('Release notes check: not newer than lastSeen, skipping modal');
     if (lastSeen !== current) configService.setLastSeenVersion(current);
     return;
   }
@@ -124,14 +130,19 @@ async function checkAndShowReleaseNotes() {
   // Upgrade: only mark the version as seen once we've successfully handed the
   // notes to the renderer. If the fetch fails (offline, GitHub rate limits) or
   // the window is gone, retry on the next launch so the user doesn't miss them.
+  console.log(`Release notes check: upgrade detected (${lastSeen} -> ${current}), fetching notes`);
   const notes = await fetchReleaseNotes(current);
-  if (!notes || !mainWindow || mainWindow.isDestroyed()) return;
+  if (!notes || !mainWindow || mainWindow.isDestroyed()) {
+    console.log('Release notes check: fetch failed or window gone, will retry on next launch');
+    return;
+  }
 
   const payload = { version: current, body: notes.body, url: notes.url };
   const send = () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('show-release-notes', payload);
     configService.setLastSeenVersion(current);
+    console.log(`Release notes check: modal delivered for ${current}, lastSeenVersion updated`);
   };
   if (mainWindow.webContents.isLoading()) {
     mainWindow.webContents.once('did-finish-load', send);
@@ -246,6 +257,7 @@ app.whenReady().then(() => {
         {
           label: 'Release Notes...',
           click: () => {
+            console.log('Release notes menu: clicked, sending open-release-history');
             if (mainWindow && !mainWindow.isDestroyed()) {
               if (!mainWindow.isVisible()) mainWindow.show();
               mainWindow.webContents.send('open-release-history');
@@ -575,7 +587,10 @@ ipcMain.handle('get-config', async () => {
 });
 
 ipcMain.handle('get-all-releases', async () => {
-  return fetchAllReleases();
+  console.log('Release list IPC: get-all-releases invoked');
+  const results = await fetchAllReleases();
+  console.log(`Release list IPC: fetched ${results.length} releases`);
+  return results;
 });
 
 ipcMain.handle('check-config', async () => {
