@@ -9,6 +9,23 @@ interface MeetingInfo {
   detectedAt: Date;
 }
 
+// True if `pmset -g assertions` output has any `PreventUserIdle{Display,System}Sleep`
+// assertion whose owning process matches `processPattern`. Video-call apps raise
+// these assertions only while a call is active, so this distinguishes "app open"
+// from "in a call" when the app's main process stays alive throughout.
+export function hasSleepAssertionFrom(pmsetOutput: string, processPattern: RegExp): boolean {
+  if (!pmsetOutput) return false;
+  let ownerMatches = false;
+  for (const line of pmsetOutput.split('\n')) {
+    const pidMatch = line.match(/pid \d+\((.+?)\):/);
+    if (pidMatch) {
+      ownerMatches = processPattern.test(pidMatch[1]);
+    }
+    if (ownerMatches && /PreventUserIdle(Display|System)Sleep/.test(line)) return true;
+  }
+  return false;
+}
+
 export class MeetingDetectorService extends EventEmitter {
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private isPolling = false;
@@ -98,24 +115,23 @@ export class MeetingDetectorService extends EventEmitter {
   }
 
   private async detectMacOS(): Promise<string | null> {
-    // Check native meeting apps via pgrep (lightweight, no full process list)
-    // and Google Meet via AppleScript in parallel
-    const [hasZoom, hasTeamsNew, hasTeamsOld, meetBrowser, hasSlackHuddle] = await Promise.all([
+    // Zoom uses a call-only subprocess (CptHost). Teams and Webex keep their main
+    // process running as long as the app is open, so we inspect pmset power assertions
+    // instead: both apps create a PreventUserIdleDisplaySleep assertion only while a
+    // call is active.
+    const [hasZoom, assertions, meetBrowser, hasSlackHuddle] = await Promise.all([
       this.pgrepExists('CptHost'),
-      this.pgrepExists('MSTeams'),
-      this.pgrepExists('ms-teams'),
+      this.getPmsetAssertions(),
       this.checkGoogleMeetMacOS(),
       this.checkSlackHuddleMacOS()
     ]);
-    const hasTeams = hasTeamsNew || hasTeamsOld;
 
-    // Zoom: CptHost child process only exists during active calls
     if (hasZoom) return 'Zoom';
 
-    // Microsoft Teams
-    if (hasTeams) return 'Microsoft Teams';
+    if (assertions.includes('Microsoft Teams Call in progress')) return 'Microsoft Teams';
 
-    // Google Meet via browser window title
+    if (hasSleepAssertionFrom(assertions, /^Webex$|^Cisco Webex/i)) return 'Webex';
+
     if (meetBrowser) return 'Google Meet';
 
     if (hasSlackHuddle) return 'Slack Huddle';
@@ -129,6 +145,15 @@ export class MeetingDetectorService extends EventEmitter {
       return true;
     } catch {
       return false; // pgrep exits non-zero when no match
+    }
+  }
+
+  private async getPmsetAssertions(): Promise<string> {
+    try {
+      const { stdout } = await execFileAsync('pmset', ['-g', 'assertions'], { timeout: 3000 });
+      return stdout;
+    } catch {
+      return '';
     }
   }
 
@@ -180,13 +205,19 @@ return false`;
   }
 
   private async detectWindows(): Promise<string | null> {
-    const [hasZoom, hasTeams] = await Promise.all([
+    // Pick call-only child processes so background app presence doesn't false-trigger:
+    // - Zoom: CptHost.exe (existing)
+    // - Teams (New, Jan 2026+): ms-teams_modulehost.exe hosts the calling stack
+    // - Webex: webexhost.exe is spawned for the meeting session (CiscoCollabHost.exe
+    //   would false-trigger because it runs while the app is idle)
+    const [hasZoom, hasTeamsCall, hasWebexCall] = await Promise.all([
       this.tasklistExists('CptHost.exe'),
-      Promise.all([this.tasklistExists('ms-teams.exe'), this.tasklistExists('Teams.exe')])
-        .then(([a, b]) => a || b)
+      this.tasklistExists('ms-teams_modulehost.exe'),
+      this.tasklistExists('webexhost.exe')
     ]);
     if (hasZoom) return 'Zoom';
-    if (hasTeams) return 'Microsoft Teams';
+    if (hasTeamsCall) return 'Microsoft Teams';
+    if (hasWebexCall) return 'Webex';
     return null;
   }
 
