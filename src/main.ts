@@ -96,9 +96,8 @@ function compareSemver(a: string, b: string): number {
   const pa = a.split('.').map((n) => parseInt(n, 10));
   const pb = b.split('.').map((n) => parseInt(n, 10));
   for (let i = 0; i < 3; i++) {
-    const x = pa[i];
-    const y = pb[i];
-    if (isNaN(x) || isNaN(y)) return 0;
+    const x = Number.isFinite(pa[i]) ? pa[i] : 0;
+    const y = Number.isFinite(pb[i]) ? pb[i] : 0;
     if (x !== y) return x - y;
   }
   return 0;
@@ -116,22 +115,23 @@ async function checkAndShowReleaseNotes() {
     return;
   }
 
-  // Only show notes when current is strictly newer than lastSeen.
+  // Same version or downgrade: bring lastSeen in sync but never show older notes.
   if (compareSemver(current, lastSeen) <= 0) {
     if (lastSeen !== current) configService.setLastSeenVersion(current);
     return;
   }
 
+  // Upgrade: only mark the version as seen once we've successfully handed the
+  // notes to the renderer. If the fetch fails (offline, GitHub rate limits) or
+  // the window is gone, retry on the next launch so the user doesn't miss them.
   const notes = await fetchReleaseNotes(current);
-  configService.setLastSeenVersion(current);
-
   if (!notes || !mainWindow || mainWindow.isDestroyed()) return;
 
   const payload = { version: current, body: notes.body, url: notes.url };
   const send = () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('show-release-notes', payload);
-    }
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('show-release-notes', payload);
+    configService.setLastSeenVersion(current);
   };
   if (mainWindow.webContents.isLoading()) {
     mainWindow.webContents.once('did-finish-load', send);

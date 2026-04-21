@@ -177,7 +177,6 @@ jobs:
         id: ai_notes
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-5.4
           PREV: ${{ steps.prev_tag.outputs.tag }}
           CUR: HEAD
         run: |
