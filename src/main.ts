@@ -13,6 +13,7 @@ import { MeetingDetectorService } from './meetingDetectorService';
 import { DisplayDetectorService } from './displayDetectorService';
 import { autoUpdaterService } from './services/autoUpdaterService';
 import { notificationService } from './services/notificationService';
+import { fetchReleaseNotes, fetchAllReleases } from './services/releaseNotesService';
 import { saveTranscription, readTranscription } from './outputService';
 
 // Global flag to track if app is quitting
@@ -88,6 +89,54 @@ function handleGlobalShortcutTrigger() {
   } else {
     // Start recording without bringing the window to front
     menuBarManager.startQuickRecording();
+  }
+}
+
+function compareSemver(a: string, b: string): number {
+  const pa = a.split('.').map((n) => parseInt(n, 10));
+  const pb = b.split('.').map((n) => parseInt(n, 10));
+  for (let i = 0; i < 3; i++) {
+    const x = pa[i];
+    const y = pb[i];
+    if (isNaN(x) || isNaN(y)) return 0;
+    if (x !== y) return x - y;
+  }
+  return 0;
+}
+
+async function checkAndShowReleaseNotes() {
+  if (!app.isPackaged) return;
+
+  const current = app.getVersion();
+  const lastSeen = configService.getLastSeenVersion();
+
+  // First-run (fresh install): record current version silently.
+  if (!lastSeen) {
+    configService.setLastSeenVersion(current);
+    return;
+  }
+
+  // Only show notes when current is strictly newer than lastSeen.
+  if (compareSemver(current, lastSeen) <= 0) {
+    if (lastSeen !== current) configService.setLastSeenVersion(current);
+    return;
+  }
+
+  const notes = await fetchReleaseNotes(current);
+  configService.setLastSeenVersion(current);
+
+  if (!notes || !mainWindow || mainWindow.isDestroyed()) return;
+
+  const payload = { version: current, body: notes.body, url: notes.url };
+  const send = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('show-release-notes', payload);
+    }
+  };
+  if (mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.once('did-finish-load', send);
+  } else {
+    send();
   }
 }
 
@@ -190,6 +239,26 @@ app.whenReady().then(() => {
           accelerator: 'CmdOrCtrl+W'
         }
       ]
+    },
+    {
+      label: 'Help',
+      submenu: [
+        {
+          label: 'Release Notes...',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              if (!mainWindow.isVisible()) mainWindow.show();
+              mainWindow.webContents.send('open-release-history');
+            }
+          }
+        },
+        {
+          label: 'Check for Updates...',
+          click: () => {
+            autoUpdaterService.checkForUpdatesManually();
+          }
+        }
+      ]
     }
   ];
 
@@ -230,6 +299,11 @@ app.whenReady().then(() => {
     autoUpdaterService.setMainWindow(mainWindow);
     notificationService.setMainWindow(mainWindow);
   }
+
+  // Show release notes on first launch after an update.
+  checkAndShowReleaseNotes().catch((err) => {
+    console.error('Release notes check failed:', err);
+  });
 
   // Register global shortcut
   registerGlobalShortcut();
@@ -498,6 +572,10 @@ ipcMain.handle('save-config', async (_, config: Partial<AppConfig>) => {
 
 ipcMain.handle('get-config', async () => {
   return configService.getAllConfig();
+});
+
+ipcMain.handle('get-all-releases', async () => {
+  return fetchAllReleases();
 });
 
 ipcMain.handle('check-config', async () => {

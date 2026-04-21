@@ -199,6 +199,34 @@
     </div>
   </div>
 
+  <!-- Release History (browse all past releases) -->
+  <div id="releaseHistoryModal" class="modal" style="display: none;">
+    <div class="modal-content release-history-content">
+      <span class="close" id="releaseHistoryClose">&times;</span>
+      <h2>Release History</h2>
+      <div id="releaseHistoryList" class="release-history-list">
+        <p class="loading">Loading releases...</p>
+      </div>
+      <div class="modal-buttons">
+        <button id="releaseHistoryOpenGithub" class="cancel-button">View all on GitHub</button>
+        <button id="releaseHistoryDismiss" class="save-button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- What's New (release notes after update) -->
+  <div id="releaseNotesModal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <span class="close" id="releaseNotesClose">&times;</span>
+      <h2 id="releaseNotesTitle">What's New</h2>
+      <div id="releaseNotesBody" class="release-notes-body"></div>
+      <div class="modal-buttons">
+        <button id="releaseNotesOpenGithub" class="cancel-button">View on GitHub</button>
+        <button id="releaseNotesDismiss" class="save-button">Got it</button>
+      </div>
+    </div>
+  </div>
+
   <!-- FFmpeg Download Progress Overlay -->
   <div id="ffmpegDownloadOverlay" class="modal" style="display: none;">
     <div class="ffmpeg-download-card">
