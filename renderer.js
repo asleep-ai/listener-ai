@@ -51,6 +51,92 @@ window.electronAPI.onTranscriptionProgress((progress) => {
   }
 });
 
+// Listen for release notes after an update
+if (window.electronAPI.onShowReleaseNotes) {
+  window.electronAPI.onShowReleaseNotes((notes) => {
+    showReleaseNotes(notes);
+  });
+}
+
+// Listen for Help → Release Notes menu click
+if (window.electronAPI.onOpenReleaseHistory) {
+  window.electronAPI.onOpenReleaseHistory(() => {
+    openReleaseHistory();
+  });
+}
+
+async function openReleaseHistory() {
+  const modal = document.getElementById('releaseHistoryModal');
+  const list = document.getElementById('releaseHistoryList');
+  const closeBtn = document.getElementById('releaseHistoryClose');
+  const dismissBtn = document.getElementById('releaseHistoryDismiss');
+  const githubBtn = document.getElementById('releaseHistoryOpenGithub');
+  if (!modal || !list) return;
+
+  const hide = () => { modal.style.display = 'none'; };
+  if (closeBtn) closeBtn.onclick = hide;
+  if (dismissBtn) dismissBtn.onclick = hide;
+  if (githubBtn) {
+    githubBtn.onclick = () => {
+      window.electronAPI.openExternal('https://github.com/asleep-ai/listener-ai/releases');
+    };
+  }
+
+  list.innerHTML = '<p class="loading">Loading releases...</p>';
+  modal.style.display = 'block';
+
+  try {
+    const releases = await window.electronAPI.getAllReleases();
+    if (!releases || releases.length === 0) {
+      list.innerHTML = '<p class="loading">No releases found.</p>';
+      return;
+    }
+    list.innerHTML = releases.map((r) => {
+      const date = r.publishedAt ? new Date(r.publishedAt).toLocaleDateString() : '';
+      const prereleaseLabel = r.prerelease ? ' <span class="release-prerelease">pre-release</span>' : '';
+      const body = (r.body || '').trim() || '_No notes._';
+      return `
+        <details class="release-history-item">
+          <summary>
+            <span class="release-tag">${escapeHtml(r.name || r.tag)}</span>
+            <span class="release-date">${escapeHtml(date)}</span>${prereleaseLabel}
+          </summary>
+          <div class="release-notes-body">${renderMarkdown(body)}</div>
+        </details>
+      `;
+    }).join('');
+  } catch (error) {
+    console.error('Failed to load release history:', error);
+    list.innerHTML = '<p class="loading">Failed to load releases.</p>';
+  }
+}
+
+function showReleaseNotes(notes) {
+  const modal = document.getElementById('releaseNotesModal');
+  const title = document.getElementById('releaseNotesTitle');
+  const body = document.getElementById('releaseNotesBody');
+  const closeBtn = document.getElementById('releaseNotesClose');
+  const dismissBtn = document.getElementById('releaseNotesDismiss');
+  const githubBtn = document.getElementById('releaseNotesOpenGithub');
+  if (!modal || !title || !body) return;
+
+  title.textContent = `What's New in v${notes.version}`;
+  const md = (notes.body || '').trim() || '_No release notes available for this version._';
+  body.innerHTML = renderMarkdown(md);
+
+  const hide = () => { modal.style.display = 'none'; };
+  if (closeBtn) closeBtn.onclick = hide;
+  if (dismissBtn) dismissBtn.onclick = hide;
+  if (githubBtn) {
+    githubBtn.onclick = () => {
+      if (notes.url) window.electronAPI.openExternal(notes.url);
+      hide();
+    };
+  }
+
+  modal.style.display = 'block';
+}
+
 // Listen for auto-update events
 if (window.electronAPI.onUpdateStatus) {
   window.electronAPI.onUpdateStatus((updateInfo) => {

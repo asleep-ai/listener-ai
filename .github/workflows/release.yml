@@ -156,11 +156,36 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
+
+      - name: Find previous tag
+        id: prev_tag
+        run: |
+          PREV=$(git describe --tags --abbrev=0 HEAD 2>/dev/null || echo "")
+          echo "tag=$PREV" >> "$GITHUB_OUTPUT"
+          echo "Previous tag: ${PREV:-<none>}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Generate AI release notes
+        id: ai_notes
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PREV: ${{ steps.prev_tag.outputs.tag }}
+          CUR: HEAD
+        run: |
+          NOTES=$(uv run .github/scripts/generate_release_notes.py)
+          {
+            echo "notes<<NOTES_EOF"
+            echo "$NOTES"
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create Release
         uses: ncipollo/release-action@v1
@@ -168,37 +193,17 @@ jobs:
           tag: v${{ needs.prepare.outputs.version }}
           name: Release v${{ needs.prepare.outputs.version }}
           body: |
-            ## Release v${{ needs.prepare.outputs.version }}
+            ### Downloads
+            - macOS (Intel): `Listener.AI-${{ needs.prepare.outputs.version }}-x64.dmg`
+            - macOS (Apple Silicon): `Listener.AI-${{ needs.prepare.outputs.version }}-arm64.dmg`
+            - Windows: `Listener.AI-Setup-${{ needs.prepare.outputs.version }}.exe`
+            - CLI: `npx listener-ai <audio-file>`
 
-            ### macOS Downloads
-            - Intel: `Listener.AI-${{ needs.prepare.outputs.version }}-x64.dmg`
-            - Apple Silicon: `Listener.AI-${{ needs.prepare.outputs.version }}-arm64.dmg`
+            Installation: see the [README](https://github.com/asleep-ai/listener-ai#installation).
 
-            ### Windows Downloads
-            - x64: `Listener.AI-Setup-${{ needs.prepare.outputs.version }}.exe`
+            ---
 
-            ### Installation
-
-            #### macOS
-            1. Download the appropriate DMG for your Mac (x64 for Intel, arm64 for Apple Silicon)
-            2. Open the DMG and drag Listener.AI to Applications
-            3. Open the app - it's fully signed and notarized!
-            4. FFmpeg will be automatically downloaded on first use
-
-            #### Windows
-            1. Download and run the installer
-            2. Follow the installation wizard
-            3. FFmpeg will be automatically downloaded on first use
-
-            ### CLI (npm)
-            ```
-            npx listener-ai <audio-file>
-            ```
-
-            ### First Run
-            1. Enter your Google Gemini API key
-            2. Enter your Notion API key and database ID
-            3. Start recording!
+            ${{ steps.ai_notes.outputs.notes }}
           draft: false
           artifacts: |
             release-artifacts/mac-build/*.dmg

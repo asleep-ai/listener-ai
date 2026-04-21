@@ -64,6 +64,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('update-status', (_, updateInfo) => callback(updateInfo));
   },
 
+  // Release notes (shown after a version update)
+  onShowReleaseNotes: (callback: (notes: { version: string; body: string; url: string }) => void) => {
+    ipcRenderer.on('show-release-notes', (_, notes) => callback(notes));
+  },
+  onOpenReleaseHistory: (callback: () => void) => {
+    ipcRenderer.on('open-release-history', () => callback());
+  },
+  getAllReleases: () => ipcRenderer.invoke('get-all-releases'),
+
   // Meeting detection
   getMeetingStatus: () => ipcRenderer.invoke('get-meeting-status'),
   onMeetingStatusChanged: (callback: (status: { active: boolean; app?: string }) => void) => {
