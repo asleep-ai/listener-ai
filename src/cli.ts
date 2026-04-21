@@ -32,7 +32,7 @@ function usage(): never {
   process.exit(1);
 }
 
-const KNOWN_CONFIG_KEYS = ['geminiApiKey', 'geminiModel', 'geminiFlashModel', 'notionApiKey', 'notionDatabaseId', 'autoMode', 'globalShortcut'] as const;
+const KNOWN_CONFIG_KEYS = ['geminiApiKey', 'geminiModel', 'geminiFlashModel', 'notionApiKey', 'notionDatabaseId', 'autoMode', 'globalShortcut', 'minRecordingSeconds'] as const;
 type ConfigKey = typeof KNOWN_CONFIG_KEYS[number];
 
 function maskValue(key: string, value: string | undefined): string {
@@ -110,6 +110,14 @@ function handleConfig(subArgs: string[]): void {
         config.setAutoMode(v === 'true');
       },
       globalShortcut: (v) => config.setGlobalShortcut(v),
+      minRecordingSeconds: (v) => {
+        const n = parseInt(v, 10);
+        if (isNaN(n) || n < 0 || String(n) !== v.trim()) {
+          process.stderr.write('Error: minRecordingSeconds must be a non-negative integer (0 disables)\n');
+          process.exit(1);
+        }
+        config.setMinRecordingSeconds(n);
+      },
     };
     setters[key](value);
     process.stderr.write(`Set ${key}\n`);

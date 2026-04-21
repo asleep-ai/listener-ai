@@ -16,6 +16,7 @@ async function findFFmpegBinary(): Promise<string | null> {
 export class SimpleAudioRecorder {
   private recordingProcess: ChildProcess | null = null;
   private outputPath: string | null = null;
+  private startTime: number | null = null;
 
   constructor() {
     // Create recordings directory if it doesn't exist
@@ -169,7 +170,8 @@ export class SimpleAudioRecorder {
       ];
 
       console.log('Starting recording...');
-      
+
+      this.startTime = Date.now();
       this.recordingProcess = spawn(ffmpegPath, args);
       
       // Track if process started successfully
@@ -225,12 +227,14 @@ export class SimpleAudioRecorder {
       // Check if there was a startup error
       if (startupError) {
         this.recordingProcess = null;
+        this.startTime = null;
         return { success: false, error: startupError };
       }
-      
+
       // Check if process is still running
       if (this.recordingProcess.killed || this.recordingProcess.exitCode !== null) {
         this.recordingProcess = null;
+        this.startTime = null;
         return { success: false, error: 'FFmpeg process terminated unexpectedly' };
       }
 
@@ -245,32 +249,35 @@ export class SimpleAudioRecorder {
     return this.recordingProcess !== null;
   }
 
-  async stopRecording(): Promise<{ success: boolean; filePath?: string; error?: string }> {
+  async stopRecording(): Promise<{ success: boolean; filePath?: string; durationMs?: number; error?: string }> {
     try {
       if (this.recordingProcess) {
+        const durationMs = this.startTime !== null ? Date.now() - this.startTime : undefined;
+
         // Send 'q' to gracefully stop ffmpeg
         this.recordingProcess.stdin?.write('q');
-        
+
         // Wait for process to finish
         await new Promise<void>((resolve) => {
           this.recordingProcess?.on('close', () => {
             resolve();
           });
-          
+
           // Fallback: force kill after 2 seconds
           setTimeout(() => {
             this.recordingProcess?.kill('SIGTERM');
             resolve();
           }, 2000);
         });
-        
+
         this.recordingProcess = null;
-        
+        this.startTime = null;
+
         // Check if file exists
         if (this.outputPath && fs.existsSync(this.outputPath)) {
           const stats = fs.statSync(this.outputPath);
-          console.log(`Recording saved: ${this.outputPath} (${stats.size} bytes)`);
-          return { success: true, filePath: this.outputPath };
+          console.log(`Recording saved: ${this.outputPath} (${stats.size} bytes, ${durationMs}ms)`);
+          return { success: true, filePath: this.outputPath, durationMs };
         } else {
           return { success: false, error: 'Recording file not found' };
         }

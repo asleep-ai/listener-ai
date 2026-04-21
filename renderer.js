@@ -317,8 +317,23 @@ function resetRecordingUI() {
   recordingTime.classList.remove('active');
 }
 
-async function processAutoMode(audioPath, recordingTitle) {
+async function processAutoMode(audioPath, recordingTitle, durationMs) {
   if (!autoModeToggle.checked || !audioPath) return;
+
+  const config = await window.electronAPI.getConfig();
+  const minSeconds = Number(config.minRecordingSeconds) || 0;
+  if (minSeconds > 0 && typeof durationMs === 'number' && durationMs < minSeconds * 1000) {
+    const actualSeconds = Math.floor(durationMs / 1000);
+    const message = `Auto mode: Skipped (${actualSeconds}s < ${minSeconds}s minimum)`;
+    console.log(message);
+    statusText.textContent = message;
+    setTimeout(() => {
+      if (!isRecording && statusText.textContent === message) {
+        statusText.textContent = 'Ready to record';
+      }
+    }, 5000);
+    return;
+  }
 
   isAutoModeProcessing = true;
   recordButton.disabled = true;
@@ -339,8 +354,7 @@ async function processAutoMode(audioPath, recordingTitle) {
         console.log('Auto mode: File renamed to:', finalAudioPath);
       }
 
-      const notionConfig = await window.electronAPI.getConfig();
-      if (notionConfig.notionApiKey && notionConfig.notionDatabaseId) {
+      if (config.notionApiKey && config.notionDatabaseId) {
         console.log('Auto mode: Uploading to Notion...');
 
         const finalTitle = (recordingTitle === '' || recordingTitle === 'Untitled_Meeting') && transcriptionResult.data.suggestedTitle
@@ -387,19 +401,19 @@ async function processAutoMode(audioPath, recordingTitle) {
   }, 5000);
 }
 
-async function handleRecordingStopped(audioPath) {
+async function handleRecordingStopped(audioPath, durationMs) {
   resetRecordingUI();
   const recordingTitle = meetingTitle.value.trim() || 'Untitled_Meeting';
   meetingTitle.value = '';
   await refreshRecordingsList();
-  await processAutoMode(audioPath, recordingTitle);
+  await processAutoMode(audioPath, recordingTitle, durationMs);
 }
 
 async function stopRecording() {
   try {
     const result = await window.electronAPI.stopRecording();
     if (result.success) {
-      await handleRecordingStopped(result.filePath);
+      await handleRecordingStopped(result.filePath, result.durationMs);
     }
   } catch (error) {
     alert('Failed to stop recording: ' + error.message);
@@ -432,7 +446,7 @@ window.electronAPI.onRecordingStatus((status) => {
 if (window.electronAPI.onRecordingAutoStopped) {
   window.electronAPI.onRecordingAutoStopped(async (data) => {
     showToast('Recording auto-stopped - reached time limit');
-    await handleRecordingStopped(data?.filePath);
+    await handleRecordingStopped(data?.filePath, data?.durationMs);
   });
 }
 
@@ -459,6 +473,8 @@ function setupEventListeners() {
     const maxRecordingMinutes = Math.max(0, Math.floor(parseInt(maxRecordingMinutesEl?.value) || 0));
     const recordingReminderMinutesEl = document.getElementById('recordingReminderMinutes');
     const recordingReminderMinutes = Math.max(0, Math.floor(parseInt(recordingReminderMinutesEl?.value) || 0));
+    const minRecordingSecondsEl = document.getElementById('minRecordingSeconds');
+    const minRecordingSeconds = Math.max(0, Math.floor(parseInt(minRecordingSecondsEl?.value) || 0));
 
     if (geminiKey) {
       await window.electronAPI.saveConfig({
@@ -471,7 +487,8 @@ function setupEventListeners() {
         knownWords: knownWords,
         summaryPrompt: summaryPrompt || DEFAULT_SUMMARY_PROMPT,
         maxRecordingMinutes: maxRecordingMinutes,
-        recordingReminderMinutes: recordingReminderMinutes
+        recordingReminderMinutes: recordingReminderMinutes,
+        minRecordingSeconds: minRecordingSeconds
       });
       configModal.style.display = 'none';
     } else {
@@ -948,6 +965,10 @@ async function showConfigModal() {
   const recordingReminderMinutesInput = document.getElementById('recordingReminderMinutes');
   if (recordingReminderMinutesInput) {
     recordingReminderMinutesInput.value = config.recordingReminderMinutes || '';
+  }
+  const minRecordingSecondsInput = document.getElementById('minRecordingSeconds');
+  if (minRecordingSecondsInput) {
+    minRecordingSecondsInput.value = config.minRecordingSeconds || '';
   }
 
   // Pre-fill summary prompt
