@@ -323,12 +323,14 @@ async function processAutoMode(audioPath, recordingTitle, durationMs) {
   const config = await window.electronAPI.getConfig();
   const minSeconds = Number(config.minRecordingSeconds) || 0;
   if (minSeconds > 0 && typeof durationMs === 'number' && durationMs < minSeconds * 1000) {
-    const actualSeconds = Math.round(durationMs / 1000);
+    const actualSeconds = Math.floor(durationMs / 1000);
     const message = `Auto mode: Skipped (${actualSeconds}s < ${minSeconds}s minimum)`;
     console.log(message);
     statusText.textContent = message;
     setTimeout(() => {
-      statusText.textContent = 'Ready to record';
+      if (!isRecording && statusText.textContent === message) {
+        statusText.textContent = 'Ready to record';
+      }
     }, 5000);
     return;
   }
