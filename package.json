@@ -17,6 +17,7 @@
   "scripts": {
     "start": "pnpm run build && electron .",
     "build": "tsc",
+    "test": "tsc && node --test dist/meetingDetectorService.test.js",
     "dist": "pnpm run build && electron-builder",
     "dist:mac": "pnpm run build && electron-builder --mac",
     "dist:mac-x64": "pnpm run build && electron-builder --mac --x64",
@@ -91,6 +92,7 @@
       "!src/**/*",
       "!.git/**/*",
       "!**/*.ts",
+      "!**/*.test.js",
       "!**/*.map",
       "!.gitignore",
       "!.eslintrc",
