@@ -7,7 +7,6 @@ export const SUPPORTED_AUDIO_EXTENSIONS = [
   '.opus',
   '.flac',
   '.aac',
-  '.wma',
 ] as const;
 
 const MIME_FOR_EXTENSION: Record<string, string> = {

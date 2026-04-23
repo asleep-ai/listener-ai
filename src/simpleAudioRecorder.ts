@@ -20,7 +20,8 @@ export class SimpleAudioRecorder {
   }
 
   private buildFilePath(meetingTitle: string, extension: string): string {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const base = this.startTime ? new Date(this.startTime) : new Date();
+    const timestamp = base.toISOString().replace(/[:.]/g, '-');
     const sanitizedTitle = meetingTitle
       .replace(/[<>:"/\\|?*]/g, '_')
       .replace(/\s+/g, '_')
