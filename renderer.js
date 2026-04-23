@@ -209,7 +209,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     notionDatabaseIdInput = document.getElementById('notionDatabaseId');
     globalShortcutInput = document.getElementById('globalShortcut');
     knownWordsInput = document.getElementById('knownWords');
-    closeTranscriptionBtn = document.querySelector('.close');
+    closeTranscriptionBtn = document.querySelector('#transcriptionModal .close');
     uploadToNotionBtn = document.getElementById('uploadToNotion');
     progressContainer = document.getElementById('transcriptionProgress');
     progressFill = document.getElementById('progressFill');
@@ -584,9 +584,10 @@ function setupEventListeners() {
     }
   });
 
-  cancelConfigBtn.addEventListener('click', () => {
-    configModal.style.display = 'none';
-  });
+  const hideConfig = () => { configModal.style.display = 'none'; };
+  cancelConfigBtn.addEventListener('click', hideConfig);
+  const configCloseBtn = document.getElementById('configClose');
+  if (configCloseBtn) configCloseBtn.addEventListener('click', hideConfig);
 
   // Global shortcut input handling
   if (globalShortcutInput) {

@@ -25,6 +25,7 @@
     </div>
     <p class="subtitle">Record and transcribe your meetings with AI</p>
 
+    <div class="main-layout">
     <div class="recording-section">
       <div class="status-indicator" id="statusIndicator">
         <span class="status-dot"></span>
@@ -90,10 +91,15 @@
         <p class="no-recordings">No recordings yet</p>
       </div>
     </div>
+    </div>
 
     <div id="configModal" class="modal">
-      <div class="modal-content">
-        <h2>API Configuration</h2>
+      <div class="modal-content config-modal">
+        <div class="modal-header">
+          <h2>API Configuration</h2>
+          <button type="button" class="close" id="configClose" aria-label="Close">&times;</button>
+        </div>
+        <div class="config-body">
         <div class="form-group">
           <label for="geminiApiKey">Gemini API Key:</label>
           <input type="password" id="geminiApiKey" placeholder="Enter your Gemini API key">
@@ -158,17 +164,20 @@
           <textarea id="summaryPrompt" rows="10" placeholder="Enter your custom summary prompt..."></textarea>
           <small>Customize the prompt sent to Gemini for generating summaries. The JSON response format (suggestedTitle, summary, keyPoints, actionItems, emoji) should be preserved.</small>
         </div>
-        <div class="modal-buttons">
-          <button id="saveConfig" class="save-button">Save</button>
+        </div>
+        <div class="config-footer">
           <button id="cancelConfig" class="cancel-button">Cancel</button>
+          <button id="saveConfig" class="save-button">Save</button>
         </div>
       </div>
     </div>
 
     <div id="transcriptionModal" class="modal">
       <div class="modal-content transcription-content">
-        <span class="close">&times;</span>
-        <h2 id="transcriptionTitle">Transcription</h2>
+        <div class="modal-header">
+          <h2 id="transcriptionTitle">Transcription</h2>
+          <span class="close">&times;</span>
+        </div>
         <div id="transcriptionProgress" class="progress-container" style="display: none;">
           <div class="progress-bar">
             <div class="progress-fill" id="progressFill"></div>
@@ -186,16 +195,18 @@
             <span class="notion-icon">📝</span> Upload to Notion
           </button>
         </div>
-        <div class="tab-content">
-          <div id="all" class="tab-pane active">
-            <p class="loading">Loading...</p>
-          </div>
-          <div id="summary" class="tab-pane">
-            <p class="loading">Loading summary...</p>
-          </div>
-          <!-- dynamic panes inserted here by JS -->
-          <div id="transcript" class="tab-pane">
-            <p class="loading">Loading transcription...</p>
+        <div class="transcription-body">
+          <div class="tab-content">
+            <div id="all" class="tab-pane active">
+              <p class="loading">Loading...</p>
+            </div>
+            <div id="summary" class="tab-pane">
+              <p class="loading">Loading summary...</p>
+            </div>
+            <!-- dynamic panes inserted here by JS -->
+            <div id="transcript" class="tab-pane">
+              <p class="loading">Loading transcription...</p>
+            </div>
           </div>
         </div>
       </div>
