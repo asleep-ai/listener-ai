@@ -6,6 +6,7 @@ import { getDataPath } from './dataPath';
 import { ConfigService } from './configService';
 import { GeminiService } from './geminiService';
 import { saveTranscription, listTranscriptions, parseFrontmatter, getTranscriptionsDir } from './outputService';
+import { searchTranscriptions, resolveFields, ALL_FIELDS, type SearchField } from './searchService';
 
 const SUPPORTED_EXTENSIONS = new Set([
   '.mp3', '.m4a', '.wav', '.ogg', '.flac', '.aac', '.wma', '.opus', '.webm',
@@ -18,6 +19,8 @@ function usage(): never {
     '       listener show <ref>                 Print summary to stdout\n' +
     '       listener export <ref> [<path>] [--json] [--transcript]\n' +
     '                                           Export transcription\n' +
+    '       listener search <query> [--limit <n>] [--transcript] [--field <name>]\n' +
+    '                                           Search past transcriptions\n' +
     '       listener config list|get|set|path   Manage configuration\n' +
     '\n' +
     '<ref> is a number from `listener list` or a folder name.\n' +
@@ -26,7 +29,8 @@ function usage(): never {
     '  --output <dir>   Parent directory for the output folder\n' +
     '  --limit <n>      Max results (0 = all, default: 20)\n' +
     '  --json           Export as JSON instead of markdown\n' +
-    '  --transcript     Include full transcript in export output\n' +
+    '  --transcript     Include transcript body (export: append; search: widen scope)\n' +
+    '  --field <name>   Restrict search to one of: title, summary, keyPoints, actionItems, transcript, all\n' +
     '  --help           Show this help message\n'
   );
   process.exit(1);
@@ -280,6 +284,70 @@ function handleExport(args: string[]): void {
   }
 }
 
+function handleSearch(args: string[]): void {
+  const VALID_FIELDS = [...ALL_FIELDS, 'all'] as const;
+  let query: string | undefined;
+  let limit = 20;
+  let includeTranscript = false;
+  let field: SearchField | 'all' | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--limit' && i + 1 < args.length) {
+      const n = parseInt(args[++i], 10);
+      if (isNaN(n) || n < 0) {
+        process.stderr.write('Error: --limit must be a non-negative integer\n');
+        process.exit(1);
+      }
+      limit = n;
+      continue;
+    }
+    if (a === '--transcript') { includeTranscript = true; continue; }
+    if (a === '--field' && i + 1 < args.length) {
+      const v = args[++i];
+      if (!(VALID_FIELDS as readonly string[]).includes(v)) {
+        process.stderr.write(`Error: --field must be one of: ${VALID_FIELDS.join(', ')}\n`);
+        process.exit(1);
+      }
+      field = v as SearchField | 'all';
+      continue;
+    }
+    if (a.startsWith('-')) {
+      process.stderr.write(`Error: Unknown option: ${a}\n`);
+      process.exit(1);
+    }
+    if (!query) { query = a; continue; }
+    process.stderr.write(`Error: Unexpected argument: ${a} (quote multi-word queries)\n`);
+    process.exit(1);
+  }
+
+  if (!query || query.trim() === '') {
+    process.stderr.write('Error: Missing query. Usage: listener search <query> [--limit <n>] [--transcript] [--field <name>]\n');
+    process.exit(1);
+  }
+
+  const dataPath = getDataPath();
+  const fields = resolveFields({ field, includeTranscript });
+  const hits = searchTranscriptions(dataPath, { query, fields, limit });
+
+  if (hits.length === 0) {
+    process.stderr.write('No results.\n');
+    return;
+  }
+
+  for (const hit of hits) {
+    const date = hit.entry.transcribedAt ? hit.entry.transcribedAt.slice(0, 10) : '          ';
+    const title = hit.data.title.length > 60 ? hit.data.title.slice(0, 57) + '...' : hit.data.title;
+    process.stdout.write(`${date}  ${title}\n`);
+    process.stdout.write(`  ref:     ${hit.entry.folderName}\n`);
+    process.stdout.write(`  matches: ${hit.matchedFields.join(', ')}\n`);
+    if (hit.snippet) {
+      process.stdout.write(`  ${hit.snippet}\n`);
+    }
+    process.stdout.write('\n');
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
@@ -304,6 +372,11 @@ async function main(): Promise<void> {
 
   if (args[0] === 'export') {
     handleExport(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'search') {
+    handleSearch(args.slice(1));
     return;
   }
 

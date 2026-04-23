@@ -84,6 +84,7 @@ interface SummaryFrontmatter {
   customFields?: Record<string, unknown>;
   audioFilePath?: string;
   transcribedAt: string;
+  emoji?: string;
 }
 
 function buildFrontmatter(meta: SummaryFrontmatter): string {
@@ -108,6 +109,9 @@ function buildFrontmatter(meta: SummaryFrontmatter): string {
   }
   if (meta.audioFilePath) {
     lines.push(`audioFilePath: ${yamlQuote(meta.audioFilePath)}`);
+  }
+  if (meta.emoji) {
+    lines.push(`emoji: ${yamlQuote(meta.emoji)}`);
   }
   lines.push('---');
   return lines.join('\n');
@@ -218,6 +222,7 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
     customFields: opts.result.customFields,
     audioFilePath: opts.audioFilePath,
     transcribedAt,
+    emoji: opts.result.emoji,
   });
   const summaryBody = formatSummary(opts.result, opts.title);
   fs.writeFileSync(path.join(folderPath, 'summary.md'), `${frontmatter}\n\n${summaryBody}`, 'utf-8');
@@ -300,6 +305,7 @@ export interface ReadTranscriptionResult {
   customFields?: Record<string, unknown>;
   audioFilePath?: string;
   transcribedAt?: string;
+  emoji?: string;
 }
 
 /**
@@ -337,6 +343,7 @@ export function readTranscription(folderPath: string): ReadTranscriptionResult |
       customFields,
       audioFilePath: meta.audioFilePath as string | undefined,
       transcribedAt: meta.transcribedAt as string | undefined,
+      emoji: meta.emoji as string | undefined,
     };
   } catch {
     return null;

@@ -212,7 +212,7 @@ export class NotionService {
         },
         icon: {
           type: 'emoji',
-          emoji: transcriptionResult.emoji as any
+          emoji: (transcriptionResult.emoji || '📝') as any
         },
         properties: properties,
         children: children
