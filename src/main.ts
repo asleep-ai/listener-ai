@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, Menu, globalShortcut, systemPreferences } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, dialog, Menu, globalShortcut, systemPreferences, session, desktopCapturer } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
@@ -18,6 +18,19 @@ import { saveTranscription, readTranscription } from './outputService';
 import { searchTranscriptions, ALL_FIELDS, type SearchField } from './searchService';
 import { AgentService, type AgentChatMessage, type AgentRunResult, type AgentScope, type ConfigProposal } from './agentService';
 import { isSupportedAudioExtension, extensionForMimeType } from './audioFormats';
+
+// Enable macOS system-audio loopback capture so getDisplayMedia({audio: 'loopback'})
+// can pull Zoom/Meet participant audio alongside the mic.
+//   MacSckSystemAudioLoopbackCapture  -- ScreenCaptureKit path, macOS 13-14
+//   MacCatapSystemAudioLoopbackCapture -- Core Audio Tap path, macOS 14.4+ (preferred on 15+)
+// Enabling both lets Chromium pick whichever implementation the kernel supports.
+// Must run before app.whenReady() so Chromium sees the flags at browser init.
+if (process.platform === 'darwin') {
+  app.commandLine.appendSwitch(
+    'enable-features',
+    'MacSckSystemAudioLoopbackCapture,MacCatapSystemAudioLoopbackCapture'
+  );
+}
 
 // Global flag to track if app is quitting
 declare global {
@@ -340,6 +353,49 @@ app.whenReady().then(() => {
 
   const menu = Menu.buildFromTemplate(template as any);
   Menu.setApplicationMenu(menu);
+
+  // getDisplayMedia() from the renderer requires a handler in the main process since
+  // Electron 30. Supplying audio: 'loopback' returns system audio without the native
+  // screen picker -- the renderer discards the video track and keeps only the audio.
+  // The feature-flag block at the top of this file is what actually enables the
+  // loopback implementation on macOS.
+  session.defaultSession.setDisplayMediaRequestHandler(
+    async (_request, callback) => {
+      // callback({}) is the "deny" signal, but Electron throws synchronously with
+      // "Video was requested, but no video stream was provided" because the renderer
+      // called getDisplayMedia({video:true}). The throw still reaches the renderer as
+      // a rejection (which is what we want), so swallow it here to avoid polluting
+      // stderr with UnhandledPromiseRejectionWarning.
+      const reject = () => {
+        try { callback({}); } catch { /* intentional */ }
+      };
+      // Short-circuit when permission is definitively refused. Allow 'not-determined'
+      // through so that desktopCapturer.getSources can trigger the macOS permission
+      // prompt on first use. 'denied'/'restricted' cases never prompt again, so calling
+      // getSources would just produce an UnhandledPromiseRejection with no user benefit.
+      if (process.platform === 'darwin') {
+        const status = systemPreferences.getMediaAccessStatus('screen');
+        if (status === 'denied' || status === 'restricted') {
+          reject();
+          return;
+        }
+      }
+      try {
+        const sources = await desktopCapturer.getSources({ types: ['screen'] });
+        if (sources.length === 0) {
+          reject();
+          return;
+        }
+        // getDisplayMedia requires a video source to satisfy the spec even when the
+        // caller only wants audio; the renderer stops the video track immediately.
+        callback({ video: sources[0], audio: 'loopback' });
+      } catch (err) {
+        console.warn('display-media handler: getSources failed:', err);
+        reject();
+      }
+    },
+    { useSystemPicker: false }
+  );
 
   createWindow();
 
@@ -1028,6 +1084,40 @@ ipcMain.handle('open-microphone-settings', async () => {
     shell.openExternal('ms-settings:privacy-microphone');
   }
   // For Linux, there's no standard way to open microphone settings
+});
+
+// Open macOS Screen Recording settings. macOS caches screen-recording permission at
+// process launch, so the app must be fully relaunched after the user toggles it on.
+ipcMain.handle('open-screen-recording-settings', async () => {
+  if (process.platform === 'darwin') {
+    shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+  }
+});
+
+// macOS caches Screen Recording permission at app launch; even after the user grants
+// it mid-session, the running process can't capture system audio until restart.
+// Snapshot the status at startup so we can tell the renderer "granted but needs restart"
+// vs "granted and ready" -- the difference is critical for the permission-status label.
+const initialScreenRecordingStatus = process.platform === 'darwin'
+  ? systemPreferences.getMediaAccessStatus('screen')
+  : 'not-applicable';
+console.log('[tcc] initial screen recording status:', initialScreenRecordingStatus);
+
+ipcMain.handle('get-screen-recording-permission', async () => {
+  if (process.platform !== 'darwin') {
+    return { current: 'not-applicable', initial: 'not-applicable', needsRestart: false };
+  }
+  const current = systemPreferences.getMediaAccessStatus('screen');
+  const needsRestart = current === 'granted' && initialScreenRecordingStatus !== 'granted';
+  return { current, initial: initialScreenRecordingStatus, needsRestart };
+});
+
+// One-click relaunch so users don't have to manually Cmd+Q after granting Screen
+// Recording permission. app.exit(0) skips before-quit hooks we don't need here.
+ipcMain.handle('relaunch-app', async () => {
+  global.isQuitting = true;
+  app.relaunch();
+  app.exit(0);
 });
 
 // Agent chat: blocks until the agent produces a final answer. During the run the

@@ -69,6 +69,15 @@
         </label>
       </div>
 
+      <div class="auto-mode-container" id="systemAudioContainer" style="display: none;">
+        <label class="toggle-container">
+          <input type="checkbox" id="recordSystemAudioToggle">
+          <span class="toggle-label">Record System Audio</span>
+          <span class="toggle-description">Capture Zoom/Meet participants and other app audio alongside your mic (macOS only; requires Screen Recording permission)</span>
+        </label>
+        <div id="systemAudioPermissionStatus" class="permission-status" hidden></div>
+      </div>
+
       <div class="drag-drop-zone" id="dragDropZone">
         <div class="drag-drop-content">
           <span class="drag-drop-icon">📁</span>

@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
   },
   checkConfig: () => ipcRenderer.invoke('check-config'),
-  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; meetingDetection?: boolean; displayDetection?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string }) =>
+  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; meetingDetection?: boolean; displayDetection?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string; recordSystemAudio?: boolean }) =>
     ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   transcribeAudio: (filePath: string) => ipcRenderer.invoke('transcribe-audio', filePath),
@@ -46,6 +46,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // System settings
   openMicrophoneSettings: () => ipcRenderer.invoke('open-microphone-settings'),
+  openScreenRecordingSettings: () => ipcRenderer.invoke('open-screen-recording-settings'),
+  getScreenRecordingPermission: (): Promise<{ current: string; initial: string; needsRestart: boolean }> =>
+    ipcRenderer.invoke('get-screen-recording-permission'),
+  relaunchApp: () => ipcRenderer.invoke('relaunch-app'),
 
   // Global shortcut
   validateShortcut: (shortcut: string) => ipcRenderer.invoke('validate-shortcut', shortcut),

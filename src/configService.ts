@@ -16,6 +16,7 @@ export interface AppConfig {
   maxRecordingMinutes?: number;
   recordingReminderMinutes?: number;
   minRecordingSeconds?: number;
+  recordSystemAudio?: boolean;
   lastSeenVersion?: string;
 }
 
@@ -204,6 +205,15 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getRecordSystemAudio(): boolean {
+    return this.config.recordSystemAudio || false;
+  }
+
+  setRecordSystemAudio(enabled: boolean): void {
+    this.config.recordSystemAudio = enabled;
+    this.saveConfig();
+  }
+
   getLastSeenVersion(): string | undefined {
     return this.config.lastSeenVersion;
   }
@@ -247,6 +257,7 @@ export class ConfigService {
       maxRecordingMinutes: this.getMaxRecordingMinutes(),
       recordingReminderMinutes: this.getRecordingReminderMinutes(),
       minRecordingSeconds: this.getMinRecordingSeconds(),
+      recordSystemAudio: this.getRecordSystemAudio(),
       lastSeenVersion: this.getLastSeenVersion()
     };
   }
