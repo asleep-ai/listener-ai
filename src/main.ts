@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, Menu, globalShortcut, systemPreferences } from 'electron';
 import { execFile } from 'child_process';
+import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
@@ -515,18 +516,15 @@ ipcMain.handle('cancel-ffmpeg-download', async () => {
   return { success: true };
 });
 
-// Transcode a saved recording (webm/ogg/opus) to M4A/AAC for sharing.
-// Returns `code: 'ffmpeg-missing'` so the renderer can trigger the existing
-// ffmpeg-download UI instead of duplicating prompts here.
+const execFileAsync = promisify(execFile);
+
+// Returns `code: 'ffmpeg-missing'` so the renderer can route users into the
+// existing ffmpeg-download UI (triggered by transcription) rather than
+// duplicating that flow here.
 ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
   try {
     if (!srcPath || typeof srcPath !== 'string') {
       return { success: false, error: 'Invalid source path' };
-    }
-    try {
-      await fs.promises.access(srcPath, fs.constants.R_OK);
-    } catch {
-      return { success: false, error: 'Source recording not found' };
     }
 
     const ffmpegPath = await ffmpegManager.ensureFFmpeg();
@@ -548,17 +546,9 @@ ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
     }
     const destPath = saveResult.filePath;
 
-    await new Promise<void>((resolve, reject) => {
-      execFile(
-        ffmpegPath,
-        ['-y', '-i', srcPath, '-vn', '-c:a', 'aac', '-b:a', '128k', destPath],
-        { maxBuffer: 20 * 1024 * 1024 },
-        (error) => {
-          if (error) reject(error);
-          else resolve();
-        }
-      );
-    });
+    await execFileAsync(ffmpegPath, [
+      '-y', '-i', srcPath, '-vn', '-c:a', 'aac', '-b:a', '128k', destPath,
+    ]);
 
     return { success: true, path: destPath };
   } catch (error) {

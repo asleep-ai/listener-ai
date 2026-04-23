@@ -209,15 +209,6 @@ export class ConfigService {
     return this.config.audioDeviceId;
   }
 
-  setAudioDeviceId(deviceId: string | undefined): void {
-    if (deviceId) {
-      this.config.audioDeviceId = deviceId;
-    } else {
-      delete this.config.audioDeviceId;
-    }
-    this.saveConfig();
-  }
-
   getLastSeenVersion(): string | undefined {
     return this.config.lastSeenVersion;
   }

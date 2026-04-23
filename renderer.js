@@ -115,6 +115,29 @@ function cleanupAudioState() {
   recordedChunks = [];
 }
 
+// Falls back to the default device when a preferred deviceId is gone (unplugged).
+async function acquireMediaStream(deviceId) {
+  const baseConstraints = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    sampleRate: 48000,
+    channelCount: 1,
+  };
+  const constraints = deviceId
+    ? { ...baseConstraints, deviceId: { exact: deviceId } }
+    : baseConstraints;
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: constraints });
+  } catch (error) {
+    if (deviceId && error && (error.name === 'OverconstrainedError' || error.name === 'NotFoundError')) {
+      console.warn('Preferred audio device unavailable, falling back to default:', error);
+      return await navigator.mediaDevices.getUserMedia({ audio: baseConstraints });
+    }
+    throw error;
+  }
+}
+
 // Initialize these after DOM loads to avoid null errors
 let recordButton, statusIndicator, statusText, recordingTime, meetingTitle, recordingsList, autoModeToggle;
 let progressContainer = null;
@@ -500,41 +523,16 @@ async function startRecording() {
   const title = meetingTitle.value.trim() || 'Untitled_Meeting';
 
   // Acquire the mic before telling main, so permission prompts don't leave main state dangling.
-  // If a saved deviceId is no longer available (unplugged), retry once with the default device.
-  const baseConstraints = {
-    echoCancellation: false,
-    noiseSuppression: false,
-    autoGainControl: false,
-    sampleRate: 48000,
-    channelCount: 1,
-  };
   let preferredDeviceId = '';
   try {
     const cfg = await window.electronAPI.getConfig();
     preferredDeviceId = typeof cfg.audioDeviceId === 'string' ? cfg.audioDeviceId : '';
-  } catch (_) {
-    // Config read failure shouldn't block recording.
-  }
-  let mediaStreamError = null;
-  try {
-    const audioConstraints = preferredDeviceId
-      ? { ...baseConstraints, deviceId: { exact: preferredDeviceId } }
-      : baseConstraints;
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   } catch (error) {
-    if (preferredDeviceId && error && (error.name === 'OverconstrainedError' || error.name === 'NotFoundError')) {
-      console.warn('Preferred audio device unavailable, falling back to default:', error);
-      try {
-        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: baseConstraints });
-      } catch (fallbackError) {
-        mediaStreamError = fallbackError;
-      }
-    } else {
-      mediaStreamError = error;
-    }
+    console.warn('Could not read audioDeviceId from config:', error);
   }
-  if (!mediaStream) {
-    const error = mediaStreamError;
+  try {
+    mediaStream = await acquireMediaStream(preferredDeviceId);
+  } catch (error) {
     const name = error && error.name ? error.name : '';
     if (name === 'NotAllowedError' || name === 'SecurityError') {
       if (confirm('Microphone access is required to record audio.\n\nOpen System Settings to grant permission?')) {
@@ -1290,9 +1288,8 @@ async function checkAndPromptForConfig() {
   }
 }
 
-// Populate the mic-device dropdown in Settings. Without prior mic permission,
-// enumerateDevices returns entries with empty labels — we fall back to
-// "Microphone (…suffix)" and show a hint so users know why names are missing.
+// Without prior mic permission, enumerateDevices returns entries with empty
+// labels — we surface a deviceId-prefix fallback and a hint explaining why.
 async function populateAudioDevices(selectedId) {
   if (!audioDeviceIdSelect) return;
   const hintEl = document.getElementById('audioDeviceHint');
@@ -1508,8 +1505,8 @@ async function createRecordingItem(recording) {
   return item;
 }
 
-// Convert a saved recording to M4A via the main-process ffmpeg handler.
-// On ffmpeg-missing, instruct the user to trigger a transcription (which downloads ffmpeg).
+// On ffmpeg-missing, point the user at transcription (which downloads ffmpeg)
+// rather than re-running the download UI for a one-off export.
 async function handleExportM4A(srcPath, button) {
   if (!window.electronAPI.exportRecordingM4A) return;
   const originalLabel = button ? button.textContent : '';
