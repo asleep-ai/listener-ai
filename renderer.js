@@ -44,6 +44,11 @@ let recordedChunks = [];
 let recordingMimeType = '';
 let audioContext = null;
 let processedStream = null;
+// Source node and graph head are tracked so the mic can be hot-swapped
+// mid-recording: disconnect sourceNode, create a new one from the new stream,
+// connect it to graphHead. MediaRecorder keeps consuming the same destination.
+let sourceNode = null;
+let graphHead = null;
 
 function pickRecordingMimeType() {
   const candidates = [
@@ -94,7 +99,7 @@ function buildProcessedStream(inputStream) {
 
   const destination = ctx.createMediaStreamDestination();
   source.connect(highpass).connect(compressor).connect(gain).connect(limiter).connect(destination);
-  return { ctx, stream: destination.stream };
+  return { ctx, stream: destination.stream, source, head: highpass };
 }
 
 function teardownAudioGraph() {
@@ -103,6 +108,8 @@ function teardownAudioGraph() {
     audioContext = null;
   }
   processedStream = null;
+  sourceNode = null;
+  graphHead = null;
 }
 
 function cleanupAudioState() {
@@ -386,9 +393,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     audioDeviceIdSelect = document.getElementById('audioDeviceId');
     if (navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === 'function') {
       navigator.mediaDevices.addEventListener('devicechange', () => {
-        if (configModal && configModal.style.display === 'block' && audioDeviceIdSelect) {
-          populateAudioDevices(audioDeviceIdSelect.value);
-        }
+        if (audioDeviceIdSelect) populateAudioDevices(audioDeviceIdSelect.value);
       });
     }
     closeTranscriptionBtn = document.querySelector('#transcriptionModal .close');
@@ -462,10 +467,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (cfg.autoMode !== undefined) autoModeToggle.checked = !!cfg.autoMode;
     if (cfg.meetingDetection !== undefined) meetingDetectionToggle.checked = !!cfg.meetingDetection;
     if (cfg.displayDetection !== undefined) displayDetectionToggle.checked = !!cfg.displayDetection;
+    if (audioDeviceIdSelect && typeof cfg.audioDeviceId === 'string') {
+      populateAudioDevices(cfg.audioDeviceId);
+    }
   }
 
   const config = await window.electronAPI.getConfig();
   applyHomeTogglesFromConfig(config);
+  if (audioDeviceIdSelect) populateAudioDevices(config.audioDeviceId || '');
 
   autoModeToggle.addEventListener('change', async () => {
     await window.electronAPI.saveConfig({ autoMode: autoModeToggle.checked });
@@ -476,6 +485,16 @@ window.addEventListener('DOMContentLoaded', async () => {
   displayDetectionToggle.addEventListener('change', async () => {
     await window.electronAPI.saveConfig({ displayDetection: displayDetectionToggle.checked });
   });
+  if (audioDeviceIdSelect) {
+    audioDeviceIdSelect.addEventListener('change', async () => {
+      const newId = audioDeviceIdSelect.value;
+      await window.electronAPI.saveConfig({ audioDeviceId: newId });
+      if (isRecording) {
+        const ok = await switchMicDevice(newId);
+        if (ok) showToast('Switched mic');
+      }
+    });
+  }
 
   // Agent-applied config writes arrive here so the home toggles stay in sync
   // without requiring the user to reopen the settings dialog.
@@ -565,6 +584,9 @@ async function startRecording() {
     const graph = buildProcessedStream(mediaStream);
     audioContext = graph.ctx;
     processedStream = graph.stream;
+    sourceNode = graph.source;
+    graphHead = graph.head;
+    attachTrackEndedHandlers(mediaStream);
     mediaRecorder = recordingMimeType
       ? new MediaRecorder(processedStream, { mimeType: recordingMimeType, audioBitsPerSecond: 64000 })
       : new MediaRecorder(processedStream, { audioBitsPerSecond: 64000 });
@@ -622,6 +644,47 @@ function resetRecordingUI() {
   statusIndicator.classList.remove('recording');
   statusText.textContent = 'Ready to record';
   recordingTime.classList.remove('active');
+}
+
+// If the capture device disappears (USB unplugged, Bluetooth drop, OS default
+// swapped out from under us), MediaRecorder stops receiving samples. Auto-stop
+// so the partial recording is saved instead of silently going mute.
+function attachTrackEndedHandlers(stream) {
+  if (!stream) return;
+  stream.getAudioTracks().forEach((track) => {
+    track.addEventListener('ended', () => {
+      if (!isRecording) return;
+      console.warn('Audio track ended mid-recording');
+      showToast('Mic disconnected — stopping recording', 'error');
+      stopRecording();
+    });
+  });
+}
+
+// Hot-swap the capture device mid-recording by replacing the source node in
+// the Web Audio graph. The processed-stream destination that MediaRecorder is
+// consuming stays the same, so the output file is continuous. There may be
+// a small pop at the transition; Opus absorbs it.
+async function switchMicDevice(newDeviceId) {
+  if (!isRecording || !audioContext || !graphHead) return false;
+  let newStream;
+  try {
+    newStream = await acquireMediaStream(newDeviceId);
+  } catch (error) {
+    console.warn('Mic switch failed, keeping current:', error);
+    showToast('Failed to switch mic — keeping current', 'error');
+    return false;
+  }
+  try {
+    if (sourceNode) sourceNode.disconnect();
+  } catch (_) {}
+  const oldStream = mediaStream;
+  mediaStream = newStream;
+  sourceNode = audioContext.createMediaStreamSource(newStream);
+  sourceNode.connect(graphHead);
+  attachTrackEndedHandlers(newStream);
+  if (oldStream) oldStream.getTracks().forEach((t) => t.stop());
+  return true;
 }
 
 async function processAutoMode(audioPath, recordingTitle, durationMs) {
@@ -831,7 +894,6 @@ function setupEventListeners() {
     const recordingReminderMinutes = Math.max(0, Math.floor(parseInt(recordingReminderMinutesEl?.value) || 0));
     const minRecordingSecondsEl = document.getElementById('minRecordingSeconds');
     const minRecordingSeconds = Math.max(0, Math.floor(parseInt(minRecordingSecondsEl?.value) || 0));
-    const audioDeviceId = audioDeviceIdSelect ? audioDeviceIdSelect.value : '';
 
     if (geminiKey) {
       await window.electronAPI.saveConfig({
@@ -845,8 +907,7 @@ function setupEventListeners() {
         summaryPrompt: summaryPrompt || DEFAULT_SUMMARY_PROMPT,
         maxRecordingMinutes: maxRecordingMinutes,
         recordingReminderMinutes: recordingReminderMinutes,
-        minRecordingSeconds: minRecordingSeconds,
-        audioDeviceId: audioDeviceId
+        minRecordingSeconds: minRecordingSeconds
       });
       configModal.style.display = 'none';
     } else {
@@ -1300,42 +1361,32 @@ async function checkAndPromptForConfig() {
 }
 
 // Without prior mic permission, enumerateDevices returns entries with empty
-// labels — we surface a deviceId-prefix fallback and a hint explaining why.
+// labels; fall back to a deviceId-prefix so users can at least distinguish them.
+// Chromium's virtual "default"/"communications" aliases are dropped — our
+// explicit "System default" option already covers that.
 async function populateAudioDevices(selectedId) {
   if (!audioDeviceIdSelect) return;
-  const hintEl = document.getElementById('audioDeviceHint');
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
-    const inputs = devices.filter((d) => d.kind === 'audioinput');
-    audioDeviceIdSelect.innerHTML = '<option value="">System default</option>';
-    let anyMissingLabel = false;
+    const inputs = devices.filter(
+      (d) => d.kind === 'audioinput' && d.deviceId !== 'default' && d.deviceId !== 'communications'
+    );
+    audioDeviceIdSelect.innerHTML = '<option value="">System default (at start)</option>';
     for (const device of inputs) {
       const option = document.createElement('option');
       option.value = device.deviceId;
       if (device.label) {
         option.textContent = device.label;
       } else {
-        anyMissingLabel = true;
         const suffix = device.deviceId ? device.deviceId.slice(0, 8) : '';
         option.textContent = suffix ? `Microphone (${suffix}…)` : 'Microphone';
       }
       audioDeviceIdSelect.appendChild(option);
     }
-    if (selectedId && inputs.some((d) => d.deviceId === selectedId)) {
-      audioDeviceIdSelect.value = selectedId;
-    } else {
-      audioDeviceIdSelect.value = '';
-    }
-    if (hintEl) {
-      hintEl.textContent = anyMissingLabel
-        ? 'Grant microphone permission (record once) to see device names.'
-        : 'Choose the input device used for recording.';
-    }
+    audioDeviceIdSelect.value =
+      selectedId && inputs.some((d) => d.deviceId === selectedId) ? selectedId : '';
   } catch (error) {
     console.warn('Failed to enumerate audio devices:', error);
-    if (hintEl) {
-      hintEl.textContent = 'Could not list audio devices. Using system default.';
-    }
   }
 }
 
@@ -1378,8 +1429,6 @@ async function showConfigModal() {
   if (minRecordingSecondsInput) {
     minRecordingSecondsInput.value = config.minRecordingSeconds || '';
   }
-
-  await populateAudioDevices(config.audioDeviceId || '');
 
   // Pre-fill summary prompt
   const summaryPromptInput = document.getElementById('summaryPrompt');

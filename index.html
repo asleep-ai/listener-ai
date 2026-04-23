@@ -35,6 +35,13 @@
 
       <input type="text" id="meetingTitle" placeholder="Enter meeting title..." class="meeting-title-input">
 
+      <div class="mic-selector-row">
+        <label for="audioDeviceId" class="mic-selector-label">Mic:</label>
+        <select id="audioDeviceId" class="mic-selector" title="Locked in at recording start. Change mid-recording to hot-swap.">
+          <option value="">System default (at start)</option>
+        </select>
+      </div>
+
       <button id="recordButton" class="record-button">
         Start Recording
       </button>
@@ -155,13 +162,6 @@
           <label for="globalShortcut">Global Shortcut:</label>
           <input type="text" id="globalShortcut" placeholder="Press shortcut keys" readonly>
           <small>Click the input and press your desired shortcut combination</small>
-        </div>
-        <div class="form-group">
-          <label for="audioDeviceId">Microphone:</label>
-          <select id="audioDeviceId">
-            <option value="">System default</option>
-          </select>
-          <small id="audioDeviceHint">Choose the input device used for recording. Record once to populate device names.</small>
         </div>
         <div class="form-group">
           <label for="maxRecordingMinutes">Max Recording Length (minutes)</label>
