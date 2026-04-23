@@ -245,6 +245,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
 
     setupSearch();
+    setupHomeChat();
+    setupModalChat();
+    setupAgentConfirmHandler();
 
     // Load existing recordings
     await loadRecordings();
@@ -264,39 +267,38 @@ window.addEventListener('DOMContentLoaded', async () => {
     </div>`;
   }
 
-  // Load auto mode preference
-  const config = await window.electronAPI.getConfig();
-  if (config.autoMode !== undefined) {
-    autoModeToggle.checked = config.autoMode;
-  }
-
-  // Save auto mode preference when toggled
-  autoModeToggle.addEventListener('change', async () => {
-    await window.electronAPI.saveConfig({ autoMode: autoModeToggle.checked });
-  });
-
-  // Meeting detection toggle
+  // Home-screen toggles reflect current config. Both the user toggling them and
+  // the agent applying a set_config write should land here -- the agent path
+  // goes through the 'config-changed' event subscription below.
   const meetingDetectionToggle = document.getElementById('meetingDetectionToggle');
   const meetingDetectionStatus = document.getElementById('meetingDetectionStatus');
   const meetingDetectionApp = document.getElementById('meetingDetectionApp');
+  const displayDetectionToggle = document.getElementById('displayDetectionToggle');
 
-  if (config.meetingDetection !== undefined) {
-    meetingDetectionToggle.checked = config.meetingDetection;
+  function applyHomeTogglesFromConfig(cfg) {
+    if (!cfg) return;
+    if (cfg.autoMode !== undefined) autoModeToggle.checked = !!cfg.autoMode;
+    if (cfg.meetingDetection !== undefined) meetingDetectionToggle.checked = !!cfg.meetingDetection;
+    if (cfg.displayDetection !== undefined) displayDetectionToggle.checked = !!cfg.displayDetection;
   }
 
+  const config = await window.electronAPI.getConfig();
+  applyHomeTogglesFromConfig(config);
+
+  autoModeToggle.addEventListener('change', async () => {
+    await window.electronAPI.saveConfig({ autoMode: autoModeToggle.checked });
+  });
   meetingDetectionToggle.addEventListener('change', async () => {
     await window.electronAPI.saveConfig({ meetingDetection: meetingDetectionToggle.checked });
   });
-
-  // Display detection toggle
-  const displayDetectionToggle = document.getElementById('displayDetectionToggle');
-
-  if (config.displayDetection !== undefined) {
-    displayDetectionToggle.checked = config.displayDetection;
-  }
-
   displayDetectionToggle.addEventListener('change', async () => {
     await window.electronAPI.saveConfig({ displayDetection: displayDetectionToggle.checked });
+  });
+
+  // Agent-applied config writes arrive here so the home toggles stay in sync
+  // without requiring the user to reopen the settings dialog.
+  window.electronAPI.onConfigChanged((cfg) => {
+    applyHomeTogglesFromConfig(cfg);
   });
 
   // Listen for meeting status changes
@@ -865,7 +867,7 @@ function populateTranscriptionUI(data) {
 }
 
 // Function to show saved transcript
-function showSavedTranscript(filePath, title, metadata) {
+function showSavedTranscript(filePath, title, metadata, folderName) {
   // Make sure modal elements are loaded
   if (!transcriptionModal) {
     transcriptionModal = document.getElementById('transcriptionModal');
@@ -893,6 +895,9 @@ function showSavedTranscript(filePath, title, metadata) {
     };
     currentMeetingTitle = title;
     currentFilePath = filePath;
+
+    // Prefer an explicit folderName; fall back to the one get-metadata attaches.
+    resetModalChatFor(folderName || (metadata && metadata.folderName) || null);
 
     populateTranscriptionUI(currentTranscriptionData);
 
@@ -946,6 +951,7 @@ async function handleTranscribe(filePath, title) {
   document.getElementById('all').innerHTML = '<p class="loading">Loading...</p>';
   document.getElementById('summary').innerHTML = '<p class="loading">Loading summary...</p>';
   document.getElementById('transcript').innerHTML = '<p class="loading">Loading transcription...</p>';
+  resetModalChatFor(null);
   document.querySelectorAll('.tab-button.dynamic').forEach(el => el.remove());
   document.querySelectorAll('.tab-pane.dynamic').forEach(el => el.remove());
   document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
@@ -1302,7 +1308,7 @@ function createSearchResultItem(hit) {
   viewBtn.className = 'action-button view-transcript-btn';
   viewBtn.textContent = 'View Transcript';
   viewBtn.addEventListener('click', () => {
-    showSavedTranscript(hit.audioFilePath || '', hit.title, hit.data);
+    showSavedTranscript(hit.audioFilePath || '', hit.title, hit.data, hit.folderName);
   });
   actions.appendChild(viewBtn);
   item.appendChild(actions);
@@ -1658,5 +1664,206 @@ function setupPasteListener() {
         dragDropZone.removeAttribute('data-paste-hint');
       }
     }
+  });
+}
+
+// --- Chat (AI agent) --------------------------------------------------------
+//
+// Two chat views share one implementation:
+//   - Home chat: scope = { kind: 'all' } (searches across every saved meeting).
+//   - Modal chat: scope = { kind: 'single', folderName } (one specific meeting).
+//
+// During an in-flight agentChat call, the main process may emit
+// 'agent-confirm-request' so the user can approve a setting change. We route
+// those confirmation bubbles into whichever chat is currently awaiting a reply
+// (tracked via activeChatMessagesEl).
+
+let activeChatMessagesEl = null;
+let currentModalScope = null; // { kind: 'single', folderName } once a transcript is open
+
+function createChatController({ messagesEl, form, input, sendBtn, scopeProvider, emptyEl }) {
+  let history = [];
+  let busy = false;
+
+  function appendMessage(role, text, { pending = false, html = false } = {}) {
+    if (emptyEl && emptyEl.parentNode) {
+      emptyEl.remove();
+    }
+    const el = document.createElement('div');
+    el.className = `chat-message chat-${role}${pending ? ' chat-pending' : ''}`;
+    if (html) el.innerHTML = text;
+    else el.textContent = text;
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return el;
+  }
+
+  async function submit(question) {
+    if (!question || busy) return;
+    busy = true;
+    sendBtn.disabled = true;
+    input.disabled = true;
+
+    appendMessage('user', question);
+    input.value = '';
+    const pending = appendMessage('model', 'Thinking...', { pending: true });
+
+    const priorActiveChat = activeChatMessagesEl;
+    activeChatMessagesEl = messagesEl;
+
+    try {
+      const scope = scopeProvider();
+      if (!scope) {
+        pending.remove();
+        appendMessage('error', 'No meeting context. Open a transcript first.');
+        return;
+      }
+      const result = await window.electronAPI.agentChat({ question, history, scope });
+      pending.remove();
+      if (result && result.success) {
+        appendMessage('model', result.result.answer || '(no answer)');
+        history = result.result.history || history;
+        if (result.result.appliedActions && result.result.appliedActions.length > 0) {
+          for (const action of result.result.appliedActions) {
+            appendMessage('system', `Applied: ${action.key} = ${JSON.stringify(action.value)}`);
+          }
+        }
+      } else {
+        appendMessage('error', (result && result.error) || 'Agent failed.');
+      }
+    } catch (err) {
+      pending.remove();
+      appendMessage('error', err && err.message ? err.message : String(err));
+    } finally {
+      activeChatMessagesEl = priorActiveChat;
+      busy = false;
+      sendBtn.disabled = false;
+      input.disabled = false;
+      input.focus();
+    }
+  }
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submit(input.value.trim());
+  });
+
+  function reset() {
+    history = [];
+    messagesEl.innerHTML = '';
+    if (emptyEl) messagesEl.appendChild(emptyEl);
+  }
+
+  return { submit, reset };
+}
+
+let homeChat = null;
+let modalChat = null;
+
+function setupHomeChat() {
+  const section = document.getElementById('chatSection');
+  const header = section ? section.querySelector('.chat-header') : null;
+  const toggle = document.getElementById('chatToggleButton');
+  const body = document.getElementById('chatBody');
+  const form = document.getElementById('chatForm');
+  const input = document.getElementById('chatInput');
+  const sendBtn = document.getElementById('chatSend');
+  const messagesEl = document.getElementById('chatMessages');
+  if (!section || !header || !toggle || !body || !form || !input || !sendBtn || !messagesEl) return;
+
+  const emptyEl = messagesEl.querySelector('.chat-empty');
+
+  const doToggle = () => {
+    const expanded = body.style.display !== 'none';
+    body.style.display = expanded ? 'none' : 'flex';
+    toggle.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+    section.classList.toggle('expanded', !expanded);
+    if (!expanded) input.focus();
+  };
+  header.addEventListener('click', (e) => {
+    // Only toggle when clicking empty header space or the toggle button.
+    if (e.target === header || e.target === toggle || e.target === header.querySelector('h2')) {
+      doToggle();
+    }
+  });
+
+  homeChat = createChatController({
+    messagesEl,
+    form,
+    input,
+    sendBtn,
+    emptyEl,
+    scopeProvider: () => ({ kind: 'all' }),
+  });
+}
+
+function setupModalChat() {
+  const form = document.getElementById('modalChatForm');
+  const input = document.getElementById('modalChatInput');
+  const sendBtn = document.getElementById('modalChatSend');
+  const messagesEl = document.getElementById('modalChatMessages');
+  if (!form || !input || !sendBtn || !messagesEl) return;
+
+  const emptyEl = messagesEl.querySelector('.chat-empty');
+
+  modalChat = createChatController({
+    messagesEl,
+    form,
+    input,
+    sendBtn,
+    emptyEl,
+    scopeProvider: () => currentModalScope,
+  });
+}
+
+function resetModalChatFor(folderName) {
+  currentModalScope = folderName ? { kind: 'single', folderName } : null;
+  if (modalChat) modalChat.reset();
+  const input = document.getElementById('modalChatInput');
+  const sendBtn = document.getElementById('modalChatSend');
+  if (input && sendBtn) {
+    const available = !!folderName;
+    input.disabled = !available;
+    sendBtn.disabled = !available;
+    input.placeholder = available
+      ? 'Ask about this meeting...'
+      : 'Transcript not saved -- ask unavailable';
+  }
+}
+
+function setupAgentConfirmHandler() {
+  window.electronAPI.onAgentConfirmRequest(({ id, proposal }) => {
+    const target = activeChatMessagesEl;
+    if (!target) {
+      const ok = window.confirm(`${proposal.description}\n\nApply change?`);
+      window.electronAPI.sendAgentConfirmResponse({ id, approved: ok });
+      return;
+    }
+    const el = document.createElement('div');
+    el.className = 'chat-message chat-confirm';
+    const desc = document.createElement('p');
+    desc.textContent = proposal.description;
+    el.appendChild(desc);
+    const btnRow = document.createElement('div');
+    btnRow.className = 'chat-confirm-buttons';
+    const yes = document.createElement('button');
+    yes.className = 'chat-confirm-yes';
+    yes.textContent = 'Apply';
+    const no = document.createElement('button');
+    no.className = 'chat-confirm-no';
+    no.textContent = 'Cancel';
+    btnRow.appendChild(yes);
+    btnRow.appendChild(no);
+    el.appendChild(btnRow);
+    target.appendChild(el);
+    target.scrollTop = target.scrollHeight;
+
+    const respond = (approved) => {
+      yes.disabled = true;
+      no.disabled = true;
+      window.electronAPI.sendAgentConfirmResponse({ id, approved });
+    };
+    yes.addEventListener('click', () => respond(true));
+    no.addEventListener('click', () => respond(false));
   });
 }

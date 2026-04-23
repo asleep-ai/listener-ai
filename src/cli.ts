@@ -7,6 +7,7 @@ import { ConfigService } from './configService';
 import { GeminiService } from './geminiService';
 import { saveTranscription, listTranscriptions, parseFrontmatter, getTranscriptionsDir } from './outputService';
 import { searchTranscriptions, resolveFields, ALL_FIELDS, type SearchField } from './searchService';
+import { AgentService, type AgentScope, type ConfigProposal } from './agentService';
 
 const SUPPORTED_EXTENSIONS = new Set([
   '.mp3', '.m4a', '.wav', '.ogg', '.flac', '.aac', '.wma', '.opus', '.webm',
@@ -21,6 +22,8 @@ function usage(): never {
     '                                           Export transcription\n' +
     '       listener search <query> [--limit <n>] [--transcript] [--field <name>]\n' +
     '                                           Search past transcriptions\n' +
+    '       listener ask <question> [--ref <ref>]\n' +
+    '                                           Ask the AI agent about saved meetings or settings\n' +
     '       listener config list|get|set|path   Manage configuration\n' +
     '\n' +
     '<ref> is a number from `listener list` or a folder name.\n' +
@@ -348,6 +351,76 @@ function handleSearch(args: string[]): void {
   }
 }
 
+async function promptYesNo(message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    process.stderr.write(`${message} [y/N] `);
+    const stdin = process.stdin;
+    const onData = (chunk: Buffer) => {
+      stdin.off('data', onData);
+      stdin.pause();
+      const answer = chunk.toString('utf-8').trim().toLowerCase();
+      resolve(answer === 'y' || answer === 'yes');
+    };
+    stdin.resume();
+    stdin.on('data', onData);
+  });
+}
+
+async function handleAsk(args: string[]): Promise<void> {
+  let question: string | undefined;
+  let ref: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--ref' && i + 1 < args.length) {
+      ref = args[++i];
+      continue;
+    }
+    if (a.startsWith('-')) {
+      process.stderr.write(`Error: Unknown option: ${a}\n`);
+      process.exit(1);
+    }
+    if (!question) { question = a; continue; }
+    process.stderr.write(`Error: Unexpected argument: ${a} (quote multi-word questions)\n`);
+    process.exit(1);
+  }
+
+  if (!question || question.trim() === '') {
+    process.stderr.write('Error: Missing question. Usage: listener ask <question> [--ref <ref>]\n');
+    process.exit(1);
+  }
+
+  const dataPath = getDataPath();
+  const config = new ConfigService(dataPath);
+  const apiKey = config.getGeminiApiKey();
+  if (!apiKey) {
+    process.stderr.write('Error: Gemini API key not found. Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n');
+    process.exit(1);
+  }
+
+  let scope: AgentScope = { kind: 'all' };
+  if (ref) {
+    const folderPath = resolveRef(ref, dataPath);
+    scope = { kind: 'single', folderName: path.basename(folderPath) };
+  }
+
+  const agent = new AgentService({ apiKey, dataPath, configService: config });
+
+  const confirm = async (proposal: ConfigProposal): Promise<boolean> => {
+    process.stderr.write('\n');
+    return promptYesNo(`Proposed change -> ${proposal.description}\nApply?`);
+  };
+
+  const result = await agent.run({ question, scope, confirm });
+  process.stdout.write(`${result.answer}\n`);
+  if (result.appliedActions.length > 0) {
+    process.stderr.write('\nApplied:\n');
+    for (const action of result.appliedActions) {
+      process.stderr.write(`  ${action.key}: ${JSON.stringify(action.previousValue ?? null)} -> ${JSON.stringify(action.value)}\n`);
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
@@ -377,6 +450,11 @@ async function main(): Promise<void> {
 
   if (args[0] === 'search') {
     handleSearch(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'ask') {
+    await handleAsk(args.slice(1));
     return;
   }
 

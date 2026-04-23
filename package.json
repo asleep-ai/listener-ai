@@ -13,12 +13,13 @@
     "dist/geminiService.js",
     "dist/outputService.js",
     "dist/searchService.js",
+    "dist/agentService.js",
     "dist/services/ffmpegManager.js"
   ],
   "scripts": {
     "start": "pnpm run build && electron .",
     "build": "tsc",
-    "test": "tsc && node --test dist/meetingDetectorService.test.js dist/searchService.test.js",
+    "test": "tsc && node --test dist/meetingDetectorService.test.js dist/searchService.test.js dist/agentService.test.js",
     "dist": "pnpm run build && electron-builder",
     "dist:mac": "pnpm run build && electron-builder --mac",
     "dist:mac-x64": "pnpm run build && electron-builder --mac --x64",

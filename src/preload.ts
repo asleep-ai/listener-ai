@@ -19,6 +19,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRecordings: () => ipcRenderer.invoke('get-recordings'),
   searchTranscriptions: (opts: { query: string; fields?: string[]; limit?: number }) =>
     ipcRenderer.invoke('search-transcriptions', opts),
+  agentChat: (opts: { question: string; history?: Array<{ role: 'user' | 'model'; text: string }>; scope: { kind: 'all' } | { kind: 'single'; folderName: string } }) =>
+    ipcRenderer.invoke('agent-chat', opts),
+  onAgentConfirmRequest: (callback: (req: { id: string; proposal: { kind: 'setConfig'; key: string; value: unknown; currentValue?: unknown; description: string } }) => void) => {
+    ipcRenderer.on('agent-confirm-request', (_, req) => callback(req));
+  },
+  sendAgentConfirmResponse: (payload: { id: string; approved: boolean }) =>
+    ipcRenderer.invoke('agent-confirm-response', payload),
+  onConfigChanged: (callback: (config: unknown) => void) => {
+    ipcRenderer.on('config-changed', (_, config) => callback(config));
+  },
   onTranscriptionProgress: (callback: (progress: { percent: number; message: string }) => void) => {
     ipcRenderer.on('transcription-progress', (_, progress) => callback(progress));
   },
