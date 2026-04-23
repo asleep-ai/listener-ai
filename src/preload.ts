@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   sendAgentConfirmResponse: (payload: { id: string; approved: boolean }) =>
     ipcRenderer.invoke('agent-confirm-response', payload),
+  cancelAgentPending: () => ipcRenderer.invoke('agent-cancel-pending'),
   onConfigChanged: (callback: (config: unknown) => void) => {
     ipcRenderer.on('config-changed', (_, config) => callback(config));
   },

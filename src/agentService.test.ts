@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   coerceConfigValue,
   describeProposal,
+  isValidFolderName,
   WRITABLE_CONFIG_KEYS,
   READABLE_CONFIG_KEYS,
   type WritableConfigKey,
@@ -102,5 +103,32 @@ describe('describeProposal', () => {
     const s = describeProposal('globalShortcut', 'Cmd+Shift+R', undefined);
     assert.match(s, /\(unset\)/);
     assert.match(s, /"Cmd\+Shift\+R"/);
+  });
+});
+
+describe('isValidFolderName', () => {
+  it('accepts names produced by saveTranscription', () => {
+    assert.equal(isValidFolderName('Q4_OKR_Sync_20260201_140000'), true);
+    assert.equal(isValidFolderName('meeting with spaces_20260201_140000'), true);
+  });
+
+  it('rejects path traversal attempts', () => {
+    assert.equal(isValidFolderName('..'), false);
+    assert.equal(isValidFolderName('../etc/passwd'), false);
+    assert.equal(isValidFolderName('foo/bar'), false);
+    assert.equal(isValidFolderName('foo\\bar'), false);
+    assert.equal(isValidFolderName('foo\0bar'), false);
+  });
+
+  it('rejects empty and dotfile-style names', () => {
+    assert.equal(isValidFolderName(''), false);
+    assert.equal(isValidFolderName('.'), false);
+    assert.equal(isValidFolderName('.hidden'), false);
+  });
+
+  it('rejects non-string input', () => {
+    assert.equal(isValidFolderName(null as unknown as string), false);
+    assert.equal(isValidFolderName(undefined as unknown as string), false);
+    assert.equal(isValidFolderName(42 as unknown as string), false);
   });
 });

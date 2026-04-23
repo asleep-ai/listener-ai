@@ -1054,4 +1054,12 @@ ipcMain.handle('agent-confirm-response', async (_, payload: { id: string; approv
   return { success: true };
 });
 
+// Renderer-triggered bail-out: if the user clicks "Stop" on a pending chat
+// bubble while a set_config confirm is outstanding, reject it so the awaiting
+// agent call unwinds and the input unlocks. No-op when nothing is pending.
+ipcMain.handle('agent-cancel-pending', async () => {
+  rejectAllPendingConfirms();
+  return { success: true };
+});
+
 fileHandlerService.registerHandlers();

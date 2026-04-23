@@ -21,6 +21,11 @@ export type AgentConfirmHandler = (proposal: ConfigProposal) => Promise<boolean>
 export interface AgentChatMessage {
   role: 'user' | 'model';
   text: string;
+  // Raw Gemini turns belonging to this message (model turns may carry
+  // function_call parts, with the matching tool-response user turns interleaved).
+  // Preserved so the next run sees the full tool-use history, not just text.
+  // Only populated on model messages produced by `run`.
+  turns?: Content[];
 }
 
 export interface AgentRunOptions {
@@ -186,6 +191,16 @@ function systemInstructionFor(scope: AgentScope, currentTranscriptionTitle?: str
   return `${common}\n\nScope: ALL saved meetings. Use search_transcriptions to find relevant meetings (title/summary/key points are searched by default; pass include_transcript=true if keywords are likely only in the transcript body). Use list_recent_transcriptions for "recent/latest" questions. Use get_transcription to read a specific meeting when you have its folder name.`;
 }
 
+/** Reject folder names that could escape the transcriptions directory. A valid
+ *  entry produced by `saveTranscription` never contains path separators, so we
+ *  can keep the guard simple without duplicating the sanitizer. */
+export function isValidFolderName(name: string): boolean {
+  if (typeof name !== 'string' || name === '' || name === '.' || name === '..') return false;
+  if (name.includes('/') || name.includes('\\') || name.includes('\0')) return false;
+  if (name.startsWith('.')) return false;
+  return true;
+}
+
 function buildSinglePrimer(data: ReadTranscriptionResult): string {
   const lines: string[] = [];
   lines.push(`[Context: meeting "${data.title}"${data.transcribedAt ? ` recorded ${data.transcribedAt.slice(0, 10)}` : ''}]`);
@@ -206,10 +221,17 @@ function buildSinglePrimer(data: ReadTranscriptionResult): string {
 }
 
 function historyToContents(history: AgentChatMessage[]): Content[] {
-  return history.map((m) => ({
-    role: m.role,
-    parts: [{ text: m.text }],
-  }));
+  const out: Content[] = [];
+  for (const m of history) {
+    // Model messages replay their full turn cluster (text + function calls +
+    // tool responses) so the agent can reason about prior tool use.
+    if (m.role === 'model' && m.turns && m.turns.length > 0) {
+      out.push(...m.turns);
+      continue;
+    }
+    out.push({ role: m.role, parts: [{ text: m.text }] });
+  }
+  return out;
 }
 
 function extractFinalText(parts: Part[] | undefined): string {
@@ -248,21 +270,27 @@ export class AgentService {
     const tools = buildTools(opts.scope, !!opts.confirm);
 
     // Load the single-meeting record once if needed; title + primer derive from it.
-    const singleData = opts.scope.kind === 'single'
+    const singleData = opts.scope.kind === 'single' && isValidFolderName(opts.scope.folderName)
       ? readTranscription(path.join(getTranscriptionsDir(this.dataPath), opts.scope.folderName))
       : null;
     const systemInstruction = systemInstructionFor(opts.scope, singleData?.title);
 
     const history = opts.history ? [...opts.history] : [];
-    const contents: Content[] = historyToContents(history);
 
+    // For single-meeting scope the primer must precede all prior turns so the
+    // model sees the meeting context before its own earlier responses about it.
+    const contents: Content[] = [];
     if (singleData) {
-      const primer = buildSinglePrimer(singleData);
-      contents.push({ role: 'user', parts: [{ text: primer }] });
+      contents.push({ role: 'user', parts: [{ text: buildSinglePrimer(singleData) }] });
     }
+    for (const c of historyToContents(history)) contents.push(c);
 
     contents.push({ role: 'user', parts: [{ text: opts.question }] });
     history.push({ role: 'user', text: opts.question });
+
+    // Track turns added from here on so they can be attached to the model
+    // message for multi-turn tool memory.
+    const modelTurnsStart = contents.length;
 
     const applied: AppliedAction[] = [];
     let finalAnswer = '';
@@ -312,7 +340,8 @@ export class AgentService {
       finalAnswer = '(no answer produced within step limit)';
     }
 
-    history.push({ role: 'model', text: finalAnswer });
+    const modelTurns = contents.slice(modelTurnsStart);
+    history.push({ role: 'model', text: finalAnswer, turns: modelTurns });
     return { answer: finalAnswer, appliedActions: applied, history };
   }
 
@@ -355,7 +384,7 @@ export class AgentService {
         }
         case 'get_transcription': {
           const folderName = typeof args.folder_name === 'string' ? args.folder_name : '';
-          if (!folderName) return { error: 'folder_name is required' };
+          if (!isValidFolderName(folderName)) return { error: 'folder_name must be a bare folder name returned by search/list (no slashes, no ..)' };
           const folderPath = path.join(getTranscriptionsDir(this.dataPath), folderName);
           const data = readTranscription(folderPath);
           if (!data) return { error: `transcription not found: ${folderName}` };

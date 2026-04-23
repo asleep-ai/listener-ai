@@ -1698,6 +1698,31 @@ function createChatController({ messagesEl, form, input, sendBtn, scopeProvider,
     return el;
   }
 
+  // Pending bubble carries a Stop affordance so the user can bail out of a
+  // set_config confirmation they no longer want to answer -- clicking it
+  // rejects any in-flight confirm so the agent call unwinds and the input
+  // re-enables, breaking the deadlock Gemini review flagged.
+  function appendPendingBubble() {
+    if (emptyEl && emptyEl.parentNode) emptyEl.remove();
+    const el = document.createElement('div');
+    el.className = 'chat-message chat-model chat-pending';
+    const label = document.createElement('span');
+    label.textContent = 'Thinking...';
+    const stop = document.createElement('button');
+    stop.type = 'button';
+    stop.className = 'chat-pending-stop';
+    stop.textContent = 'Stop';
+    stop.addEventListener('click', () => {
+      stop.disabled = true;
+      window.electronAPI.cancelAgentPending();
+    });
+    el.appendChild(label);
+    el.appendChild(stop);
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return el;
+  }
+
   async function submit(question) {
     if (!question || busy) return;
     busy = true;
@@ -1706,7 +1731,7 @@ function createChatController({ messagesEl, form, input, sendBtn, scopeProvider,
 
     appendMessage('user', question);
     input.value = '';
-    const pending = appendMessage('model', 'Thinking...', { pending: true });
+    const pending = appendPendingBubble();
 
     const priorActiveChat = activeChatMessagesEl;
     activeChatMessagesEl = messagesEl;
