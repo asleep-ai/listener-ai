@@ -835,7 +835,7 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
 
     // New format: read from transcription folder
     if (metadata.transcriptionPath) {
-      const transcription = readTranscription(metadata.transcriptionPath);
+      const transcription = await readTranscription(metadata.transcriptionPath);
       if (transcription) {
         return {
           success: true,
@@ -896,7 +896,7 @@ ipcMain.handle('search-transcriptions', async (_, opts: { query: string; fields?
     const fields = filtered.length > 0 ? filtered : ALL_FIELDS;
     const limit = Number.isFinite(opts.limit) && (opts.limit as number) >= 0 ? (opts.limit as number) : 20;
     const dataPath = app.getPath('userData');
-    const raw = searchTranscriptions(dataPath, { query, fields, limit });
+    const raw = await searchTranscriptions(dataPath, { query, fields, limit });
 
     const hits = raw.map((h) => ({
       folderName: h.entry.folderName,

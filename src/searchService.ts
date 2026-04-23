@@ -142,15 +142,15 @@ export function resolveFields(opts: { field?: SearchField | 'all'; includeTransc
 }
 
 /** Run a search against the local transcriptions archive. */
-export function searchTranscriptions(dataPath: string, opts: SearchOptions): SearchHit[] {
-  const entries = listTranscriptions(dataPath, 0);
+export async function searchTranscriptions(dataPath: string, opts: SearchOptions): Promise<SearchHit[]> {
+  const entries = await listTranscriptions(dataPath, 0);
   const fields = opts.fields ?? DEFAULT_FIELDS;
   const needle = opts.query.toLowerCase();
   const scope = new Set(fields);
   const hits: SearchHit[] = [];
 
   for (const entry of entries) {
-    const data = readTranscription(entry.folderPath);
+    const data = await readTranscription(entry.folderPath);
     if (!data) continue;
     const hit = scoreRecordPrepared(entry, data, needle, scope);
     if (hit) hits.push(hit);
