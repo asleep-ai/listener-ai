@@ -135,10 +135,10 @@ function handleConfig(subArgs: string[]): void {
   usage();
 }
 
-function resolveRef(ref: string, dataPath: string): string {
+async function resolveRef(ref: string, dataPath: string): Promise<string> {
   if (/^\d+$/.test(ref)) {
     const index = parseInt(ref, 10);
-    const entries = listTranscriptions(dataPath, 0);
+    const entries = await listTranscriptions(dataPath, 0);
     if (entries.length === 0) {
       process.stderr.write('Error: No transcriptions found.\n');
       process.exit(1);
@@ -157,7 +157,7 @@ function resolveRef(ref: string, dataPath: string): string {
   return folderPath;
 }
 
-function handleList(args: string[]): void {
+async function handleList(args: string[]): Promise<void> {
   const dataPath = getDataPath();
   let limit: number | undefined;
   for (let i = 0; i < args.length; i++) {
@@ -169,7 +169,7 @@ function handleList(args: string[]): void {
       }
     }
   }
-  const entries = listTranscriptions(dataPath, limit);
+  const entries = await listTranscriptions(dataPath, limit);
   if (entries.length === 0) {
     process.stderr.write('No transcriptions found.\n');
     return;
@@ -184,14 +184,14 @@ function handleList(args: string[]): void {
   }
 }
 
-function handleShow(args: string[]): void {
+async function handleShow(args: string[]): Promise<void> {
   const ref = args[0];
   if (!ref) {
     process.stderr.write('Error: Missing ref. Usage: listener show <ref>\n');
     process.exit(1);
   }
   const dataPath = getDataPath();
-  const folderPath = resolveRef(ref, dataPath);
+  const folderPath = await resolveRef(ref, dataPath);
   const summaryPath = path.join(folderPath, 'summary.md');
   if (!fs.existsSync(summaryPath)) {
     process.stderr.write(`Error: summary.md not found in ${folderPath}\n`);
@@ -202,7 +202,7 @@ function handleShow(args: string[]): void {
   process.stdout.write(body);
 }
 
-function handleExport(args: string[]): void {
+async function handleExport(args: string[]): Promise<void> {
   let ref: string | undefined;
   let targetPath: string | undefined;
   let json = false;
@@ -225,7 +225,7 @@ function handleExport(args: string[]): void {
   }
 
   const dataPath = getDataPath();
-  const folderPath = resolveRef(ref, dataPath);
+  const folderPath = await resolveRef(ref, dataPath);
   const summaryPath = path.join(folderPath, 'summary.md');
 
   if (!fs.existsSync(summaryPath)) {
@@ -287,7 +287,7 @@ function handleExport(args: string[]): void {
   }
 }
 
-function handleSearch(args: string[]): void {
+async function handleSearch(args: string[]): Promise<void> {
   const VALID_FIELDS = [...ALL_FIELDS, 'all'] as const;
   let query: string | undefined;
   let limit = 20;
@@ -331,7 +331,7 @@ function handleSearch(args: string[]): void {
 
   const dataPath = getDataPath();
   const fields = resolveFields({ field, includeTranscript });
-  const hits = searchTranscriptions(dataPath, { query, fields, limit });
+  const hits = await searchTranscriptions(dataPath, { query, fields, limit });
 
   if (hits.length === 0) {
     process.stderr.write('No results.\n');
@@ -400,7 +400,7 @@ async function handleAsk(args: string[]): Promise<void> {
 
   let scope: AgentScope = { kind: 'all' };
   if (ref) {
-    const folderPath = resolveRef(ref, dataPath);
+    const folderPath = await resolveRef(ref, dataPath);
     scope = { kind: 'single', folderName: path.basename(folderPath) };
   }
 
@@ -434,22 +434,22 @@ async function main(): Promise<void> {
   }
 
   if (args[0] === 'list') {
-    handleList(args.slice(1));
+    await handleList(args.slice(1));
     return;
   }
 
   if (args[0] === 'show') {
-    handleShow(args.slice(1));
+    await handleShow(args.slice(1));
     return;
   }
 
   if (args[0] === 'export') {
-    handleExport(args.slice(1));
+    await handleExport(args.slice(1));
     return;
   }
 
   if (args[0] === 'search') {
-    handleSearch(args.slice(1));
+    await handleSearch(args.slice(1));
     return;
   }
 

@@ -271,7 +271,7 @@ export class AgentService {
 
     // Load the single-meeting record once if needed; title + primer derive from it.
     const singleData = opts.scope.kind === 'single' && isValidFolderName(opts.scope.folderName)
-      ? readTranscription(path.join(getTranscriptionsDir(this.dataPath), opts.scope.folderName))
+      ? await readTranscription(path.join(getTranscriptionsDir(this.dataPath), opts.scope.folderName))
       : null;
     const systemInstruction = systemInstructionFor(opts.scope, singleData?.title);
 
@@ -359,7 +359,7 @@ export class AgentService {
           const limit = typeof args.limit === 'number' ? args.limit : 5;
           const includeTranscript = args.include_transcript === true;
           const fields: SearchField[] = includeTranscript ? [...ALL_FIELDS] : ['title', 'summary', 'keyPoints', 'actionItems'];
-          const hits = searchTranscriptions(this.dataPath, { query, fields, limit });
+          const hits = await searchTranscriptions(this.dataPath, { query, fields, limit });
           return {
             hits: hits.map((h) => ({
               folder_name: h.entry.folderName,
@@ -373,7 +373,7 @@ export class AgentService {
         }
         case 'list_recent_transcriptions': {
           const limit = typeof args.limit === 'number' ? args.limit : 10;
-          const entries = listTranscriptions(this.dataPath, limit);
+          const entries = await listTranscriptions(this.dataPath, limit);
           return {
             entries: entries.map((e) => ({
               folder_name: e.folderName,
@@ -386,7 +386,7 @@ export class AgentService {
           const folderName = typeof args.folder_name === 'string' ? args.folder_name : '';
           if (!isValidFolderName(folderName)) return { error: 'folder_name must be a bare folder name returned by search/list (no slashes, no ..)' };
           const folderPath = path.join(getTranscriptionsDir(this.dataPath), folderName);
-          const data = readTranscription(folderPath);
+          const data = await readTranscription(folderPath);
           if (!data) return { error: `transcription not found: ${folderName}` };
           const result: Record<string, unknown> = {
             title: data.title,

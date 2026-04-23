@@ -244,25 +244,37 @@ export interface TranscriptionEntry {
  * List transcription folders sorted by most-recent-first.
  * Performs a lightweight line scan of each summary.md to extract only title and transcribedAt.
  */
-export function listTranscriptions(dataPath: string, limit?: number): TranscriptionEntry[] {
+export async function listTranscriptions(dataPath: string, limit?: number): Promise<TranscriptionEntry[]> {
   const dir = getTranscriptionsDir(dataPath);
-  if (!fs.existsSync(dir)) return [];
+  let dirents: fs.Dirent[];
+  try {
+    dirents = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
+  }
 
   const entries: TranscriptionEntry[] = [];
-  for (const name of fs.readdirSync(dir)) {
+  for (const dirent of dirents) {
+    if (!dirent.isDirectory()) continue;
+    const name = dirent.name;
     const folderPath = path.join(dir, name);
-    if (!fs.statSync(folderPath).isDirectory()) continue;
     const summaryPath = path.join(folderPath, 'summary.md');
-    if (!fs.existsSync(summaryPath)) continue;
 
     let title = name;
     let transcribedAt = '';
 
     // Lightweight line scan -- read only frontmatter, not the full file
-    const fd = fs.openSync(summaryPath, 'r');
+    let fileHandle: fs.promises.FileHandle;
+    try {
+      fileHandle = await fs.promises.open(summaryPath, 'r');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw err;
+    }
     try {
       const buf = Buffer.alloc(2048);
-      const bytesRead = fs.readSync(fd, buf, 0, 2048, 0);
+      const { bytesRead } = await fileHandle.read(buf, 0, 2048, 0);
       const head = buf.toString('utf-8', 0, bytesRead);
 
       for (const line of head.split('\n')) {
@@ -274,7 +286,7 @@ export function listTranscriptions(dataPath: string, limit?: number): Transcript
         if (line === '---' && transcribedAt) break;
       }
     } finally {
-      fs.closeSync(fd);
+      await fileHandle.close();
     }
 
     // Fall back to folder name timestamp suffix (e.g. _20260219_143000)
@@ -312,13 +324,11 @@ export interface ReadTranscriptionResult {
  * Read transcription data from a transcription folder.
  * Returns raw data from frontmatter (machine-readable), not the markdown body.
  */
-export function readTranscription(folderPath: string): ReadTranscriptionResult | null {
+export async function readTranscription(folderPath: string): Promise<ReadTranscriptionResult | null> {
   try {
     const summaryPath = path.join(folderPath, 'summary.md');
 
-    if (!fs.existsSync(summaryPath)) return null;
-
-    const summaryContent = fs.readFileSync(summaryPath, 'utf-8');
+    const summaryContent = await fs.promises.readFile(summaryPath, 'utf-8');
     const { meta } = parseFrontmatter(summaryContent);
 
     // Parse customFields from frontmatter (stored as JSON string)
