@@ -1156,6 +1156,10 @@ async function handleTranscribe(filePath, title) {
 
       populateTranscriptionUI(result.data);
 
+      // Refresh the main recordings list so the renamed file and "View Transcript"
+      // state appear without requiring a manual reload.
+      await refreshRecordingsList();
+
       // Show upload to Notion button if configured
       const notionConfig = await window.electronAPI.getConfig();
       if (notionConfig.notionApiKey && notionConfig.notionDatabaseId) {
