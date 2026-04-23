@@ -1465,6 +1465,9 @@ async function createRecordingItem(recording) {
       <button class="action-button reveal-btn" data-path="${recording.path}" title="Reveal in Finder (right-click in Finder to share)">
         Show
       </button>
+      <button class="action-button export-m4a-btn" data-path="${recording.path}" title="Export as M4A for sharing">
+        M4A
+      </button>
     </div>
   `;
 
@@ -1495,7 +1498,49 @@ async function createRecordingItem(recording) {
     });
   }
 
+  const exportBtn = item.querySelector('.export-m4a-btn');
+  if (exportBtn) {
+    exportBtn.addEventListener('click', () => {
+      handleExportM4A(recording.path, exportBtn);
+    });
+  }
+
   return item;
+}
+
+// Convert a saved recording to M4A via the main-process ffmpeg handler.
+// On ffmpeg-missing, instruct the user to trigger a transcription (which downloads ffmpeg).
+async function handleExportM4A(srcPath, button) {
+  if (!window.electronAPI.exportRecordingM4A) return;
+  const originalLabel = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Exporting…';
+  }
+  try {
+    const result = await window.electronAPI.exportRecordingM4A(srcPath);
+    if (result && result.canceled) {
+      return;
+    }
+    if (result && result.success) {
+      showToast('Exported M4A');
+      return;
+    }
+    if (result && result.code === 'ffmpeg-missing') {
+      showToast('FFmpeg is required. Transcribe a recording to install it first.', 'error');
+      return;
+    }
+    const message = result && result.error ? result.error : 'Unknown error';
+    showToast(`Failed to export M4A: ${message}`, 'error');
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    showToast(`Failed to export M4A: ${message}`, 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
 }
 
 // Function to format file size

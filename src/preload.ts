@@ -44,6 +44,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('ffmpeg-download-progress', (_, progress) => callback(progress));
   },
 
+  // Recording export
+  exportRecordingM4A: (srcPath: string) => ipcRenderer.invoke('export-recording-m4a', srcPath),
+
   // System settings
   openMicrophoneSettings: () => ipcRenderer.invoke('open-microphone-settings'),
 

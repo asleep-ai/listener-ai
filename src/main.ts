@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, Menu, globalShortcut, systemPreferences } from 'electron';
+import { execFile } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
@@ -512,6 +513,58 @@ ipcMain.handle('download-ffmpeg', async () => {
 ipcMain.handle('cancel-ffmpeg-download', async () => {
   ffmpegManager.cancelDownload();
   return { success: true };
+});
+
+// Transcode a saved recording (webm/ogg/opus) to M4A/AAC for sharing.
+// Returns `code: 'ffmpeg-missing'` so the renderer can trigger the existing
+// ffmpeg-download UI instead of duplicating prompts here.
+ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
+  try {
+    if (!srcPath || typeof srcPath !== 'string') {
+      return { success: false, error: 'Invalid source path' };
+    }
+    try {
+      await fs.promises.access(srcPath, fs.constants.R_OK);
+    } catch {
+      return { success: false, error: 'Source recording not found' };
+    }
+
+    const ffmpegPath = await ffmpegManager.ensureFFmpeg();
+    if (!ffmpegPath) {
+      return { success: false, code: 'ffmpeg-missing', error: 'FFmpeg is required for M4A export.' };
+    }
+
+    const baseName = path.basename(srcPath, path.extname(srcPath));
+    const dialogOptions = {
+      title: 'Export recording as M4A',
+      defaultPath: `${baseName}.m4a`,
+      filters: [{ name: 'M4A Audio', extensions: ['m4a'] }],
+    };
+    const saveResult = mainWindow
+      ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions);
+    if (saveResult.canceled || !saveResult.filePath) {
+      return { canceled: true };
+    }
+    const destPath = saveResult.filePath;
+
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        ffmpegPath,
+        ['-y', '-i', srcPath, '-vn', '-c:a', 'aac', '-b:a', '128k', destPath],
+        { maxBuffer: 20 * 1024 * 1024 },
+        (error) => {
+          if (error) reject(error);
+          else resolve();
+        }
+      );
+    });
+
+    return { success: true, path: destPath };
+  } catch (error) {
+    console.error('Error exporting M4A:', error);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
 });
 
 // Audio capture runs in the renderer via MediaRecorder; main only tracks state,
