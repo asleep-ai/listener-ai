@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
   openRecordingsFolder: () => ipcRenderer.invoke('open-recordings-folder'),
   getRecordings: () => ipcRenderer.invoke('get-recordings'),
+  searchTranscriptions: (opts: { query: string; fields?: string[]; limit?: number }) =>
+    ipcRenderer.invoke('search-transcriptions', opts),
   onTranscriptionProgress: (callback: (progress: { percent: number; message: string }) => void) => {
     ipcRenderer.on('transcription-progress', (_, progress) => callback(progress));
   },

@@ -244,6 +244,8 @@ window.addEventListener('DOMContentLoaded', async () => {
       });
     }
 
+    setupSearch();
+
     // Load existing recordings
     await loadRecordings();
 
@@ -886,6 +888,7 @@ function showSavedTranscript(filePath, title, metadata) {
       actionItems: metadata.actionItems || [],
       suggestedTitle: metadata.suggestedTitle,
       customFields: metadata.customFields,
+      emoji: metadata.emoji,
     };
     currentMeetingTitle = title;
     currentFilePath = filePath;
@@ -1183,7 +1186,127 @@ function formatFileSize(bytes) {
 
 // Function to refresh recordings list after a new recording
 async function refreshRecordingsList() {
+  const searchInput = document.getElementById('searchInput');
+  if (searchInput && searchInput.value.trim()) {
+    await runSearch(searchInput.value.trim());
+    return;
+  }
   await loadRecordings();
+}
+
+// --- Search ----------------------------------------------------------------
+
+let searchDebounceTimer = null;
+let lastSearchToken = 0;
+
+function setupSearch() {
+  const searchInput = document.getElementById('searchInput');
+  if (!searchInput) return;
+
+  searchInput.addEventListener('input', () => {
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+    const q = searchInput.value.trim();
+    if (!q) {
+      lastSearchToken++; // drop any in-flight result so it can't overwrite the default list
+      setHeadingDefault();
+      loadRecordings();
+      return;
+    }
+    searchDebounceTimer = setTimeout(() => runSearch(q), 200);
+  });
+
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      searchInput.value = '';
+      lastSearchToken++;
+      setHeadingDefault();
+      loadRecordings();
+    }
+  });
+}
+
+function setHeadingDefault() {
+  const h = document.getElementById('recordingsHeading');
+  if (h) h.textContent = 'Recent Recordings';
+}
+
+function setHeadingSearch(count, query) {
+  const h = document.getElementById('recordingsHeading');
+  if (!h) return;
+  h.textContent = count > 0
+    ? `Search Results (${count}) — "${query}"`
+    : `No matches for "${query}"`;
+}
+
+async function runSearch(query) {
+  const token = ++lastSearchToken;
+  try {
+    const result = await window.electronAPI.searchTranscriptions({ query, limit: 20 });
+    if (token !== lastSearchToken) return; // stale response
+    if (!result || !result.success) {
+      recordingsList.innerHTML = '<p class="no-recordings">Search failed</p>';
+      return;
+    }
+    renderSearchResults(result.hits, query);
+  } catch (err) {
+    if (token !== lastSearchToken) return;
+    console.error('Search error:', err);
+    recordingsList.innerHTML = '<p class="no-recordings">Search failed</p>';
+  }
+}
+
+function renderSearchResults(hits, query) {
+  setHeadingSearch(hits.length, query);
+  recordingsList.innerHTML = '';
+  if (hits.length === 0) {
+    recordingsList.innerHTML = '<p class="no-recordings">No matches</p>';
+    return;
+  }
+  for (const hit of hits) {
+    recordingsList.appendChild(createSearchResultItem(hit));
+  }
+}
+
+function createSearchResultItem(hit) {
+  const item = document.createElement('div');
+  item.className = 'recording-item search-result-item';
+
+  const date = hit.transcribedAt ? new Date(hit.transcribedAt).toLocaleDateString() : '';
+  const matches = (hit.matchedFields || []).join(', ');
+
+  const info = document.createElement('div');
+  info.className = 'recording-info';
+
+  const h3 = document.createElement('h3');
+  h3.textContent = hit.title || hit.folderName;
+  info.appendChild(h3);
+
+  const meta = document.createElement('p');
+  meta.className = 'recording-meta';
+  meta.textContent = date ? `${date} • matches: ${matches}` : `matches: ${matches}`;
+  info.appendChild(meta);
+
+  if (hit.snippet) {
+    const snippet = document.createElement('p');
+    snippet.className = 'search-snippet';
+    snippet.textContent = hit.snippet;
+    info.appendChild(snippet);
+  }
+
+  item.appendChild(info);
+
+  const actions = document.createElement('div');
+  actions.className = 'recording-actions';
+  const viewBtn = document.createElement('button');
+  viewBtn.className = 'action-button view-transcript-btn';
+  viewBtn.textContent = 'View Transcript';
+  viewBtn.addEventListener('click', () => {
+    showSavedTranscript(hit.audioFilePath || '', hit.title, hit.data);
+  });
+  actions.appendChild(viewBtn);
+  item.appendChild(actions);
+
+  return item;
 }
 
 // Copy functionality

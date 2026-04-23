@@ -78,10 +78,13 @@
 
     <div class="recordings-section">
       <div class="recordings-header">
-        <h2>Recent Recordings</h2>
+        <h2 id="recordingsHeading">Recent Recordings</h2>
         <button id="openFolderButton" class="folder-button" title="Open recordings folder">
           📁
         </button>
+      </div>
+      <div class="search-row">
+        <input type="search" id="searchInput" class="search-input" placeholder="Search past meetings (title, summary, notes, transcript)" autocomplete="off" spellcheck="false" />
       </div>
       <div id="recordingsList" class="recordings-list">
         <p class="no-recordings">No recordings yet</p>

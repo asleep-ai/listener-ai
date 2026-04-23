@@ -15,6 +15,7 @@ import { autoUpdaterService } from './services/autoUpdaterService';
 import { notificationService } from './services/notificationService';
 import { fetchReleaseNotes, fetchAllReleases } from './services/releaseNotesService';
 import { saveTranscription, readTranscription } from './outputService';
+import { searchTranscriptions, ALL_FIELDS, type SearchField } from './searchService';
 
 // Global flag to track if app is quitting
 declare global {
@@ -796,6 +797,7 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
             keyPoints: transcription.keyPoints,
             actionItems: transcription.actionItems,
             customFields: transcription.customFields ?? metadata.customFields,
+            emoji: transcription.emoji,
           }
         };
       }
@@ -829,6 +831,49 @@ ipcMain.handle('open-recordings-folder', async () => {
 
   // Open the folder in the system file explorer
   shell.openPath(recordingsPath);
+});
+
+// Search past transcriptions
+ipcMain.handle('search-transcriptions', async (_, opts: { query: string; fields?: SearchField[]; limit?: number }) => {
+  try {
+    const query = (opts?.query ?? '').trim();
+    if (!query) return { success: true, hits: [] };
+
+    // Validate fields against the known whitelist; drop anything else. Unvalidated input
+    // (e.g. a stringified 'title') would be passed to `new Set(...)` and silently match nothing.
+    const requested = Array.isArray(opts.fields) ? opts.fields : [];
+    const filtered = requested.filter((f): f is SearchField => (ALL_FIELDS as readonly string[]).includes(f));
+    const fields = filtered.length > 0 ? filtered : ALL_FIELDS;
+    const limit = Number.isFinite(opts.limit) && (opts.limit as number) >= 0 ? (opts.limit as number) : 20;
+    const dataPath = app.getPath('userData');
+    const raw = searchTranscriptions(dataPath, { query, fields, limit });
+
+    const hits = raw.map((h) => ({
+      folderName: h.entry.folderName,
+      folderPath: h.entry.folderPath,
+      transcribedAt: h.entry.transcribedAt,
+      title: h.data.title,
+      audioFilePath: h.data.audioFilePath ?? '',
+      score: h.score,
+      matchedFields: h.matchedFields,
+      snippet: h.snippet,
+      snippetField: h.snippetField ?? null,
+      data: {
+        title: h.data.title,
+        suggestedTitle: h.data.suggestedTitle,
+        summary: h.data.summary,
+        transcript: h.data.transcript,
+        keyPoints: h.data.keyPoints ?? [],
+        actionItems: h.data.actionItems ?? [],
+        customFields: h.data.customFields ?? {},
+        emoji: h.data.emoji,
+      },
+    }));
+
+    return { success: true, hits };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
 });
 
 // Get list of recordings
