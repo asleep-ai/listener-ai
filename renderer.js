@@ -356,6 +356,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     notionDatabaseIdInput = document.getElementById('notionDatabaseId');
     globalShortcutInput = document.getElementById('globalShortcut');
     knownWordsInput = document.getElementById('knownWords');
+    audioDeviceIdSelect = document.getElementById('audioDeviceId');
     closeTranscriptionBtn = document.querySelector('#transcriptionModal .close');
     uploadToNotionBtn = document.getElementById('uploadToNotion');
     progressContainer = document.getElementById('transcriptionProgress');
@@ -499,17 +500,41 @@ async function startRecording() {
   const title = meetingTitle.value.trim() || 'Untitled_Meeting';
 
   // Acquire the mic before telling main, so permission prompts don't leave main state dangling.
+  // If a saved deviceId is no longer available (unplugged), retry once with the default device.
+  const baseConstraints = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    sampleRate: 48000,
+    channelCount: 1,
+  };
+  let preferredDeviceId = '';
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        sampleRate: 48000,
-        channelCount: 1,
-      },
-    });
+    const cfg = await window.electronAPI.getConfig();
+    preferredDeviceId = typeof cfg.audioDeviceId === 'string' ? cfg.audioDeviceId : '';
+  } catch (_) {
+    // Config read failure shouldn't block recording.
+  }
+  let mediaStreamError = null;
+  try {
+    const audioConstraints = preferredDeviceId
+      ? { ...baseConstraints, deviceId: { exact: preferredDeviceId } }
+      : baseConstraints;
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   } catch (error) {
+    if (preferredDeviceId && error && (error.name === 'OverconstrainedError' || error.name === 'NotFoundError')) {
+      console.warn('Preferred audio device unavailable, falling back to default:', error);
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: baseConstraints });
+      } catch (fallbackError) {
+        mediaStreamError = fallbackError;
+      }
+    } else {
+      mediaStreamError = error;
+    }
+  }
+  if (!mediaStream) {
+    const error = mediaStreamError;
     const name = error && error.name ? error.name : '';
     if (name === 'NotAllowedError' || name === 'SecurityError') {
       if (confirm('Microphone access is required to record audio.\n\nOpen System Settings to grant permission?')) {
@@ -774,6 +799,7 @@ if (window.electronAPI.onRecordingAutoStopped) {
 // Modal elements - will be initialized after DOM loads
 let configModal, transcriptionModal, saveConfigBtn, cancelConfigBtn;
 let geminiApiKeyInput, geminiModelInput, geminiFlashModelInput, notionApiKeyInput, notionDatabaseIdInput, globalShortcutInput, knownWordsInput;
+let audioDeviceIdSelect;
 let closeTranscriptionBtn, uploadToNotionBtn;
 
 
@@ -796,6 +822,7 @@ function setupEventListeners() {
     const recordingReminderMinutes = Math.max(0, Math.floor(parseInt(recordingReminderMinutesEl?.value) || 0));
     const minRecordingSecondsEl = document.getElementById('minRecordingSeconds');
     const minRecordingSeconds = Math.max(0, Math.floor(parseInt(minRecordingSecondsEl?.value) || 0));
+    const audioDeviceId = audioDeviceIdSelect ? audioDeviceIdSelect.value : '';
 
     if (geminiKey) {
       await window.electronAPI.saveConfig({
@@ -809,7 +836,8 @@ function setupEventListeners() {
         summaryPrompt: summaryPrompt || DEFAULT_SUMMARY_PROMPT,
         maxRecordingMinutes: maxRecordingMinutes,
         recordingReminderMinutes: recordingReminderMinutes,
-        minRecordingSeconds: minRecordingSeconds
+        minRecordingSeconds: minRecordingSeconds,
+        audioDeviceId: audioDeviceId
       });
       configModal.style.display = 'none';
     } else {
@@ -1262,6 +1290,47 @@ async function checkAndPromptForConfig() {
   }
 }
 
+// Populate the mic-device dropdown in Settings. Without prior mic permission,
+// enumerateDevices returns entries with empty labels — we fall back to
+// "Microphone (…suffix)" and show a hint so users know why names are missing.
+async function populateAudioDevices(selectedId) {
+  if (!audioDeviceIdSelect) return;
+  const hintEl = document.getElementById('audioDeviceHint');
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter((d) => d.kind === 'audioinput');
+    audioDeviceIdSelect.innerHTML = '<option value="">System default</option>';
+    let anyMissingLabel = false;
+    for (const device of inputs) {
+      const option = document.createElement('option');
+      option.value = device.deviceId;
+      if (device.label) {
+        option.textContent = device.label;
+      } else {
+        anyMissingLabel = true;
+        const suffix = device.deviceId ? device.deviceId.slice(0, 8) : '';
+        option.textContent = suffix ? `Microphone (${suffix}…)` : 'Microphone';
+      }
+      audioDeviceIdSelect.appendChild(option);
+    }
+    if (selectedId && inputs.some((d) => d.deviceId === selectedId)) {
+      audioDeviceIdSelect.value = selectedId;
+    } else {
+      audioDeviceIdSelect.value = '';
+    }
+    if (hintEl) {
+      hintEl.textContent = anyMissingLabel
+        ? 'Grant microphone permission (record once) to see device names.'
+        : 'Choose the input device used for recording.';
+    }
+  } catch (error) {
+    console.warn('Failed to enumerate audio devices:', error);
+    if (hintEl) {
+      hintEl.textContent = 'Could not list audio devices. Using system default.';
+    }
+  }
+}
+
 // Function to show the config modal
 async function showConfigModal() {
   // Load current config
@@ -1301,6 +1370,8 @@ async function showConfigModal() {
   if (minRecordingSecondsInput) {
     minRecordingSecondsInput.value = config.minRecordingSeconds || '';
   }
+
+  await populateAudioDevices(config.audioDeviceId || '');
 
   // Pre-fill summary prompt
   const summaryPromptInput = document.getElementById('summaryPrompt');

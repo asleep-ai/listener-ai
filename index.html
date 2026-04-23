@@ -157,6 +157,13 @@
           <small>Click the input and press your desired shortcut combination</small>
         </div>
         <div class="form-group">
+          <label for="audioDeviceId">Microphone:</label>
+          <select id="audioDeviceId">
+            <option value="">System default</option>
+          </select>
+          <small id="audioDeviceHint">Choose the input device used for recording. Record once to populate device names.</small>
+        </div>
+        <div class="form-group">
           <label for="maxRecordingMinutes">Max Recording Length (minutes)</label>
           <input type="number" id="maxRecordingMinutes" min="0" max="1440" step="1" placeholder="0 = disabled">
         </div>
