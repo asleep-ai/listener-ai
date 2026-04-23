@@ -564,11 +564,14 @@ ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
     const tmpPath = `${destPath}.partial`;
 
     try {
+      // Force -f ipod (M4A muxer) because the `.partial` extension defeats
+      // ffmpeg's format-by-extension detection otherwise.
       await execFileAsync(ffmpegPath, [
         '-y', '-loglevel', 'error',
         '-i', resolvedSrc,
         '-vn', '-c:a', 'aac', '-b:a', '128k',
         '-movflags', '+faststart',
+        '-f', 'ipod',
         tmpPath,
       ]);
       await fs.promises.rename(tmpPath, destPath);
@@ -580,7 +583,12 @@ ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
     return { success: true, path: destPath };
   } catch (error) {
     console.error('Error exporting M4A:', error);
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
+    // execFileAsync rejections carry stderr on the error object — surface it
+    // so renderer-side toasts aren't reduced to "Command failed".
+    const stderr = (error as { stderr?: string } | null)?.stderr;
+    const baseMessage = error instanceof Error ? error.message : String(error);
+    const message = stderr ? `${baseMessage.split('\n')[0]} — ${stderr.trim()}` : baseMessage;
+    return { success: false, error: message };
   }
 });
 
