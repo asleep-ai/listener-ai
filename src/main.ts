@@ -526,13 +526,27 @@ ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
     if (!srcPath || typeof srcPath !== 'string') {
       return { success: false, error: 'Invalid source path' };
     }
+    // Containment: the renderer is trusted today, but bound srcPath to the
+    // recordings directory so a future renderer bug can't transcode arbitrary
+    // local files. realpath resolves symlinks before the prefix check.
+    const recordingsDir = path.join(app.getPath('userData'), 'recordings');
+    let resolvedSrc: string;
+    try {
+      resolvedSrc = await fs.promises.realpath(srcPath);
+    } catch {
+      return { success: false, error: 'Source recording not found' };
+    }
+    const resolvedRoot = await fs.promises.realpath(recordingsDir).catch(() => recordingsDir);
+    if (!resolvedSrc.startsWith(resolvedRoot + path.sep)) {
+      return { success: false, error: 'Source path is outside the recordings directory' };
+    }
 
     const ffmpegPath = await ffmpegManager.ensureFFmpeg();
     if (!ffmpegPath) {
       return { success: false, code: 'ffmpeg-missing', error: 'FFmpeg is required for M4A export.' };
     }
 
-    const baseName = path.basename(srcPath, path.extname(srcPath));
+    const baseName = path.basename(resolvedSrc, path.extname(resolvedSrc));
     const dialogOptions = {
       title: 'Export recording as M4A',
       defaultPath: `${baseName}.m4a`,
@@ -545,10 +559,23 @@ ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
       return { canceled: true };
     }
     const destPath = saveResult.filePath;
+    // Write to a sibling temp file and atomically rename on success so a
+    // failed encode never overwrites the user's picked path with a partial.
+    const tmpPath = `${destPath}.partial`;
 
-    await execFileAsync(ffmpegPath, [
-      '-y', '-i', srcPath, '-vn', '-c:a', 'aac', '-b:a', '128k', destPath,
-    ]);
+    try {
+      await execFileAsync(ffmpegPath, [
+        '-y', '-loglevel', 'error',
+        '-i', resolvedSrc,
+        '-vn', '-c:a', 'aac', '-b:a', '128k',
+        '-movflags', '+faststart',
+        tmpPath,
+      ]);
+      await fs.promises.rename(tmpPath, destPath);
+    } catch (encodeError) {
+      await fs.promises.unlink(tmpPath).catch(() => {});
+      throw encodeError;
+    }
 
     return { success: true, path: destPath };
   } catch (error) {

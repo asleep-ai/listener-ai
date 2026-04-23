@@ -132,7 +132,11 @@ async function acquireMediaStream(deviceId) {
   } catch (error) {
     if (deviceId && error && (error.name === 'OverconstrainedError' || error.name === 'NotFoundError')) {
       console.warn('Preferred audio device unavailable, falling back to default:', error);
-      return await navigator.mediaDevices.getUserMedia({ audio: baseConstraints });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: baseConstraints });
+      if (typeof showToast === 'function') {
+        showToast('Preferred mic unavailable — using system default');
+      }
+      return stream;
     }
     throw error;
   }
@@ -380,6 +384,13 @@ window.addEventListener('DOMContentLoaded', async () => {
     globalShortcutInput = document.getElementById('globalShortcut');
     knownWordsInput = document.getElementById('knownWords');
     audioDeviceIdSelect = document.getElementById('audioDeviceId');
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === 'function') {
+      navigator.mediaDevices.addEventListener('devicechange', () => {
+        if (configModal && configModal.style.display === 'block' && audioDeviceIdSelect) {
+          populateAudioDevices(audioDeviceIdSelect.value);
+        }
+      });
+    }
     closeTranscriptionBtn = document.querySelector('#transcriptionModal .close');
     uploadToNotionBtn = document.getElementById('uploadToNotion');
     progressContainer = document.getElementById('transcriptionProgress');
