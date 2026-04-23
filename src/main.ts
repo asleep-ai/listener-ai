@@ -245,9 +245,6 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  // Initialize auto-updater
-  autoUpdaterService.checkForUpdates();
-  
   // Create menu with DevTools option
   const template = [
     {
@@ -353,6 +350,10 @@ app.whenReady().then(() => {
     notificationService.setMainWindow(mainWindow);
   }
 
+  // Kick off initial + periodic update checks once the renderer can receive IPC.
+  autoUpdaterService.checkForUpdates();
+  autoUpdaterService.startPeriodicCheck();
+
   // Show release notes on first launch after an update.
   checkAndShowReleaseNotes().catch((err) => {
     console.error('Release notes check failed:', err);
@@ -433,6 +434,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   meetingDetector.stop();
   displayDetector.stop();
+  autoUpdaterService.stopPeriodicCheck();
   global.isQuitting = true;
 });
 
@@ -641,6 +643,23 @@ ipcMain.handle('get-all-releases', async () => {
   const results = await fetchAllReleases();
   console.log(`Release list IPC: fetched ${results.length} releases`);
   return results;
+});
+
+ipcMain.handle('update:get-state', async () => {
+  return autoUpdaterService.getUpdateState();
+});
+
+ipcMain.handle('update:download', async () => {
+  autoUpdaterService.downloadUpdate();
+});
+
+ipcMain.handle('update:install', async () => {
+  autoUpdaterService.quitAndInstall();
+});
+
+// Dev-only: drive the badge state machine manually from DevTools.
+ipcMain.handle('update:simulate', async (_, event: string, data?: any) => {
+  autoUpdaterService.simulateUpdateEvent(event, data);
 });
 
 ipcMain.handle('check-config', async () => {

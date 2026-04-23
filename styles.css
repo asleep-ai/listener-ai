@@ -86,6 +86,73 @@ h1 {
   background-color: rgba(0, 0, 0, 0.05);
 }
 
+.update-badge {
+  position: absolute;
+  right: 48px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  color: #1d4ed8;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, transform 0.15s;
+}
+
+.update-badge[hidden] {
+  display: none;
+}
+
+.update-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #2563eb;
+  animation: update-badge-pulse 1.8s ease-in-out infinite;
+}
+
+.update-badge:hover {
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+
+.update-badge:active {
+  transform: scale(0.97);
+}
+
+.update-badge.is-downloading {
+  color: #92400e;
+  background: #fffbeb;
+  border-color: #fde68a;
+  cursor: progress;
+}
+
+.update-badge.is-downloading::before {
+  background: #d97706;
+}
+
+.update-badge.is-ready {
+  color: #065f46;
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+}
+
+.update-badge.is-ready::before {
+  background: #10b981;
+  animation: none;
+}
+
+@keyframes update-badge-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
 .subtitle {
   text-align: center;
   color: #7f8c8d;
