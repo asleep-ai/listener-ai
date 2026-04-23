@@ -2,11 +2,26 @@
 
 class FileHandler {
   constructor() {
-    // Use Set for O(1) lookups instead of Array O(n)
-    this.validTypes = new Set(['audio/mp3', 'audio/mpeg', 'audio/mp4', 'audio/x-m4a', 'audio/m4a']);
-    this.validExtensions = new Set(['.mp3', '.m4a']);
-    this.maxSize = 500 * 1024 * 1024; // 500MB
-    this.chunkSize = 0x8000; // 32KB for base64 conversion
+    this.validTypes = new Set([
+      'audio/mp3', 'audio/mpeg',
+      'audio/mp4', 'audio/x-m4a', 'audio/m4a',
+      'audio/wav', 'audio/x-wav', 'audio/wave',
+      'audio/webm', 'audio/ogg', 'audio/opus',
+      'audio/flac', 'audio/aac',
+    ]);
+    this.validExtensions = new Set(['.mp3', '.m4a', '.wav', '.webm', '.ogg', '.opus', '.flac', '.aac']);
+    this.extensionMimes = {
+      '.mp3': 'audio/mp3',
+      '.m4a': 'audio/mp4',
+      '.wav': 'audio/wav',
+      '.webm': 'audio/webm',
+      '.ogg': 'audio/ogg',
+      '.opus': 'audio/ogg',
+      '.flac': 'audio/flac',
+      '.aac': 'audio/aac',
+    };
+    this.maxSize = 500 * 1024 * 1024;
+    this.chunkSize = 0x8000;
   }
 
   // Validate file before processing
@@ -33,7 +48,7 @@ class FileHandler {
     const hasValidExtension = fileExtension && this.validExtensions.has(fileExtension);
 
     if (!hasValidType && !hasValidExtension) {
-      throw new Error('Please select an MP3 or M4A audio file');
+      throw new Error('Please select a supported audio file (MP3, M4A, WAV, WebM, OGG, Opus, FLAC, AAC)');
     }
 
     return true;
@@ -124,14 +139,14 @@ class FileHandler {
       const fileInfo = await window.electronAPI.getFileInfo(result.filePath);
       
       if (fileInfo.success) {
-        // Create a pseudo-file object with path for efficient copying
+        const ext = fileInfo.name.toLowerCase().substring(fileInfo.name.lastIndexOf('.'));
         const fileWithPath = {
           name: fileInfo.name,
           path: result.filePath,
           size: fileInfo.size,
-          type: fileInfo.name.endsWith('.mp3') ? 'audio/mp3' : 'audio/m4a'
+          type: this.extensionMimes[ext] || 'application/octet-stream',
         };
-        
+
         return await this.processAudioFile(fileWithPath);
       } else {
         throw new Error('Failed to get file info');

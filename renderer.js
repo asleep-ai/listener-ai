@@ -36,6 +36,85 @@ let recordingStartTime = null;
 let timerInterval = null;
 let isAutoModeProcessing = false; // Track if auto mode is processing
 
+// MediaRecorder state (renderer owns audio capture; main only persists the final blob).
+// Constraints disable Chromium's AUVoiceIO path so macOS Voice Isolation can't touch the signal.
+let mediaStream = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+let recordingMimeType = '';
+let audioContext = null;
+let processedStream = null;
+
+function pickRecordingMimeType() {
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/ogg;codecs=opus',
+    'audio/mp4;codecs=mp4a.40.2',
+    'audio/webm',
+  ];
+  for (const mime of candidates) {
+    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mime)) {
+      return mime;
+    }
+  }
+  return '';
+}
+
+// Voice-meeting processing chain:
+//   highpass 80Hz (rumble/plosive cut)
+//   -> DynamicsCompressor (fast attack tames keyboard taps & close transients)
+//   -> makeup gain (+12dB) lifts distant speakers back up
+// Net effect: distant voices become audible without amplifying key clicks equally.
+function buildProcessedStream(inputStream) {
+  const ctx = new AudioContext({ sampleRate: 48000 });
+  const source = ctx.createMediaStreamSource(inputStream);
+
+  const highpass = ctx.createBiquadFilter();
+  highpass.type = 'highpass';
+  highpass.frequency.value = 80;
+
+  const compressor = ctx.createDynamicsCompressor();
+  compressor.threshold.value = -30;
+  compressor.knee.value = 20;
+  compressor.ratio.value = 8;
+  compressor.attack.value = 0.003;
+  compressor.release.value = 0.2;
+
+  const gain = ctx.createGain();
+  gain.gain.value = 4.0;
+
+  // Brick-wall limiter after the +12dB makeup gain so close-range speech can't
+  // clip into the Opus encoder when the compressor's attack/release lets a peak through.
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = -1;
+  limiter.knee.value = 0;
+  limiter.ratio.value = 20;
+  limiter.attack.value = 0;
+  limiter.release.value = 0.1;
+
+  const destination = ctx.createMediaStreamDestination();
+  source.connect(highpass).connect(compressor).connect(gain).connect(limiter).connect(destination);
+  return { ctx, stream: destination.stream };
+}
+
+function teardownAudioGraph() {
+  if (audioContext) {
+    audioContext.close().catch((e) => console.warn('AudioContext close:', e));
+    audioContext = null;
+  }
+  processedStream = null;
+}
+
+function cleanupAudioState() {
+  if (mediaStream) {
+    mediaStream.getTracks().forEach((t) => t.stop());
+    mediaStream = null;
+  }
+  teardownAudioGraph();
+  mediaRecorder = null;
+  recordedChunks = [];
+}
+
 // Initialize these after DOM loads to avoid null errors
 let recordButton, statusIndicator, statusText, recordingTime, meetingTitle, recordingsList, autoModeToggle;
 let progressContainer = null;
@@ -412,57 +491,93 @@ window.addEventListener('DOMContentLoaded', async () => {
 });
 
 async function startRecording() {
-  // Prevent starting a new recording if auto mode is processing
   if (isAutoModeProcessing) {
     alert('Please wait for auto mode processing to complete before starting a new recording.');
     return;
   }
 
-  // Check if FFmpeg is available
-  const ffmpegCheck = await window.electronAPI.checkFFmpeg();
-  if (!ffmpegCheck.available) {
-    // Show download dialog
-    await showFFmpegDownloadDialog();
+  const title = meetingTitle.value.trim() || 'Untitled_Meeting';
+
+  // Acquire the mic before telling main, so permission prompts don't leave main state dangling.
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        sampleRate: 48000,
+        channelCount: 1,
+      },
+    });
+  } catch (error) {
+    const name = error && error.name ? error.name : '';
+    if (name === 'NotAllowedError' || name === 'SecurityError') {
+      if (confirm('Microphone access is required to record audio.\n\nOpen System Settings to grant permission?')) {
+        await window.electronAPI.openMicrophoneSettings();
+      }
+    } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+      if (confirm('No microphone was detected.\n\nOpen System Settings to check input devices?')) {
+        await window.electronAPI.openMicrophoneSettings();
+      }
+    } else {
+      alert('Failed to access microphone: ' + (error && error.message ? error.message : String(error)));
+    }
     return;
   }
 
-  const title = meetingTitle.value.trim() || 'Untitled_Meeting';
+  recordingMimeType = pickRecordingMimeType();
+
+  try {
+    const graph = buildProcessedStream(mediaStream);
+    audioContext = graph.ctx;
+    processedStream = graph.stream;
+    mediaRecorder = recordingMimeType
+      ? new MediaRecorder(processedStream, { mimeType: recordingMimeType, audioBitsPerSecond: 64000 })
+      : new MediaRecorder(processedStream, { audioBitsPerSecond: 64000 });
+    recordedChunks = [];
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) recordedChunks.push(event.data);
+    };
+    mediaRecorder.onerror = (event) => {
+      const err = event && event.error ? event.error : event;
+      console.error('MediaRecorder error:', err);
+      cleanupAudioState();
+      resetRecordingUI();
+      window.electronAPI.stopRecording().catch(() => {});
+      alert('Recording failed: ' + (err && err.message ? err.message : 'Unknown error'));
+    };
+    mediaRecorder.start(1000);
+  } catch (error) {
+    cleanupAudioState();
+    alert('Failed to initialize recorder: ' + (error && error.message ? error.message : String(error)));
+    return;
+  }
 
   try {
     const result = await window.electronAPI.startRecording(title);
-    if (result.success) {
-      isRecording = true;
-      recordingStartTime = Date.now();
-
-      recordButton.textContent = 'Stop Recording';
-      recordButton.classList.add('recording');
-      statusIndicator.classList.add('recording');
-      statusText.textContent = 'Recording...';
-      recordingTime.classList.add('active');
-
-      startTimer();
-    } else {
-      // Handle error - check what type of error
-      if (result.error && result.error.includes('FFmpeg not found')) {
-        // FFmpeg check should have already happened above, but just in case
-        await showFFmpegDownloadDialog();
-      } else if (result.error && result.error.includes('Microphone permission denied')) {
-        // Show permission error with button to open settings
-        if (confirm('Microphone access is required to record audio.\n\nWould you like to open System Settings to grant permission?\n\nAfter granting permission, please restart Listener.AI.')) {
-          await window.electronAPI.openMicrophoneSettings();
-        }
-      } else if (result.error && result.error.includes('No audio devices found')) {
-        // This might be due to permissions or no microphone connected
-        if (confirm('No microphone was detected.\n\nThis could be because:\n1. Microphone permissions are denied\n2. No microphone is connected\n3. Audio drivers need updating\n\nWould you like to check System Settings?')) {
-          await window.electronAPI.openMicrophoneSettings();
-        }
-      } else {
-        alert('Failed to start recording: ' + (result.error || 'Unknown error'));
-      }
+    if (!result.success) {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+      cleanupAudioState();
+      alert('Failed to start recording: ' + (result.error || 'Unknown error'));
+      return;
     }
   } catch (error) {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    cleanupAudioState();
     alert('Failed to start recording: ' + error.message);
+    return;
   }
+
+  isRecording = true;
+  recordingStartTime = Date.now();
+
+  recordButton.textContent = 'Stop Recording';
+  recordButton.classList.add('recording');
+  statusIndicator.classList.add('recording');
+  statusText.textContent = 'Recording...';
+  recordingTime.classList.add('active');
+
+  startTimer();
 }
 
 function resetRecordingUI() {
@@ -568,13 +683,59 @@ async function handleRecordingStopped(audioPath, durationMs) {
 }
 
 async function stopRecording() {
+  // If the recorder already transitioned to inactive on its own (e.g. USB mic
+  // unplugged, stream ended, Chromium force-stopped encoding), still unwind the
+  // session so the next recording isn't blocked by stuck state.
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+    cleanupAudioState();
+    await window.electronAPI.stopRecording().catch(() => {});
+    resetRecordingUI();
+    return;
+  }
+
   try {
-    const result = await window.electronAPI.stopRecording();
-    if (result.success) {
-      await handleRecordingStopped(result.filePath, result.durationMs);
+    const stopped = new Promise((resolve) => {
+      mediaRecorder.onstop = () => resolve();
+    });
+    mediaRecorder.stop();
+    await stopped;
+
+    const chunks = recordedChunks;
+    const mimeType = mediaRecorder.mimeType || recordingMimeType || 'audio/webm';
+    cleanupAudioState();
+
+    const blob = new Blob(chunks, { type: mimeType });
+    const durationMs = recordingStartTime ? Date.now() - recordingStartTime : 0;
+
+    const stopSignal = await window.electronAPI.stopRecording();
+    if (!stopSignal.success) {
+      console.warn('stop-recording signal returned failure:', stopSignal.error);
+    }
+
+    if (blob.size === 0) {
+      alert('No audio captured.');
+      resetRecordingUI();
+      return;
+    }
+
+    const title = meetingTitle.value.trim() || 'Untitled_Meeting';
+    const saveResult = await window.electronAPI.saveRecording({
+      title,
+      mimeType,
+      durationMs,
+      data: new Uint8Array(await blob.arrayBuffer()),
+    });
+
+    if (saveResult.success) {
+      await handleRecordingStopped(saveResult.filePath, saveResult.durationMs ?? durationMs);
+    } else {
+      alert('Failed to save recording: ' + (saveResult.error || 'Unknown error'));
+      resetRecordingUI();
     }
   } catch (error) {
     alert('Failed to stop recording: ' + error.message);
+    cleanupAudioState();
+    resetRecordingUI();
   }
 }
 
@@ -602,9 +763,11 @@ window.electronAPI.onRecordingStatus((status) => {
 });
 
 if (window.electronAPI.onRecordingAutoStopped) {
-  window.electronAPI.onRecordingAutoStopped(async (data) => {
+  window.electronAPI.onRecordingAutoStopped(async () => {
     showToast('Recording auto-stopped - reached time limit');
-    await handleRecordingStopped(data?.filePath, data?.durationMs);
+    if (isRecording) {
+      await stopRecording();
+    }
   });
 }
 
@@ -1061,6 +1224,10 @@ async function handleTranscribe(filePath, title) {
 
       populateTranscriptionUI(result.data);
 
+      // Refresh the main recordings list so the renamed file and "View Transcript"
+      // state appear without requiring a manual reload.
+      await refreshRecordingsList();
+
       // Show upload to Notion button if configured
       const notionConfig = await window.electronAPI.getConfig();
       if (notionConfig.notionApiKey && notionConfig.notionDatabaseId) {
@@ -1224,6 +1391,9 @@ async function createRecordingItem(recording) {
           Transcribe
         </button>
       `}
+      <button class="action-button reveal-btn" data-path="${recording.path}" title="Reveal in Finder (right-click in Finder to share)">
+        Show
+      </button>
     </div>
   `;
 
@@ -1244,6 +1414,13 @@ async function createRecordingItem(recording) {
     const transcribeBtn = item.querySelector('.transcribe-btn');
     transcribeBtn.addEventListener('click', () => {
       handleTranscribe(recording.path, recording.title);
+    });
+  }
+
+  const revealBtn = item.querySelector('.reveal-btn');
+  if (revealBtn && window.electronAPI.showInFinder) {
+    revealBtn.addEventListener('click', () => {
+      window.electronAPI.showInFinder(recording.path);
     });
   }
 
@@ -1678,7 +1855,7 @@ function setupPasteListener() {
           const file = item.getAsFile();
           if (file && file.name) {
             const ext = file.name.toLowerCase().substring(file.name.lastIndexOf('.'));
-            if (ext === '.mp3' || ext === '.m4a') {
+            if (ext === '.mp3' || ext === '.m4a' || ext === '.webm' || ext === '.ogg' || ext === '.opus' || ext === '.wav') {
               audioFile = file;
               break;
             }
@@ -1700,7 +1877,7 @@ function setupPasteListener() {
     } else {
       // Check if clipboard contains file paths (text)
       const text = e.clipboardData.getData('text');
-      if (text && (text.toLowerCase().endsWith('.mp3') || text.toLowerCase().endsWith('.m4a'))) {
+      if (text && /\.(mp3|m4a|webm|ogg|opus|wav)$/i.test(text.toLowerCase())) {
         showToast('Please copy the actual audio file, not just its path', 'error');
       }
     }
