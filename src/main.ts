@@ -17,6 +17,7 @@ import { fetchReleaseNotes, fetchAllReleases } from './services/releaseNotesServ
 import { saveTranscription, readTranscription } from './outputService';
 import { searchTranscriptions, ALL_FIELDS, type SearchField } from './searchService';
 import { AgentService, type AgentChatMessage, type AgentRunResult, type AgentScope, type ConfigProposal } from './agentService';
+import { isSupportedAudioExtension, extensionForMimeType } from './audioFormats';
 
 // Global flag to track if app is quitting
 declare global {
@@ -511,47 +512,43 @@ ipcMain.handle('cancel-ffmpeg-download', async () => {
   return { success: true };
 });
 
+// Audio capture runs in the renderer via MediaRecorder; main only tracks state,
+// runs max/reminder timers, updates the menu bar, and writes the final blob to disk.
 ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
   try {
-    const result = await audioRecorder.startRecording(meetingTitle);
-    // Update menu bar icon state
-    if (result.success) {
-      menuBarManager.updateRecordingState(true, meetingTitle);
+    const result = audioRecorder.startRecording(meetingTitle);
+    if (!result.success) return result;
 
-      // Set up recording limit timer
-      const maxMinutes = configService.getMaxRecordingMinutes();
-      if (maxMinutes > 0) {
-        recordingMaxTimer = setTimeout(async () => {
-          clearRecordingTimers();
-          if (audioRecorder.isRecording()) {
-            try {
-              const stopResult = await audioRecorder.stopRecording();
-              menuBarManager.updateRecordingState(false);
-              meetingAutoStartedRecording = false;
-              if (stopResult.success) {
-                notificationService.notifyRecordingAutoStopped(maxMinutes);
-              }
-              if (mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.webContents.send('recording-auto-stopped', stopResult);
-              }
-            } catch (error) {
-              console.error('Error auto-stopping recording:', error);
-            }
-          }
-        }, maxMinutes * 60 * 1000);
-      }
+    menuBarManager.updateRecordingState(true, meetingTitle);
 
-      // Set up recording reminder interval
-      const reminderMinutes = configService.getRecordingReminderMinutes();
-      if (reminderMinutes > 0) {
-        let elapsed = 0;
-        recordingReminderTimer = setInterval(() => {
-          elapsed += reminderMinutes;
-          if (audioRecorder.isRecording()) {
-            notificationService.notifyRecordingReminder(elapsed);
-          }
-        }, reminderMinutes * 60 * 1000);
-      }
+    const maxMinutes = configService.getMaxRecordingMinutes();
+    if (maxMinutes > 0) {
+      recordingMaxTimer = setTimeout(() => {
+        clearRecordingTimers();
+        if (!audioRecorder.isRecording()) return;
+        notificationService.notifyRecordingAutoStopped(maxMinutes);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          // Renderer owns MediaRecorder — it will stop, save, and reset state via save-recording.
+          mainWindow.webContents.send('recording-auto-stopped', { reason: 'maxDuration', maxMinutes });
+        } else {
+          // Window gone so renderer can't save the file; at least clear main state
+          // so the next recording isn't blocked by a stuck isRecording() flag.
+          audioRecorder.stopRecording();
+          menuBarManager.updateRecordingState(false);
+          meetingAutoStartedRecording = false;
+        }
+      }, maxMinutes * 60 * 1000);
+    }
+
+    const reminderMinutes = configService.getRecordingReminderMinutes();
+    if (reminderMinutes > 0) {
+      let elapsed = 0;
+      recordingReminderTimer = setInterval(() => {
+        elapsed += reminderMinutes;
+        if (audioRecorder.isRecording()) {
+          notificationService.notifyRecordingReminder(elapsed);
+        }
+      }, reminderMinutes * 60 * 1000);
     }
 
     return result;
@@ -565,18 +562,32 @@ ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
 ipcMain.handle('stop-recording', async () => {
   try {
     clearRecordingTimers();
-    const result = await audioRecorder.stopRecording();
+    const result = audioRecorder.stopRecording();
 
-    // Update menu bar icon state
     menuBarManager.updateRecordingState(false);
     meetingAutoStartedRecording = false;
-    if (result.success) {
-      notificationService.notifyRecordingStopped();
-    }
 
     return result;
   } catch (error) {
     console.error('Error stopping recording:', error);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+// Receives the encoded audio blob from the renderer after MediaRecorder finalizes.
+// The "stopped" notification only fires once the file is actually on disk — otherwise
+// a failed write would still show a success toast.
+ipcMain.handle('save-recording', async (_, payload: { title: string; mimeType: string; durationMs: number; data: ArrayBuffer | Uint8Array }) => {
+  try {
+    const buf = Buffer.from(payload.data as ArrayBuffer);
+    const extension = extensionForMimeType(payload.mimeType);
+    const result = await audioRecorder.saveRecording(payload.title, buf, extension, payload.durationMs);
+    if (result.success) {
+      notificationService.notifyRecordingStopped();
+    }
+    return result;
+  } catch (error) {
+    console.error('Error saving recording:', error);
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -883,6 +894,19 @@ ipcMain.handle('open-recordings-folder', async () => {
   shell.openPath(recordingsPath);
 });
 
+// Reveal a specific recording in Finder/Explorer. This gives the user a
+// one-click path to native OS share tools (right-click -> Share -> AirDrop,
+// Messages, Mail, KakaoTalk, etc.) without us having to integrate each target.
+ipcMain.handle('show-in-finder', (_, filePath: string) => {
+  if (!filePath) return { success: false, error: 'No file path provided' };
+  try {
+    shell.showItemInFolder(filePath);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
 // Search past transcriptions
 ipcMain.handle('search-transcriptions', async (_, opts: { query: string; fields?: SearchField[]; limit?: number }) => {
   try {
@@ -944,7 +968,7 @@ ipcMain.handle('get-recordings', async () => {
       .filter((file: string) => {
         // Filter out segment files
         if (file.includes('_segment_')) return false;
-        return file.endsWith('.mp3') || file.endsWith('.wav') || file.endsWith('.m4a');
+        return isSupportedAudioExtension(path.extname(file));
       })
       .map((file: string) => {
         const filePath = path.join(recordingsDir, file);

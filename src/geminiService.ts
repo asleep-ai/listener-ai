@@ -2,6 +2,7 @@ import { GoogleGenAI } from '@google/genai';
 import * as fs from 'fs';
 import * as path from 'path';
 import { FFmpegManager } from './services/ffmpegManager';
+import { mimeTypeForExtension } from './audioFormats';
 
 export interface TranscriptionResult {
   transcript: string;
@@ -348,13 +349,7 @@ Return as JSON:
           progressCallback(25, 'Uploading large file to Gemini...');
         }
 
-        const fileExt = path.extname(audioFilePath).toLowerCase();
-        let mimeType = 'audio/mp3';
-        if (fileExt === '.wav') {
-          mimeType = 'audio/wav';
-        } else if (fileExt === '.m4a') {
-          mimeType = 'audio/mp4';
-        }
+        const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
 
         const fileData = fs.readFileSync(audioFilePath);
         const uploadResult = await this.ai.files.upload({
@@ -407,13 +402,7 @@ IMPORTANT:
 
       let result;
       if (fileUri) {
-        const fileExt = path.extname(audioFilePath).toLowerCase();
-        let mimeType = 'audio/mp3';
-        if (fileExt === '.wav') {
-          mimeType = 'audio/wav';
-        } else if (fileExt === '.m4a') {
-          mimeType = 'audio/mp4';
-        }
+        const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
 
         result = await this.ai.models.generateContent({
           model: this.flashModel,
@@ -439,13 +428,7 @@ IMPORTANT:
       } else {
         const audioData = fs.readFileSync(audioFilePath);
         const base64Audio = audioData.toString('base64');
-        const fileExt = path.extname(audioFilePath).toLowerCase();
-        let mimeType = 'audio/mp3';
-        if (fileExt === '.wav') {
-          mimeType = 'audio/wav';
-        } else if (fileExt === '.m4a') {
-          mimeType = 'audio/mp4';
-        }
+        const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
 
         result = await this.ai.models.generateContent({
           model: this.flashModel,
@@ -535,8 +518,7 @@ IMPORTANT:
 
         const audioData = fs.readFileSync(segmentFile);
         const base64Audio = audioData.toString('base64');
-        const fileExt = path.extname(segmentFile).toLowerCase();
-        const mimeType = fileExt === '.mp3' ? 'audio/mp3' : 'audio/wav';
+        const mimeType = mimeTypeForExtension(path.extname(segmentFile));
 
         const result = await this.ai.models.generateContent({
           model: this.flashModel,

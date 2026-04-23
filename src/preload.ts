@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
   startRecording: (meetingTitle: string) => ipcRenderer.invoke('start-recording', meetingTitle),
   stopRecording: () => ipcRenderer.invoke('stop-recording'),
+  saveRecording: (payload: { title: string; mimeType: string; durationMs: number; data: Uint8Array }) =>
+    ipcRenderer.invoke('save-recording', payload),
   onRecordingStatus: (callback: (status: string) => void) => {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
   },
@@ -16,6 +18,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('upload-to-notion', data),
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
   openRecordingsFolder: () => ipcRenderer.invoke('open-recordings-folder'),
+  showInFinder: (filePath: string) => ipcRenderer.invoke('show-in-finder', filePath),
   getRecordings: () => ipcRenderer.invoke('get-recordings'),
   searchTranscriptions: (opts: { query: string; fields?: string[]; limit?: number }) =>
     ipcRenderer.invoke('search-transcriptions', opts),
