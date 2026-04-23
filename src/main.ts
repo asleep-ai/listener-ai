@@ -528,15 +528,15 @@ ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
         if (!audioRecorder.isRecording()) return;
         notificationService.notifyRecordingAutoStopped(maxMinutes);
         if (mainWindow && !mainWindow.isDestroyed()) {
-          // Renderer owns MediaRecorder — it will stop, save, and reset state via save-recording.
+          // Renderer owns MediaRecorder — it will stop, save, and re-enter stop-recording via IPC.
           mainWindow.webContents.send('recording-auto-stopped', { reason: 'maxDuration', maxMinutes });
-        } else {
-          // Window gone so renderer can't save the file; at least clear main state
-          // so the next recording isn't blocked by a stuck isRecording() flag.
-          audioRecorder.stopRecording();
-          menuBarManager.updateRecordingState(false);
-          meetingAutoStartedRecording = false;
         }
+        // Always reset main-side state so an unresponsive or hung renderer can't leave the
+        // isRecording() flag stuck and block future recordings. stopRecording() is idempotent,
+        // so the renderer's own stop-recording IPC (if it runs) is a safe no-op here.
+        audioRecorder.stopRecording();
+        menuBarManager.updateRecordingState(false);
+        meetingAutoStartedRecording = false;
       }, maxMinutes * 60 * 1000);
     }
 

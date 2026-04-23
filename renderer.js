@@ -615,7 +615,15 @@ async function handleRecordingStopped(audioPath, durationMs) {
 }
 
 async function stopRecording() {
-  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  // If the recorder already transitioned to inactive on its own (e.g. USB mic
+  // unplugged, stream ended, Chromium force-stopped encoding), still unwind the
+  // session so the next recording isn't blocked by stuck state.
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+    cleanupAudioState();
+    await window.electronAPI.stopRecording().catch(() => {});
+    resetRecordingUI();
+    return;
+  }
 
   try {
     const stopped = new Promise((resolve) => {
