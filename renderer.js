@@ -1727,7 +1727,6 @@ function createChatController({ messagesEl, form, input, sendBtn, scopeProvider,
     if (!question || busy) return;
     busy = true;
     sendBtn.disabled = true;
-    input.disabled = true;
 
     appendMessage('user', question);
     input.value = '';
@@ -1763,7 +1762,6 @@ function createChatController({ messagesEl, form, input, sendBtn, scopeProvider,
       activeChatMessagesEl = priorActiveChat;
       busy = false;
       sendBtn.disabled = false;
-      input.disabled = false;
       input.focus();
     }
   }
