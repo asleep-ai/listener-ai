@@ -246,19 +246,19 @@ export interface TranscriptionEntry {
  */
 export async function listTranscriptions(dataPath: string, limit?: number): Promise<TranscriptionEntry[]> {
   const dir = getTranscriptionsDir(dataPath);
-  let names: string[];
+  let dirents: fs.Dirent[];
   try {
-    names = await fs.promises.readdir(dir);
+    dirents = await fs.promises.readdir(dir, { withFileTypes: true });
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;
   }
 
   const entries: TranscriptionEntry[] = [];
-  for (const name of names) {
+  for (const dirent of dirents) {
+    if (!dirent.isDirectory()) continue;
+    const name = dirent.name;
     const folderPath = path.join(dir, name);
-    const stat = await fs.promises.stat(folderPath);
-    if (!stat.isDirectory()) continue;
     const summaryPath = path.join(folderPath, 'summary.md');
 
     let title = name;
