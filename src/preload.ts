@@ -76,6 +76,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onUpdateStatus: (callback: (updateInfo: { event: string; data?: any }) => void) => {
     ipcRenderer.on('update-status', (_, updateInfo) => callback(updateInfo));
   },
+  getUpdateState: () => ipcRenderer.invoke('update:get-state'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  simulateUpdateEvent: (event: string, data?: any) => ipcRenderer.invoke('update:simulate', event, data),
 
   // Release notes (shown after a version update)
   onShowReleaseNotes: (callback: (notes: { version: string; body: string; url: string }) => void) => {
