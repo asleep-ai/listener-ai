@@ -58,17 +58,19 @@ function firstArrayHit(haystack: string[] | undefined, needleLower: string): { t
   return undefined;
 }
 
-/** Score a single transcription record. Returns null if no field in scope matches. */
-export function scoreRecord(
+/**
+ * Score one record against a pre-lowercased needle and pre-built scope Set.
+ * The bulk-search path hoists these out of the per-entry loop; `scoreRecord`
+ * below is a thin convenience wrapper for direct callers (tests).
+ */
+function scoreRecordPrepared(
   entry: TranscriptionEntry,
   data: ReadTranscriptionResult,
-  query: string,
-  fields: SearchField[],
+  needle: string,
+  scope: Set<SearchField>,
 ): SearchHit | null {
-  const needle = query.toLowerCase();
   if (!needle) return null;
 
-  const scope = new Set(fields);
   let score = 0;
   const matched: SearchField[] = [];
   let snippetSource = '';
@@ -122,6 +124,16 @@ export function scoreRecord(
   return { entry, data, score, matchedFields: matched, snippet, snippetField };
 }
 
+/** Convenience wrapper: lowercases the query and builds the scope Set per call. */
+export function scoreRecord(
+  entry: TranscriptionEntry,
+  data: ReadTranscriptionResult,
+  query: string,
+  fields: SearchField[],
+): SearchHit | null {
+  return scoreRecordPrepared(entry, data, query.toLowerCase(), new Set(fields));
+}
+
 /** Resolve which fields to search based on CLI flags. */
 export function resolveFields(opts: { field?: SearchField | 'all'; includeTranscript?: boolean }): SearchField[] {
   if (opts.field === 'all') return [...ALL_FIELDS];
@@ -133,12 +145,14 @@ export function resolveFields(opts: { field?: SearchField | 'all'; includeTransc
 export function searchTranscriptions(dataPath: string, opts: SearchOptions): SearchHit[] {
   const entries = listTranscriptions(dataPath, 0);
   const fields = opts.fields ?? DEFAULT_FIELDS;
+  const needle = opts.query.toLowerCase();
+  const scope = new Set(fields);
   const hits: SearchHit[] = [];
 
   for (const entry of entries) {
     const data = readTranscription(entry.folderPath);
     if (!data) continue;
-    const hit = scoreRecord(entry, data, opts.query, fields);
+    const hit = scoreRecordPrepared(entry, data, needle, scope);
     if (hit) hits.push(hit);
   }
 
