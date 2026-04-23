@@ -93,6 +93,23 @@
     </div>
     </div>
 
+    <div class="chat-section" id="chatSection">
+      <div class="chat-header">
+        <h2>💬 Ask Listener</h2>
+        <button id="chatToggleButton" class="chat-toggle" aria-label="Toggle chat" aria-expanded="false">▾</button>
+      </div>
+      <div class="chat-body" id="chatBody" style="display: none;">
+        <div class="chat-messages" id="chatMessages" role="log" aria-live="polite">
+          <p class="chat-empty">Ask about any saved meeting, or say things like <em>"enable auto mode"</em> or <em>"change the shortcut to Cmd+Shift+R"</em>. I'll always confirm before changing a setting.</p>
+        </div>
+        <form class="chat-input-row" id="chatForm">
+          <input type="text" id="chatInput" class="chat-input" placeholder="Ask Listener anything..." autocomplete="off" spellcheck="false" />
+          <button type="submit" id="chatSend" class="chat-send-button">Send</button>
+        </form>
+        <p class="chat-hint">Credentials (API keys, Notion DB ID) can't be changed here — use the settings dialog.</p>
+      </div>
+    </div>
+
     <div id="configModal" class="modal">
       <div class="modal-content config-modal">
         <div class="modal-header">
@@ -190,6 +207,7 @@
             <button class="tab-button" data-tab="summary">Summary</button>
             <!-- dynamic tabs inserted here by JS -->
             <button class="tab-button" data-tab="transcript">Transcript</button>
+            <button class="tab-button" data-tab="ask">💬 Ask</button>
           </div>
           <button id="uploadToNotion" class="notion-button" style="display: none;">
             <span class="notion-icon">📝</span> Upload to Notion
@@ -207,6 +225,15 @@
             <div id="transcript" class="tab-pane">
               <p class="loading">Loading transcription...</p>
             </div>
+          </div>
+          <div id="ask" class="tab-pane chat-pane">
+            <div class="chat-messages" id="modalChatMessages" role="log" aria-live="polite">
+              <p class="chat-empty">Ask anything about this meeting -- "What were the action items?", "Summarize the risks mentioned", etc.</p>
+            </div>
+            <form class="chat-input-row" id="modalChatForm">
+              <input type="text" id="modalChatInput" class="chat-input" placeholder="Ask about this meeting..." autocomplete="off" spellcheck="false" />
+              <button type="submit" id="modalChatSend" class="chat-send-button">Send</button>
+            </form>
           </div>
         </div>
       </div>

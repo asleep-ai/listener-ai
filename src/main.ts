@@ -16,6 +16,7 @@ import { notificationService } from './services/notificationService';
 import { fetchReleaseNotes, fetchAllReleases } from './services/releaseNotesService';
 import { saveTranscription, readTranscription } from './outputService';
 import { searchTranscriptions, ALL_FIELDS, type SearchField } from './searchService';
+import { AgentService, type AgentChatMessage, type AgentRunResult, type AgentScope, type ConfigProposal } from './agentService';
 
 // Global flag to track if app is quitting
 declare global {
@@ -34,6 +35,33 @@ const displayDetector = new DisplayDetectorService();
 let meetingAutoStartedRecording = false;
 let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
+let agentService: AgentService | null = null;
+
+function getAgentService(): AgentService | null {
+  if (agentService) return agentService;
+  const apiKey = configService.getGeminiApiKey();
+  if (!apiKey) return null;
+  agentService = new AgentService({
+    apiKey,
+    dataPath: app.getPath('userData'),
+    configService,
+  });
+  return agentService;
+}
+
+// Pending agent confirmation resolvers keyed by request id. The renderer responds
+// via the 'agent-confirm-response' IPC and we resolve the promise the agent is awaiting.
+// If the window goes away (reload, crash, close) before the user answers, we
+// auto-reject so the awaiting agent-chat call can unwind instead of hanging.
+const pendingConfirms = new Map<string, (approved: boolean) => void>();
+let confirmIdCounter = 0;
+
+function rejectAllPendingConfirms(): void {
+  for (const resolver of pendingConfirms.values()) {
+    try { resolver(false); } catch { /* ignore */ }
+  }
+  pendingConfirms.clear();
+}
 let recordingMaxTimer: NodeJS.Timeout | null = null;
 let recordingReminderTimer: NodeJS.Timeout | null = null;
 
@@ -202,7 +230,17 @@ function createWindow() {
   });
 
   mainWindow.on('closed', () => {
+    rejectAllPendingConfirms();
     mainWindow = null;
+  });
+
+  // Reload or crash drops the renderer that would answer a confirm prompt;
+  // unblock any waiting agent call so it returns cleanly instead of hanging.
+  mainWindow.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) rejectAllPendingConfirms();
+  });
+  mainWindow.webContents.on('render-process-gone', () => {
+    rejectAllPendingConfirms();
   });
 }
 
@@ -545,35 +583,44 @@ ipcMain.handle('stop-recording', async () => {
 
 // Configuration handlers
 
+// Apply runtime side effects for changed config keys (shortcut re-registration,
+// detector on/off, service re-creation). Called from both the GUI save-config
+// IPC and the agent-chat flow when set_config mutations land.
+function applyConfigSideEffects(changed: Partial<AppConfig>): void {
+  if (changed.knownWords !== undefined || changed.geminiApiKey !== undefined || changed.geminiModel !== undefined || changed.geminiFlashModel !== undefined) {
+    geminiService = createGeminiService();
+    agentService = null;
+  }
+  if (changed.globalShortcut !== undefined) {
+    registerGlobalShortcut();
+  }
+  if (changed.meetingDetection !== undefined) {
+    meetingDetector.setEnabled(changed.meetingDetection);
+  }
+  if (changed.displayDetection !== undefined) {
+    displayDetector.setEnabled(changed.displayDetection);
+  }
+  if (changed.notionApiKey !== undefined || changed.notionDatabaseId !== undefined) {
+    const apiKey = configService.getNotionApiKey();
+    const databaseId = configService.getNotionDatabaseId();
+    if (apiKey && databaseId) {
+      notionService = new NotionService({ apiKey, databaseId });
+    }
+  }
+}
+
+// Tell the renderer the config has changed out-of-band so it can re-read and
+// re-render its UI state (toggle checkboxes etc.). Used by the agent flow.
+function broadcastConfigChanged(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('config-changed', configService.getAllConfig());
+  }
+}
+
 ipcMain.handle('save-config', async (_, config: Partial<AppConfig>) => {
   try {
     configService.updateConfig(config);
-
-    // Recreate GeminiService if any relevant setting changed
-    if (config.knownWords !== undefined || config.geminiApiKey !== undefined || config.geminiModel !== undefined || config.geminiFlashModel !== undefined) {
-      geminiService = createGeminiService();
-    }
-
-    if (config.globalShortcut !== undefined) {
-      registerGlobalShortcut();
-    }
-
-    if (config.meetingDetection !== undefined) {
-      meetingDetector.setEnabled(config.meetingDetection);
-    }
-
-    if (config.displayDetection !== undefined) {
-      displayDetector.setEnabled(config.displayDetection);
-    }
-
-    // Recreate Notion service if either field changed
-    if (config.notionApiKey !== undefined || config.notionDatabaseId !== undefined) {
-      const apiKey = configService.getNotionApiKey();
-      const databaseId = configService.getNotionDatabaseId();
-      if (apiKey && databaseId) {
-        notionService = new NotionService({ apiKey, databaseId });
-      }
-    }
+    applyConfigSideEffects(config);
 
     return {
       success: true,
@@ -794,6 +841,7 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
           success: true,
           data: {
             ...metadata,
+            folderName: path.basename(metadata.transcriptionPath),
             transcript: transcription.transcript,
             summary: transcription.summary,
             keyPoints: transcription.keyPoints,
@@ -939,5 +987,79 @@ ipcMain.handle('open-microphone-settings', async () => {
   // For Linux, there's no standard way to open microphone settings
 });
 
-// Register file handler service
+// Agent chat: blocks until the agent produces a final answer. During the run the
+// main process may ask the renderer to confirm a config change via the
+// 'agent-confirm-request' event; the renderer answers with 'agent-confirm-response'.
+ipcMain.handle('agent-chat', async (
+  _event,
+  opts: { question: string; history?: AgentChatMessage[]; scope: AgentScope }
+): Promise<{ success: true; result: AgentRunResult } | { success: false; error: string }> => {
+  try {
+    const agent = getAgentService();
+    if (!agent) {
+      return { success: false, error: 'Gemini API key not configured.' };
+    }
+    const question = (opts?.question ?? '').trim();
+    if (!question) return { success: false, error: 'Empty question.' };
+
+    const scope: AgentScope = opts?.scope?.kind === 'single' && typeof opts.scope.folderName === 'string'
+      ? { kind: 'single', folderName: opts.scope.folderName }
+      : { kind: 'all' };
+
+    const confirm = async (proposal: ConfigProposal): Promise<boolean> => {
+      if (!mainWindow || mainWindow.isDestroyed()) return false;
+      const id = `cfm_${++confirmIdCounter}`;
+      const approval = new Promise<boolean>((resolve) => {
+        pendingConfirms.set(id, resolve);
+      });
+      mainWindow.webContents.send('agent-confirm-request', { id, proposal });
+      return approval;
+    };
+
+    const result = await agent.run({
+      question,
+      history: Array.isArray(opts?.history) ? opts.history : [],
+      scope,
+      confirm,
+    });
+
+    // The agent only mutates via set_config; replay each applied write into the
+    // runtime side-effect pipeline so shortcut/detector state matches the disk
+    // config, then push a 'config-changed' event so the renderer can re-render
+    // its toggle checkboxes without waiting for a full reload.
+    if (result.appliedActions.length > 0) {
+      const changed: Partial<AppConfig> = {};
+      for (const action of result.appliedActions) {
+        if (action.type === 'setConfig') {
+          (changed as Record<string, unknown>)[action.key] = action.value;
+        }
+      }
+      applyConfigSideEffects(changed);
+      broadcastConfigChanged();
+    }
+
+    return { success: true, result };
+  } catch (error) {
+    console.error('agent-chat failed:', error);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('agent-confirm-response', async (_, payload: { id: string; approved: boolean }) => {
+  const resolver = pendingConfirms.get(payload.id);
+  if (resolver) {
+    pendingConfirms.delete(payload.id);
+    resolver(!!payload.approved);
+  }
+  return { success: true };
+});
+
+// Renderer-triggered bail-out: if the user clicks "Stop" on a pending chat
+// bubble while a set_config confirm is outstanding, reject it so the awaiting
+// agent call unwinds and the input unlocks. No-op when nothing is pending.
+ipcMain.handle('agent-cancel-pending', async () => {
+  rejectAllPendingConfirms();
+  return { success: true };
+});
+
 fileHandlerService.registerHandlers();

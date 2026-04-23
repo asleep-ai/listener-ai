@@ -1282,3 +1282,245 @@ h1 {
   font-size: 13px;
   color: #ef4444;
 }
+
+/* Chat (agent) section */
+.chat-section {
+  margin-top: 24px;
+  padding: 16px 20px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.chat-section .chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+}
+
+.chat-section .chat-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.chat-toggle {
+  background: none;
+  border: none;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px 8px;
+  color: #6b7280;
+  transition: transform 0.15s ease;
+}
+
+.chat-section.expanded .chat-toggle {
+  transform: rotate(180deg);
+}
+
+.chat-body {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-messages {
+  min-height: 140px;
+  max-height: 340px;
+  overflow-y: auto;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-empty {
+  margin: 0;
+  color: #6b7280;
+  font-size: 13px;
+  font-style: italic;
+}
+
+.chat-message {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.chat-user {
+  align-self: flex-end;
+  background: #4f46e5;
+  color: #ffffff;
+  border-bottom-right-radius: 2px;
+}
+
+.chat-model {
+  align-self: flex-start;
+  background: #ffffff;
+  color: #111827;
+  border: 1px solid #e5e7eb;
+  border-bottom-left-radius: 2px;
+}
+
+.chat-pending {
+  font-style: italic;
+  color: #6b7280;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.chat-pending-stop {
+  font-style: normal;
+  font-size: 12px;
+  padding: 2px 10px;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #374151;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.chat-pending-stop:hover {
+  background: #f3f4f6;
+}
+
+.chat-pending-stop:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.chat-error {
+  align-self: stretch;
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+}
+
+.chat-system {
+  align-self: center;
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.chat-confirm {
+  align-self: stretch;
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fde68a;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-confirm p {
+  margin: 0;
+}
+
+.chat-confirm-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.chat-confirm-buttons button {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chat-confirm-buttons button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chat-confirm-yes {
+  background: #16a34a;
+  color: #ffffff;
+}
+
+.chat-confirm-no {
+  background: #ffffff;
+  color: #374151;
+  border-color: #d1d5db;
+}
+
+.chat-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.chat-input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.chat-input:focus {
+  border-color: #4f46e5;
+}
+
+.chat-send-button {
+  padding: 8px 16px;
+  background: #4f46e5;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.chat-send-button:hover {
+  background: #4338ca;
+}
+
+.chat-send-button:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}
+
+.chat-hint {
+  margin: 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+/* Chat pane inside the transcription modal */
+.chat-pane.tab-pane {
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+}
+
+.chat-pane.tab-pane.active {
+  display: flex;
+}
+
+.chat-pane .chat-messages {
+  flex: 1;
+  min-height: 260px;
+  max-height: none;
+}
