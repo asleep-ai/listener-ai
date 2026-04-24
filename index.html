@@ -35,6 +35,13 @@
 
       <input type="text" id="meetingTitle" placeholder="Enter meeting title..." class="meeting-title-input">
 
+      <div class="mic-selector-row">
+        <label for="audioDeviceId" class="mic-selector-label">Mic:</label>
+        <select id="audioDeviceId" class="mic-selector" title="Locked in at recording start. Change mid-recording to hot-swap.">
+          <option value="">System default (at start)</option>
+        </select>
+      </div>
+
       <button id="recordButton" class="record-button">
         Start Recording
       </button>

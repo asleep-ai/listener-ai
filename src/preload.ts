@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
   },
   checkConfig: () => ipcRenderer.invoke('check-config'),
-  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; meetingDetection?: boolean; displayDetection?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string; recordSystemAudio?: boolean }) =>
+  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; meetingDetection?: boolean; displayDetection?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string; recordSystemAudio?: boolean; audioDeviceId?: string }) =>
     ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   transcribeAudio: (filePath: string) => ipcRenderer.invoke('transcribe-audio', filePath),
@@ -43,6 +43,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onFFmpegDownloadProgress: (callback: (progress: any) => void) => {
     ipcRenderer.on('ffmpeg-download-progress', (_, progress) => callback(progress));
   },
+
+  // Recording export
+  exportRecordingM4A: (srcPath: string) => ipcRenderer.invoke('export-recording-m4a', srcPath),
 
   // System settings
   openMicrophoneSettings: () => ipcRenderer.invoke('open-microphone-settings'),

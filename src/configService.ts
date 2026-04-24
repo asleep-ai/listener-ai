@@ -17,6 +17,7 @@ export interface AppConfig {
   recordingReminderMinutes?: number;
   minRecordingSeconds?: number;
   recordSystemAudio?: boolean;
+  audioDeviceId?: string;
   lastSeenVersion?: string;
 }
 
@@ -214,6 +215,10 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getAudioDeviceId(): string | undefined {
+    return this.config.audioDeviceId;
+  }
+
   getLastSeenVersion(): string | undefined {
     return this.config.lastSeenVersion;
   }
@@ -258,6 +263,7 @@ export class ConfigService {
       recordingReminderMinutes: this.getRecordingReminderMinutes(),
       minRecordingSeconds: this.getMinRecordingSeconds(),
       recordSystemAudio: this.getRecordSystemAudio(),
+      audioDeviceId: this.getAudioDeviceId(),
       lastSeenVersion: this.getLastSeenVersion()
     };
   }

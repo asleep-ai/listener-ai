@@ -58,6 +58,7 @@ export const WRITABLE_CONFIG_KEYS = [
   'maxRecordingMinutes',
   'recordingReminderMinutes',
   'minRecordingSeconds',
+  'recordSystemAudio',
 ] as const;
 
 export type WritableConfigKey = typeof WRITABLE_CONFIG_KEYS[number];
@@ -83,7 +84,8 @@ export function coerceConfigValue(key: WritableConfigKey, raw: unknown): { ok: t
   switch (key) {
     case 'autoMode':
     case 'meetingDetection':
-    case 'displayDetection': {
+    case 'displayDetection':
+    case 'recordSystemAudio': {
       if (typeof raw === 'boolean') return { ok: true, value: raw };
       if (raw === 'true') return { ok: true, value: true };
       if (raw === 'false') return { ok: true, value: false };

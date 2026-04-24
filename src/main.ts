@@ -1,4 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, Menu, globalShortcut, systemPreferences, session, desktopCapturer } from 'electron';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
@@ -568,6 +570,82 @@ ipcMain.handle('download-ffmpeg', async () => {
 ipcMain.handle('cancel-ffmpeg-download', async () => {
   ffmpegManager.cancelDownload();
   return { success: true };
+});
+
+const execFileAsync = promisify(execFile);
+
+// Returns `code: 'ffmpeg-missing'` so the renderer can route users into the
+// existing ffmpeg-download UI (triggered by transcription) rather than
+// duplicating that flow here.
+ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
+  try {
+    if (!srcPath || typeof srcPath !== 'string') {
+      return { success: false, error: 'Invalid source path' };
+    }
+    // Containment: the renderer is trusted today, but bound srcPath to the
+    // recordings directory so a future renderer bug can't transcode arbitrary
+    // local files. realpath resolves symlinks before the prefix check.
+    const recordingsDir = path.join(app.getPath('userData'), 'recordings');
+    let resolvedSrc: string;
+    try {
+      resolvedSrc = await fs.promises.realpath(srcPath);
+    } catch {
+      return { success: false, error: 'Source recording not found' };
+    }
+    const resolvedRoot = await fs.promises.realpath(recordingsDir).catch(() => recordingsDir);
+    if (!resolvedSrc.startsWith(resolvedRoot + path.sep)) {
+      return { success: false, error: 'Source path is outside the recordings directory' };
+    }
+
+    const ffmpegPath = await ffmpegManager.ensureFFmpeg();
+    if (!ffmpegPath) {
+      return { success: false, code: 'ffmpeg-missing', error: 'FFmpeg is required for M4A export.' };
+    }
+
+    const baseName = path.basename(resolvedSrc, path.extname(resolvedSrc));
+    const dialogOptions = {
+      title: 'Export recording as M4A',
+      defaultPath: `${baseName}.m4a`,
+      filters: [{ name: 'M4A Audio', extensions: ['m4a'] }],
+    };
+    const saveResult = mainWindow
+      ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions);
+    if (saveResult.canceled || !saveResult.filePath) {
+      return { canceled: true };
+    }
+    const destPath = saveResult.filePath;
+    // Write to a sibling temp file and atomically rename on success so a
+    // failed encode never overwrites the user's picked path with a partial.
+    const tmpPath = `${destPath}.partial`;
+
+    try {
+      // Force -f ipod (M4A muxer) because the `.partial` extension defeats
+      // ffmpeg's format-by-extension detection otherwise.
+      await execFileAsync(ffmpegPath, [
+        '-y', '-loglevel', 'error',
+        '-i', resolvedSrc,
+        '-vn', '-c:a', 'aac', '-b:a', '128k',
+        '-movflags', '+faststart',
+        '-f', 'ipod',
+        tmpPath,
+      ]);
+      await fs.promises.rename(tmpPath, destPath);
+    } catch (encodeError) {
+      await fs.promises.unlink(tmpPath).catch(() => {});
+      throw encodeError;
+    }
+
+    return { success: true, path: destPath };
+  } catch (error) {
+    console.error('Error exporting M4A:', error);
+    // execFileAsync rejections carry stderr on the error object — surface it
+    // so renderer-side toasts aren't reduced to "Command failed".
+    const stderr = (error as { stderr?: string } | null)?.stderr;
+    const baseMessage = error instanceof Error ? error.message : String(error);
+    const message = stderr ? `${baseMessage.split('\n')[0]} — ${stderr.trim()}` : baseMessage;
+    return { success: false, error: message };
+  }
 });
 
 // Audio capture runs in the renderer via MediaRecorder; main only tracks state,

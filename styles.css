@@ -218,6 +218,41 @@ h1 {
   border-color: #3498db;
 }
 
+.mic-selector-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.mic-selector-label {
+  font-size: 13px;
+  color: #666;
+  flex-shrink: 0;
+}
+
+.mic-selector {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  font-size: 14px;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.mic-selector:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.mic-selector:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .record-button {
   width: 100%;
   padding: 15px;

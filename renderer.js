@@ -45,6 +45,11 @@ let recordedChunks = [];
 let recordingMimeType = '';
 let audioContext = null;
 let processedStream = null;
+// Source node and graph head are tracked so the mic can be hot-swapped
+// mid-recording: disconnect sourceNode, create a new one from the new stream,
+// connect it to graphHead. MediaRecorder keeps consuming the same destination.
+let sourceNode = null;
+let graphHead = null;
 
 function pickRecordingMimeType() {
   const candidates = [
@@ -84,7 +89,8 @@ function buildMicChain(ctx, micStream) {
   gain.gain.value = 4.0;
 
   source.connect(highpass).connect(compressor).connect(gain);
-  return gain;
+  // source/head are exposed so the caller can hot-swap the mic source mid-recording.
+  return { source, head: highpass, tail: gain };
 }
 
 function buildLimiter(ctx) {
@@ -104,23 +110,24 @@ function buildLimiter(ctx) {
 // any combined peaks before the Opus encoder.
 function buildProcessedStream(micStream, systemStream = null) {
   const ctx = new AudioContext({ sampleRate: 48000 });
-  const micOut = buildMicChain(ctx, micStream);
+  const mic = buildMicChain(ctx, micStream);
 
-  let preLimit = micOut;
+  let preLimit = mic.tail;
   if (systemStream) {
     const sysGain = ctx.createGain();
     sysGain.gain.value = 0.8;
     ctx.createMediaStreamSource(systemStream).connect(sysGain);
 
     const mixer = ctx.createGain();
-    micOut.connect(mixer);
+    mic.tail.connect(mixer);
     sysGain.connect(mixer);
     preLimit = mixer;
   }
 
   const destination = ctx.createMediaStreamDestination();
   preLimit.connect(buildLimiter(ctx)).connect(destination);
-  return { ctx, stream: destination.stream };
+  // source/head support hot-swapping the mic mid-recording (mic selector).
+  return { ctx, stream: destination.stream, source: mic.source, head: mic.head };
 }
 
 function teardownAudioGraph() {
@@ -129,6 +136,8 @@ function teardownAudioGraph() {
     audioContext = null;
   }
   processedStream = null;
+  sourceNode = null;
+  graphHead = null;
 }
 
 function cleanupAudioState() {
@@ -175,6 +184,33 @@ async function acquireSystemAudioStream() {
       } catch { /* fall through with denied=false */ }
     }
     return { stream: null, denied };
+  }
+}
+
+// Falls back to the default device when a preferred deviceId is gone (unplugged).
+async function acquireMediaStream(deviceId) {
+  const baseConstraints = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    sampleRate: 48000,
+    channelCount: 1,
+  };
+  const constraints = deviceId
+    ? { ...baseConstraints, deviceId: { exact: deviceId } }
+    : baseConstraints;
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: constraints });
+  } catch (error) {
+    if (deviceId && error && (error.name === 'OverconstrainedError' || error.name === 'NotFoundError')) {
+      console.warn('Preferred audio device unavailable, falling back to default:', error);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: baseConstraints });
+      if (typeof showToast === 'function') {
+        showToast('Preferred mic unavailable — using system default');
+      }
+      return stream;
+    }
+    throw error;
   }
 }
 
@@ -419,6 +455,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     notionDatabaseIdInput = document.getElementById('notionDatabaseId');
     globalShortcutInput = document.getElementById('globalShortcut');
     knownWordsInput = document.getElementById('knownWords');
+    audioDeviceIdSelect = document.getElementById('audioDeviceId');
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === 'function') {
+      navigator.mediaDevices.addEventListener('devicechange', () => {
+        if (audioDeviceIdSelect) populateAudioDevices(audioDeviceIdSelect.value);
+      });
+    }
     closeTranscriptionBtn = document.querySelector('#transcriptionModal .close');
     uploadToNotionBtn = document.getElementById('uploadToNotion');
     progressContainer = document.getElementById('transcriptionProgress');
@@ -560,10 +602,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (cfg.recordSystemAudio !== undefined && recordSystemAudioToggle) {
       recordSystemAudioToggle.checked = !!cfg.recordSystemAudio;
     }
+    if (audioDeviceIdSelect && typeof cfg.audioDeviceId === 'string') {
+      populateAudioDevices(cfg.audioDeviceId);
+    }
   }
 
   const config = await window.electronAPI.getConfig();
   applyHomeTogglesFromConfig(config);
+  if (audioDeviceIdSelect) populateAudioDevices(config.audioDeviceId || '');
 
   autoModeToggle.addEventListener('change', async () => {
     await window.electronAPI.saveConfig({ autoMode: autoModeToggle.checked });
@@ -609,6 +655,17 @@ window.addEventListener('DOMContentLoaded', async () => {
         showNotification('System audio capture unavailable on this system.', 'error');
       }
       refreshSystemAudioPermissionStatus();
+    });
+  }
+
+  if (audioDeviceIdSelect) {
+    audioDeviceIdSelect.addEventListener('change', async () => {
+      const newId = audioDeviceIdSelect.value;
+      await window.electronAPI.saveConfig({ audioDeviceId: newId });
+      if (isRecording) {
+        const ok = await switchMicDevice(newId);
+        if (ok) showToast('Switched mic');
+      }
     });
   }
 
@@ -669,16 +726,15 @@ async function startRecording() {
   const title = meetingTitle.value.trim() || 'Untitled_Meeting';
 
   // Acquire the mic before telling main, so permission prompts don't leave main state dangling.
+  let preferredDeviceId = '';
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        sampleRate: 48000,
-        channelCount: 1,
-      },
-    });
+    const cfg = await window.electronAPI.getConfig();
+    preferredDeviceId = typeof cfg.audioDeviceId === 'string' ? cfg.audioDeviceId : '';
+  } catch (error) {
+    console.warn('Could not read audioDeviceId from config:', error);
+  }
+  try {
+    mediaStream = await acquireMediaStream(preferredDeviceId);
   } catch (error) {
     const name = error && error.name ? error.name : '';
     if (name === 'NotAllowedError' || name === 'SecurityError') {
@@ -714,6 +770,9 @@ async function startRecording() {
     const graph = buildProcessedStream(mediaStream, systemAudioStream);
     audioContext = graph.ctx;
     processedStream = graph.stream;
+    sourceNode = graph.source;
+    graphHead = graph.head;
+    attachTrackEndedHandlers(mediaStream);
     mediaRecorder = recordingMimeType
       ? new MediaRecorder(processedStream, { mimeType: recordingMimeType, audioBitsPerSecond: 64000 })
       : new MediaRecorder(processedStream, { audioBitsPerSecond: 64000 });
@@ -771,6 +830,47 @@ function resetRecordingUI() {
   statusIndicator.classList.remove('recording');
   statusText.textContent = 'Ready to record';
   recordingTime.classList.remove('active');
+}
+
+// If the capture device disappears (USB unplugged, Bluetooth drop, OS default
+// swapped out from under us), MediaRecorder stops receiving samples. Auto-stop
+// so the partial recording is saved instead of silently going mute.
+function attachTrackEndedHandlers(stream) {
+  if (!stream) return;
+  stream.getAudioTracks().forEach((track) => {
+    track.addEventListener('ended', () => {
+      if (!isRecording) return;
+      console.warn('Audio track ended mid-recording');
+      showToast('Mic disconnected — stopping recording', 'error');
+      stopRecording();
+    });
+  });
+}
+
+// Hot-swap the capture device mid-recording by replacing the source node in
+// the Web Audio graph. The processed-stream destination that MediaRecorder is
+// consuming stays the same, so the output file is continuous. There may be
+// a small pop at the transition; Opus absorbs it.
+async function switchMicDevice(newDeviceId) {
+  if (!isRecording || !audioContext || !graphHead) return false;
+  let newStream;
+  try {
+    newStream = await acquireMediaStream(newDeviceId);
+  } catch (error) {
+    console.warn('Mic switch failed, keeping current:', error);
+    showToast('Failed to switch mic — keeping current', 'error');
+    return false;
+  }
+  try {
+    if (sourceNode) sourceNode.disconnect();
+  } catch (_) {}
+  const oldStream = mediaStream;
+  mediaStream = newStream;
+  sourceNode = audioContext.createMediaStreamSource(newStream);
+  sourceNode.connect(graphHead);
+  attachTrackEndedHandlers(newStream);
+  if (oldStream) oldStream.getTracks().forEach((t) => t.stop());
+  return true;
 }
 
 async function processAutoMode(audioPath, recordingTitle, durationMs) {
@@ -957,6 +1057,7 @@ if (window.electronAPI.onRecordingAutoStopped) {
 // Modal elements - will be initialized after DOM loads
 let configModal, transcriptionModal, saveConfigBtn, cancelConfigBtn;
 let geminiApiKeyInput, geminiModelInput, geminiFlashModelInput, notionApiKeyInput, notionDatabaseIdInput, globalShortcutInput, knownWordsInput;
+let audioDeviceIdSelect;
 let closeTranscriptionBtn, uploadToNotionBtn;
 
 
@@ -1445,6 +1546,36 @@ async function checkAndPromptForConfig() {
   }
 }
 
+// Without prior mic permission, enumerateDevices returns entries with empty
+// labels; fall back to a deviceId-prefix so users can at least distinguish them.
+// Chromium's virtual "default"/"communications" aliases are dropped — our
+// explicit "System default" option already covers that.
+async function populateAudioDevices(selectedId) {
+  if (!audioDeviceIdSelect) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter(
+      (d) => d.kind === 'audioinput' && d.deviceId !== 'default' && d.deviceId !== 'communications'
+    );
+    audioDeviceIdSelect.innerHTML = '<option value="">System default (at start)</option>';
+    for (const device of inputs) {
+      const option = document.createElement('option');
+      option.value = device.deviceId;
+      if (device.label) {
+        option.textContent = device.label;
+      } else {
+        const suffix = device.deviceId ? device.deviceId.slice(0, 8) : '';
+        option.textContent = suffix ? `Microphone (${suffix}…)` : 'Microphone';
+      }
+      audioDeviceIdSelect.appendChild(option);
+    }
+    audioDeviceIdSelect.value =
+      selectedId && inputs.some((d) => d.deviceId === selectedId) ? selectedId : '';
+  } catch (error) {
+    console.warn('Failed to enumerate audio devices:', error);
+  }
+}
+
 // Function to show the config modal
 async function showConfigModal() {
   // Load current config
@@ -1577,6 +1708,9 @@ async function createRecordingItem(recording) {
       <button class="action-button reveal-btn" data-path="${recording.path}" title="Reveal in Finder (right-click in Finder to share)">
         Show
       </button>
+      <button class="action-button export-m4a-btn" data-path="${recording.path}" title="Export as M4A for sharing">
+        M4A
+      </button>
     </div>
   `;
 
@@ -1607,7 +1741,49 @@ async function createRecordingItem(recording) {
     });
   }
 
+  const exportBtn = item.querySelector('.export-m4a-btn');
+  if (exportBtn) {
+    exportBtn.addEventListener('click', () => {
+      handleExportM4A(recording.path, exportBtn);
+    });
+  }
+
   return item;
+}
+
+// On ffmpeg-missing, point the user at transcription (which downloads ffmpeg)
+// rather than re-running the download UI for a one-off export.
+async function handleExportM4A(srcPath, button) {
+  if (!window.electronAPI.exportRecordingM4A) return;
+  const originalLabel = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Exporting…';
+  }
+  try {
+    const result = await window.electronAPI.exportRecordingM4A(srcPath);
+    if (result && result.canceled) {
+      return;
+    }
+    if (result && result.success) {
+      showToast('Exported M4A');
+      return;
+    }
+    if (result && result.code === 'ffmpeg-missing') {
+      showToast('FFmpeg is required. Transcribe a recording to install it first.', 'error');
+      return;
+    }
+    const message = result && result.error ? result.error : 'Unknown error';
+    showToast(`Failed to export M4A: ${message}`, 'error');
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    showToast(`Failed to export M4A: ${message}`, 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
 }
 
 // Function to format file size
