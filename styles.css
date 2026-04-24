@@ -1130,6 +1130,14 @@ h1 {
   cursor: grabbing;
 }
 
+.permission-tip {
+  margin-top: 4px;
+  margin-left: 30px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #7f8c8d;
+}
+
 /* Progress bar styles */
 .progress-container {
   margin: 20px 0;

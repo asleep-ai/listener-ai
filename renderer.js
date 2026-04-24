@@ -617,13 +617,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     build(systemAudioPermissionStatus);
   }
 
+  const systemAudioTip = document.getElementById('systemAudioTip');
+
   // The system-audio permission (macOS "System Audio Recording Only") isn't
   // queryable via Electron's systemPreferences API. We reflect the UI state from
   // the toggle: if it's on, config says the probe succeeded before, so assume
   // granted. On toggle interaction we re-probe and update from the result.
   function refreshSystemAudioPermissionStatus() {
     if (!systemAudioPermissionStatus) return;
-    if (!recordSystemAudioToggle?.checked) {
+    const on = !!recordSystemAudioToggle?.checked;
+    if (systemAudioTip) systemAudioTip.hidden = !on;
+    if (!on) {
       setPermissionStatus('not-determined', (el) => {
         el.textContent = 'Permission will be requested when you enable this';
       });
@@ -673,22 +677,19 @@ window.addEventListener('DOMContentLoaded', async () => {
       const probe = await probeSystemAudio();
       if (probe.ok) {
         await window.electronAPI.saveConfig({ recordSystemAudio: true });
-        setPermissionStatus('granted', (el) => {
-          el.textContent = '✓ System Audio permission granted';
-        });
-        return;
-      }
-      recordSystemAudioToggle.checked = false;
-      if (probe.denied) {
-        const open = confirm(
-          'System Audio Recording permission is required.\n\n' +
-          'Open System Settings to grant it?'
-        );
-        if (open) {
-          await window.electronAPI.openScreenRecordingSettings();
-        }
       } else {
-        showNotification('System audio capture unavailable on this system.', 'error');
+        recordSystemAudioToggle.checked = false;
+        if (probe.denied) {
+          const open = confirm(
+            'System Audio Recording permission is required.\n\n' +
+            'Open System Settings to grant it?'
+          );
+          if (open) {
+            await window.electronAPI.openScreenRecordingSettings();
+          }
+        } else {
+          showNotification('System audio capture unavailable on this system.', 'error');
+        }
       }
       refreshSystemAudioPermissionStatus();
     });
