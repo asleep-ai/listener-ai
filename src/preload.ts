@@ -2,10 +2,11 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
-  startRecording: (meetingTitle: string) => ipcRenderer.invoke('start-recording', meetingTitle),
+  startRecording: (payload: { title: string; mimeType: string }) =>
+    ipcRenderer.invoke('start-recording', payload),
+  sendRecordingChunk: (data: ArrayBuffer) => ipcRenderer.send('recording-chunk', data),
   stopRecording: () => ipcRenderer.invoke('stop-recording'),
-  saveRecording: (payload: { title: string; mimeType: string; durationMs: number; data: Uint8Array }) =>
-    ipcRenderer.invoke('save-recording', payload),
+  abortRecording: () => ipcRenderer.invoke('abort-recording'),
   onRecordingStatus: (callback: (status: string) => void) => {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
   },

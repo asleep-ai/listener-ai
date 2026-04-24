@@ -1,6 +1,6 @@
 {
   "name": "listener-ai",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "A lightweight desktop application for recording and transcribing meetings with AI-powered notes.",
   "main": "dist/main.js",
   "bin": {
@@ -19,7 +19,7 @@
   "scripts": {
     "start": "pnpm run build && electron .",
     "build": "tsc",
-    "test": "tsc && node --test dist/meetingDetectorService.test.js dist/searchService.test.js dist/agentService.test.js",
+    "test": "tsc && node --test dist/meetingDetectorService.test.js dist/searchService.test.js dist/agentService.test.js dist/simpleAudioRecorder.test.js",
     "dist": "pnpm run build && electron-builder",
     "dist:mac": "pnpm run build && electron-builder --mac",
     "dist:mac-x64": "pnpm run build && electron-builder --mac --x64",

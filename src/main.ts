@@ -19,7 +19,7 @@ import { fetchReleaseNotes, fetchAllReleases } from './services/releaseNotesServ
 import { saveTranscription, readTranscription } from './outputService';
 import { searchTranscriptions, ALL_FIELDS, type SearchField } from './searchService';
 import { AgentService, type AgentChatMessage, type AgentRunResult, type AgentScope, type ConfigProposal } from './agentService';
-import { isSupportedAudioExtension, extensionForMimeType } from './audioFormats';
+import { isSupportedAudioExtension } from './audioFormats';
 
 // Enable macOS system-audio loopback capture so getDisplayMedia({audio: 'loopback'})
 // can pull Zoom/Meet participant audio alongside the mic.
@@ -80,6 +80,23 @@ function rejectAllPendingConfirms(): void {
 }
 let recordingMaxTimer: NodeJS.Timeout | null = null;
 let recordingReminderTimer: NodeJS.Timeout | null = null;
+let recordingAutoStopAbortTimer: NodeJS.Timeout | null = null;
+// The grace timer, the renderer's stop invoke, and the crash/quit finalizers can
+// all call audioRecorder.stopRecording() for the same session (recorder caches the
+// result and replays it). This flag ensures the "stopped" notification fires once.
+let recordingNotificationFired = false;
+function fireStoppedNotificationOnce() {
+  if (recordingNotificationFired) return;
+  recordingNotificationFired = true;
+  notificationService.notifyRecordingStopped();
+}
+// Tracks async finalize work (crash-path stop + remux) so before-quit can await
+// it. Without this, main can exit while the async chain is still running and the
+// partial file ends up without a Duration header.
+let pendingFinalize: Promise<void> = Promise.resolve();
+function trackFinalize(work: Promise<void>): void {
+  pendingFinalize = pendingFinalize.then(() => work).catch(() => {});
+}
 
 function createGeminiService(): GeminiService | null {
   const apiKey = configService.getGeminiApiKey();
@@ -255,8 +272,26 @@ function createWindow() {
   mainWindow.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
     if (isMainFrame && !isInPlace) rejectAllPendingConfirms();
   });
-  mainWindow.webContents.on('render-process-gone', () => {
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
     rejectAllPendingConfirms();
+    // Close the recording file handle so the partial file is flushed and left on disk
+    // instead of corrupted or locked open. User keeps whatever audio was streamed so far.
+    if (audioRecorder.isRecording()) {
+      console.warn('Renderer process gone during recording; finalizing partial file:', details.reason);
+      finalizeRecordingSession();
+      trackFinalize((async () => {
+        try {
+          const r = await audioRecorder.stopRecording();
+          if (r.success && r.filePath) {
+            fireStoppedNotificationOnce();
+            console.log(`Partial recording saved: ${r.filePath}`);
+            await remuxRecordingHeader(r.filePath);
+          }
+        } catch (err) {
+          console.error('Failed to finalize partial recording:', err);
+        }
+      })());
+    }
   });
 }
 
@@ -490,11 +525,40 @@ app.on('window-all-closed', () => {
 });
 
 // Handle app quit
-app.on('before-quit', () => {
+app.on('before-quit', async (event) => {
   meetingDetector.stop();
   displayDetector.stop();
   autoUpdaterService.stopPeriodicCheck();
   global.isQuitting = true;
+
+  // Flush and close any open recording handle so the partial file survives the quit.
+  if (audioRecorder.isRecording()) {
+    event.preventDefault();
+    console.warn('Quit requested during recording; finalizing partial file before exit');
+    finalizeRecordingSession();
+    try {
+      const r = await audioRecorder.stopRecording();
+      if (r.success && r.filePath) {
+        console.log(`Partial recording saved on quit: ${r.filePath}`);
+        await remuxRecordingHeader(r.filePath);
+      }
+    } catch (err) {
+      console.error('Failed to finalize recording on quit:', err);
+    }
+    app.quit();
+    return;
+  }
+
+  // Wait for any async finalize started by render-process-gone to complete so
+  // the remux isn't killed mid-spawn when the app exits.
+  try {
+    await Promise.race([
+      pendingFinalize,
+      new Promise<void>((resolve) => setTimeout(resolve, 5000)),
+    ]);
+  } catch {
+    // swallow — we're quitting
+  }
 });
 
 // Unregister all shortcuts when app quits
@@ -542,6 +606,17 @@ function clearRecordingTimers() {
     clearInterval(recordingReminderTimer);
     recordingReminderTimer = null;
   }
+  if (recordingAutoStopAbortTimer) {
+    clearTimeout(recordingAutoStopAbortTimer);
+    recordingAutoStopAbortTimer = null;
+  }
+}
+
+// Shared session teardown for stop, abort, crash, and quit paths.
+function finalizeRecordingSession() {
+  clearRecordingTimers();
+  menuBarManager.updateRecordingState(false);
+  meetingAutoStartedRecording = false;
 }
 
 // IPC handlers for recording functionality
@@ -648,31 +723,39 @@ ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
   }
 });
 
-// Audio capture runs in the renderer via MediaRecorder; main only tracks state,
-// runs max/reminder timers, updates the menu bar, and writes the final blob to disk.
-ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
+// Audio capture runs in the renderer via MediaRecorder; chunks stream over IPC as
+// they're encoded so the renderer never accumulates hours of audio in memory. Main
+// opens a FileHandle on start, appends each chunk on arrival, and closes on stop.
+// A renderer crash mid-session leaves a truncated-but-valid WebM/Opus file on disk.
+ipcMain.handle('start-recording', async (_, payload: { title: string; mimeType: string }) => {
   try {
-    const result = audioRecorder.startRecording(meetingTitle);
+    const meetingTitle = payload?.title ?? 'Untitled_Meeting';
+    const mimeType = payload?.mimeType ?? 'audio/webm';
+    const result = await audioRecorder.startRecording(meetingTitle, mimeType);
     if (!result.success) return result;
 
+    recordingNotificationFired = false;
     menuBarManager.updateRecordingState(true, meetingTitle);
 
     const maxMinutes = configService.getMaxRecordingMinutes();
     if (maxMinutes > 0) {
       recordingMaxTimer = setTimeout(() => {
-        clearRecordingTimers();
         if (!audioRecorder.isRecording()) return;
         notificationService.notifyRecordingAutoStopped(maxMinutes);
         if (mainWindow && !mainWindow.isDestroyed()) {
-          // Renderer owns MediaRecorder — it will stop, save, and re-enter stop-recording via IPC.
           mainWindow.webContents.send('recording-auto-stopped', { reason: 'maxDuration', maxMinutes });
         }
-        // Always reset main-side state so an unresponsive or hung renderer can't leave the
-        // isRecording() flag stuck and block future recordings. stopRecording() is idempotent,
-        // so the renderer's own stop-recording IPC (if it runs) is a safe no-op here.
-        audioRecorder.stopRecording();
-        menuBarManager.updateRecordingState(false);
-        meetingAutoStartedRecording = false;
+        // Grace window: if the renderer is hung and never calls stop-recording,
+        // force-finalize so main state unblocks and the partial file is saved.
+        recordingAutoStopAbortTimer = setTimeout(() => {
+          recordingAutoStopAbortTimer = null;
+          if (!audioRecorder.isRecording()) return;
+          console.warn('Renderer did not stop after auto-stop signal; finalizing partial file');
+          finalizeRecordingSession();
+          audioRecorder.stopRecording().then((r) => {
+            if (r.success) fireStoppedNotificationOnce();
+          }).catch((err) => console.error('Force-stop failed:', err));
+        }, 10_000);
       }, maxMinutes * 60 * 1000);
     }
 
@@ -695,14 +778,32 @@ ipcMain.handle('start-recording', async (_, meetingTitle: string) => {
   }
 });
 
+// Fire-and-forget chunk append. IPC preserves order per channel, so sequential
+// appendChunk calls land on disk in the order MediaRecorder emitted them.
+ipcMain.on('recording-chunk', (_event, data: ArrayBuffer | Uint8Array) => {
+  if (!data) return;
+  try {
+    audioRecorder.appendChunk(Buffer.from(data as ArrayBuffer));
+  } catch (error) {
+    console.error('Invalid chunk payload:', error);
+  }
+});
+
 ipcMain.handle('stop-recording', async () => {
   try {
-    clearRecordingTimers();
-    const result = audioRecorder.stopRecording();
-
-    menuBarManager.updateRecordingState(false);
-    meetingAutoStartedRecording = false;
-
+    finalizeRecordingSession();
+    const result = await audioRecorder.stopRecording();
+    if (result.success) {
+      fireStoppedNotificationOnce();
+      if (result.filePath) {
+        // MediaRecorder writes no Duration element to the WebM header, so players
+        // like Chrome/QuickTime show "0:00" until they scan the whole file. An
+        // ffmpeg `-c copy` remux adds Duration + Cues in ~1s without re-encoding.
+        // Silently skip if ffmpeg isn't available — file still plays, transcription
+        // pipeline is unaffected.
+        await remuxRecordingHeader(result.filePath);
+      }
+    }
     return result;
   } catch (error) {
     console.error('Error stopping recording:', error);
@@ -710,20 +811,33 @@ ipcMain.handle('stop-recording', async () => {
   }
 });
 
-// Receives the encoded audio blob from the renderer after MediaRecorder finalizes.
-// The "stopped" notification only fires once the file is actually on disk — otherwise
-// a failed write would still show a success toast.
-ipcMain.handle('save-recording', async (_, payload: { title: string; mimeType: string; durationMs: number; data: ArrayBuffer | Uint8Array }) => {
+async function remuxRecordingHeader(filePath: string): Promise<void> {
   try {
-    const buf = Buffer.from(payload.data as ArrayBuffer);
-    const extension = extensionForMimeType(payload.mimeType);
-    const result = await audioRecorder.saveRecording(payload.title, buf, extension, payload.durationMs);
-    if (result.success) {
-      notificationService.notifyRecordingStopped();
-    }
-    return result;
+    const ffmpegPath = await ffmpegManager.ensureFFmpeg();
+    if (!ffmpegPath) return;
+    const dir = path.dirname(filePath);
+    const tmpPath = path.join(dir, `.remux-${path.basename(filePath)}`);
+    const { spawn } = await import('child_process');
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(ffmpegPath, ['-y', '-i', filePath, '-c', 'copy', tmpPath], { stdio: 'ignore' });
+      proc.on('error', reject);
+      proc.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`))));
+    });
+    await fs.promises.rename(tmpPath, filePath);
   } catch (error) {
-    console.error('Error saving recording:', error);
+    console.warn('Header remux skipped:', error instanceof Error ? error.message : error);
+  }
+}
+
+// Explicit cancel path: discard the in-progress file (used when renderer fails to
+// construct MediaRecorder after main already opened the stream).
+ipcMain.handle('abort-recording', async () => {
+  try {
+    finalizeRecordingSession();
+    await audioRecorder.abortRecording();
+    return { success: true };
+  } catch (error) {
+    console.error('Error aborting recording:', error);
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
