@@ -36,11 +36,12 @@ let recordingStartTime = null;
 let timerInterval = null;
 let isAutoModeProcessing = false; // Track if auto mode is processing
 
-// MediaRecorder state (renderer owns audio capture; main only persists the final blob).
-// Constraints disable Chromium's AUVoiceIO path so macOS Voice Isolation can't touch the signal.
+// MediaRecorder state. Chunks are streamed to main via IPC as they arrive so the
+// renderer never accumulates hours of audio; main appends each chunk to a file
+// handle on disk. Constraints disable Chromium's AUVoiceIO path so macOS Voice
+// Isolation can't touch the signal.
 let mediaStream = null;
 let mediaRecorder = null;
-let recordedChunks = [];
 let recordingMimeType = '';
 let audioContext = null;
 let processedStream = null;
@@ -49,6 +50,11 @@ let processedStream = null;
 // connect it to graphHead. MediaRecorder keeps consuming the same destination.
 let sourceNode = null;
 let graphHead = null;
+// Serializes chunk forwarding. ondataavailable awaits Blob.arrayBuffer() which is
+// async, so without this chain chunk N+1 could send before chunk N. Stop waits on
+// the chain's tail before invoking stop-recording, guaranteeing every chunk lands
+// on main's IPC queue (and thus the FileHandle write queue) before finalize.
+let chunkSendChain = Promise.resolve();
 
 function pickRecordingMimeType() {
   const candidates = [
@@ -119,7 +125,6 @@ function cleanupAudioState() {
   }
   teardownAudioGraph();
   mediaRecorder = null;
-  recordedChunks = [];
 }
 
 // Falls back to the default device when a preferred deviceId is gone (unplugged).
@@ -580,8 +585,12 @@ async function startRecording() {
 
   recordingMimeType = pickRecordingMimeType();
 
+  // Open the output stream in main BEFORE starting MediaRecorder so the first chunk
+  // has a file handle waiting for it. Build the Web Audio graph up front (without
+  // calling start) — if construction fails we haven't touched main state yet.
+  let graph;
   try {
-    const graph = buildProcessedStream(mediaStream);
+    graph = buildProcessedStream(mediaStream);
     audioContext = graph.ctx;
     processedStream = graph.stream;
     sourceNode = graph.source;
@@ -590,19 +599,6 @@ async function startRecording() {
     mediaRecorder = recordingMimeType
       ? new MediaRecorder(processedStream, { mimeType: recordingMimeType, audioBitsPerSecond: 64000 })
       : new MediaRecorder(processedStream, { audioBitsPerSecond: 64000 });
-    recordedChunks = [];
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data && event.data.size > 0) recordedChunks.push(event.data);
-    };
-    mediaRecorder.onerror = (event) => {
-      const err = event && event.error ? event.error : event;
-      console.error('MediaRecorder error:', err);
-      cleanupAudioState();
-      resetRecordingUI();
-      window.electronAPI.stopRecording().catch(() => {});
-      alert('Recording failed: ' + (err && err.message ? err.message : 'Unknown error'));
-    };
-    mediaRecorder.start(1000);
   } catch (error) {
     cleanupAudioState();
     alert('Failed to initialize recorder: ' + (error && error.message ? error.message : String(error)));
@@ -610,17 +606,49 @@ async function startRecording() {
   }
 
   try {
-    const result = await window.electronAPI.startRecording(title);
+    const result = await window.electronAPI.startRecording({
+      title,
+      mimeType: mediaRecorder.mimeType || recordingMimeType || 'audio/webm',
+    });
     if (!result.success) {
-      if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
       cleanupAudioState();
       alert('Failed to start recording: ' + (result.error || 'Unknown error'));
       return;
     }
   } catch (error) {
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     cleanupAudioState();
     alert('Failed to start recording: ' + error.message);
+    return;
+  }
+
+  chunkSendChain = Promise.resolve();
+  mediaRecorder.ondataavailable = (event) => {
+    if (!event.data || event.data.size === 0) return;
+    const blob = event.data;
+    chunkSendChain = chunkSendChain.then(async () => {
+      try {
+        const buf = await blob.arrayBuffer();
+        window.electronAPI.sendRecordingChunk(buf);
+      } catch (err) {
+        console.error('Failed to forward recording chunk:', err);
+      }
+    });
+  };
+  mediaRecorder.onerror = (event) => {
+    const err = event && event.error ? event.error : event;
+    console.error('MediaRecorder error:', err);
+    cleanupAudioState();
+    resetRecordingUI();
+    window.electronAPI.stopRecording().catch(() => {});
+    alert('Recording failed: ' + (err && err.message ? err.message : 'Unknown error'));
+  };
+
+  try {
+    mediaRecorder.start(1000);
+  } catch (error) {
+    await window.electronAPI.abortRecording().catch(() => {});
+    cleanupAudioState();
+    alert('Failed to start recorder: ' + (error && error.message ? error.message : String(error)));
     return;
   }
 
@@ -785,48 +813,41 @@ async function stopRecording() {
   // session so the next recording isn't blocked by stuck state.
   if (!mediaRecorder || mediaRecorder.state === 'inactive') {
     cleanupAudioState();
-    await window.electronAPI.stopRecording().catch(() => {});
+    try {
+      const result = await window.electronAPI.stopRecording();
+      if (result && result.success) {
+        await handleRecordingStopped(result.filePath, result.durationMs);
+        return;
+      }
+    } catch {
+      // fall through to UI reset
+    }
     resetRecordingUI();
     return;
   }
 
   try {
+    // MediaRecorder.stop() flushes the final chunk via ondataavailable before
+    // firing onstop. We then await chunkSendChain so every in-flight arrayBuffer()
+    // conversion lands on main's IPC queue before stop-recording invoke — Electron
+    // multiplexes all IPC over one Mojo pipe, preserving delivery order.
     const stopped = new Promise((resolve) => {
       mediaRecorder.onstop = () => resolve();
     });
     mediaRecorder.stop();
     await stopped;
-
-    const chunks = recordedChunks;
-    const mimeType = mediaRecorder.mimeType || recordingMimeType || 'audio/webm';
+    await chunkSendChain;
     cleanupAudioState();
 
-    const blob = new Blob(chunks, { type: mimeType });
-    const durationMs = recordingStartTime ? Date.now() - recordingStartTime : 0;
+    const result = await window.electronAPI.stopRecording();
 
-    const stopSignal = await window.electronAPI.stopRecording();
-    if (!stopSignal.success) {
-      console.warn('stop-recording signal returned failure:', stopSignal.error);
-    }
-
-    if (blob.size === 0) {
+    if (result.success) {
+      await handleRecordingStopped(result.filePath, result.durationMs);
+    } else if (result.reason === 'empty') {
       alert('No audio captured.');
       resetRecordingUI();
-      return;
-    }
-
-    const title = meetingTitle.value.trim() || 'Untitled_Meeting';
-    const saveResult = await window.electronAPI.saveRecording({
-      title,
-      mimeType,
-      durationMs,
-      data: new Uint8Array(await blob.arrayBuffer()),
-    });
-
-    if (saveResult.success) {
-      await handleRecordingStopped(saveResult.filePath, saveResult.durationMs ?? durationMs);
     } else {
-      alert('Failed to save recording: ' + (saveResult.error || 'Unknown error'));
+      alert('Failed to save recording: ' + (result.error || 'Unknown error'));
       resetRecordingUI();
     }
   } catch (error) {
