@@ -20,6 +20,7 @@ import { saveTranscription, readTranscription } from './outputService';
 import { searchTranscriptions, ALL_FIELDS, type SearchField } from './searchService';
 import { AgentService, type AgentChatMessage, type AgentRunResult, type AgentScope, type ConfigProposal } from './agentService';
 import { isSupportedAudioExtension } from './audioFormats';
+import { SystemAudioService, SYSTEM_AUDIO_FORMAT } from './services/systemAudioService';
 
 // Enable macOS system-audio loopback capture so getDisplayMedia({audio: 'loopback'})
 // can pull Zoom/Meet participant audio alongside the mic.
@@ -42,6 +43,7 @@ global.isQuitting = false;
 
 let mainWindow: BrowserWindow | null = null;
 const audioRecorder = new SimpleAudioRecorder();
+const systemAudioService = new SystemAudioService();
 const configService = new ConfigService();
 const ffmpegManager = new FFmpegManager();
 const menuBarManager = new MenuBarManager();
@@ -391,19 +393,11 @@ app.whenReady().then(() => {
   const menu = Menu.buildFromTemplate(template as any);
   Menu.setApplicationMenu(menu);
 
-  // getDisplayMedia() in the renderer requires a handler since Electron 30.
-  // audio: 'loopback' is Windows-only in Electron 37 -- on macOS our custom-handler
-  // path returns a stream with no audio tracks. Route to the native ScreenCaptureKit
-  // picker instead: it supports "Record audio" natively on macOS 15+ and the permission
-  // prompt on earlier versions. The handler callback is ignored when useSystemPicker
-  // is true, so we pass a no-op.
-  if (process.platform === 'darwin') {
-    session.defaultSession.setDisplayMediaRequestHandler(
-      () => { /* ignored with useSystemPicker */ },
-      { useSystemPicker: true }
-    );
-  } else {
-    // Windows/Linux: audio: 'loopback' works via the custom-handler path.
+  // macOS system-audio capture goes through SystemAudioService (audiotee /
+  // Core Audio Tap) via dedicated IPC -- see ipcMain.handle('system-audio-start')
+  // below. We only need setDisplayMediaRequestHandler for non-macOS platforms,
+  // where audio: 'loopback' is genuinely supported (Windows, partial on Linux).
+  if (process.platform !== 'darwin') {
     session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
       const reject = () => { try { callback({}); } catch { /* intentional */ } };
       try {
@@ -1269,47 +1263,31 @@ ipcMain.handle('open-screen-recording-settings', async () => {
   }
 });
 
-// macOS caches Screen Recording permission at app launch; even after the user grants
-// it mid-session, the running process can't capture system audio until restart.
-// Snapshot the status at startup so we can tell the renderer "granted but needs restart"
-// vs "granted and ready" -- the difference is critical for the permission-status label.
-const initialScreenRecordingStatus = process.platform === 'darwin'
-  ? systemPreferences.getMediaAccessStatus('screen')
-  : 'not-applicable';
-
-ipcMain.handle('get-screen-recording-permission', async () => {
-  if (process.platform !== 'darwin') {
-    return { current: 'not-applicable', initial: 'not-applicable', needsRestart: false };
-  }
-  const current = systemPreferences.getMediaAccessStatus('screen');
-  const needsRestart = current === 'granted' && initialScreenRecordingStatus !== 'granted';
-  return { current, initial: initialScreenRecordingStatus, needsRestart };
+// Native macOS system-audio capture. PCM chunks are streamed to the renderer as
+// raw ArrayBuffers via webContents.send; the renderer pushes them into an
+// AudioWorklet that feeds the Web Audio mix.
+ipcMain.handle('system-audio-start', async (event) => {
+  const result = await systemAudioService.start({
+    onChunk: (chunk) => {
+      if (!event.sender.isDestroyed()) {
+        // structuredClone of Buffer through IPC is expensive; send the raw
+        // Uint8Array view which becomes an ArrayBuffer on the renderer side.
+        event.sender.send('system-audio-chunk', new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+      }
+    },
+    onError: (err) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('system-audio-error', { message: err.message });
+      }
+    },
+  });
+  if (result.ok) return { success: true, format: SYSTEM_AUDIO_FORMAT };
+  return { success: false, reason: result.reason, message: result.message };
 });
 
-// One-click relaunch so users don't have to manually Cmd+Q after granting Screen
-// Recording permission. app.exit(0) skips before-quit hooks we don't need here.
-ipcMain.handle('relaunch-app', async () => {
-  global.isQuitting = true;
-  app.relaunch();
-  app.exit(0);
-});
-
-// Native file drag from renderer: drags the .app bundle so the user can drop it
-// directly onto System Settings > Screen Recording (macOS accepts .app drops there).
-// The bundle path resolves to `<...>/Listener.AI.app` in production or
-// `<...>/Electron.app` in dev mode -- both are valid drag sources for TCC.
-ipcMain.on('start-app-drag', (event) => {
-  try {
-    const appBundlePath = path.resolve(process.execPath, '..', '..', '..');
-    const iconPath = path.join(__dirname, '../assets/icon.png');
-    const { nativeImage } = require('electron');
-    event.sender.startDrag({
-      file: appBundlePath,
-      icon: nativeImage.createFromPath(iconPath).resize({ width: 64, height: 64 }),
-    });
-  } catch (err) {
-    console.error('start-app-drag failed:', err);
-  }
+ipcMain.handle('system-audio-stop', async () => {
+  await systemAudioService.stop();
+  return { success: true };
 });
 
 // Agent chat: blocks until the agent produces a final answer. During the run the

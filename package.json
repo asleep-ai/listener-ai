@@ -55,6 +55,7 @@
   },
   "dependencies": {
     "@google/genai": "^1.13.0",
+    "audiotee": "^0.0.7",
     "fs-extra": "^11.2.0",
     "marked": "^15.0.0"
   },
@@ -103,7 +104,9 @@
       "!tsconfig.json",
       "!build/**/*"
     ],
-    "asarUnpack": [],
+    "asarUnpack": [
+      "node_modules/audiotee/bin/**"
+    ],
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "assets/icon.png",
@@ -112,7 +115,8 @@
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "extendInfo": {
         "NSMicrophoneUsageDescription": "Listener.AI needs access to your microphone to record meetings.",
-        "NSScreenCaptureUsageDescription": "Listener.AI mixes your Mac's audio (Zoom/Meet participants, browser tabs) into the recording. Screen content is not captured or stored.",
+        "NSAudioCaptureUsageDescription": "Listener.AI mixes your Mac's audio (Zoom/Meet participants, browser tabs) into the recording.",
+        "NSScreenCaptureUsageDescription": "Listener.AI mixes your Mac's audio into the recording. Screen content is not captured or stored. (Fallback path for macOS 13.)",
         "LSApplicationCategoryType": "public.app-category.productivity",
         "CFBundleExecutable": "Listener.AI"
       },

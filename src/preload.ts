@@ -51,10 +51,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // System settings
   openMicrophoneSettings: () => ipcRenderer.invoke('open-microphone-settings'),
   openScreenRecordingSettings: () => ipcRenderer.invoke('open-screen-recording-settings'),
-  getScreenRecordingPermission: (): Promise<{ current: string; initial: string; needsRestart: boolean }> =>
-    ipcRenderer.invoke('get-screen-recording-permission'),
-  relaunchApp: () => ipcRenderer.invoke('relaunch-app'),
-  startAppDrag: () => ipcRenderer.send('start-app-drag'),
+
+  // Native macOS system-audio capture (audiotee / Core Audio Tap).
+  startSystemAudio: () => ipcRenderer.invoke('system-audio-start'),
+  stopSystemAudio: () => ipcRenderer.invoke('system-audio-stop'),
+  onSystemAudioChunk: (callback: (chunk: Uint8Array) => void) => {
+    ipcRenderer.on('system-audio-chunk', (_event, chunk: Uint8Array) => callback(chunk));
+  },
+  offSystemAudioChunk: () => ipcRenderer.removeAllListeners('system-audio-chunk'),
+  onSystemAudioError: (callback: (err: { message: string }) => void) => {
+    ipcRenderer.on('system-audio-error', (_event, err: { message: string }) => callback(err));
+  },
 
   // Global shortcut
   validateShortcut: (shortcut: string) => ipcRenderer.invoke('validate-shortcut', shortcut),

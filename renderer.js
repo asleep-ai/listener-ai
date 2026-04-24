@@ -41,7 +41,6 @@ let isAutoModeProcessing = false; // Track if auto mode is processing
 // handle on disk. Constraints disable Chromium's AUVoiceIO path so macOS Voice
 // Isolation can't touch the signal.
 let mediaStream = null;
-let systemAudioStream = null;
 let mediaRecorder = null;
 let recordingMimeType = '';
 let audioContext = null;
@@ -114,15 +113,20 @@ function buildLimiter(ctx) {
 // Mic keeps the voice-lift chain; system audio (Zoom/Meet, browser tabs) is digital-clean
 // so it only gets a gentle -2dB attenuation before the shared brick-wall limiter catches
 // any combined peaks before the Opus encoder.
-function buildProcessedStream(micStream, systemStream = null) {
+// The caller can supply a factory that returns an AudioNode (in the given ctx)
+// for the system-audio source. This lets the macOS path feed an AudioWorklet
+// fed from audiotee PCM chunks, while the cross-platform path wraps a
+// MediaStream from getDisplayMedia.
+async function buildProcessedStream(micStream, addSystemAudio = null) {
   const ctx = new AudioContext({ sampleRate: 48000 });
   const mic = buildMicChain(ctx, micStream);
 
   let preLimit = mic.tail;
-  if (systemStream) {
+  const systemAudioNode = addSystemAudio ? await addSystemAudio(ctx) : null;
+  if (systemAudioNode) {
     const sysGain = ctx.createGain();
     sysGain.gain.value = 0.8;
-    ctx.createMediaStreamSource(systemStream).connect(sysGain);
+    systemAudioNode.connect(sysGain);
 
     const mixer = ctx.createGain();
     mic.tail.connect(mixer);
@@ -151,46 +155,111 @@ function cleanupAudioState() {
     mediaStream.getTracks().forEach((t) => t.stop());
     mediaStream = null;
   }
-  if (systemAudioStream) {
-    systemAudioStream.getTracks().forEach((t) => t.stop());
-    systemAudioStream = null;
+  if (systemAudioCleanup) {
+    const fn = systemAudioCleanup;
+    systemAudioCleanup = null;
+    Promise.resolve(fn()).catch((err) => console.warn('System audio cleanup:', err));
   }
   teardownAudioGraph();
   mediaRecorder = null;
 }
 
-// Request system-audio loopback via getDisplayMedia. Main-process handler returns
-// audio: 'loopback' so no picker appears. Video track is discarded immediately.
-// `denied` is set when macOS Screen Recording permission is missing, so the caller
-// can route the user to System Settings.
-async function acquireSystemAudioStream() {
+// Request a loopback-audio stream via getDisplayMedia. Shape must match what
+// the main-process handler returns (video source + audio: 'loopback') on
+// Windows/Linux. macOS uses the audiotee IPC path instead.
+async function acquireDisplayMediaStream() {
+  return navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+}
+
+// Probe whether system audio capture is currently authorized. On macOS we start
+// audiotee (Core Audio Tap) just long enough to confirm the "System Audio
+// Recording" permission was granted, then stop. On other platforms we fall back
+// to getDisplayMedia with audio: 'loopback'.
+// Returns { ok: true } on success, { ok: false, denied: boolean } on failure.
+async function probeSystemAudio() {
+  if (window.electronAPI.platform === 'darwin') {
+    const result = await window.electronAPI.startSystemAudio();
+    if (result.success) {
+      await window.electronAPI.stopSystemAudio();
+      return { ok: true };
+    }
+    const denied = result.reason === 'permission-denied';
+    console.warn('System audio probe failed:', result);
+    return { ok: false, denied };
+  }
   try {
-    const display = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: true,
+    const display = await acquireDisplayMediaStream();
+    display.getTracks().forEach((t) => t.stop());
+    return { ok: true };
+  } catch (error) {
+    console.warn('System audio probe failed (getDisplayMedia):', error);
+    const name = error && error.name ? error.name : '';
+    return { ok: false, denied: name === 'NotAllowedError' || name === 'SecurityError' };
+  }
+}
+
+// Build an AudioNode that feeds mic+system audio into the shared Web Audio graph.
+// macOS: AudioWorklet fed by PCM chunks over IPC from audiotee in main process.
+// Other: MediaStreamAudioSourceNode wrapping a fresh getDisplayMedia stream.
+// Returns an object with:
+//   node: AudioNode (connected into ctx) OR null on failure,
+//   cleanup: () => Promise<void> to call when the recording stops.
+async function createSystemAudioSource(ctx) {
+  if (window.electronAPI.platform === 'darwin') {
+    const result = await window.electronAPI.startSystemAudio();
+    if (!result.success) {
+      console.warn('System audio start failed:', result);
+      return { node: null, cleanup: async () => {} };
+    }
+    try {
+      await ctx.audioWorklet.addModule('./pcmStreamProcessor.js');
+    } catch (err) {
+      console.error('Failed to load PCM worklet:', err);
+      await window.electronAPI.stopSystemAudio();
+      return { node: null, cleanup: async () => {} };
+    }
+    const node = new AudioWorkletNode(ctx, 'pcm-stream', {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
     });
+    // Convert Int16 PCM (from audiotee) to Float32 and post to the worklet port.
+    // Transferring the buffer avoids a copy at the postMessage boundary.
+    window.electronAPI.onSystemAudioChunk((chunk) => {
+      const int16 = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+      node.port.postMessage({ type: 'pcm', samples: float32 }, [float32.buffer]);
+    });
+    return {
+      node,
+      cleanup: async () => {
+        window.electronAPI.offSystemAudioChunk();
+        try { node.port.postMessage({ type: 'flush' }); } catch { /* ignore */ }
+        await window.electronAPI.stopSystemAudio();
+      },
+    };
+  }
+  try {
+    const display = await acquireDisplayMediaStream();
     display.getVideoTracks().forEach((t) => t.stop());
     const audioTracks = display.getAudioTracks();
     if (audioTracks.length === 0) {
-      console.warn('System audio: no audio track returned');
-      return { stream: null, denied: false };
+      return { node: null, cleanup: async () => {} };
     }
-    return { stream: new MediaStream(audioTracks), denied: false };
-  } catch (error) {
-    console.warn('System audio: getDisplayMedia failed:', error);
-    // Chromium's error shape varies (NotAllowedError, AbortError, or even a sync TypeError),
-    // so use the TCC status from main as the definitive signal for whether this is a
-    // permission issue we should prompt the user to fix.
-    let denied = false;
-    if (window.electronAPI.platform === 'darwin') {
-      try {
-        const { current } = await window.electronAPI.getScreenRecordingPermission();
-        denied = current !== 'granted';
-      } catch { /* fall through with denied=false */ }
-    }
-    return { stream: null, denied };
+    const stream = new MediaStream(audioTracks);
+    const node = ctx.createMediaStreamSource(stream);
+    return {
+      node,
+      cleanup: async () => { stream.getTracks().forEach((t) => t.stop()); },
+    };
+  } catch (err) {
+    console.warn('System audio getDisplayMedia failed:', err);
+    return { node: null, cleanup: async () => {} };
   }
 }
+
+let systemAudioCleanup = null;
 
 // Falls back to the default device when a preferred deviceId is gone (unplugged).
 async function acquireMediaStream(deviceId) {
@@ -548,67 +617,22 @@ window.addEventListener('DOMContentLoaded', async () => {
     build(systemAudioPermissionStatus);
   }
 
-  async function refreshSystemAudioPermissionStatus() {
-    if (!systemAudioPermissionStatus || window.electronAPI.platform !== 'darwin') return;
-    try {
-      const { current, needsRestart } = await window.electronAPI.getScreenRecordingPermission();
-      if (current === 'granted' && !needsRestart) {
-        setPermissionStatus('granted', (el) => {
-          el.textContent = '✓ Screen Recording permission granted';
-        });
-        return;
-      }
-      if (current === 'granted' && needsRestart) {
-        setPermissionStatus('needs-restart', (el) => {
-          el.append('⚠ Permission granted — ');
-          const restart = document.createElement('a');
-          restart.textContent = 'Restart Listener.AI';
-          restart.addEventListener('click', () => window.electronAPI.relaunchApp());
-          el.append(restart);
-          el.append(' to activate capture');
-        });
-        return;
-      }
-      if (current === 'denied' || current === 'restricted') {
-        setPermissionStatus('denied', (el) => {
-          el.append('✗ Permission denied — ');
-          const link = document.createElement('a');
-          link.textContent = 'Open System Settings';
-          link.addEventListener('click', () => window.electronAPI.openScreenRecordingSettings());
-          el.append(link);
-          el.append(' or ');
-          const drag = document.createElement('a');
-          drag.textContent = 'drag Listener.AI';
-          drag.draggable = true;
-          drag.title = 'Drag onto System Settings > Screen Recording to grant permission';
-          drag.addEventListener('dragstart', (e) => {
-            e.preventDefault();
-            window.electronAPI.startAppDrag();
-          });
-          el.append(drag);
-          el.append(' into the Screen Recording list.');
-        });
-        return;
-      }
-      if (current === 'not-determined') {
-        setPermissionStatus('not-determined', (el) => {
-          el.textContent = 'Permission will be requested when you enable this';
-        });
-        return;
-      }
-      setPermissionStatus('unknown', (el) => {
-        el.textContent = `Permission status: ${current}`;
+  // The system-audio permission (macOS "System Audio Recording Only") isn't
+  // queryable via Electron's systemPreferences API. We reflect the UI state from
+  // the toggle: if it's on, config says the probe succeeded before, so assume
+  // granted. On toggle interaction we re-probe and update from the result.
+  function refreshSystemAudioPermissionStatus() {
+    if (!systemAudioPermissionStatus) return;
+    if (!recordSystemAudioToggle?.checked) {
+      setPermissionStatus('not-determined', (el) => {
+        el.textContent = 'Permission will be requested when you enable this';
       });
-    } catch (error) {
-      console.warn('Failed to query Screen Recording permission status:', error);
-      systemAudioPermissionStatus.hidden = true;
+      return;
     }
+    setPermissionStatus('granted', (el) => {
+      el.textContent = '✓ System Audio permission granted';
+    });
   }
-
-  refreshSystemAudioPermissionStatus();
-  // User may grant permission in System Settings and come back; refresh on window focus
-  // so the "needs restart" hint appears without requiring an extra click.
-  window.addEventListener('focus', refreshSystemAudioPermissionStatus);
 
   function applyHomeTogglesFromConfig(cfg) {
     if (!cfg) return;
@@ -625,6 +649,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   const config = await window.electronAPI.getConfig();
   applyHomeTogglesFromConfig(config);
+  refreshSystemAudioPermissionStatus();
   if (audioDeviceIdSelect) populateAudioDevices(config.audioDeviceId || '');
 
   autoModeToggle.addEventListener('change', async () => {
@@ -637,37 +662,32 @@ window.addEventListener('DOMContentLoaded', async () => {
     await window.electronAPI.saveConfig({ displayDetection: displayDetectionToggle.checked });
   });
   if (recordSystemAudioToggle) {
-    // Validate Screen Recording permission at toggle time rather than at record time.
-    // macOS caches the permission at app launch, so a mid-meeting failure would force
-    // the user to restart anyway -- better to surface the restart requirement now.
+    // Probe the system-audio permission at toggle time so the user sees the macOS
+    // prompt (and any denial UX) up front rather than mid-recording.
     recordSystemAudioToggle.addEventListener('change', async () => {
       if (!recordSystemAudioToggle.checked) {
         await window.electronAPI.saveConfig({ recordSystemAudio: false });
         refreshSystemAudioPermissionStatus();
         return;
       }
-      const sysResult = await acquireSystemAudioStream();
-      if (sysResult.stream) {
-        // Probe succeeded -- capture works in this session regardless of what
-        // getMediaAccessStatus (which can lag) reports. Show granted immediately.
-        sysResult.stream.getTracks().forEach((t) => t.stop());
+      const probe = await probeSystemAudio();
+      if (probe.ok) {
         await window.electronAPI.saveConfig({ recordSystemAudio: true });
         setPermissionStatus('granted', (el) => {
-          el.textContent = '✓ Screen Recording permission granted';
+          el.textContent = '✓ System Audio permission granted';
         });
         return;
-      } else if (sysResult.denied) {
-        recordSystemAudioToggle.checked = false;
+      }
+      recordSystemAudioToggle.checked = false;
+      if (probe.denied) {
         const open = confirm(
-          'Screen Recording permission is required to capture system audio.\n\n' +
-          'Open System Settings to grant it?\n\n' +
-          'After granting, fully quit Listener.AI (Cmd+Q) and reopen it -- macOS only reads the permission at app launch.'
+          'System Audio Recording permission is required.\n\n' +
+          'Open System Settings to grant it?'
         );
         if (open) {
           await window.electronAPI.openScreenRecordingSettings();
         }
       } else {
-        recordSystemAudioToggle.checked = false;
         showNotification('System audio capture unavailable on this system.', 'error');
       }
       refreshSystemAudioPermissionStatus();
@@ -769,25 +789,27 @@ async function startRecording() {
 
   recordingMimeType = pickRecordingMimeType();
 
-  // Permission was validated at toggle time; just re-acquire the stream here.
-  // If it fails now despite earlier success, quietly fall back to mic-only.
+  // Permission was validated at toggle time; start the system-audio source now so
+  // PCM chunks start flowing (audiotee on macOS, getDisplayMedia on Win/Linux).
   const recordSystemAudioToggle = document.getElementById('recordSystemAudioToggle');
-  const useSystemAudio = !!recordSystemAudioToggle?.checked && window.electronAPI.platform === 'darwin';
-  if (useSystemAudio) {
-    const sysResult = await acquireSystemAudioStream();
-    if (sysResult.stream) {
-      systemAudioStream = sysResult.stream;
-    } else {
-      showNotification('System audio capture failed -- recording mic only.', 'error');
-    }
-  }
+  const useSystemAudio = !!recordSystemAudioToggle?.checked;
 
   // Open the output stream in main BEFORE starting MediaRecorder so the first chunk
   // has a file handle waiting for it. Build the Web Audio graph up front (without
   // calling start) — if construction fails we haven't touched main state yet.
   let graph;
   try {
-    graph = buildProcessedStream(mediaStream, systemAudioStream);
+    const addSystemAudio = useSystemAudio
+      ? async (ctx) => {
+          const { node, cleanup } = await createSystemAudioSource(ctx);
+          systemAudioCleanup = cleanup;
+          if (!node) {
+            showNotification('System audio capture failed -- recording mic only.', 'error');
+          }
+          return node;
+        }
+      : null;
+    graph = await buildProcessedStream(mediaStream, addSystemAudio);
     audioContext = graph.ctx;
     processedStream = graph.stream;
     sourceNode = graph.source;
