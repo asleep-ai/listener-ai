@@ -11,7 +11,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
   },
   checkConfig: () => ipcRenderer.invoke('check-config'),
-  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; meetingDetection?: boolean; displayDetection?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string; audioDeviceId?: string }) =>
+  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; meetingDetection?: boolean; displayDetection?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string; recordSystemAudio?: boolean; audioDeviceId?: string }) =>
     ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   transcribeAudio: (filePath: string) => ipcRenderer.invoke('transcribe-audio', filePath),
@@ -50,6 +50,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // System settings
   openMicrophoneSettings: () => ipcRenderer.invoke('open-microphone-settings'),
+  openScreenRecordingSettings: () => ipcRenderer.invoke('open-screen-recording-settings'),
+
+  // Native macOS system-audio capture (audiotee / Core Audio Tap).
+  startSystemAudio: () => ipcRenderer.invoke('system-audio-start'),
+  stopSystemAudio: () => ipcRenderer.invoke('system-audio-stop'),
+  onSystemAudioChunk: (callback: (chunk: Uint8Array) => void) => {
+    ipcRenderer.on('system-audio-chunk', (_event, chunk: Uint8Array) => callback(chunk));
+  },
+  offSystemAudioChunk: () => ipcRenderer.removeAllListeners('system-audio-chunk'),
+  onSystemAudioError: (callback: (err: { message: string }) => void) => {
+    ipcRenderer.on('system-audio-error', (_event, err: { message: string }) => callback(err));
+  },
 
   // Global shortcut
   validateShortcut: (shortcut: string) => ipcRenderer.invoke('validate-shortcut', shortcut),

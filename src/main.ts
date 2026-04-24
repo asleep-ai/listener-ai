@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, Menu, globalShortcut, systemPreferences } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, dialog, Menu, globalShortcut, systemPreferences, session, desktopCapturer } from 'electron';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
@@ -20,6 +20,20 @@ import { saveTranscription, readTranscription } from './outputService';
 import { searchTranscriptions, ALL_FIELDS, type SearchField } from './searchService';
 import { AgentService, type AgentChatMessage, type AgentRunResult, type AgentScope, type ConfigProposal } from './agentService';
 import { isSupportedAudioExtension } from './audioFormats';
+import { SystemAudioService, SYSTEM_AUDIO_FORMAT } from './services/systemAudioService';
+
+// Enable macOS system-audio loopback capture so getDisplayMedia({audio: 'loopback'})
+// can pull Zoom/Meet participant audio alongside the mic.
+//   MacSckSystemAudioLoopbackCapture  -- ScreenCaptureKit path, macOS 13-14
+//   MacCatapSystemAudioLoopbackCapture -- Core Audio Tap path, macOS 14.4+ (preferred on 15+)
+// Enabling both lets Chromium pick whichever implementation the kernel supports.
+// Must run before app.whenReady() so Chromium sees the flags at browser init.
+if (process.platform === 'darwin') {
+  app.commandLine.appendSwitch(
+    'enable-features',
+    'MacSckSystemAudioLoopbackCapture,MacCatapSystemAudioLoopbackCapture'
+  );
+}
 
 // Global flag to track if app is quitting
 declare global {
@@ -29,6 +43,7 @@ global.isQuitting = false;
 
 let mainWindow: BrowserWindow | null = null;
 const audioRecorder = new SimpleAudioRecorder();
+const systemAudioService = new SystemAudioService();
 const configService = new ConfigService();
 const ffmpegManager = new FFmpegManager();
 const menuBarManager = new MenuBarManager();
@@ -377,6 +392,24 @@ app.whenReady().then(() => {
 
   const menu = Menu.buildFromTemplate(template as any);
   Menu.setApplicationMenu(menu);
+
+  // macOS system-audio capture goes through SystemAudioService (audiotee /
+  // Core Audio Tap) via dedicated IPC -- see ipcMain.handle('system-audio-start')
+  // below. We only need setDisplayMediaRequestHandler for non-macOS platforms,
+  // where audio: 'loopback' is genuinely supported (Windows, partial on Linux).
+  if (process.platform !== 'darwin') {
+    session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
+      const reject = () => { try { callback({}); } catch { /* intentional */ } };
+      try {
+        const sources = await desktopCapturer.getSources({ types: ['screen'] });
+        if (sources.length === 0) { reject(); return; }
+        callback({ video: sources[0], audio: 'loopback' });
+      } catch (err) {
+        console.warn('display-media handler: getSources failed:', err);
+        reject();
+      }
+    });
+  }
 
   createWindow();
 
@@ -1220,6 +1253,41 @@ ipcMain.handle('open-microphone-settings', async () => {
     shell.openExternal('ms-settings:privacy-microphone');
   }
   // For Linux, there's no standard way to open microphone settings
+});
+
+// Open macOS Screen Recording settings. macOS caches screen-recording permission at
+// process launch, so the app must be fully relaunched after the user toggles it on.
+ipcMain.handle('open-screen-recording-settings', async () => {
+  if (process.platform === 'darwin') {
+    shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+  }
+});
+
+// Native macOS system-audio capture. PCM chunks are streamed to the renderer as
+// raw ArrayBuffers via webContents.send; the renderer pushes them into an
+// AudioWorklet that feeds the Web Audio mix.
+ipcMain.handle('system-audio-start', async (event) => {
+  const result = await systemAudioService.start({
+    onChunk: (chunk) => {
+      if (!event.sender.isDestroyed()) {
+        // structuredClone of Buffer through IPC is expensive; send the raw
+        // Uint8Array view which becomes an ArrayBuffer on the renderer side.
+        event.sender.send('system-audio-chunk', new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+      }
+    },
+    onError: (err) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('system-audio-error', { message: err.message });
+      }
+    },
+  });
+  if (result.ok) return { success: true, format: SYSTEM_AUDIO_FORMAT };
+  return { success: false, reason: result.reason, message: result.message };
+});
+
+ipcMain.handle('system-audio-stop', async () => {
+  await systemAudioService.stop();
+  return { success: true };
 });
 
 // Agent chat: blocks until the agent produces a final answer. During the run the

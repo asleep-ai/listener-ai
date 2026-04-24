@@ -1099,6 +1099,45 @@ h1 {
   line-height: 1.4;
 }
 
+.permission-status {
+  margin-top: 6px;
+  margin-left: 30px;
+  font-size: 12px;
+  line-height: 1.4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.permission-status[data-state="granted"] { color: #27ae60; }
+.permission-status[data-state="needs-restart"] { color: #d68910; }
+.permission-status[data-state="denied"] { color: #c0392b; }
+.permission-status[data-state="not-determined"],
+.permission-status[data-state="unknown"],
+.permission-status[data-state="restricted"] { color: #7f8c8d; }
+
+.permission-status a {
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.permission-status a[draggable="true"] {
+  cursor: grab;
+}
+
+.permission-status a[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.permission-tip {
+  margin-top: 4px;
+  margin-left: 30px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #7f8c8d;
+}
+
 /* Progress bar styles */
 .progress-container {
   margin: 20px 0;

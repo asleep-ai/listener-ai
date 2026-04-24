@@ -12,6 +12,7 @@ Listener.AI is an Electron desktop application for recording meetings and produc
 - Web Audio processing chain before `MediaRecorder`: highpass 80Hz → DynamicsCompressor (threshold -30dB, ratio 8, 3ms attack) → Gain ×4 (+12dB) → brick-wall limiter at -1 dBFS. Tuned for meeting/conference use: lifts distant speakers, tames close-range transients, prevents clipping.
 - Output: `audio/webm;codecs=opus` at 64 kbps mono (Chromium's native MediaRecorder codec). Falls back to other supported types via `MediaRecorder.isTypeSupported`.
 - Duration cap (`maxRecordingMinutes`), reminder cadence (`recordingReminderMinutes`), and minimum-length floor (`minRecordingSeconds`, discards accidental taps).
+- **System audio capture (macOS, opt-in via `recordSystemAudio`)**: `getDisplayMedia({video:true, audio:true})` pulls a loopback track covering Zoom/Meet participants, browser tabs, and other app audio. On macOS the renderer is routed through the native ScreenCaptureKit picker via `setDisplayMediaRequestHandler(..., { useSystemPicker: true })` -- `audio: 'loopback'` via a custom handler returns a stream without audio tracks on Electron 37 (Windows-only per Electron's own types). The user selects a display + "Record audio" in the native picker; the renderer discards the video track and mixes the audio into the Web Audio chain alongside the mic (mic keeps the voice-lift chain, system audio passes through a -2dB gain, shared limiter catches combined peaks). Windows/Linux keep the no-picker `audio: 'loopback'` path. Chromium feature flags `MacSckSystemAudioLoopbackCapture` / `MacCatapSystemAudioLoopbackCapture` are left enabled at module load for forward-compat. Requires macOS Screen Recording permission; falls back to mic-only when permission is denied. Future migration path: a native Core Audio Tap module (`mac-audio-capture` / AudioTee) to request only the narrower "System Audio Recording Only" permission (macOS 14.4+).
 - Known limitation: chunks accumulate in renderer memory until `stop`. A renderer crash mid-session loses the recording. Streaming chunks to main during capture is a planned future enhancement.
 
 ### 2. User Interface
@@ -103,6 +104,7 @@ All values are stored in plaintext JSON at `getDataPath()/config.json`.
 | `maxRecordingMinutes` | Hard stop for long recordings |
 | `recordingReminderMinutes` | Reminder cadence |
 | `minRecordingSeconds` | Discards accidental short recordings |
+| `recordSystemAudio` | Mix system audio loopback (Zoom/Meet) into the recording (macOS only) |
 | `lastSeenVersion` | Drives "what's new" release-notes modal |
 
 Env-var fallbacks (read-only when the config key is empty): `GEMINI_API_KEY`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`.
