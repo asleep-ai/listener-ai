@@ -112,6 +112,7 @@
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "extendInfo": {
         "NSMicrophoneUsageDescription": "Listener.AI needs access to your microphone to record meetings.",
+        "NSScreenCaptureUsageDescription": "Listener.AI mixes your Mac's audio (Zoom/Meet participants, browser tabs) into the recording. Screen content is not captured or stored.",
         "LSApplicationCategoryType": "public.app-category.productivity",
         "CFBundleExecutable": "Listener.AI"
       },

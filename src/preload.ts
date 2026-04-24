@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getScreenRecordingPermission: (): Promise<{ current: string; initial: string; needsRestart: boolean }> =>
     ipcRenderer.invoke('get-screen-recording-permission'),
   relaunchApp: () => ipcRenderer.invoke('relaunch-app'),
+  startAppDrag: () => ipcRenderer.send('start-app-drag'),
 
   // Global shortcut
   validateShortcut: (shortcut: string) => ipcRenderer.invoke('validate-shortcut', shortcut),

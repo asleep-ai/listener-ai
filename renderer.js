@@ -576,6 +576,17 @@ window.addEventListener('DOMContentLoaded', async () => {
           link.textContent = 'Open System Settings';
           link.addEventListener('click', () => window.electronAPI.openScreenRecordingSettings());
           el.append(link);
+          el.append(' or ');
+          const drag = document.createElement('a');
+          drag.textContent = 'drag Listener.AI';
+          drag.draggable = true;
+          drag.title = 'Drag onto System Settings > Screen Recording to grant permission';
+          drag.addEventListener('dragstart', (e) => {
+            e.preventDefault();
+            window.electronAPI.startAppDrag();
+          });
+          el.append(drag);
+          el.append(' into the Screen Recording list.');
         });
         return;
       }

@@ -391,48 +391,31 @@ app.whenReady().then(() => {
   const menu = Menu.buildFromTemplate(template as any);
   Menu.setApplicationMenu(menu);
 
-  // getDisplayMedia() from the renderer requires a handler in the main process since
-  // Electron 30. Supplying audio: 'loopback' returns system audio without the native
-  // screen picker -- the renderer discards the video track and keeps only the audio.
-  // The feature-flag block at the top of this file is what actually enables the
-  // loopback implementation on macOS.
-  session.defaultSession.setDisplayMediaRequestHandler(
-    async (_request, callback) => {
-      // callback({}) is the "deny" signal, but Electron throws synchronously with
-      // "Video was requested, but no video stream was provided" because the renderer
-      // called getDisplayMedia({video:true}). The throw still reaches the renderer as
-      // a rejection (which is what we want), so swallow it here to avoid polluting
-      // stderr with UnhandledPromiseRejectionWarning.
-      const reject = () => {
-        try { callback({}); } catch { /* intentional */ }
-      };
-      // Short-circuit when permission is definitively refused. Allow 'not-determined'
-      // through so that desktopCapturer.getSources can trigger the macOS permission
-      // prompt on first use. 'denied'/'restricted' cases never prompt again, so calling
-      // getSources would just produce an UnhandledPromiseRejection with no user benefit.
-      if (process.platform === 'darwin') {
-        const status = systemPreferences.getMediaAccessStatus('screen');
-        if (status === 'denied' || status === 'restricted') {
-          reject();
-          return;
-        }
-      }
+  // getDisplayMedia() in the renderer requires a handler since Electron 30.
+  // audio: 'loopback' is Windows-only in Electron 37 -- on macOS our custom-handler
+  // path returns a stream with no audio tracks. Route to the native ScreenCaptureKit
+  // picker instead: it supports "Record audio" natively on macOS 15+ and the permission
+  // prompt on earlier versions. The handler callback is ignored when useSystemPicker
+  // is true, so we pass a no-op.
+  if (process.platform === 'darwin') {
+    session.defaultSession.setDisplayMediaRequestHandler(
+      () => { /* ignored with useSystemPicker */ },
+      { useSystemPicker: true }
+    );
+  } else {
+    // Windows/Linux: audio: 'loopback' works via the custom-handler path.
+    session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
+      const reject = () => { try { callback({}); } catch { /* intentional */ } };
       try {
         const sources = await desktopCapturer.getSources({ types: ['screen'] });
-        if (sources.length === 0) {
-          reject();
-          return;
-        }
-        // getDisplayMedia requires a video source to satisfy the spec even when the
-        // caller only wants audio; the renderer stops the video track immediately.
+        if (sources.length === 0) { reject(); return; }
         callback({ video: sources[0], audio: 'loopback' });
       } catch (err) {
         console.warn('display-media handler: getSources failed:', err);
         reject();
       }
-    },
-    { useSystemPicker: false }
-  );
+    });
+  }
 
   createWindow();
 
@@ -1293,7 +1276,6 @@ ipcMain.handle('open-screen-recording-settings', async () => {
 const initialScreenRecordingStatus = process.platform === 'darwin'
   ? systemPreferences.getMediaAccessStatus('screen')
   : 'not-applicable';
-console.log('[tcc] initial screen recording status:', initialScreenRecordingStatus);
 
 ipcMain.handle('get-screen-recording-permission', async () => {
   if (process.platform !== 'darwin') {
@@ -1310,6 +1292,24 @@ ipcMain.handle('relaunch-app', async () => {
   global.isQuitting = true;
   app.relaunch();
   app.exit(0);
+});
+
+// Native file drag from renderer: drags the .app bundle so the user can drop it
+// directly onto System Settings > Screen Recording (macOS accepts .app drops there).
+// The bundle path resolves to `<...>/Listener.AI.app` in production or
+// `<...>/Electron.app` in dev mode -- both are valid drag sources for TCC.
+ipcMain.on('start-app-drag', (event) => {
+  try {
+    const appBundlePath = path.resolve(process.execPath, '..', '..', '..');
+    const iconPath = path.join(__dirname, '../assets/icon.png');
+    const { nativeImage } = require('electron');
+    event.sender.startDrag({
+      file: appBundlePath,
+      icon: nativeImage.createFromPath(iconPath).resize({ width: 64, height: 64 }),
+    });
+  } catch (err) {
+    console.error('start-app-drag failed:', err);
+  }
 });
 
 // Agent chat: blocks until the agent produces a final answer. During the run the

@@ -1122,6 +1122,14 @@ h1 {
   cursor: pointer;
 }
 
+.permission-status a[draggable="true"] {
+  cursor: grab;
+}
+
+.permission-status a[draggable="true"]:active {
+  cursor: grabbing;
+}
+
 /* Progress bar styles */
 .progress-container {
   margin: 20px 0;
