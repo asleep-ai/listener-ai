@@ -303,6 +303,17 @@ window.electronAPI.onTranscriptionProgress((progress) => {
   }
 });
 
+// Auto-refresh the list when the recordings directory changes externally
+// (e.g., a `listener` CLI run, or manual file ops). refreshRecordingsList is
+// defined later in this file but the listener only fires after first event.
+if (window.electronAPI.onRecordingsChanged) {
+  window.electronAPI.onRecordingsChanged(() => {
+    if (typeof refreshRecordingsList === 'function') {
+      refreshRecordingsList();
+    }
+  });
+}
+
 // Listen for release notes after an update
 if (window.electronAPI.onShowReleaseNotes) {
   window.electronAPI.onShowReleaseNotes((notes) => {

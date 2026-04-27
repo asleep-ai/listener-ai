@@ -216,6 +216,34 @@ async function checkAndShowReleaseNotes() {
   }
 }
 
+// Watch the recordings directory for external changes (CLI runs, manual file
+// ops) and push a refresh to the renderer so the list stays in sync without
+// requiring a manual reload. Debounced because some operations (a merge
+// concat) write through multiple events in quick succession.
+let recordingsWatcher: fs.FSWatcher | null = null;
+let recordingsWatcherTimer: NodeJS.Timeout | null = null;
+function startRecordingsWatcher(): void {
+  if (recordingsWatcher) return;
+  const dir = path.join(app.getPath('userData'), 'recordings');
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    recordingsWatcher = fs.watch(dir, () => {
+      if (recordingsWatcherTimer) clearTimeout(recordingsWatcherTimer);
+      recordingsWatcherTimer = setTimeout(() => {
+        recordingsWatcherTimer = null;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('recordings-changed');
+        }
+      }, 250);
+    });
+    recordingsWatcher.on('error', (err) => {
+      console.warn('recordings watcher error:', err);
+    });
+  } catch (err) {
+    console.warn('Failed to start recordings watcher:', err);
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1000,
@@ -422,6 +450,8 @@ app.whenReady().then(() => {
     notificationService.setMainWindow(mainWindow);
   }
 
+  startRecordingsWatcher();
+
   // Kick off initial + periodic update checks once the renderer can receive IPC.
   autoUpdaterService.checkForUpdates();
   autoUpdaterService.startPeriodicCheck();
@@ -542,6 +572,14 @@ app.on('before-quit', async (event) => {
 // Unregister all shortcuts when app quits
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  if (recordingsWatcher) {
+    recordingsWatcher.close();
+    recordingsWatcher = null;
+  }
+  if (recordingsWatcherTimer) {
+    clearTimeout(recordingsWatcherTimer);
+    recordingsWatcherTimer = null;
+  }
 });
 
 // Helper function to rename audio file with generated title
