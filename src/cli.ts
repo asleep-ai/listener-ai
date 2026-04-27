@@ -5,9 +5,12 @@ import * as path from 'path';
 import { getDataPath } from './dataPath';
 import { ConfigService } from './configService';
 import { GeminiService } from './geminiService';
-import { saveTranscription, listTranscriptions, parseFrontmatter, getTranscriptionsDir } from './outputService';
+import { saveTranscription, listTranscriptions, parseFrontmatter, getTranscriptionsDir, readTranscription, sanitizeForPath, formatTimestamp } from './outputService';
 import { searchTranscriptions, resolveFields, ALL_FIELDS, type SearchField } from './searchService';
 import { AgentService, type AgentScope, type ConfigProposal } from './agentService';
+import { FFmpegManager } from './services/ffmpegManager';
+import { concatAudioFiles } from './services/audioConcatService';
+import { extensionForMimeType } from './audioFormats';
 
 const SUPPORTED_EXTENSIONS = new Set([
   '.mp3', '.m4a', '.wav', '.ogg', '.flac', '.aac', '.wma', '.opus', '.webm',
@@ -22,6 +25,9 @@ function usage(): never {
     '                                           Export transcription\n' +
     '       listener search <query> [--limit <n>] [--transcript] [--field <name>]\n' +
     '                                           Search past transcriptions\n' +
+    '       listener merge <ref1> <ref2> [<ref3>...] [--title <t>]\n' +
+    '                                           Concat the source audio of two or more notes,\n' +
+    '                                           re-transcribe end-to-end, and save as a new note\n' +
     '       listener ask <question> [--ref <ref>]\n' +
     '                                           Ask the AI agent about saved meetings or settings\n' +
     '       listener config list|get|set|path   Manage configuration\n' +
@@ -366,6 +372,99 @@ async function promptYesNo(message: string): Promise<boolean> {
   });
 }
 
+async function handleMerge(args: string[]): Promise<void> {
+  const refs: string[] = [];
+  let title: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--title' && i + 1 < args.length) {
+      title = args[++i];
+      continue;
+    }
+    if (a.startsWith('-')) {
+      process.stderr.write(`Error: Unknown option: ${a}\n`);
+      process.exit(1);
+    }
+    refs.push(a);
+  }
+
+  if (refs.length < 2) {
+    process.stderr.write('Error: merge requires at least 2 refs. Usage: listener merge <ref1> <ref2> [<ref3>...] [--title <t>]\n');
+    process.exit(1);
+  }
+
+  const dataPath = getDataPath();
+  const config = new ConfigService(dataPath);
+  const apiKey = config.getGeminiApiKey();
+  if (!apiKey) {
+    process.stderr.write('Error: Gemini API key not found. Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n');
+    process.exit(1);
+  }
+
+  // Resolve every ref to a folder + audio path before doing any expensive work
+  // so an early failure (missing audio) doesn't waste a partial concat.
+  const sources: Array<{ folderName: string; audioPath: string }> = [];
+  for (const ref of refs) {
+    const folderPath = await resolveRef(ref, dataPath);
+    const data = await readTranscription(folderPath);
+    if (!data || !data.audioFilePath) {
+      process.stderr.write(`Error: ${ref} has no audioFilePath in its frontmatter; cannot include it in a merge.\n`);
+      process.exit(1);
+    }
+    if (!fs.existsSync(data.audioFilePath)) {
+      process.stderr.write(`Error: source audio missing for ${ref}: ${data.audioFilePath}\n`);
+      process.exit(1);
+    }
+    sources.push({ folderName: path.basename(folderPath), audioPath: data.audioFilePath });
+  }
+
+  const ffmpegManager = new FFmpegManager(dataPath);
+  const ffmpegPath = await ffmpegManager.ensureFFmpeg();
+  if (!ffmpegPath) {
+    process.stderr.write('Error: ffmpeg not found. Install ffmpeg or run a transcription in the GUI to download it.\n');
+    process.exit(1);
+  }
+
+  const safeTitle = sanitizeForPath(title?.trim() || 'Merged Meeting') || 'Merged Meeting';
+  const recordingsDir = path.join(dataPath, 'recordings');
+  fs.mkdirSync(recordingsDir, { recursive: true });
+  const mergedAudioPath = path.join(recordingsDir, `${safeTitle}_${formatTimestamp()}.${extensionForMimeType('audio/webm')}`);
+
+  process.stderr.write(`Merging ${sources.length} recordings...\n`);
+  await concatAudioFiles({
+    ffmpegPath,
+    inputPaths: sources.map((s) => s.audioPath),
+    outputPath: mergedAudioPath,
+  });
+  process.stderr.write(`  -> ${mergedAudioPath}\n`);
+
+  const gemini = new GeminiService({
+    apiKey,
+    dataPath,
+    knownWords: config.getKnownWords(),
+    proModel: config.getGeminiModel(),
+    flashModel: config.getGeminiFlashModel(),
+  });
+
+  process.stderr.write('Transcribing merged recording...\n');
+  const result = await gemini.transcribeAudio(mergedAudioPath, (_percent, message) => {
+    process.stderr.write(`  ${message}\n`);
+  }, config.getSummaryPrompt());
+
+  const finalTitle = result.suggestedTitle || (title?.trim() || 'Merged Meeting');
+  const folderPath = saveTranscription({
+    title: finalTitle,
+    result,
+    audioFilePath: mergedAudioPath,
+    dataPath,
+    mergedFrom: sources.map((s) => s.folderName),
+  });
+
+  process.stderr.write('Done.\n');
+  process.stdout.write(`${folderPath}\n`);
+}
+
 async function handleAsk(args: string[]): Promise<void> {
   let question: string | undefined;
   let ref: string | undefined;
@@ -450,6 +549,11 @@ async function main(): Promise<void> {
 
   if (args[0] === 'search') {
     await handleSearch(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'merge') {
+    await handleMerge(args.slice(1));
     return;
   }
 

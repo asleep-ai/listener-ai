@@ -22,9 +22,18 @@ export function camelToLabel(key: string): string {
   return key.replace(/([A-Z])/g, ' $1').replace(/^./, (s: string) => s.toUpperCase()).trim();
 }
 
-export function formatSummary(result: TranscriptionResult, title: string): string {
+export function formatSummary(result: TranscriptionResult, title: string, mergedFrom?: string[]): string {
   const lines: string[] = [];
   lines.push(`# ${title}\n`);
+
+  if (mergedFrom?.length) {
+    lines.push(`## Sources\n`);
+    lines.push(`Merged from ${mergedFrom.length} recording${mergedFrom.length === 1 ? '' : 's'}:\n`);
+    for (const src of mergedFrom) {
+      lines.push(`- ${src}`);
+    }
+    lines.push('');
+  }
 
   if (result.summary) {
     lines.push(`## Summary\n`);
@@ -85,6 +94,7 @@ interface SummaryFrontmatter {
   audioFilePath?: string;
   transcribedAt: string;
   emoji?: string;
+  mergedFrom?: string[];
 }
 
 function buildFrontmatter(meta: SummaryFrontmatter): string {
@@ -112,6 +122,10 @@ function buildFrontmatter(meta: SummaryFrontmatter): string {
   }
   if (meta.emoji) {
     lines.push(`emoji: ${yamlQuote(meta.emoji)}`);
+  }
+  if (meta.mergedFrom?.length) {
+    lines.push('mergedFrom:');
+    for (const src of meta.mergedFrom) lines.push(`  - ${yamlQuote(src)}`);
   }
   lines.push('---');
   return lines.join('\n');
@@ -197,6 +211,7 @@ export interface SaveTranscriptionOptions {
   audioFilePath?: string;
   outputDir?: string; // override parent dir (for CLI --output)
   dataPath: string;   // app data path (default location)
+  mergedFrom?: string[]; // source folder names when this note was created by merging others
 }
 
 /**
@@ -223,8 +238,9 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
     audioFilePath: opts.audioFilePath,
     transcribedAt,
     emoji: opts.result.emoji,
+    mergedFrom: opts.mergedFrom,
   });
-  const summaryBody = formatSummary(opts.result, opts.title);
+  const summaryBody = formatSummary(opts.result, opts.title, opts.mergedFrom);
   fs.writeFileSync(path.join(folderPath, 'summary.md'), `${frontmatter}\n\n${summaryBody}`, 'utf-8');
 
   // transcript.md
@@ -318,6 +334,7 @@ export interface ReadTranscriptionResult {
   audioFilePath?: string;
   transcribedAt?: string;
   emoji?: string;
+  mergedFrom?: string[];
 }
 
 /**
@@ -354,6 +371,7 @@ export async function readTranscription(folderPath: string): Promise<ReadTranscr
       audioFilePath: meta.audioFilePath as string | undefined,
       transcribedAt: meta.transcribedAt as string | undefined,
       emoji: meta.emoji as string | undefined,
+      mergedFrom: meta.mergedFrom as string[] | undefined,
     };
   } catch {
     return null;

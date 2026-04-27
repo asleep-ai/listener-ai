@@ -57,6 +57,21 @@ export class GeminiService {
   }
 
   async transcribeAudio(audioFilePath: string, progressCallback?: (percent: number, message: string) => void, summaryPrompt?: string): Promise<TranscriptionResult> {
+    // Integration-test escape hatch: avoid the real Gemini call so tests can
+    // exercise the surrounding pipeline (CLI parsing, IPC, ffmpeg, save) for
+    // free and offline. Production runtime never sets this.
+    if (process.env.LISTENER_TEST_MODE) {
+      if (progressCallback) progressCallback(100, 'Stubbed transcription');
+      return {
+        transcript: 'Stubbed transcript.',
+        summary: 'Stubbed summary.',
+        keyPoints: ['stub point'],
+        actionItems: ['stub action'],
+        emoji: '🧪',
+        suggestedTitle: 'Stubbed Title',
+      };
+    }
+
     try {
       // Check file size
       const stats = fs.statSync(audioFilePath);

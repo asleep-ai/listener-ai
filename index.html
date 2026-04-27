@@ -286,6 +286,27 @@
     </div>
   </div>
 
+  <!-- Merge Recordings Dialog -->
+  <div id="mergeModal" class="modal" style="display: none;">
+    <div class="modal-content merge-modal-content">
+      <div class="modal-header">
+        <h2>Merge Recordings</h2>
+        <span class="close" id="mergeModalClose">&times;</span>
+      </div>
+      <p class="merge-hint">Select 2 or more recordings to combine. Audio is concatenated in the listed order, then re-transcribed end-to-end. Originals are kept.</p>
+      <div class="merge-title-row">
+        <label for="mergeTitleInput">New note title</label>
+        <input type="text" id="mergeTitleInput" placeholder="Merged Meeting" />
+      </div>
+      <ul id="mergeList" class="merge-list" aria-label="Recordings available to merge"></ul>
+      <p id="mergeStatus" class="merge-status"></p>
+      <div class="modal-buttons">
+        <button id="mergeCancelBtn" class="cancel-button">Cancel</button>
+        <button id="mergeConfirmBtn" class="save-button" disabled>Merge &amp; Transcribe</button>
+      </div>
+    </div>
+  </div>
+
   <!-- FFmpeg Download Progress Overlay -->
   <div id="ffmpegDownloadOverlay" class="modal" style="display: none;">
     <div class="ffmpeg-download-card">

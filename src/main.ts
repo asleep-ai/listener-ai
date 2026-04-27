@@ -16,10 +16,11 @@ import { DisplayDetectorService } from './displayDetectorService';
 import { autoUpdaterService } from './services/autoUpdaterService';
 import { notificationService } from './services/notificationService';
 import { fetchReleaseNotes, fetchAllReleases } from './services/releaseNotesService';
-import { saveTranscription, readTranscription } from './outputService';
+import { saveTranscription, readTranscription, sanitizeForPath, formatTimestamp } from './outputService';
+import { concatAudioFiles } from './services/audioConcatService';
 import { searchTranscriptions, ALL_FIELDS, type SearchField } from './searchService';
 import { AgentService, type AgentChatMessage, type AgentRunResult, type AgentScope, type ConfigProposal } from './agentService';
-import { isSupportedAudioExtension } from './audioFormats';
+import { isSupportedAudioExtension, extensionForMimeType } from './audioFormats';
 import { SystemAudioService, SYSTEM_AUDIO_FORMAT } from './services/systemAudioService';
 
 // Enable macOS system-audio loopback capture so getDisplayMedia({audio: 'loopback'})
@@ -696,6 +697,134 @@ ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
     const stderr = (error as { stderr?: string } | null)?.stderr;
     const baseMessage = error instanceof Error ? error.message : String(error);
     const message = stderr ? `${baseMessage.split('\n')[0]} — ${stderr.trim()}` : baseMessage;
+    return { success: false, error: message };
+  }
+});
+
+// Merge multiple recordings: concat audio files, then run the standard
+// transcription pipeline on the merged file. Originals are left untouched.
+// Resolves source folder names from per-recording metadata so the merged note's
+// `mergedFrom` frontmatter (and "Sources" body section) can reference them.
+ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: string }) => {
+  try {
+    const inputPaths = Array.isArray(opts?.paths) ? opts.paths : [];
+    if (inputPaths.length < 2) {
+      return { success: false, error: 'At least 2 recordings are required to merge' };
+    }
+
+    // Containment: every input must resolve inside the recordings directory.
+    const recordingsDir = path.join(app.getPath('userData'), 'recordings');
+    const resolvedRoot = await fs.promises.realpath(recordingsDir).catch(() => recordingsDir);
+    const resolvedInputs: string[] = [];
+    for (const p of inputPaths) {
+      if (typeof p !== 'string' || !p) {
+        return { success: false, error: 'Invalid input path' };
+      }
+      let resolved: string;
+      try {
+        resolved = await fs.promises.realpath(p);
+      } catch {
+        return { success: false, error: `Recording not found: ${path.basename(p)}` };
+      }
+      if (!resolved.startsWith(resolvedRoot + path.sep)) {
+        return { success: false, error: 'Source path is outside the recordings directory' };
+      }
+      resolvedInputs.push(resolved);
+    }
+
+    if (!geminiService) {
+      const apiKey = configService.getGeminiApiKey();
+      if (!apiKey) {
+        return { success: false, error: 'Gemini API key not configured' };
+      }
+      geminiService = createGeminiService()!;
+    }
+
+    const ffmpegPath = await ffmpegManager.ensureFFmpeg();
+    if (!ffmpegPath) {
+      return { success: false, code: 'ffmpeg-missing', error: 'FFmpeg is required to merge recordings.' };
+    }
+
+    const rawTitle = (opts.title && opts.title.trim()) || 'Merged Meeting';
+    const safeTitle = sanitizeForPath(rawTitle) || 'Merged Meeting';
+    // Always emit webm/opus -- matches MediaRecorder native output and survives
+    // the stream-copy fast path when all inputs are also webm.
+    const mergedExt = extensionForMimeType('audio/webm');
+    const mergedAudioPath = path.join(recordingsDir, `${safeTitle}_${formatTimestamp()}.${mergedExt}`);
+
+    if (mainWindow) {
+      mainWindow.webContents.send('transcription-progress', { percent: 5, message: 'Merging audio files...' });
+    }
+
+    await fs.promises.mkdir(recordingsDir, { recursive: true });
+
+    // Run the metadata lookup concurrently with the ffmpeg concat -- they're
+    // independent and concat is the long pole, so the metadata reads are free.
+    // Recordings without a transcription contribute nothing to mergedFrom.
+    const [, metas] = await Promise.all([
+      concatAudioFiles({ ffmpegPath, inputPaths: resolvedInputs, outputPath: mergedAudioPath }),
+      Promise.all(resolvedInputs.map((p) => metadataService.getMetadata(p))),
+    ]);
+    const sourceFolders = metas
+      .filter((m): m is NonNullable<typeof m> => !!m?.transcriptionPath)
+      .map((m) => path.basename(m.transcriptionPath!));
+
+    if (mainWindow) {
+      mainWindow.webContents.send('transcription-progress', { percent: 15, message: 'Transcribing merged recording...' });
+    }
+
+    const progressCallback = (percent: number, message: string) => {
+      if (mainWindow) {
+        // Compress the transcription progress into 15-95% to leave room for the
+        // concat phase at the start and the save phase at the end.
+        const adjusted = 15 + Math.round(percent * 0.8);
+        mainWindow.webContents.send('transcription-progress', { percent: adjusted, message });
+      }
+    };
+
+    const summaryPrompt = configService.getSummaryPrompt();
+    const result = await geminiService.transcribeAudio(mergedAudioPath, progressCallback, summaryPrompt);
+
+    const finalTitle = result.suggestedTitle || rawTitle;
+    let transcriptionPath: string | undefined;
+    try {
+      transcriptionPath = saveTranscription({
+        title: finalTitle,
+        result,
+        audioFilePath: mergedAudioPath,
+        dataPath: app.getPath('userData'),
+        mergedFrom: sourceFolders,
+      });
+    } catch (error) {
+      console.error('Failed to save merged transcription files:', error);
+    }
+
+    try {
+      if (transcriptionPath) {
+        await metadataService.saveMetadata(mergedAudioPath, {
+          title: finalTitle,
+          suggestedTitle: result.suggestedTitle,
+          transcriptionPath,
+          customFields: result.customFields,
+          transcribedAt: new Date().toISOString(),
+        });
+      }
+    } catch (error) {
+      console.error('Failed to save merged metadata:', error);
+    }
+
+    if (mainWindow) {
+      mainWindow.webContents.send('transcription-progress', { percent: 100, message: 'Merge complete' });
+    }
+
+    notificationService.notifyTranscriptionComplete(finalTitle);
+    return { success: true, data: result, mergedAudioPath, transcriptionPath, mergedFrom: sourceFolders };
+  } catch (error) {
+    console.error('Error merging recordings:', error);
+    const stderr = (error as { stderr?: string } | null)?.stderr;
+    const baseMessage = error instanceof Error ? error.message : String(error);
+    const message = stderr ? `${baseMessage.split('\n')[0]} — ${stderr.trim()}` : baseMessage;
+    notificationService.notifyTranscriptionFailed('Merge failed. Check the app for details.');
     return { success: false, error: message };
   }
 });

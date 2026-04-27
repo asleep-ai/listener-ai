@@ -5,6 +5,11 @@ import * as os from 'os';
 const APP_NAME = 'Listener.AI';
 
 export function getDataPath(): string {
+  // Test escape hatch: integration tests set this to a temp dir to avoid
+  // touching the user's real data. Read-only at process start.
+  if (process.env.LISTENER_DATA_PATH) {
+    return process.env.LISTENER_DATA_PATH;
+  }
   switch (process.platform) {
     case 'darwin':
       return path.join(os.homedir(), 'Library', 'Application Support', APP_NAME);
