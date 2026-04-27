@@ -45,6 +45,7 @@
   },
   "homepage": "https://github.com/asleep-ai/listener-ai#readme",
   "devDependencies": {
+    "@electron/asar": "^4.2.0",
     "@electron/notarize": "^3.0.1",
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^24.0.12",
