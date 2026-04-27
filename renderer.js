@@ -1688,22 +1688,28 @@ async function showConfigModal() {
 
 
 // Function to load and display recordings
+// Monotonic token so a slow loadRecordings (per-item async metadata reads)
+// can't overwrite a fresher snapshot's render. Mirrors lastSearchToken.
+let lastLoadRecordingsToken = 0;
 async function loadRecordings() {
+  const myToken = ++lastLoadRecordingsToken;
   try {
     const result = await window.electronAPI.getRecordings();
 
     if (result.success && result.recordings.length > 0) {
-      recordingsList.innerHTML = '';
-
-      // Use Promise.all to handle async createRecordingItem
       const items = await Promise.all(
         result.recordings.map(recording => createRecordingItem(recording))
       );
+      // Drop if a newer load started while we were awaiting metadata.
+      if (myToken !== lastLoadRecordingsToken) return;
+      recordingsList.innerHTML = '';
       items.forEach(item => recordingsList.appendChild(item));
     } else {
+      if (myToken !== lastLoadRecordingsToken) return;
       recordingsList.innerHTML = '<p class="no-recordings">No recordings yet</p>';
     }
   } catch (error) {
+    if (myToken !== lastLoadRecordingsToken) return;
     console.error('Error loading recordings:', error);
     recordingsList.innerHTML = '<p class="no-recordings">Error loading recordings</p>';
   }

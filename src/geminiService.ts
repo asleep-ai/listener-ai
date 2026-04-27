@@ -59,8 +59,9 @@ export class GeminiService {
   async transcribeAudio(audioFilePath: string, progressCallback?: (percent: number, message: string) => void, summaryPrompt?: string): Promise<TranscriptionResult> {
     // Integration-test escape hatch: avoid the real Gemini call so tests can
     // exercise the surrounding pipeline (CLI parsing, IPC, ffmpeg, save) for
-    // free and offline. Production runtime never sets this.
-    if (process.env.LISTENER_TEST_MODE) {
+    // free and offline. Gated on NODE_ENV=test so a stray LISTENER_TEST_MODE
+    // in a packaged user's shell rc can't silently stub their transcripts.
+    if (process.env.LISTENER_TEST_MODE && process.env.NODE_ENV === 'test') {
       if (progressCallback) progressCallback(100, 'Stubbed transcription');
       return {
         transcript: 'Stubbed transcript.',

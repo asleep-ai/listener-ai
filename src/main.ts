@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, Menu, globalShortcut, systemPreferences, session, desktopCapturer } from 'electron';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { randomUUID } from 'crypto';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
@@ -222,6 +223,7 @@ async function checkAndShowReleaseNotes() {
 // concat) write through multiple events in quick succession.
 let recordingsWatcher: fs.FSWatcher | null = null;
 let recordingsWatcherTimer: NodeJS.Timeout | null = null;
+let recordingsWatcherRetry: NodeJS.Timeout | null = null;
 function startRecordingsWatcher(): void {
   if (recordingsWatcher) return;
   const dir = path.join(app.getPath('userData'), 'recordings');
@@ -238,6 +240,19 @@ function startRecordingsWatcher(): void {
     });
     recordingsWatcher.on('error', (err) => {
       console.warn('recordings watcher error:', err);
+    });
+    // fs.watch holds an inode handle. If recordings/ is deleted and recreated
+    // externally, the OS fires 'close' and the watcher silently dies on the
+    // dead inode. Re-arm on close so a manual rm -rf doesn't permanently break
+    // live refresh.
+    recordingsWatcher.on('close', () => {
+      recordingsWatcher = null;
+      if (global.isQuitting) return;
+      if (recordingsWatcherRetry) clearTimeout(recordingsWatcherRetry);
+      recordingsWatcherRetry = setTimeout(() => {
+        recordingsWatcherRetry = null;
+        startRecordingsWatcher();
+      }, 1000);
     });
   } catch (err) {
     console.warn('Failed to start recordings watcher:', err);
@@ -580,6 +595,10 @@ app.on('will-quit', () => {
     clearTimeout(recordingsWatcherTimer);
     recordingsWatcherTimer = null;
   }
+  if (recordingsWatcherRetry) {
+    clearTimeout(recordingsWatcherRetry);
+    recordingsWatcherRetry = null;
+  }
 });
 
 // Helper function to rename audio file with generated title
@@ -743,16 +762,33 @@ ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
 // transcription pipeline on the merged file. Originals are left untouched.
 // Resolves source folder names from per-recording metadata so the merged note's
 // `mergedFrom` frontmatter (and "Sources" body section) can reference them.
+//
+// Single-flight: a second click while a merge is running returns
+// `{ code: 'merge-busy' }` rather than racing against the in-flight one for
+// the shared geminiService and the merged-output filename slot.
+let mergeInFlight = false;
 ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: string }) => {
+  if (mergeInFlight) {
+    return { success: false, code: 'merge-busy', error: 'Another merge is already running. Wait for it to finish.' };
+  }
+  mergeInFlight = true;
+  const sendProgress = (percent: number, message: string) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('transcription-progress', { percent, message });
+    }
+  };
   try {
     const inputPaths = Array.isArray(opts?.paths) ? opts.paths : [];
     if (inputPaths.length < 2) {
       return { success: false, error: 'At least 2 recordings are required to merge' };
     }
 
-    // Containment: every input must resolve inside the recordings directory.
+    // Ensure recordings dir exists before realpath so symlink resolution can't
+    // throw on a fresh install. Containment: every input must then resolve
+    // inside that directory.
     const recordingsDir = path.join(app.getPath('userData'), 'recordings');
-    const resolvedRoot = await fs.promises.realpath(recordingsDir).catch(() => recordingsDir);
+    await fs.promises.mkdir(recordingsDir, { recursive: true });
+    const resolvedRoot = await fs.promises.realpath(recordingsDir);
     const resolvedInputs: string[] = [];
     for (const p of inputPaths) {
       if (typeof p !== 'string' || !p) {
@@ -786,45 +822,48 @@ ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: st
     const rawTitle = (opts.title && opts.title.trim()) || 'Merged Meeting';
     const safeTitle = sanitizeForPath(rawTitle) || 'Merged Meeting';
     // Always emit webm/opus -- matches MediaRecorder native output and survives
-    // the stream-copy fast path when all inputs are also webm.
+    // the stream-copy fast path when all inputs are also webm. UUID suffix
+    // avoids collisions when two merges with the same title start in the same
+    // second (formatTimestamp is second-granularity).
     const mergedExt = extensionForMimeType('audio/webm');
-    const mergedAudioPath = path.join(recordingsDir, `${safeTitle}_${formatTimestamp()}.${mergedExt}`);
+    const mergedAudioPath = path.join(
+      recordingsDir,
+      `${safeTitle}_${formatTimestamp()}_${randomUUID().slice(0, 8)}.${mergedExt}`,
+    );
 
-    if (mainWindow) {
-      mainWindow.webContents.send('transcription-progress', { percent: 5, message: 'Merging audio files...' });
-    }
-
-    await fs.promises.mkdir(recordingsDir, { recursive: true });
+    sendProgress(5, 'Merging audio files...');
 
     // Run the metadata lookup concurrently with the ffmpeg concat -- they're
     // independent and concat is the long pole, so the metadata reads are free.
-    // Recordings without a transcription contribute nothing to mergedFrom.
+    // Recordings without a transcription contribute nothing to mergedFrom; we
+    // also drop entries whose transcription folder no longer exists on disk
+    // so the merged note's Sources section never references stale ghosts.
     const [, metas] = await Promise.all([
       concatAudioFiles({ ffmpegPath, inputPaths: resolvedInputs, outputPath: mergedAudioPath }),
       Promise.all(resolvedInputs.map((p) => metadataService.getMetadata(p))),
     ]);
     const sourceFolders = metas
       .filter((m): m is NonNullable<typeof m> => !!m?.transcriptionPath)
+      .filter((m) => fs.existsSync(m.transcriptionPath!))
       .map((m) => path.basename(m.transcriptionPath!));
 
-    if (mainWindow) {
-      mainWindow.webContents.send('transcription-progress', { percent: 15, message: 'Transcribing merged recording...' });
-    }
+    sendProgress(15, 'Transcribing merged recording...');
 
+    // Compress the transcription progress into 15-95% to leave room for the
+    // concat phase at the start and the save phase at the end.
     const progressCallback = (percent: number, message: string) => {
-      if (mainWindow) {
-        // Compress the transcription progress into 15-95% to leave room for the
-        // concat phase at the start and the save phase at the end.
-        const adjusted = 15 + Math.round(percent * 0.8);
-        mainWindow.webContents.send('transcription-progress', { percent: adjusted, message });
-      }
+      sendProgress(15 + Math.round(percent * 0.8), message);
     };
 
     const summaryPrompt = configService.getSummaryPrompt();
     const result = await geminiService.transcribeAudio(mergedAudioPath, progressCallback, summaryPrompt);
 
-    const finalTitle = result.suggestedTitle || rawTitle;
-    let transcriptionPath: string | undefined;
+    // User-supplied title takes precedence; only fall back to Gemini's
+    // suggestion when the user didn't provide one. Gemini almost always
+    // returns a suggestedTitle, so the previous order silently overrode the
+    // user's --title flag / dialog input.
+    const finalTitle = (opts.title?.trim()) || result.suggestedTitle || rawTitle;
+    let transcriptionPath: string;
     try {
       transcriptionPath = saveTranscription({
         title: finalTitle,
@@ -835,25 +874,26 @@ ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: st
       });
     } catch (error) {
       console.error('Failed to save merged transcription files:', error);
+      const message = error instanceof Error ? error.message : String(error);
+      notificationService.notifyTranscriptionFailed('Merge failed: could not save the transcription.');
+      return { success: false, error: `Failed to save merged transcription: ${message}` };
     }
 
     try {
-      if (transcriptionPath) {
-        await metadataService.saveMetadata(mergedAudioPath, {
-          title: finalTitle,
-          suggestedTitle: result.suggestedTitle,
-          transcriptionPath,
-          customFields: result.customFields,
-          transcribedAt: new Date().toISOString(),
-        });
-      }
+      await metadataService.saveMetadata(mergedAudioPath, {
+        title: finalTitle,
+        suggestedTitle: result.suggestedTitle,
+        transcriptionPath,
+        customFields: result.customFields,
+        transcribedAt: new Date().toISOString(),
+      });
     } catch (error) {
+      // Metadata write is best-effort -- the transcription folder is the
+      // source of truth. Log and continue rather than fail the merge.
       console.error('Failed to save merged metadata:', error);
     }
 
-    if (mainWindow) {
-      mainWindow.webContents.send('transcription-progress', { percent: 100, message: 'Merge complete' });
-    }
+    sendProgress(100, 'Merge complete');
 
     notificationService.notifyTranscriptionComplete(finalTitle);
     return { success: true, data: result, mergedAudioPath, transcriptionPath, mergedFrom: sourceFolders };
@@ -864,6 +904,8 @@ ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: st
     const message = stderr ? `${baseMessage.split('\n')[0]} — ${stderr.trim()}` : baseMessage;
     notificationService.notifyTranscriptionFailed('Merge failed. Check the app for details.');
     return { success: false, error: message };
+  } finally {
+    mergeInFlight = false;
   }
 });
 

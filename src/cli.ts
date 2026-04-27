@@ -2,6 +2,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import { getDataPath } from './dataPath';
 import { ConfigService } from './configService';
 import { GeminiService } from './geminiService';
@@ -429,7 +430,9 @@ async function handleMerge(args: string[]): Promise<void> {
   const safeTitle = sanitizeForPath(title?.trim() || 'Merged Meeting') || 'Merged Meeting';
   const recordingsDir = path.join(dataPath, 'recordings');
   fs.mkdirSync(recordingsDir, { recursive: true });
-  const mergedAudioPath = path.join(recordingsDir, `${safeTitle}_${formatTimestamp()}.${extensionForMimeType('audio/webm')}`);
+  // UUID suffix avoids filename collision when two CLI merges with the same
+  // title start in the same second (formatTimestamp is second-granularity).
+  const mergedAudioPath = path.join(recordingsDir, `${safeTitle}_${formatTimestamp()}_${randomUUID().slice(0, 8)}.${extensionForMimeType('audio/webm')}`);
 
   process.stderr.write(`Merging ${sources.length} recordings...\n`);
   await concatAudioFiles({
@@ -452,7 +455,8 @@ async function handleMerge(args: string[]): Promise<void> {
     process.stderr.write(`  ${message}\n`);
   }, config.getSummaryPrompt());
 
-  const finalTitle = result.suggestedTitle || (title?.trim() || 'Merged Meeting');
+  // User-supplied --title wins; Gemini's suggestion is the fallback.
+  const finalTitle = (title?.trim()) || result.suggestedTitle || 'Merged Meeting';
   const folderPath = saveTranscription({
     title: finalTitle,
     result,

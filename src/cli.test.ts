@@ -71,6 +71,7 @@ describe('listener merge (CLI integration)', { skip: !ffmpegPath ? 'ffmpeg not i
 
     const env = {
       ...process.env,
+      NODE_ENV: 'test',
       LISTENER_DATA_PATH: dataPath,
       LISTENER_TEST_MODE: '1',
       GEMINI_API_KEY: 'test-mode-key',
@@ -87,7 +88,9 @@ describe('listener merge (CLI integration)', { skip: !ffmpegPath ? 'ffmpeg not i
     assert.ok(resultFolder.startsWith(dataPath), `result folder must live inside the test dataPath, got ${resultFolder}`);
 
     const summary = fs.readFileSync(path.join(resultFolder, 'summary.md'), 'utf-8');
-    assert.match(summary, /title: Stubbed Title/);
+    // User-provided --title beats the stub's suggestedTitle.
+    assert.match(summary, /^title: Combined Meeting$/m);
+    assert.match(summary, /suggestedTitle: Stubbed Title/);
     assert.match(summary, /## Sources/);
     assert.match(summary, new RegExp(folderNameA.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.match(summary, new RegExp(folderNameB.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));

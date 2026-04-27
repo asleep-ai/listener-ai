@@ -1,4 +1,5 @@
 import { execFile } from 'child_process';
+import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -41,7 +42,7 @@ export async function concatAudioFiles(opts: ConcatOptions): Promise<void> {
   const allSameExt = opts.inputPaths.every((p) => path.extname(p).toLowerCase() === firstExt);
 
   if (allSameExt) {
-    const manifestPath = path.join(os.tmpdir(), `listener-concat-${process.pid}-${Date.now()}.txt`);
+    const manifestPath = path.join(os.tmpdir(), `listener-concat-${process.pid}-${randomUUID()}.txt`);
     // Single quotes inside paths must be escaped as `'\''` for the concat
     // demuxer's manifest format.
     const manifest = opts.inputPaths
