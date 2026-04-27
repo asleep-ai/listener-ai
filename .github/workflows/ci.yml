@@ -30,3 +30,9 @@ jobs:
 
       - name: Test
         run: pnpm run test
+
+      - name: Package app (no signing) for asar verification
+        run: pnpm exec electron-builder --linux dir --publish never
+
+      - name: Verify packaged asar contents
+        run: node scripts/verify-asar-contents.js
