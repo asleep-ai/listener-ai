@@ -1,5 +1,5 @@
-import * as path from 'path';
 import * as fs from 'fs';
+import * as path from 'path';
 import { extensionForMimeType } from './audioFormats';
 
 // Lazy-load electron so unit tests (which inject recordingsDir) don't trigger a
@@ -62,7 +62,7 @@ export class SimpleAudioRecorder {
 
   async startRecording(
     meetingTitle: string,
-    mimeType: string
+    mimeType: string,
   ): Promise<{ success: boolean; filePath?: string; error?: string }> {
     if (this.recordingActive) {
       return { success: false, error: 'Recording already in progress' };
@@ -177,7 +177,12 @@ export class SimpleAudioRecorder {
     }
 
     console.log(`Recording saved: ${outputPath} (${bytes} bytes, ${durationMs ?? 'unknown'}ms)`);
-    const result: StopResult = { success: true, filePath: outputPath, durationMs, bytesWritten: bytes };
+    const result: StopResult = {
+      success: true,
+      filePath: outputPath,
+      durationMs,
+      bytesWritten: bytes,
+    };
     this.lastResult = result;
     return result;
   }

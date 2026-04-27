@@ -7,9 +7,9 @@
 // audiotee is ESM-only. We use a Function-constructed dynamic import so the
 // TypeScript CommonJS emitter does not downlevel it into require().
 
-import { app } from 'electron';
-import * as path from 'path';
 import * as fs from 'fs';
+import * as path from 'path';
+import { app } from 'electron';
 
 export type SystemAudioFormat = {
   sampleRate: number;
@@ -26,10 +26,9 @@ export const SYSTEM_AUDIO_FORMAT: SystemAudioFormat = {
 };
 
 // eslint-disable-next-line @typescript-eslint/no-implied-eval
-const importESM = new Function(
-  'specifier',
-  'return import(specifier)'
-) as <T = unknown>(specifier: string) => Promise<T>;
+const importESM = new Function('specifier', 'return import(specifier)') as <T = unknown>(
+  specifier: string,
+) => Promise<T>;
 
 type AudioTeeOptions = {
   sampleRate?: number;
@@ -52,7 +51,9 @@ type AudioTeeInstance = {
 let AudioTeeCtor: (new (opts?: AudioTeeOptions) => AudioTeeInstance) | null = null;
 async function loadAudioTee(): Promise<typeof AudioTeeCtor> {
   if (AudioTeeCtor) return AudioTeeCtor;
-  const mod = await importESM<{ AudioTee: new (opts?: AudioTeeOptions) => AudioTeeInstance }>('audiotee');
+  const mod = await importESM<{ AudioTee: new (opts?: AudioTeeOptions) => AudioTeeInstance }>(
+    'audiotee',
+  );
   AudioTeeCtor = mod.AudioTee;
   return AudioTeeCtor;
 }
@@ -69,7 +70,7 @@ function resolveBinaryPath(): string | null {
       'node_modules',
       'audiotee',
       'bin',
-      'audiotee'
+      'audiotee',
     );
   }
   // Dev: resolve relative to the worktree's node_modules (which is a symlink to

@@ -1,4 +1,4 @@
-import { Notification, BrowserWindow, app } from 'electron';
+import { type BrowserWindow, Notification, app } from 'electron';
 
 export class NotificationService {
   private mainWindow: BrowserWindow | null = null;
@@ -83,11 +83,17 @@ export class NotificationService {
   }
 
   notifyRecordingReminder(elapsedMinutes: number) {
-    this.notify('Recording In Progress', `Recording has been running for ${elapsedMinutes} minutes`);
+    this.notify(
+      'Recording In Progress',
+      `Recording has been running for ${elapsedMinutes} minutes`,
+    );
   }
 
   notifyRecordingAutoStopped(maxMinutes: number) {
-    this.notify('Recording Auto-Stopped', `Recording reached the ${maxMinutes}-minute limit and was automatically stopped`);
+    this.notify(
+      'Recording Auto-Stopped',
+      `Recording reached the ${maxMinutes}-minute limit and was automatically stopped`,
+    );
   }
 }
 

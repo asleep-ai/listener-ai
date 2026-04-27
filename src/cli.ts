@@ -1,58 +1,83 @@
 #!/usr/bin/env node
 
+import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { randomUUID } from 'crypto';
-import { getDataPath } from './dataPath';
-import { ConfigService } from './configService';
-import { GeminiService } from './geminiService';
-import { saveTranscription, listTranscriptions, parseFrontmatter, getTranscriptionsDir, readTranscription, sanitizeForPath, formatTimestamp } from './outputService';
-import { searchTranscriptions, resolveFields, ALL_FIELDS, type SearchField } from './searchService';
-import { AgentService, type AgentScope, type ConfigProposal } from './agentService';
-import { FFmpegManager } from './services/ffmpegManager';
-import { concatAudioFiles } from './services/audioConcatService';
+import { type AgentScope, AgentService, type ConfigProposal } from './agentService';
 import { extensionForMimeType } from './audioFormats';
+import { ConfigService } from './configService';
+import { getDataPath } from './dataPath';
+import { GeminiService } from './geminiService';
+import {
+  formatTimestamp,
+  getTranscriptionsDir,
+  listTranscriptions,
+  parseFrontmatter,
+  readTranscription,
+  sanitizeForPath,
+  saveTranscription,
+} from './outputService';
+import { ALL_FIELDS, type SearchField, resolveFields, searchTranscriptions } from './searchService';
+import { concatAudioFiles } from './services/audioConcatService';
+import { FFmpegManager } from './services/ffmpegManager';
 
 const SUPPORTED_EXTENSIONS = new Set([
-  '.mp3', '.m4a', '.wav', '.ogg', '.flac', '.aac', '.wma', '.opus', '.webm',
+  '.mp3',
+  '.m4a',
+  '.wav',
+  '.ogg',
+  '.flac',
+  '.aac',
+  '.wma',
+  '.opus',
+  '.webm',
 ]);
 
 function usage(): never {
   process.stderr.write(
     'Usage: listener <file> [--output <dir>]    Transcribe an audio file\n' +
-    '       listener list [--limit <n>]         List past transcriptions\n' +
-    '       listener show <ref>                 Print summary to stdout\n' +
-    '       listener export <ref> [<path>] [--json] [--transcript]\n' +
-    '                                           Export transcription\n' +
-    '       listener search <query> [--limit <n>] [--transcript] [--field <name>]\n' +
-    '                                           Search past transcriptions\n' +
-    '       listener merge <ref1> <ref2> [<ref3>...] [--title <t>]\n' +
-    '                                           Concat the source audio of two or more notes,\n' +
-    '                                           re-transcribe end-to-end, and save as a new note\n' +
-    '       listener ask <question> [--ref <ref>]\n' +
-    '                                           Ask the AI agent about saved meetings or settings\n' +
-    '       listener config list|get|set|path   Manage configuration\n' +
-    '\n' +
-    '<ref> is a number from `listener list` or a folder name.\n' +
-    '\n' +
-    'Options:\n' +
-    '  --output <dir>   Parent directory for the output folder\n' +
-    '  --limit <n>      Max results (0 = all, default: 20)\n' +
-    '  --json           Export as JSON instead of markdown\n' +
-    '  --transcript     Include transcript body (export: append; search: widen scope)\n' +
-    '  --field <name>   Restrict search to one of: title, summary, keyPoints, actionItems, transcript, all\n' +
-    '  --help           Show this help message\n'
+      '       listener list [--limit <n>]         List past transcriptions\n' +
+      '       listener show <ref>                 Print summary to stdout\n' +
+      '       listener export <ref> [<path>] [--json] [--transcript]\n' +
+      '                                           Export transcription\n' +
+      '       listener search <query> [--limit <n>] [--transcript] [--field <name>]\n' +
+      '                                           Search past transcriptions\n' +
+      '       listener merge <ref1> <ref2> [<ref3>...] [--title <t>]\n' +
+      '                                           Concat the source audio of two or more notes,\n' +
+      '                                           re-transcribe end-to-end, and save as a new note\n' +
+      '       listener ask <question> [--ref <ref>]\n' +
+      '                                           Ask the AI agent about saved meetings or settings\n' +
+      '       listener config list|get|set|path   Manage configuration\n' +
+      '\n' +
+      '<ref> is a number from `listener list` or a folder name.\n' +
+      '\n' +
+      'Options:\n' +
+      '  --output <dir>   Parent directory for the output folder\n' +
+      '  --limit <n>      Max results (0 = all, default: 20)\n' +
+      '  --json           Export as JSON instead of markdown\n' +
+      '  --transcript     Include transcript body (export: append; search: widen scope)\n' +
+      '  --field <name>   Restrict search to one of: title, summary, keyPoints, actionItems, transcript, all\n' +
+      '  --help           Show this help message\n',
   );
   process.exit(1);
 }
 
-const KNOWN_CONFIG_KEYS = ['geminiApiKey', 'geminiModel', 'geminiFlashModel', 'notionApiKey', 'notionDatabaseId', 'autoMode', 'globalShortcut', 'minRecordingSeconds'] as const;
-type ConfigKey = typeof KNOWN_CONFIG_KEYS[number];
+const KNOWN_CONFIG_KEYS = [
+  'geminiApiKey',
+  'geminiModel',
+  'geminiFlashModel',
+  'notionApiKey',
+  'notionDatabaseId',
+  'autoMode',
+  'globalShortcut',
+  'minRecordingSeconds',
+] as const;
+type ConfigKey = (typeof KNOWN_CONFIG_KEYS)[number];
 
 function maskValue(key: string, value: string | undefined): string {
   if (value == null || value === '') return '(not set)';
   if (key.toLowerCase().includes('key')) {
-    return value.length > 4 ? '****' + value.slice(-4) : '****';
+    return value.length > 4 ? `****${value.slice(-4)}` : '****';
   }
   return value;
 }
@@ -102,7 +127,9 @@ function handleConfig(subArgs: string[]): void {
     const key = subArgs[1] as ConfigKey;
     const value = subArgs[2];
     if (!key || value == null) {
-      process.stderr.write('Error: Missing key or value. Usage: listener config set <key> <value>\n');
+      process.stderr.write(
+        'Error: Missing key or value. Usage: listener config set <key> <value>\n',
+      );
       process.exit(1);
     }
     if (!KNOWN_CONFIG_KEYS.includes(key)) {
@@ -125,9 +152,11 @@ function handleConfig(subArgs: string[]): void {
       },
       globalShortcut: (v) => config.setGlobalShortcut(v),
       minRecordingSeconds: (v) => {
-        const n = parseInt(v, 10);
-        if (isNaN(n) || n < 0 || String(n) !== v.trim()) {
-          process.stderr.write('Error: minRecordingSeconds must be a non-negative integer (0 disables)\n');
+        const n = Number.parseInt(v, 10);
+        if (Number.isNaN(n) || n < 0 || String(n) !== v.trim()) {
+          process.stderr.write(
+            'Error: minRecordingSeconds must be a non-negative integer (0 disables)\n',
+          );
           process.exit(1);
         }
         config.setMinRecordingSeconds(n);
@@ -144,14 +173,16 @@ function handleConfig(subArgs: string[]): void {
 
 async function resolveRef(ref: string, dataPath: string): Promise<string> {
   if (/^\d+$/.test(ref)) {
-    const index = parseInt(ref, 10);
+    const index = Number.parseInt(ref, 10);
     const entries = await listTranscriptions(dataPath, 0);
     if (entries.length === 0) {
       process.stderr.write('Error: No transcriptions found.\n');
       process.exit(1);
     }
     if (index < 1 || index > entries.length) {
-      process.stderr.write(`Error: Invalid index ${index}. Run 'listener list' to see available entries (1-${entries.length}).\n`);
+      process.stderr.write(
+        `Error: Invalid index ${index}. Run 'listener list' to see available entries (1-${entries.length}).\n`,
+      );
       process.exit(1);
     }
     return entries[index - 1].folderPath;
@@ -169,8 +200,8 @@ async function handleList(args: string[]): Promise<void> {
   let limit: number | undefined;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--limit' && i + 1 < args.length) {
-      limit = parseInt(args[++i], 10);
-      if (isNaN(limit) || limit < 0) {
+      limit = Number.parseInt(args[++i], 10);
+      if (Number.isNaN(limit) || limit < 0) {
         process.stderr.write('Error: --limit must be a non-negative integer\n');
         process.exit(1);
       }
@@ -186,7 +217,7 @@ async function handleList(args: string[]): Promise<void> {
     const e = entries[i];
     const num = String(i + 1).padStart(2, ' ');
     const date = e.transcribedAt ? e.transcribedAt.slice(0, 10) : '          ';
-    const title = e.title.length > 60 ? e.title.slice(0, 57) + '...' : e.title;
+    const title = e.title.length > 60 ? `${e.title.slice(0, 57)}...` : e.title;
     process.stdout.write(`${num}  ${date}  ${title}\n`);
   }
 }
@@ -216,18 +247,31 @@ async function handleExport(args: string[]): Promise<void> {
   let includeTranscript = false;
 
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--json') { json = true; continue; }
-    if (args[i] === '--transcript') { includeTranscript = true; continue; }
+    if (args[i] === '--json') {
+      json = true;
+      continue;
+    }
+    if (args[i] === '--transcript') {
+      includeTranscript = true;
+      continue;
+    }
     if (args[i].startsWith('-')) {
       process.stderr.write(`Error: Unknown option: ${args[i]}\n`);
       process.exit(1);
     }
-    if (!ref) { ref = args[i]; continue; }
-    if (!targetPath) { targetPath = args[i]; continue; }
+    if (!ref) {
+      ref = args[i];
+      continue;
+    }
+    if (!targetPath) {
+      targetPath = args[i];
+    }
   }
 
   if (!ref) {
-    process.stderr.write('Error: Missing ref. Usage: listener export <ref> [<path>] [--json] [--transcript]\n');
+    process.stderr.write(
+      'Error: Missing ref. Usage: listener export <ref> [<path>] [--json] [--transcript]\n',
+    );
     process.exit(1);
   }
 
@@ -242,7 +286,9 @@ async function handleExport(args: string[]): Promise<void> {
 
   // Copy files to target path
   if (targetPath && (json || includeTranscript)) {
-    process.stderr.write('Error: --json and --transcript are only supported when writing to stdout (omit <path>)\n');
+    process.stderr.write(
+      'Error: --json and --transcript are only supported when writing to stdout (omit <path>)\n',
+    );
     process.exit(1);
   }
   if (targetPath) {
@@ -265,10 +311,13 @@ async function handleExport(args: string[]): Promise<void> {
     let customFields: Record<string, unknown> = {};
     if (meta.customFields) {
       try {
-        customFields = typeof meta.customFields === 'string'
-          ? JSON.parse(meta.customFields as string)
-          : meta.customFields as Record<string, unknown>;
-      } catch { /* ignore */ }
+        customFields =
+          typeof meta.customFields === 'string'
+            ? JSON.parse(meta.customFields as string)
+            : (meta.customFields as Record<string, unknown>);
+      } catch {
+        /* ignore */
+      }
     }
     const obj: Record<string, unknown> = {
       title: meta.title || '',
@@ -281,14 +330,14 @@ async function handleExport(args: string[]): Promise<void> {
     if (includeTranscript) {
       obj.transcript = meta.transcript || '';
     }
-    process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
+    process.stdout.write(`${JSON.stringify(obj, null, 2)}\n`);
   } else {
     process.stdout.write(body);
     if (includeTranscript) {
       const transcriptPath = path.join(folderPath, 'transcript.md');
       if (fs.existsSync(transcriptPath)) {
         const transcriptContent = fs.readFileSync(transcriptPath, 'utf-8');
-        process.stdout.write('\n' + transcriptContent);
+        process.stdout.write(`\n${transcriptContent}`);
       }
     }
   }
@@ -304,15 +353,18 @@ async function handleSearch(args: string[]): Promise<void> {
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--limit' && i + 1 < args.length) {
-      const n = parseInt(args[++i], 10);
-      if (isNaN(n) || n < 0) {
+      const n = Number.parseInt(args[++i], 10);
+      if (Number.isNaN(n) || n < 0) {
         process.stderr.write('Error: --limit must be a non-negative integer\n');
         process.exit(1);
       }
       limit = n;
       continue;
     }
-    if (a === '--transcript') { includeTranscript = true; continue; }
+    if (a === '--transcript') {
+      includeTranscript = true;
+      continue;
+    }
     if (a === '--field' && i + 1 < args.length) {
       const v = args[++i];
       if (!(VALID_FIELDS as readonly string[]).includes(v)) {
@@ -326,13 +378,18 @@ async function handleSearch(args: string[]): Promise<void> {
       process.stderr.write(`Error: Unknown option: ${a}\n`);
       process.exit(1);
     }
-    if (!query) { query = a; continue; }
+    if (!query) {
+      query = a;
+      continue;
+    }
     process.stderr.write(`Error: Unexpected argument: ${a} (quote multi-word queries)\n`);
     process.exit(1);
   }
 
   if (!query || query.trim() === '') {
-    process.stderr.write('Error: Missing query. Usage: listener search <query> [--limit <n>] [--transcript] [--field <name>]\n');
+    process.stderr.write(
+      'Error: Missing query. Usage: listener search <query> [--limit <n>] [--transcript] [--field <name>]\n',
+    );
     process.exit(1);
   }
 
@@ -347,7 +404,7 @@ async function handleSearch(args: string[]): Promise<void> {
 
   for (const hit of hits) {
     const date = hit.entry.transcribedAt ? hit.entry.transcribedAt.slice(0, 10) : '          ';
-    const title = hit.data.title.length > 60 ? hit.data.title.slice(0, 57) + '...' : hit.data.title;
+    const title = hit.data.title.length > 60 ? `${hit.data.title.slice(0, 57)}...` : hit.data.title;
     process.stdout.write(`${date}  ${title}\n`);
     process.stdout.write(`  ref:     ${hit.entry.folderName}\n`);
     process.stdout.write(`  matches: ${hit.matchedFields.join(', ')}\n`);
@@ -391,7 +448,9 @@ async function handleMerge(args: string[]): Promise<void> {
   }
 
   if (refs.length < 2) {
-    process.stderr.write('Error: merge requires at least 2 refs. Usage: listener merge <ref1> <ref2> [<ref3>...] [--title <t>]\n');
+    process.stderr.write(
+      'Error: merge requires at least 2 refs. Usage: listener merge <ref1> <ref2> [<ref3>...] [--title <t>]\n',
+    );
     process.exit(1);
   }
 
@@ -399,7 +458,9 @@ async function handleMerge(args: string[]): Promise<void> {
   const config = new ConfigService(dataPath);
   const apiKey = config.getGeminiApiKey();
   if (!apiKey) {
-    process.stderr.write('Error: Gemini API key not found. Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n');
+    process.stderr.write(
+      'Error: Gemini API key not found. Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n',
+    );
     process.exit(1);
   }
 
@@ -410,7 +471,9 @@ async function handleMerge(args: string[]): Promise<void> {
     const folderPath = await resolveRef(ref, dataPath);
     const data = await readTranscription(folderPath);
     if (!data || !data.audioFilePath) {
-      process.stderr.write(`Error: ${ref} has no audioFilePath in its frontmatter; cannot include it in a merge.\n`);
+      process.stderr.write(
+        `Error: ${ref} has no audioFilePath in its frontmatter; cannot include it in a merge.\n`,
+      );
       process.exit(1);
     }
     if (!fs.existsSync(data.audioFilePath)) {
@@ -423,7 +486,9 @@ async function handleMerge(args: string[]): Promise<void> {
   const ffmpegManager = new FFmpegManager(dataPath);
   const ffmpegPath = await ffmpegManager.ensureFFmpeg();
   if (!ffmpegPath) {
-    process.stderr.write('Error: ffmpeg not found. Install ffmpeg or run a transcription in the GUI to download it.\n');
+    process.stderr.write(
+      'Error: ffmpeg not found. Install ffmpeg or run a transcription in the GUI to download it.\n',
+    );
     process.exit(1);
   }
 
@@ -432,7 +497,10 @@ async function handleMerge(args: string[]): Promise<void> {
   fs.mkdirSync(recordingsDir, { recursive: true });
   // UUID suffix avoids filename collision when two CLI merges with the same
   // title start in the same second (formatTimestamp is second-granularity).
-  const mergedAudioPath = path.join(recordingsDir, `${safeTitle}_${formatTimestamp()}_${randomUUID().slice(0, 8)}.${extensionForMimeType('audio/webm')}`);
+  const mergedAudioPath = path.join(
+    recordingsDir,
+    `${safeTitle}_${formatTimestamp()}_${randomUUID().slice(0, 8)}.${extensionForMimeType('audio/webm')}`,
+  );
 
   process.stderr.write(`Merging ${sources.length} recordings...\n`);
   await concatAudioFiles({
@@ -451,12 +519,16 @@ async function handleMerge(args: string[]): Promise<void> {
   });
 
   process.stderr.write('Transcribing merged recording...\n');
-  const result = await gemini.transcribeAudio(mergedAudioPath, (_percent, message) => {
-    process.stderr.write(`  ${message}\n`);
-  }, config.getSummaryPrompt());
+  const result = await gemini.transcribeAudio(
+    mergedAudioPath,
+    (_percent, message) => {
+      process.stderr.write(`  ${message}\n`);
+    },
+    config.getSummaryPrompt(),
+  );
 
   // User-supplied --title wins; Gemini's suggestion is the fallback.
-  const finalTitle = (title?.trim()) || result.suggestedTitle || 'Merged Meeting';
+  const finalTitle = title?.trim() || result.suggestedTitle || 'Merged Meeting';
   const folderPath = saveTranscription({
     title: finalTitle,
     result,
@@ -483,7 +555,10 @@ async function handleAsk(args: string[]): Promise<void> {
       process.stderr.write(`Error: Unknown option: ${a}\n`);
       process.exit(1);
     }
-    if (!question) { question = a; continue; }
+    if (!question) {
+      question = a;
+      continue;
+    }
     process.stderr.write(`Error: Unexpected argument: ${a} (quote multi-word questions)\n`);
     process.exit(1);
   }
@@ -497,7 +572,9 @@ async function handleAsk(args: string[]): Promise<void> {
   const config = new ConfigService(dataPath);
   const apiKey = config.getGeminiApiKey();
   if (!apiKey) {
-    process.stderr.write('Error: Gemini API key not found. Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n');
+    process.stderr.write(
+      'Error: Gemini API key not found. Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n',
+    );
     process.exit(1);
   }
 
@@ -519,7 +596,9 @@ async function handleAsk(args: string[]): Promise<void> {
   if (result.appliedActions.length > 0) {
     process.stderr.write('\nApplied:\n');
     for (const action of result.appliedActions) {
-      process.stderr.write(`  ${action.key}: ${JSON.stringify(action.previousValue ?? null)} -> ${JSON.stringify(action.value)}\n`);
+      process.stderr.write(
+        `  ${action.key}: ${JSON.stringify(action.previousValue ?? null)} -> ${JSON.stringify(action.value)}\n`,
+      );
     }
   }
 }
@@ -614,7 +693,7 @@ async function main(): Promise<void> {
   if (!apiKey) {
     process.stderr.write(
       'Error: Gemini API key not found.\n' +
-      'Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n'
+        'Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n',
     );
     process.exit(1);
   }
@@ -643,7 +722,7 @@ async function main(): Promise<void> {
     dataPath,
   });
 
-  process.stderr.write(`Done.\n`);
+  process.stderr.write('Done.\n');
 
   // Print folder path to stdout for piping
   process.stdout.write(`${folderPath}\n`);

@@ -1,28 +1,50 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, Menu, globalShortcut, systemPreferences, session, desktopCapturer } from 'electron';
 import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { randomUUID } from 'crypto';
-import * as path from 'path';
 import * as fs from 'fs';
-import { SimpleAudioRecorder } from './simpleAudioRecorder';
-import { GeminiService } from './geminiService';
-import { AppConfig, ConfigService } from './configService';
-import { NotionService } from './notionService';
-import { FFmpegManager } from './services/ffmpegManager';
-import { MenuBarManager } from './menuBarManager';
-import { metadataService } from './services/metadataService';
-import { FileHandlerService } from './services/fileHandlerService';
-import { MeetingDetectorService } from './meetingDetectorService';
+import * as path from 'path';
+import { promisify } from 'util';
+import {
+  BrowserWindow,
+  Menu,
+  app,
+  desktopCapturer,
+  dialog,
+  globalShortcut,
+  ipcMain,
+  session,
+  shell,
+  systemPreferences,
+} from 'electron';
+import {
+  type AgentChatMessage,
+  type AgentRunResult,
+  type AgentScope,
+  AgentService,
+  type ConfigProposal,
+} from './agentService';
+import { extensionForMimeType, isSupportedAudioExtension } from './audioFormats';
+import { type AppConfig, ConfigService } from './configService';
 import { DisplayDetectorService } from './displayDetectorService';
-import { autoUpdaterService } from './services/autoUpdaterService';
-import { notificationService } from './services/notificationService';
-import { fetchReleaseNotes, fetchAllReleases } from './services/releaseNotesService';
-import { saveTranscription, readTranscription, sanitizeForPath, formatTimestamp } from './outputService';
+import { GeminiService } from './geminiService';
+import { MeetingDetectorService } from './meetingDetectorService';
+import { MenuBarManager } from './menuBarManager';
+import { NotionService } from './notionService';
+import {
+  formatTimestamp,
+  readTranscription,
+  sanitizeForPath,
+  saveTranscription,
+} from './outputService';
+import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
 import { concatAudioFiles } from './services/audioConcatService';
-import { searchTranscriptions, ALL_FIELDS, type SearchField } from './searchService';
-import { AgentService, type AgentChatMessage, type AgentRunResult, type AgentScope, type ConfigProposal } from './agentService';
-import { isSupportedAudioExtension, extensionForMimeType } from './audioFormats';
-import { SystemAudioService, SYSTEM_AUDIO_FORMAT } from './services/systemAudioService';
+import { autoUpdaterService } from './services/autoUpdaterService';
+import { FFmpegManager } from './services/ffmpegManager';
+import { FileHandlerService } from './services/fileHandlerService';
+import { metadataService } from './services/metadataService';
+import { notificationService } from './services/notificationService';
+import { fetchAllReleases, fetchReleaseNotes } from './services/releaseNotesService';
+import { SYSTEM_AUDIO_FORMAT, SystemAudioService } from './services/systemAudioService';
+import { SimpleAudioRecorder } from './simpleAudioRecorder';
 
 // Enable macOS system-audio loopback capture so getDisplayMedia({audio: 'loopback'})
 // can pull Zoom/Meet participant audio alongside the mic.
@@ -33,7 +55,7 @@ import { SystemAudioService, SYSTEM_AUDIO_FORMAT } from './services/systemAudioS
 if (process.platform === 'darwin') {
   app.commandLine.appendSwitch(
     'enable-features',
-    'MacSckSystemAudioLoopbackCapture,MacCatapSystemAudioLoopbackCapture'
+    'MacSckSystemAudioLoopbackCapture,MacCatapSystemAudioLoopbackCapture',
   );
 }
 
@@ -78,7 +100,11 @@ let confirmIdCounter = 0;
 
 function rejectAllPendingConfirms(): void {
   for (const resolver of pendingConfirms.values()) {
-    try { resolver(false); } catch { /* ignore */ }
+    try {
+      resolver(false);
+    } catch {
+      /* ignore */
+    }
   }
   pendingConfirms.clear();
 }
@@ -159,8 +185,8 @@ function handleGlobalShortcutTrigger() {
 }
 
 function compareSemver(a: string, b: string): number {
-  const pa = a.split('.').map((n) => parseInt(n, 10));
-  const pb = b.split('.').map((n) => parseInt(n, 10));
+  const pa = a.split('.').map((n) => Number.parseInt(n, 10));
+  const pb = b.split('.').map((n) => Number.parseInt(n, 10));
   for (let i = 0; i < 3; i++) {
     const x = Number.isFinite(pa[i]) ? pa[i] : 0;
     const y = Number.isFinite(pb[i]) ? pb[i] : 0;
@@ -268,22 +294,25 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
+      preload: path.join(__dirname, 'preload.js'),
     },
     title: 'Listener.AI',
-    icon: path.join(__dirname, '../assets/icon.png')
+    icon: path.join(__dirname, '../assets/icon.png'),
   });
 
-
-  // Load the index.html file
-  const indexPath = path.join(__dirname, '../index.html');
+  // Load the Vite-built renderer entry. After tsc compilation __dirname is
+  // `dist/`, so dist/renderer/index.html resolves correctly.
+  const indexPath = path.join(__dirname, 'renderer', 'index.html');
   console.log('Loading index.html from:', indexPath);
   console.log('App packaged:', app.isPackaged);
   console.log('__dirname:', __dirname);
 
-  mainWindow.loadFile(indexPath).catch(err => {
+  mainWindow.loadFile(indexPath).catch((err) => {
     console.error('Failed to load index.html:', err);
-    dialog.showErrorBox('Loading Error', `Failed to load application UI: ${err.message}\n\nPath: ${indexPath}`);
+    dialog.showErrorBox(
+      'Loading Error',
+      `Failed to load application UI: ${err.message}\n\nPath: ${indexPath}`,
+    );
   });
 
   // Open DevTools in development or if there's an error
@@ -323,20 +352,25 @@ function createWindow() {
     // Close the recording file handle so the partial file is flushed and left on disk
     // instead of corrupted or locked open. User keeps whatever audio was streamed so far.
     if (audioRecorder.isRecording()) {
-      console.warn('Renderer process gone during recording; finalizing partial file:', details.reason);
+      console.warn(
+        'Renderer process gone during recording; finalizing partial file:',
+        details.reason,
+      );
       finalizeRecordingSession();
-      trackFinalize((async () => {
-        try {
-          const r = await audioRecorder.stopRecording();
-          if (r.success && r.filePath) {
-            fireStoppedNotificationOnce();
-            console.log(`Partial recording saved: ${r.filePath}`);
-            await remuxRecordingHeader(r.filePath);
+      trackFinalize(
+        (async () => {
+          try {
+            const r = await audioRecorder.stopRecording();
+            if (r.success && r.filePath) {
+              fireStoppedNotificationOnce();
+              console.log(`Partial recording saved: ${r.filePath}`);
+              await remuxRecordingHeader(r.filePath);
+            }
+          } catch (err) {
+            console.error('Failed to finalize partial recording:', err);
           }
-        } catch (err) {
-          console.error('Failed to finalize partial recording:', err);
-        }
-      })());
+        })(),
+      );
     }
   });
 }
@@ -356,8 +390,8 @@ app.whenReady().then(() => {
         { role: 'pasteAndMatchStyle' },
         { role: 'delete' },
         { type: 'separator' },
-        { role: 'selectAll' }
-      ]
+        { role: 'selectAll' },
+      ],
     },
     {
       label: 'View',
@@ -369,12 +403,12 @@ app.whenReady().then(() => {
             if (mainWindow) {
               mainWindow.webContents.toggleDevTools();
             }
-          }
+          },
         },
         { type: 'separator' },
         { role: 'reload' },
-        { role: 'forceReload' }
-      ]
+        { role: 'forceReload' },
+      ],
     },
     {
       label: 'Window',
@@ -382,9 +416,9 @@ app.whenReady().then(() => {
         { role: 'minimize' },
         {
           role: 'close',
-          accelerator: 'CmdOrCtrl+W'
-        }
-      ]
+          accelerator: 'CmdOrCtrl+W',
+        },
+      ],
     },
     {
       label: 'Help',
@@ -397,16 +431,16 @@ app.whenReady().then(() => {
               if (!mainWindow.isVisible()) mainWindow.show();
               mainWindow.webContents.send('open-release-history');
             }
-          }
+          },
         },
         {
           label: 'Check for Updates...',
           click: () => {
             autoUpdaterService.checkForUpdatesManually();
-          }
-        }
-      ]
-    }
+          },
+        },
+      ],
+    },
   ];
 
   if (process.platform === 'darwin') {
@@ -419,7 +453,7 @@ app.whenReady().then(() => {
           label: 'Check for Updates...',
           click: () => {
             autoUpdaterService.checkForUpdatesManually();
-          }
+          },
         },
         { type: 'separator' } as any,
         {
@@ -428,9 +462,9 @@ app.whenReady().then(() => {
           click: () => {
             global.isQuitting = true;
             app.quit();
-          }
-        }
-      ]
+          },
+        },
+      ],
     });
   }
 
@@ -443,10 +477,19 @@ app.whenReady().then(() => {
   // where audio: 'loopback' is genuinely supported (Windows, partial on Linux).
   if (process.platform !== 'darwin') {
     session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
-      const reject = () => { try { callback({}); } catch { /* intentional */ } };
+      const reject = () => {
+        try {
+          callback({});
+        } catch {
+          /* intentional */
+        }
+      };
       try {
         const sources = await desktopCapturer.getSources({ types: ['screen'] });
-        if (sources.length === 0) { reject(); return; }
+        if (sources.length === 0) {
+          reject();
+          return;
+        }
         callback({ video: sources[0], audio: 'loopback' });
       } catch (err) {
         console.warn('display-media handler: getSources failed:', err);
@@ -610,12 +653,14 @@ async function renameAudioFile(oldPath: string, suggestedTitle: string): Promise
 
     // Extract timestamp from old filename (format: Untitled_Meeting_2025-07-10T01-34-07-679Z)
     const timestampMatch = oldFileName.match(/_(\d{4}-\d{2}-\d{2}T[\d-]+Z)$/);
-    const timestamp = timestampMatch ? timestampMatch[1] : new Date().toISOString().replace(/[:.]/g, '-');
+    const timestamp = timestampMatch
+      ? timestampMatch[1]
+      : new Date().toISOString().replace(/[:.]/g, '-');
 
     // Sanitize the suggested title
     const sanitizedTitle = suggestedTitle
-      .replace(/[<>:"/\\|?*]/g, '_')  // Replace problematic characters
-      .replace(/\s+/g, '_')           // Replace spaces with underscores
+      .replace(/[<>:"/\\|?*]/g, '_') // Replace problematic characters
+      .replace(/\s+/g, '_') // Replace spaces with underscores
       .trim();
 
     const newFileName = `${sanitizedTitle}_${timestamp}${ext}`;
@@ -672,7 +717,7 @@ ipcMain.handle('download-ffmpeg', async () => {
   } catch (error) {
     return {
       success: false,
-      error: error instanceof Error ? error.message : String(error)
+      error: error instanceof Error ? error.message : String(error),
     };
   }
 });
@@ -709,7 +754,11 @@ ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
 
     const ffmpegPath = await ffmpegManager.ensureFFmpeg();
     if (!ffmpegPath) {
-      return { success: false, code: 'ffmpeg-missing', error: 'FFmpeg is required for M4A export.' };
+      return {
+        success: false,
+        code: 'ffmpeg-missing',
+        error: 'FFmpeg is required for M4A export.',
+      };
     }
 
     const baseName = path.basename(resolvedSrc, path.extname(resolvedSrc));
@@ -733,11 +782,20 @@ ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
       // Force -f ipod (M4A muxer) because the `.partial` extension defeats
       // ffmpeg's format-by-extension detection otherwise.
       await execFileAsync(ffmpegPath, [
-        '-y', '-loglevel', 'error',
-        '-i', resolvedSrc,
-        '-vn', '-c:a', 'aac', '-b:a', '128k',
-        '-movflags', '+faststart',
-        '-f', 'ipod',
+        '-y',
+        '-loglevel',
+        'error',
+        '-i',
+        resolvedSrc,
+        '-vn',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-movflags',
+        '+faststart',
+        '-f',
+        'ipod',
         tmpPath,
       ]);
       await fs.promises.rename(tmpPath, destPath);
@@ -769,7 +827,11 @@ ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
 let mergeInFlight = false;
 ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: string }) => {
   if (mergeInFlight) {
-    return { success: false, code: 'merge-busy', error: 'Another merge is already running. Wait for it to finish.' };
+    return {
+      success: false,
+      code: 'merge-busy',
+      error: 'Another merge is already running. Wait for it to finish.',
+    };
   }
   mergeInFlight = true;
   const sendProgress = (percent: number, message: string) => {
@@ -816,10 +878,14 @@ ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: st
 
     const ffmpegPath = await ffmpegManager.ensureFFmpeg();
     if (!ffmpegPath) {
-      return { success: false, code: 'ffmpeg-missing', error: 'FFmpeg is required to merge recordings.' };
+      return {
+        success: false,
+        code: 'ffmpeg-missing',
+        error: 'FFmpeg is required to merge recordings.',
+      };
     }
 
-    const rawTitle = (opts.title && opts.title.trim()) || 'Merged Meeting';
+    const rawTitle = opts.title?.trim() || 'Merged Meeting';
     const safeTitle = sanitizeForPath(rawTitle) || 'Merged Meeting';
     // Always emit webm/opus -- matches MediaRecorder native output and survives
     // the stream-copy fast path when all inputs are also webm. UUID suffix
@@ -856,13 +922,17 @@ ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: st
     };
 
     const summaryPrompt = configService.getSummaryPrompt();
-    const result = await geminiService.transcribeAudio(mergedAudioPath, progressCallback, summaryPrompt);
+    const result = await geminiService.transcribeAudio(
+      mergedAudioPath,
+      progressCallback,
+      summaryPrompt,
+    );
 
     // User-supplied title takes precedence; only fall back to Gemini's
     // suggestion when the user didn't provide one. Gemini almost always
     // returns a suggestedTitle, so the previous order silently overrode the
     // user's --title flag / dialog input.
-    const finalTitle = (opts.title?.trim()) || result.suggestedTitle || rawTitle;
+    const finalTitle = opts.title?.trim() || result.suggestedTitle || rawTitle;
     let transcriptionPath: string;
     try {
       transcriptionPath = saveTranscription({
@@ -875,7 +945,9 @@ ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: st
     } catch (error) {
       console.error('Failed to save merged transcription files:', error);
       const message = error instanceof Error ? error.message : String(error);
-      notificationService.notifyTranscriptionFailed('Merge failed: could not save the transcription.');
+      notificationService.notifyTranscriptionFailed(
+        'Merge failed: could not save the transcription.',
+      );
       return { success: false, error: `Failed to save merged transcription: ${message}` };
     }
 
@@ -896,7 +968,13 @@ ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: st
     sendProgress(100, 'Merge complete');
 
     notificationService.notifyTranscriptionComplete(finalTitle);
-    return { success: true, data: result, mergedAudioPath, transcriptionPath, mergedFrom: sourceFolders };
+    return {
+      success: true,
+      data: result,
+      mergedAudioPath,
+      transcriptionPath,
+      mergedFrom: sourceFolders,
+    };
   } catch (error) {
     console.error('Error merging recordings:', error);
     const stderr = (error as { stderr?: string } | null)?.stderr;
@@ -925,35 +1003,47 @@ ipcMain.handle('start-recording', async (_, payload: { title: string; mimeType: 
 
     const maxMinutes = configService.getMaxRecordingMinutes();
     if (maxMinutes > 0) {
-      recordingMaxTimer = setTimeout(() => {
-        if (!audioRecorder.isRecording()) return;
-        notificationService.notifyRecordingAutoStopped(maxMinutes);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('recording-auto-stopped', { reason: 'maxDuration', maxMinutes });
-        }
-        // Grace window: if the renderer is hung and never calls stop-recording,
-        // force-finalize so main state unblocks and the partial file is saved.
-        recordingAutoStopAbortTimer = setTimeout(() => {
-          recordingAutoStopAbortTimer = null;
+      recordingMaxTimer = setTimeout(
+        () => {
           if (!audioRecorder.isRecording()) return;
-          console.warn('Renderer did not stop after auto-stop signal; finalizing partial file');
-          finalizeRecordingSession();
-          audioRecorder.stopRecording().then((r) => {
-            if (r.success) fireStoppedNotificationOnce();
-          }).catch((err) => console.error('Force-stop failed:', err));
-        }, 10_000);
-      }, maxMinutes * 60 * 1000);
+          notificationService.notifyRecordingAutoStopped(maxMinutes);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('recording-auto-stopped', {
+              reason: 'maxDuration',
+              maxMinutes,
+            });
+          }
+          // Grace window: if the renderer is hung and never calls stop-recording,
+          // force-finalize so main state unblocks and the partial file is saved.
+          recordingAutoStopAbortTimer = setTimeout(() => {
+            recordingAutoStopAbortTimer = null;
+            if (!audioRecorder.isRecording()) return;
+            console.warn('Renderer did not stop after auto-stop signal; finalizing partial file');
+            finalizeRecordingSession();
+            audioRecorder
+              .stopRecording()
+              .then((r) => {
+                if (r.success) fireStoppedNotificationOnce();
+              })
+              .catch((err) => console.error('Force-stop failed:', err));
+          }, 10_000);
+        },
+        maxMinutes * 60 * 1000,
+      );
     }
 
     const reminderMinutes = configService.getRecordingReminderMinutes();
     if (reminderMinutes > 0) {
       let elapsed = 0;
-      recordingReminderTimer = setInterval(() => {
-        elapsed += reminderMinutes;
-        if (audioRecorder.isRecording()) {
-          notificationService.notifyRecordingReminder(elapsed);
-        }
-      }, reminderMinutes * 60 * 1000);
+      recordingReminderTimer = setInterval(
+        () => {
+          elapsed += reminderMinutes;
+          if (audioRecorder.isRecording()) {
+            notificationService.notifyRecordingReminder(elapsed);
+          }
+        },
+        reminderMinutes * 60 * 1000,
+      );
     }
 
     return result;
@@ -1005,9 +1095,13 @@ async function remuxRecordingHeader(filePath: string): Promise<void> {
     const tmpPath = path.join(dir, `.remux-${path.basename(filePath)}`);
     const { spawn } = await import('child_process');
     await new Promise<void>((resolve, reject) => {
-      const proc = spawn(ffmpegPath, ['-y', '-i', filePath, '-c', 'copy', tmpPath], { stdio: 'ignore' });
+      const proc = spawn(ffmpegPath, ['-y', '-i', filePath, '-c', 'copy', tmpPath], {
+        stdio: 'ignore',
+      });
       proc.on('error', reject);
-      proc.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`))));
+      proc.on('exit', (code) =>
+        code === 0 ? resolve() : reject(new Error(`ffmpeg exit ${code}`)),
+      );
     });
     await fs.promises.rename(tmpPath, filePath);
   } catch (error) {
@@ -1034,7 +1128,12 @@ ipcMain.handle('abort-recording', async () => {
 // detector on/off, service re-creation). Called from both the GUI save-config
 // IPC and the agent-chat flow when set_config mutations land.
 function applyConfigSideEffects(changed: Partial<AppConfig>): void {
-  if (changed.knownWords !== undefined || changed.geminiApiKey !== undefined || changed.geminiModel !== undefined || changed.geminiFlashModel !== undefined) {
+  if (
+    changed.knownWords !== undefined ||
+    changed.geminiApiKey !== undefined ||
+    changed.geminiModel !== undefined ||
+    changed.geminiFlashModel !== undefined
+  ) {
     geminiService = createGeminiService();
     agentService = null;
   }
@@ -1071,7 +1170,7 @@ ipcMain.handle('save-config', async (_, config: Partial<AppConfig>) => {
 
     return {
       success: true,
-      configPath: app.getPath('userData')
+      configPath: app.getPath('userData'),
     };
   } catch (error) {
     console.error('Error saving config:', error);
@@ -1110,7 +1209,7 @@ ipcMain.handle('update:simulate', async (_, event: string, data?: any) => {
 ipcMain.handle('check-config', async () => {
   return {
     hasConfig: configService.hasRequiredConfig(),
-    missing: configService.getMissingConfigs()
+    missing: configService.getMissingConfigs(),
   };
 });
 
@@ -1118,7 +1217,7 @@ ipcMain.handle('check-config', async () => {
 ipcMain.handle('validate-shortcut', async (_, shortcut: string) => {
   try {
     // Temporarily register the shortcut to check if it's valid
-    const isValid = globalShortcut.register(shortcut, () => { });
+    const isValid = globalShortcut.register(shortcut, () => {});
     if (isValid) {
       globalShortcut.unregister(shortcut);
     }
@@ -1135,7 +1234,7 @@ ipcMain.handle('get-meeting-status', async () => {
   return {
     enabled: configService.getMeetingDetection(),
     active: meetingDetector.isActive(),
-    app: meeting?.app
+    app: meeting?.app,
   };
 });
 
@@ -1146,7 +1245,10 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
 
     // Send progress update
     if (mainWindow) {
-      mainWindow.webContents.send('transcription-progress', { percent: 0, message: 'Initializing Gemini service...' });
+      mainWindow.webContents.send('transcription-progress', {
+        percent: 0,
+        message: 'Initializing Gemini service...',
+      });
     }
 
     // Initialize Gemini service if not already initialized
@@ -1162,7 +1264,10 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
 
     // Send progress update
     if (mainWindow) {
-      mainWindow.webContents.send('transcription-progress', { percent: 10, message: 'Starting transcription...' });
+      mainWindow.webContents.send('transcription-progress', {
+        percent: 10,
+        message: 'Starting transcription...',
+      });
     }
 
     console.log('Starting transcription...');
@@ -1202,7 +1307,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
           suggestedTitle: result.suggestedTitle,
           transcriptionPath,
           customFields: result.customFields,
-          transcribedAt: new Date().toISOString()
+          transcribedAt: new Date().toISOString(),
         });
       } else {
         // Fallback: store inline data when file write failed
@@ -1214,7 +1319,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
           keyPoints: result.keyPoints,
           actionItems: result.actionItems,
           customFields: result.customFields,
-          transcribedAt: new Date().toISOString()
+          transcribedAt: new Date().toISOString(),
         });
       }
       console.log('Metadata saved successfully');
@@ -1242,49 +1347,54 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
     return { success: true, data: result };
   } catch (error) {
     console.error('Error transcribing audio:', error);
-    notificationService.notifyTranscriptionFailed('Transcription failed. Check the app for details.');
+    notificationService.notifyTranscriptionFailed(
+      'Transcription failed. Check the app for details.',
+    );
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
 
 // Notion upload handler
-ipcMain.handle('upload-to-notion', async (_, data: { title: string; transcriptionData: any; audioFilePath?: string }) => {
-  try {
-    console.log('Uploading to Notion:', data.title);
+ipcMain.handle(
+  'upload-to-notion',
+  async (_, data: { title: string; transcriptionData: any; audioFilePath?: string }) => {
+    try {
+      console.log('Uploading to Notion:', data.title);
 
-    // Initialize Notion service if not already initialized
-    if (!notionService) {
-      const notionApiKey = configService.getNotionApiKey();
-      const notionDatabaseId = configService.getNotionDatabaseId();
+      // Initialize Notion service if not already initialized
+      if (!notionService) {
+        const notionApiKey = configService.getNotionApiKey();
+        const notionDatabaseId = configService.getNotionDatabaseId();
 
-      if (!notionApiKey || !notionDatabaseId) {
-        return { success: false, error: 'Notion configuration not found' };
+        if (!notionApiKey || !notionDatabaseId) {
+          return { success: false, error: 'Notion configuration not found' };
+        }
+
+        notionService = new NotionService({
+          apiKey: notionApiKey,
+          databaseId: notionDatabaseId,
+        });
       }
 
-      notionService = new NotionService({
-        apiKey: notionApiKey,
-        databaseId: notionDatabaseId
-      });
+      // Add "by L.AI" to the title for distinction
+      const titleWithSuffix = `${data.title} by L.AI`;
+
+      const result = await notionService.createMeetingNote(
+        titleWithSuffix,
+        new Date(),
+        data.transcriptionData,
+        data.audioFilePath,
+      );
+
+      notificationService.notifyUploadComplete(data.title);
+      return result;
+    } catch (error) {
+      console.error('Error uploading to Notion:', error);
+      notificationService.notifyUploadFailed('Upload failed. Check the app for details.');
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
-
-    // Add "by L.AI" to the title for distinction
-    const titleWithSuffix = `${data.title} by L.AI`;
-
-    const result = await notionService.createMeetingNote(
-      titleWithSuffix,
-      new Date(),
-      data.transcriptionData,
-      data.audioFilePath
-    );
-
-    notificationService.notifyUploadComplete(data.title);
-    return result;
-  } catch (error) {
-    console.error('Error uploading to Notion:', error);
-    notificationService.notifyUploadFailed('Upload failed. Check the app for details.');
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
-  }
-});
+  },
+);
 
 // Open external URL
 ipcMain.handle('open-external', async (_, url: string) => {
@@ -1312,7 +1422,7 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
             actionItems: transcription.actionItems,
             customFields: transcription.customFields ?? metadata.customFields,
             emoji: transcription.emoji,
-          }
+          },
         };
       }
       console.warn('Transcription folder missing or unreadable:', metadata.transcriptionPath);
@@ -1361,47 +1471,53 @@ ipcMain.handle('show-in-finder', (_, filePath: string) => {
 });
 
 // Search past transcriptions
-ipcMain.handle('search-transcriptions', async (_, opts: { query: string; fields?: SearchField[]; limit?: number }) => {
-  try {
-    const query = (opts?.query ?? '').trim();
-    if (!query) return { success: true, hits: [] };
+ipcMain.handle(
+  'search-transcriptions',
+  async (_, opts: { query: string; fields?: SearchField[]; limit?: number }) => {
+    try {
+      const query = (opts?.query ?? '').trim();
+      if (!query) return { success: true, hits: [] };
 
-    // Validate fields against the known whitelist; drop anything else. Unvalidated input
-    // (e.g. a stringified 'title') would be passed to `new Set(...)` and silently match nothing.
-    const requested = Array.isArray(opts.fields) ? opts.fields : [];
-    const filtered = requested.filter((f): f is SearchField => (ALL_FIELDS as readonly string[]).includes(f));
-    const fields = filtered.length > 0 ? filtered : ALL_FIELDS;
-    const limit = Number.isFinite(opts.limit) && (opts.limit as number) >= 0 ? (opts.limit as number) : 20;
-    const dataPath = app.getPath('userData');
-    const raw = await searchTranscriptions(dataPath, { query, fields, limit });
+      // Validate fields against the known whitelist; drop anything else. Unvalidated input
+      // (e.g. a stringified 'title') would be passed to `new Set(...)` and silently match nothing.
+      const requested = Array.isArray(opts.fields) ? opts.fields : [];
+      const filtered = requested.filter((f): f is SearchField =>
+        (ALL_FIELDS as readonly string[]).includes(f),
+      );
+      const fields = filtered.length > 0 ? filtered : ALL_FIELDS;
+      const limit =
+        Number.isFinite(opts.limit) && (opts.limit as number) >= 0 ? (opts.limit as number) : 20;
+      const dataPath = app.getPath('userData');
+      const raw = await searchTranscriptions(dataPath, { query, fields, limit });
 
-    const hits = raw.map((h) => ({
-      folderName: h.entry.folderName,
-      folderPath: h.entry.folderPath,
-      transcribedAt: h.entry.transcribedAt,
-      title: h.data.title,
-      audioFilePath: h.data.audioFilePath ?? '',
-      score: h.score,
-      matchedFields: h.matchedFields,
-      snippet: h.snippet,
-      snippetField: h.snippetField ?? null,
-      data: {
+      const hits = raw.map((h) => ({
+        folderName: h.entry.folderName,
+        folderPath: h.entry.folderPath,
+        transcribedAt: h.entry.transcribedAt,
         title: h.data.title,
-        suggestedTitle: h.data.suggestedTitle,
-        summary: h.data.summary,
-        transcript: h.data.transcript,
-        keyPoints: h.data.keyPoints ?? [],
-        actionItems: h.data.actionItems ?? [],
-        customFields: h.data.customFields ?? {},
-        emoji: h.data.emoji,
-      },
-    }));
+        audioFilePath: h.data.audioFilePath ?? '',
+        score: h.score,
+        matchedFields: h.matchedFields,
+        snippet: h.snippet,
+        snippetField: h.snippetField ?? null,
+        data: {
+          title: h.data.title,
+          suggestedTitle: h.data.suggestedTitle,
+          summary: h.data.summary,
+          transcript: h.data.transcript,
+          keyPoints: h.data.keyPoints ?? [],
+          actionItems: h.data.actionItems ?? [],
+          customFields: h.data.customFields ?? {},
+          emoji: h.data.emoji,
+        },
+      }));
 
-    return { success: true, hits };
-  } catch (error) {
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
-  }
-});
+      return { success: true, hits };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+);
 
 // Get list of recordings
 ipcMain.handle('get-recordings', async () => {
@@ -1440,7 +1556,7 @@ ipcMain.handle('get-recordings', async () => {
           timestamp: timestamp,
           size: stats.size,
           createdAt: stats.birthtime,
-          modifiedAt: stats.mtime
+          modifiedAt: stats.mtime,
         };
       })
       .sort((a: any, b: any) => b.createdAt.getTime() - a.createdAt.getTime()); // Sort by newest first
@@ -1456,7 +1572,9 @@ ipcMain.handle('get-recordings', async () => {
 ipcMain.handle('open-microphone-settings', async () => {
   if (process.platform === 'darwin') {
     // Open System Preferences > Security & Privacy > Privacy > Microphone
-    shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone');
+    shell.openExternal(
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
+    );
   } else if (process.platform === 'win32') {
     // Open Windows Settings > Privacy > Microphone
     shell.openExternal('ms-settings:privacy-microphone');
@@ -1468,7 +1586,9 @@ ipcMain.handle('open-microphone-settings', async () => {
 // process launch, so the app must be fully relaunched after the user toggles it on.
 ipcMain.handle('open-screen-recording-settings', async () => {
   if (process.platform === 'darwin') {
-    shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+    shell.openExternal(
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+    );
   }
 });
 
@@ -1481,7 +1601,10 @@ ipcMain.handle('system-audio-start', async (event) => {
       if (!event.sender.isDestroyed()) {
         // structuredClone of Buffer through IPC is expensive; send the raw
         // Uint8Array view which becomes an ArrayBuffer on the renderer side.
-        event.sender.send('system-audio-chunk', new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+        event.sender.send(
+          'system-audio-chunk',
+          new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength),
+        );
       }
     },
     onError: (err) => {
@@ -1502,60 +1625,64 @@ ipcMain.handle('system-audio-stop', async () => {
 // Agent chat: blocks until the agent produces a final answer. During the run the
 // main process may ask the renderer to confirm a config change via the
 // 'agent-confirm-request' event; the renderer answers with 'agent-confirm-response'.
-ipcMain.handle('agent-chat', async (
-  _event,
-  opts: { question: string; history?: AgentChatMessage[]; scope: AgentScope }
-): Promise<{ success: true; result: AgentRunResult } | { success: false; error: string }> => {
-  try {
-    const agent = getAgentService();
-    if (!agent) {
-      return { success: false, error: 'Gemini API key not configured.' };
-    }
-    const question = (opts?.question ?? '').trim();
-    if (!question) return { success: false, error: 'Empty question.' };
-
-    const scope: AgentScope = opts?.scope?.kind === 'single' && typeof opts.scope.folderName === 'string'
-      ? { kind: 'single', folderName: opts.scope.folderName }
-      : { kind: 'all' };
-
-    const confirm = async (proposal: ConfigProposal): Promise<boolean> => {
-      if (!mainWindow || mainWindow.isDestroyed()) return false;
-      const id = `cfm_${++confirmIdCounter}`;
-      const approval = new Promise<boolean>((resolve) => {
-        pendingConfirms.set(id, resolve);
-      });
-      mainWindow.webContents.send('agent-confirm-request', { id, proposal });
-      return approval;
-    };
-
-    const result = await agent.run({
-      question,
-      history: Array.isArray(opts?.history) ? opts.history : [],
-      scope,
-      confirm,
-    });
-
-    // The agent only mutates via set_config; replay each applied write into the
-    // runtime side-effect pipeline so shortcut/detector state matches the disk
-    // config, then push a 'config-changed' event so the renderer can re-render
-    // its toggle checkboxes without waiting for a full reload.
-    if (result.appliedActions.length > 0) {
-      const changed: Partial<AppConfig> = {};
-      for (const action of result.appliedActions) {
-        if (action.type === 'setConfig') {
-          (changed as Record<string, unknown>)[action.key] = action.value;
-        }
+ipcMain.handle(
+  'agent-chat',
+  async (
+    _event,
+    opts: { question: string; history?: AgentChatMessage[]; scope: AgentScope },
+  ): Promise<{ success: true; result: AgentRunResult } | { success: false; error: string }> => {
+    try {
+      const agent = getAgentService();
+      if (!agent) {
+        return { success: false, error: 'Gemini API key not configured.' };
       }
-      applyConfigSideEffects(changed);
-      broadcastConfigChanged();
-    }
+      const question = (opts?.question ?? '').trim();
+      if (!question) return { success: false, error: 'Empty question.' };
 
-    return { success: true, result };
-  } catch (error) {
-    console.error('agent-chat failed:', error);
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
-  }
-});
+      const scope: AgentScope =
+        opts?.scope?.kind === 'single' && typeof opts.scope.folderName === 'string'
+          ? { kind: 'single', folderName: opts.scope.folderName }
+          : { kind: 'all' };
+
+      const confirm = async (proposal: ConfigProposal): Promise<boolean> => {
+        if (!mainWindow || mainWindow.isDestroyed()) return false;
+        const id = `cfm_${++confirmIdCounter}`;
+        const approval = new Promise<boolean>((resolve) => {
+          pendingConfirms.set(id, resolve);
+        });
+        mainWindow.webContents.send('agent-confirm-request', { id, proposal });
+        return approval;
+      };
+
+      const result = await agent.run({
+        question,
+        history: Array.isArray(opts?.history) ? opts.history : [],
+        scope,
+        confirm,
+      });
+
+      // The agent only mutates via set_config; replay each applied write into the
+      // runtime side-effect pipeline so shortcut/detector state matches the disk
+      // config, then push a 'config-changed' event so the renderer can re-render
+      // its toggle checkboxes without waiting for a full reload.
+      if (result.appliedActions.length > 0) {
+        const changed: Partial<AppConfig> = {};
+        for (const action of result.appliedActions) {
+          if (action.type === 'setConfig') {
+            (changed as Record<string, unknown>)[action.key] = action.value;
+          }
+        }
+        applyConfigSideEffects(changed);
+        broadcastConfigChanged();
+      }
+
+      return { success: true, result };
+    } catch (error) {
+      console.error('agent-chat failed:', error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+);
 
 ipcMain.handle('agent-confirm-response', async (_, payload: { id: string; approved: boolean }) => {
   const resolver = pendingConfirms.get(payload.id);

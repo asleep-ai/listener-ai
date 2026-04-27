@@ -41,15 +41,18 @@ export class MetadataService {
     try {
       const metadataPath = this.getMetadataPath(audioFilePath);
       console.log('Saving metadata to:', metadataPath);
-      
+
       const existingMetadata = await this.getMetadata(audioFilePath);
-      
+
       const updatedMetadata: RecordingMetadata = {
         ...existingMetadata,
         ...metadata,
         filePath: audioFilePath,
-        title: metadata.title || existingMetadata?.title || path.basename(audioFilePath, path.extname(audioFilePath)),
-        timestamp: existingMetadata?.timestamp || new Date().toISOString()
+        title:
+          metadata.title ||
+          existingMetadata?.title ||
+          path.basename(audioFilePath, path.extname(audioFilePath)),
+        timestamp: existingMetadata?.timestamp || new Date().toISOString(),
       };
 
       await fs.writeFile(metadataPath, JSON.stringify(updatedMetadata, null, 2), 'utf8');
@@ -65,7 +68,7 @@ export class MetadataService {
       const metadataPath = this.getMetadataPath(audioFilePath);
       const content = await fs.readFile(metadataPath, 'utf8');
       return JSON.parse(content);
-    } catch (error) {
+    } catch (_error) {
       // File doesn't exist or is invalid
       return null;
     }
@@ -75,7 +78,7 @@ export class MetadataService {
     try {
       const metadataPath = this.getMetadataPath(audioFilePath);
       await fs.unlink(metadataPath);
-    } catch (error) {
+    } catch (_error) {
       // Ignore if file doesn't exist
       console.log('Metadata file not found:', audioFilePath);
     }
@@ -84,8 +87,8 @@ export class MetadataService {
   async getAllMetadata(): Promise<RecordingMetadata[]> {
     try {
       const files = await fs.readdir(this.metadataDir);
-      const metadataFiles = files.filter(f => f.endsWith('.json'));
-      
+      const metadataFiles = files.filter((f) => f.endsWith('.json'));
+
       const metadata: RecordingMetadata[] = [];
       for (const file of metadataFiles) {
         try {
@@ -95,7 +98,7 @@ export class MetadataService {
           console.error(`Failed to read metadata file ${file}:`, error);
         }
       }
-      
+
       return metadata;
     } catch (error) {
       console.error('Failed to get all metadata:', error);

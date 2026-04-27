@@ -1,14 +1,14 @@
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  makeSnippet,
-  scoreRecord,
-  resolveFields,
-  FIELD_WEIGHTS,
-  DEFAULT_FIELDS,
-  ALL_FIELDS,
-} from './searchService';
+import { describe, it } from 'node:test';
 import type { ReadTranscriptionResult, TranscriptionEntry } from './outputService';
+import {
+  ALL_FIELDS,
+  DEFAULT_FIELDS,
+  FIELD_WEIGHTS,
+  makeSnippet,
+  resolveFields,
+  scoreRecord,
+} from './searchService';
 
 const sampleEntry: TranscriptionEntry = {
   folderPath: '/tmp/Roadmap_20260420_143000',
@@ -32,7 +32,7 @@ describe('makeSnippet', () => {
   });
 
   it('centers snippet around first occurrence and adds ellipses', () => {
-    const text = 'a'.repeat(100) + ' needle ' + 'b'.repeat(100);
+    const text = `${'a'.repeat(100)} needle ${'b'.repeat(100)}`;
     const snippet = makeSnippet(text, 'needle', 40);
     assert.ok(snippet.includes('needle'));
     assert.ok(snippet.startsWith('...'));
@@ -112,10 +112,12 @@ describe('scoreRecord', () => {
       FIELD_WEIGHTS.actionItems +
       FIELD_WEIGHTS.transcript;
     assert.equal(hit!.score, expected);
-    assert.deepEqual(
-      hit!.matchedFields.slice().sort(),
-      ['actionItems', 'summary', 'title', 'transcript'],
-    );
+    assert.deepEqual(hit!.matchedFields.slice().sort(), [
+      'actionItems',
+      'summary',
+      'title',
+      'transcript',
+    ]);
   });
 
   it('ranks title match above transcript-only match', () => {

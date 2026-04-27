@@ -1,12 +1,12 @@
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
 import {
+  READABLE_CONFIG_KEYS,
+  WRITABLE_CONFIG_KEYS,
+  type WritableConfigKey,
   coerceConfigValue,
   describeProposal,
   isValidFolderName,
-  WRITABLE_CONFIG_KEYS,
-  READABLE_CONFIG_KEYS,
-  type WritableConfigKey,
 } from './agentService';
 
 describe('coerceConfigValue', () => {
@@ -83,10 +83,7 @@ describe('config key whitelists', () => {
       'minRecordingSeconds',
     ];
     for (const k of expected) {
-      assert.ok(
-        (WRITABLE_CONFIG_KEYS as readonly string[]).includes(k),
-        `${k} should be writable`,
-      );
+      assert.ok((WRITABLE_CONFIG_KEYS as readonly string[]).includes(k), `${k} should be writable`);
     }
   });
 });

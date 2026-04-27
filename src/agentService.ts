@@ -1,12 +1,22 @@
-import { GoogleGenAI, Type, type Content, type FunctionCall, type FunctionDeclaration, type Part } from '@google/genai';
 import * as path from 'path';
+import {
+  type Content,
+  type FunctionCall,
+  type FunctionDeclaration,
+  GoogleGenAI,
+  type Part,
+  Type,
+} from '@google/genai';
 import type { ConfigService } from './configService';
-import { searchTranscriptions, ALL_FIELDS, type SearchField } from './searchService';
-import { listTranscriptions, readTranscription, getTranscriptionsDir, type ReadTranscriptionResult } from './outputService';
+import {
+  type ReadTranscriptionResult,
+  getTranscriptionsDir,
+  listTranscriptions,
+  readTranscription,
+} from './outputService';
+import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
 
-export type AgentScope =
-  | { kind: 'all' }
-  | { kind: 'single'; folderName: string };
+export type AgentScope = { kind: 'all' } | { kind: 'single'; folderName: string };
 
 export interface ConfigProposal {
   kind: 'setConfig';
@@ -61,7 +71,7 @@ export const WRITABLE_CONFIG_KEYS = [
   'recordSystemAudio',
 ] as const;
 
-export type WritableConfigKey = typeof WRITABLE_CONFIG_KEYS[number];
+export type WritableConfigKey = (typeof WRITABLE_CONFIG_KEYS)[number];
 
 export const READABLE_CONFIG_KEYS = [
   ...WRITABLE_CONFIG_KEYS,
@@ -69,7 +79,7 @@ export const READABLE_CONFIG_KEYS = [
   'geminiFlashModel',
 ] as const;
 
-export type ReadableConfigKey = typeof READABLE_CONFIG_KEYS[number];
+export type ReadableConfigKey = (typeof READABLE_CONFIG_KEYS)[number];
 
 function isWritableKey(key: string): key is WritableConfigKey {
   return (WRITABLE_CONFIG_KEYS as readonly string[]).includes(key);
@@ -80,7 +90,10 @@ function isReadableKey(key: string): key is ReadableConfigKey {
 }
 
 /** Coerce agent-supplied value to the right type per key. */
-export function coerceConfigValue(key: WritableConfigKey, raw: unknown): { ok: true; value: unknown } | { ok: false; error: string } {
+export function coerceConfigValue(
+  key: WritableConfigKey,
+  raw: unknown,
+): { ok: true; value: unknown } | { ok: false; error: string } {
   switch (key) {
     case 'autoMode':
     case 'meetingDetection':
@@ -100,7 +113,7 @@ export function coerceConfigValue(key: WritableConfigKey, raw: unknown): { ok: t
     case 'maxRecordingMinutes':
     case 'recordingReminderMinutes':
     case 'minRecordingSeconds': {
-      const n = typeof raw === 'number' ? raw : parseInt(String(raw), 10);
+      const n = typeof raw === 'number' ? raw : Number.parseInt(String(raw), 10);
       if (!Number.isFinite(n) || n < 0) {
         return { ok: false, error: `${key} expects a non-negative integer` };
       }
@@ -115,13 +128,17 @@ function buildTools(scope: AgentScope, hasConfirm: boolean): FunctionDeclaration
   if (scope.kind === 'all') {
     tools.push({
       name: 'search_transcriptions',
-      description: 'Full-text search across saved meeting transcriptions. Returns top-k hits with title, date, snippet, and folder name. Use this to find meetings relevant to the user question.',
+      description:
+        'Full-text search across saved meeting transcriptions. Returns top-k hits with title, date, snippet, and folder name. Use this to find meetings relevant to the user question.',
       parameters: {
         type: Type.OBJECT,
         properties: {
           query: { type: Type.STRING, description: 'Search keywords. Can be Korean or English.' },
           limit: { type: Type.INTEGER, description: 'Max hits to return (default 5).' },
-          include_transcript: { type: Type.BOOLEAN, description: 'Also search the full transcript body (slower). Default false.' },
+          include_transcript: {
+            type: Type.BOOLEAN,
+            description: 'Also search the full transcript body (slower). Default false.',
+          },
         },
         required: ['query'],
       },
@@ -129,7 +146,8 @@ function buildTools(scope: AgentScope, hasConfirm: boolean): FunctionDeclaration
 
     tools.push({
       name: 'list_recent_transcriptions',
-      description: 'List the most recent saved transcriptions, newest first. Use when the user asks "what did we talk about recently" or "show me yesterday\'s meetings".',
+      description:
+        'List the most recent saved transcriptions, newest first. Use when the user asks "what did we talk about recently" or "show me yesterday\'s meetings".',
       parameters: {
         type: Type.OBJECT,
         properties: {
@@ -140,12 +158,20 @@ function buildTools(scope: AgentScope, hasConfirm: boolean): FunctionDeclaration
 
     tools.push({
       name: 'get_transcription',
-      description: 'Fetch a saved meeting record (summary, key points, action items) by folder name. Pass include_transcript=true only when you need the verbatim transcript body; omit it for summary-level questions to keep the response compact.',
+      description:
+        'Fetch a saved meeting record (summary, key points, action items) by folder name. Pass include_transcript=true only when you need the verbatim transcript body; omit it for summary-level questions to keep the response compact.',
       parameters: {
         type: Type.OBJECT,
         properties: {
-          folder_name: { type: Type.STRING, description: 'The folderName returned by search_transcriptions or list_recent_transcriptions.' },
-          include_transcript: { type: Type.BOOLEAN, description: 'Include the full transcript body. Default false.' },
+          folder_name: {
+            type: Type.STRING,
+            description:
+              'The folderName returned by search_transcriptions or list_recent_transcriptions.',
+          },
+          include_transcript: {
+            type: Type.BOOLEAN,
+            description: 'Include the full transcript body. Default false.',
+          },
         },
         required: ['folder_name'],
       },
@@ -154,11 +180,11 @@ function buildTools(scope: AgentScope, hasConfirm: boolean): FunctionDeclaration
 
   tools.push({
     name: 'get_config',
-    description: 'Read a single Listener.AI setting value. Allowed keys: ' + READABLE_CONFIG_KEYS.join(', ') + '. API keys and database IDs are never readable here.',
+    description: `Read a single Listener.AI setting value. Allowed keys: ${READABLE_CONFIG_KEYS.join(', ')}. API keys and database IDs are never readable here.`,
     parameters: {
       type: Type.OBJECT,
       properties: {
-        key: { type: Type.STRING, description: 'One of: ' + READABLE_CONFIG_KEYS.join(', ') },
+        key: { type: Type.STRING, description: `One of: ${READABLE_CONFIG_KEYS.join(', ')}` },
       },
       required: ['key'],
     },
@@ -167,13 +193,21 @@ function buildTools(scope: AgentScope, hasConfirm: boolean): FunctionDeclaration
   if (hasConfirm) {
     tools.push({
       name: 'set_config',
-      description: 'Propose a change to a Listener.AI setting. Requires user confirmation before taking effect. Allowed keys: ' + WRITABLE_CONFIG_KEYS.join(', ') + '. Do NOT try to set API keys, Notion database ID, or other credentials here.',
+      description: `Propose a change to a Listener.AI setting. Requires user confirmation before taking effect. Allowed keys: ${WRITABLE_CONFIG_KEYS.join(', ')}. Do NOT try to set API keys, Notion database ID, or other credentials here.`,
       parameters: {
         type: Type.OBJECT,
         properties: {
-          key: { type: Type.STRING, description: 'One of: ' + WRITABLE_CONFIG_KEYS.join(', ') },
-          value: { type: Type.STRING, description: 'The new value. For booleans pass "true"/"false"; for numbers pass the digits as a string; for strings pass the string.' },
-          reason: { type: Type.STRING, description: 'Short human-readable reason shown to the user in the confirmation prompt.' },
+          key: { type: Type.STRING, description: `One of: ${WRITABLE_CONFIG_KEYS.join(', ')}` },
+          value: {
+            type: Type.STRING,
+            description:
+              'The new value. For booleans pass "true"/"false"; for numbers pass the digits as a string; for strings pass the string.',
+          },
+          reason: {
+            type: Type.STRING,
+            description:
+              'Short human-readable reason shown to the user in the confirmation prompt.',
+          },
         },
         required: ['key', 'value'],
       },
@@ -205,7 +239,9 @@ export function isValidFolderName(name: string): boolean {
 
 function buildSinglePrimer(data: ReadTranscriptionResult): string {
   const lines: string[] = [];
-  lines.push(`[Context: meeting "${data.title}"${data.transcribedAt ? ` recorded ${data.transcribedAt.slice(0, 10)}` : ''}]`);
+  lines.push(
+    `[Context: meeting "${data.title}"${data.transcribedAt ? ` recorded ${data.transcribedAt.slice(0, 10)}` : ''}]`,
+  );
   if (data.summary) lines.push(`Summary: ${data.summary}`);
   if (data.keyPoints?.length) {
     lines.push('Key points:');
@@ -272,9 +308,12 @@ export class AgentService {
     const tools = buildTools(opts.scope, !!opts.confirm);
 
     // Load the single-meeting record once if needed; title + primer derive from it.
-    const singleData = opts.scope.kind === 'single' && isValidFolderName(opts.scope.folderName)
-      ? await readTranscription(path.join(getTranscriptionsDir(this.dataPath), opts.scope.folderName))
-      : null;
+    const singleData =
+      opts.scope.kind === 'single' && isValidFolderName(opts.scope.folderName)
+        ? await readTranscription(
+            path.join(getTranscriptionsDir(this.dataPath), opts.scope.folderName),
+          )
+        : null;
     const systemInstruction = systemInstructionFor(opts.scope, singleData?.title);
 
     const history = opts.history ? [...opts.history] : [];
@@ -360,7 +399,9 @@ export class AgentService {
           if (!query.trim()) return { error: 'query is required' };
           const limit = typeof args.limit === 'number' ? args.limit : 5;
           const includeTranscript = args.include_transcript === true;
-          const fields: SearchField[] = includeTranscript ? [...ALL_FIELDS] : ['title', 'summary', 'keyPoints', 'actionItems'];
+          const fields: SearchField[] = includeTranscript
+            ? [...ALL_FIELDS]
+            : ['title', 'summary', 'keyPoints', 'actionItems'];
           const hits = await searchTranscriptions(this.dataPath, { query, fields, limit });
           return {
             hits: hits.map((h) => ({
@@ -386,7 +427,11 @@ export class AgentService {
         }
         case 'get_transcription': {
           const folderName = typeof args.folder_name === 'string' ? args.folder_name : '';
-          if (!isValidFolderName(folderName)) return { error: 'folder_name must be a bare folder name returned by search/list (no slashes, no ..)' };
+          if (!isValidFolderName(folderName))
+            return {
+              error:
+                'folder_name must be a bare folder name returned by search/list (no slashes, no ..)',
+            };
           const folderPath = path.join(getTranscriptionsDir(this.dataPath), folderName);
           const data = await readTranscription(folderPath);
           if (!data) return { error: `transcription not found: ${folderName}` };
@@ -413,8 +458,19 @@ export class AgentService {
           const coerced = coerceConfigValue(key, args.value);
           if (!coerced.ok) return { error: coerced.error };
           const previousValue = (this.configService.getAllConfig() as Record<string, unknown>)[key];
-          const description = describeProposal(key, coerced.value, previousValue, typeof args.reason === 'string' ? args.reason : undefined);
-          const approved = await opts.confirm({ kind: 'setConfig', key, value: coerced.value, currentValue: previousValue, description });
+          const description = describeProposal(
+            key,
+            coerced.value,
+            previousValue,
+            typeof args.reason === 'string' ? args.reason : undefined,
+          );
+          const approved = await opts.confirm({
+            kind: 'setConfig',
+            key,
+            value: coerced.value,
+            currentValue: previousValue,
+            description,
+          });
           if (!approved) {
             return { approved: false, note: 'User declined the change.' };
           }
@@ -431,8 +487,16 @@ export class AgentService {
   }
 }
 
-export function describeProposal(key: WritableConfigKey, value: unknown, current: unknown, reason?: string): string {
-  const currentStr = current === undefined || current === null || current === '' ? '(unset)' : JSON.stringify(current);
+export function describeProposal(
+  key: WritableConfigKey,
+  value: unknown,
+  current: unknown,
+  reason?: string,
+): string {
+  const currentStr =
+    current === undefined || current === null || current === ''
+      ? '(unset)'
+      : JSON.stringify(current);
   const valueStr = JSON.stringify(value);
   const base = `Change ${key}: ${currentStr} -> ${valueStr}`;
   return reason ? `${base} (${reason})` : base;

@@ -1,5 +1,5 @@
-import { EventEmitter } from 'events';
 import { execFile } from 'child_process';
+import { EventEmitter } from 'events';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
@@ -33,8 +33,8 @@ export class MeetingDetectorService extends EventEmitter {
   private consecutiveDetections = 0;
   private consecutiveNonDetections = 0;
   private static readonly POLL_MS = 5000;
-  private static readonly START_THRESHOLD = 2;  // 2 consecutive detections to confirm start
-  private static readonly END_THRESHOLD = 3;    // 3 consecutive non-detections to confirm end
+  private static readonly START_THRESHOLD = 2; // 2 consecutive detections to confirm start
+  private static readonly END_THRESHOLD = 3; // 3 consecutive non-detections to confirm end
 
   start(): void {
     if (this.pollInterval) return;
@@ -80,26 +80,36 @@ export class MeetingDetectorService extends EventEmitter {
     if (this.isPolling) return;
     this.isPolling = true;
     try {
-      const detected = process.platform === 'darwin'
-        ? await this.detectMacOS()
-        : process.platform === 'win32'
-          ? await this.detectWindows()
-          : null;
+      const detected =
+        process.platform === 'darwin'
+          ? await this.detectMacOS()
+          : process.platform === 'win32'
+            ? await this.detectWindows()
+            : null;
 
       if (detected) {
         this.consecutiveNonDetections = 0;
         this.consecutiveDetections++;
 
-        if (!this.currentMeeting && this.consecutiveDetections >= MeetingDetectorService.START_THRESHOLD) {
+        if (
+          !this.currentMeeting &&
+          this.consecutiveDetections >= MeetingDetectorService.START_THRESHOLD
+        ) {
           this.currentMeeting = { app: detected, detectedAt: new Date() };
-          this.emit('meeting-started', { app: detected, detectedAt: this.currentMeeting.detectedAt });
+          this.emit('meeting-started', {
+            app: detected,
+            detectedAt: this.currentMeeting.detectedAt,
+          });
           console.log(`Meeting started: ${detected}`);
         }
       } else {
         this.consecutiveDetections = 0;
         this.consecutiveNonDetections++;
 
-        if (this.currentMeeting && this.consecutiveNonDetections >= MeetingDetectorService.END_THRESHOLD) {
+        if (
+          this.currentMeeting &&
+          this.consecutiveNonDetections >= MeetingDetectorService.END_THRESHOLD
+        ) {
           const duration = Date.now() - this.currentMeeting.detectedAt.getTime();
           const app = this.currentMeeting.app;
           this.currentMeeting = null;
@@ -123,12 +133,16 @@ export class MeetingDetectorService extends EventEmitter {
       this.pgrepExists('CptHost'),
       this.getPmsetAssertions(),
       this.checkGoogleMeetMacOS(),
-      this.checkSlackHuddleMacOS()
+      this.checkSlackHuddleMacOS(),
     ]);
 
     if (hasZoom) return 'Zoom';
 
-    if (hasSleepAssertionFrom(assertions, /^Microsoft Teams$/) && assertions.includes('Microsoft Teams Call in progress')) return 'Microsoft Teams';
+    if (
+      hasSleepAssertionFrom(assertions, /^Microsoft Teams$/) &&
+      assertions.includes('Microsoft Teams Call in progress')
+    )
+      return 'Microsoft Teams';
 
     if (hasSleepAssertionFrom(assertions, /^Webex$|^Cisco Webex/i)) return 'Webex';
 
@@ -213,7 +227,7 @@ return false`;
     const [hasZoom, hasTeamsCall, hasWebexCall] = await Promise.all([
       this.tasklistExists('CptHost.exe'),
       this.tasklistExists('ms-teams_modulehost.exe'),
-      this.tasklistExists('webexhost.exe')
+      this.tasklistExists('webexhost.exe'),
     ]);
     if (hasZoom) return 'Zoom';
     if (hasTeamsCall) return 'Microsoft Teams';
@@ -223,7 +237,11 @@ return false`;
 
   private async tasklistExists(imageName: string): Promise<boolean> {
     try {
-      const { stdout } = await execFileAsync('tasklist', ['/FI', `IMAGENAME eq ${imageName}`, '/NH']);
+      const { stdout } = await execFileAsync('tasklist', [
+        '/FI',
+        `IMAGENAME eq ${imageName}`,
+        '/NH',
+      ]);
       return stdout.includes(imageName);
     } catch {
       return false;

@@ -42,20 +42,28 @@ export async function concatAudioFiles(opts: ConcatOptions): Promise<void> {
   const allSameExt = opts.inputPaths.every((p) => path.extname(p).toLowerCase() === firstExt);
 
   if (allSameExt) {
-    const manifestPath = path.join(os.tmpdir(), `listener-concat-${process.pid}-${randomUUID()}.txt`);
+    const manifestPath = path.join(
+      os.tmpdir(),
+      `listener-concat-${process.pid}-${randomUUID()}.txt`,
+    );
     // Single quotes inside paths must be escaped as `'\''` for the concat
     // demuxer's manifest format.
-    const manifest = opts.inputPaths
-      .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
-      .join('\n') + '\n';
+    const manifest = `${opts.inputPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join('\n')}\n`;
     await fs.promises.writeFile(manifestPath, manifest, 'utf-8');
 
     try {
       await execFileAsync(opts.ffmpegPath, [
-        '-y', '-loglevel', 'error',
-        '-f', 'concat', '-safe', '0',
-        '-i', manifestPath,
-        '-c', 'copy',
+        '-y',
+        '-loglevel',
+        'error',
+        '-f',
+        'concat',
+        '-safe',
+        '0',
+        '-i',
+        manifestPath,
+        '-c',
+        'copy',
         opts.outputPath,
       ]);
       return;
@@ -72,13 +80,16 @@ export async function concatAudioFiles(opts: ConcatOptions): Promise<void> {
   for (const p of opts.inputPaths) {
     filterArgs.push('-i', p);
   }
-  const filterExpr =
-    opts.inputPaths.map((_, i) => `[${i}:a]`).join('') +
-    `concat=n=${opts.inputPaths.length}:v=0:a=1[out]`;
+  const filterExpr = `${opts.inputPaths.map((_, i) => `[${i}:a]`).join('')}concat=n=${opts.inputPaths.length}:v=0:a=1[out]`;
   filterArgs.push(
-    '-filter_complex', filterExpr,
-    '-map', '[out]',
-    '-c:a', 'libopus', '-b:a', '64k',
+    '-filter_complex',
+    filterExpr,
+    '-map',
+    '[out]',
+    '-c:a',
+    'libopus',
+    '-b:a',
+    '64k',
     opts.outputPath,
   );
 

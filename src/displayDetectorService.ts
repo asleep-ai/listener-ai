@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { screen, Display } from 'electron';
+import { type Display, screen } from 'electron';
 
 export class DisplayDetectorService extends EventEmitter {
   private listening = false;

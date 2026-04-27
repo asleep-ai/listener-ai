@@ -1,15 +1,15 @@
-import { describe, it, after } from 'node:test';
-import assert from 'node:assert/strict';
 import * as fs from 'fs';
+import assert from 'node:assert/strict';
+import { after, describe, it } from 'node:test';
 import * as path from 'path';
-import {
-  saveTranscription,
-  readTranscription,
-  parseFrontmatter,
-  formatSummary,
-  sanitizeForPath,
-} from './outputService';
 import type { TranscriptionResult } from './geminiService';
+import {
+  formatSummary,
+  parseFrontmatter,
+  readTranscription,
+  sanitizeForPath,
+  saveTranscription,
+} from './outputService';
 import { makeTempDir, rmDir } from './test-helpers';
 
 const tmpDirs: string[] = [];
@@ -46,10 +46,7 @@ describe('saveTranscription with mergedFrom', () => {
 
     const data = await readTranscription(folderPath);
     assert.ok(data, 'readTranscription returned null');
-    assert.deepEqual(data!.mergedFrom, [
-      'Part_One_20260101_120000',
-      'Part_Two_20260101_130000',
-    ]);
+    assert.deepEqual(data!.mergedFrom, ['Part_One_20260101_120000', 'Part_Two_20260101_130000']);
     assert.equal(data!.summary, 'A short greeting.');
     assert.deepEqual(data!.keyPoints, ['Greeting exchanged']);
   });

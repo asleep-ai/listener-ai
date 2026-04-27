@@ -112,7 +112,7 @@ export class ConfigService {
   hasRequiredConfig(): boolean {
     return !!this.getGeminiApiKey() && !!this.getNotionApiKey() && !!this.getNotionDatabaseId();
   }
-  
+
   getMissingConfigs(): string[] {
     const missing: string[] = [];
     if (!this.getGeminiApiKey()) missing.push('Gemini API Key');
@@ -264,7 +264,7 @@ export class ConfigService {
       minRecordingSeconds: this.getMinRecordingSeconds(),
       recordSystemAudio: this.getRecordSystemAudio(),
       audioDeviceId: this.getAudioDeviceId(),
-      lastSeenVersion: this.getLastSeenVersion()
+      lastSeenVersion: this.getLastSeenVersion(),
     };
   }
 }

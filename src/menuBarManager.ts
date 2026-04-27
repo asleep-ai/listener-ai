@@ -1,6 +1,5 @@
-import { Tray, Menu, nativeImage, app, BrowserWindow } from 'electron';
-import { SimpleAudioRecorder } from './simpleAudioRecorder';
-
+import { type BrowserWindow, Menu, Tray, app, nativeImage } from 'electron';
+import type { SimpleAudioRecorder } from './simpleAudioRecorder';
 
 export class MenuBarManager {
   private tray: Tray | null = null;
@@ -8,8 +7,6 @@ export class MenuBarManager {
   private mainWindow: BrowserWindow | null = null;
   private audioRecorder: SimpleAudioRecorder | null = null;
   private currentRecordingTitle = 'Quick Recording';
-
-  constructor() { }
 
   init(mainWindow: BrowserWindow, audioRecorder: SimpleAudioRecorder) {
     this.mainWindow = mainWindow;
@@ -78,22 +75,19 @@ export class MenuBarManager {
     const setPixel = (x: number, y: number) => {
       if (x < 0 || x >= size || y < 0 || y >= size) return;
       const i = (y * size + x) * 4;
-      buf[i] = 0;       // R
-      buf[i + 1] = 0;   // G
-      buf[i + 2] = 0;   // B
-      buf[i + 3] = 255;  // A
+      buf[i] = 0; // R
+      buf[i + 1] = 0; // G
+      buf[i + 2] = 0; // B
+      buf[i + 3] = 255; // A
     };
 
     const fillRect = (x: number, y: number, w: number, h: number) => {
-      for (let dy = 0; dy < h; dy++)
-        for (let dx = 0; dx < w; dx++)
-          setPixel(x + dx, y + dy);
+      for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) setPixel(x + dx, y + dy);
     };
 
     const fillCircle = (cx: number, cy: number, r: number) => {
       for (let dy = -r; dy <= r; dy++)
-        for (let dx = -r; dx <= r; dx++)
-          if (dx * dx + dy * dy <= r * r) setPixel(cx + dx, cy + dy);
+        for (let dx = -r; dx <= r; dx++) if (dx * dx + dy * dy <= r * r) setPixel(cx + dx, cy + dy);
     };
 
     // "L" letterform
@@ -102,15 +96,19 @@ export class MenuBarManager {
     const bottom = Math.round(size * 0.86);
     const right = Math.round(size * 0.77);
 
-    fillRect(margin, margin, thick, bottom - margin);          // vertical bar
-    fillRect(margin, bottom - thick, right - margin, thick);   // horizontal bar
+    fillRect(margin, margin, thick, bottom - margin); // vertical bar
+    fillRect(margin, bottom - thick, right - margin, thick); // horizontal bar
 
     if (state === 'recording') {
       const dotR = Math.round(size * 0.09);
       fillCircle(right + dotR, bottom - dotR, dotR);
     }
 
-    const image = nativeImage.createFromBuffer(buf, { width: size, height: size, scaleFactor: scale });
+    const image = nativeImage.createFromBuffer(buf, {
+      width: size,
+      height: size,
+      scaleFactor: scale,
+    });
     if (process.platform === 'darwin') {
       image.setTemplateImage(true);
     }
@@ -164,7 +162,7 @@ export class MenuBarManager {
     if (this.isRecording) {
       menuItems.push({
         label: 'Stop Recording',
-        click: () => this.stopRecording()
+        click: () => this.stopRecording(),
       });
       menuItems.push({ type: 'separator' });
     }
@@ -176,7 +174,7 @@ export class MenuBarManager {
           this.mainWindow.show();
           this.mainWindow.focus();
         }
-      }
+      },
     });
 
     menuItems.push({ type: 'separator' });
@@ -188,7 +186,7 @@ export class MenuBarManager {
           this.mainWindow.show();
           this.mainWindow.webContents.send('open-config');
         }
-      }
+      },
     });
 
     menuItems.push({ type: 'separator' });
@@ -198,7 +196,7 @@ export class MenuBarManager {
       click: () => {
         global.isQuitting = true;
         app.quit();
-      }
+      },
     });
 
     const contextMenu = Menu.buildFromTemplate(menuItems);

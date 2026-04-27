@@ -1,5 +1,5 @@
-import * as fs from 'fs-extra';
 import * as path from 'path';
+import * as fs from 'fs-extra';
 
 export interface DownloadProgress {
   status: 'preparing' | 'downloading' | 'extracting' | 'verifying' | 'complete' | 'error';
@@ -26,29 +26,29 @@ const FFMPEG_RELEASES: FFmpegRelease[] = [
     arch: 'x64',
     url: 'https://github.com/eugeneware/ffmpeg-static/releases/download/b6.0/ffmpeg-darwin-x64',
     sha256: '', // TODO: Add actual checksum from release page
-    version: '6.0'
+    version: '6.0',
   },
   {
     platform: 'darwin',
     arch: 'arm64',
     url: 'https://github.com/eugeneware/ffmpeg-static/releases/download/b6.0/ffmpeg-darwin-arm64',
     sha256: '', // TODO: Add actual checksum from release page
-    version: '6.0'
+    version: '6.0',
   },
   {
     platform: 'win32',
     arch: 'x64',
     url: 'https://github.com/eugeneware/ffmpeg-static/releases/download/b6.0/ffmpeg-win32-x64',
     sha256: '', // TODO: Add actual checksum from release page
-    version: '6.0'
+    version: '6.0',
   },
   {
     platform: 'linux',
     arch: 'x64',
     url: 'https://github.com/eugeneware/ffmpeg-static/releases/download/b6.0/ffmpeg-linux-x64',
     sha256: '', // TODO: Add actual checksum from release page
-    version: '6.0'
-  }
+    version: '6.0',
+  },
 ];
 
 export class FFmpegManager {
@@ -87,7 +87,6 @@ export class FFmpegManager {
     return null;
   }
 
-
   async downloadFFmpeg(onProgress: (progress: DownloadProgress) => void): Promise<string> {
     try {
       // Find appropriate release
@@ -102,7 +101,7 @@ export class FFmpegManager {
         bytesDownloaded: 0,
         totalBytes: 0,
         speed: '0 MB/s',
-        eta: 'Preparing...'
+        eta: 'Preparing...',
       });
 
       // Ensure directory exists
@@ -119,7 +118,7 @@ export class FFmpegManager {
         bytesDownloaded: 0,
         totalBytes: 0,
         speed: '0 MB/s',
-        eta: 'Installing...'
+        eta: 'Installing...',
       });
 
       await fs.move(tempPath, this.ffmpegPath, { overwrite: true });
@@ -136,7 +135,7 @@ export class FFmpegManager {
         bytesDownloaded: 0,
         totalBytes: 0,
         speed: '0 MB/s',
-        eta: 'Verifying...'
+        eta: 'Verifying...',
       });
 
       if (await this.isFFmpegValid()) {
@@ -146,7 +145,7 @@ export class FFmpegManager {
           bytesDownloaded: 0,
           totalBytes: 0,
           speed: '0 MB/s',
-          eta: 'Complete!'
+          eta: 'Complete!',
         });
         return this.ffmpegPath;
       }
@@ -159,13 +158,17 @@ export class FFmpegManager {
         bytesDownloaded: 0,
         totalBytes: 0,
         speed: '0 MB/s',
-        eta: 'Error'
+        eta: 'Error',
       });
       throw error;
     }
   }
 
-  private async downloadFile(url: string, destPath: string, onProgress: (progress: DownloadProgress) => void): Promise<void> {
+  private async downloadFile(
+    url: string,
+    destPath: string,
+    onProgress: (progress: DownloadProgress) => void,
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
       this.downloadController = new AbortController();
       const startTime = Date.now();
@@ -175,7 +178,7 @@ export class FFmpegManager {
       const { net } = require('electron');
       const request = net.request({
         url,
-        redirect: 'follow'
+        redirect: 'follow',
       });
 
       request.on('response', (response: any) => {
@@ -184,7 +187,7 @@ export class FFmpegManager {
           return;
         }
 
-        totalBytes = parseInt(response.headers['content-length'] as string) || 0;
+        totalBytes = Number.parseInt(response.headers['content-length'] as string) || 0;
         const fileStream = fs.createWriteStream(destPath);
 
         response.on('data', (chunk: Buffer) => {
@@ -200,7 +203,7 @@ export class FFmpegManager {
           const progress = this.calculateProgress(receivedBytes, totalBytes, startTime);
           onProgress({
             status: 'downloading',
-            ...progress
+            ...progress,
           });
         });
 
@@ -220,7 +223,11 @@ export class FFmpegManager {
     });
   }
 
-  private calculateProgress(received: number, total: number, startTime: number): Omit<DownloadProgress, 'status'> {
+  private calculateProgress(
+    received: number,
+    total: number,
+    startTime: number,
+  ): Omit<DownloadProgress, 'status'> {
     const percent = total > 0 ? Math.round((received / total) * 100) : 0;
     const elapsed = (Date.now() - startTime) / 1000;
     const speed = received / elapsed;
@@ -231,7 +238,7 @@ export class FFmpegManager {
       bytesDownloaded: received,
       totalBytes: total,
       speed: this.formatSpeed(speed),
-      eta: this.formatTime(remaining)
+      eta: this.formatTime(remaining),
     };
   }
 
@@ -247,7 +254,6 @@ export class FFmpegManager {
     return `${minutes} minute${minutes > 1 ? 's' : ''}`;
   }
 
-
   private getRelease(): FFmpegRelease | null {
     const arch = process.arch as string;
     const platform = process.platform;
@@ -257,9 +263,7 @@ export class FFmpegManager {
     if (arch === 'ia32') targetArch = 'x64'; // 32-bit x86 -> use x64 build
     if (arch === 'x32') targetArch = 'x64'; // x32 ABI -> use x64 build
 
-    return FFMPEG_RELEASES.find(r =>
-      r.platform === platform && r.arch === targetArch
-    ) || null;
+    return FFMPEG_RELEASES.find((r) => r.platform === platform && r.arch === targetArch) || null;
   }
 
   private async isFFmpegValid(): Promise<boolean> {
@@ -277,22 +281,15 @@ export class FFmpegManager {
     const paths: string[] = [];
 
     if (platform === 'darwin') {
-      paths.push(
-        '/opt/homebrew/bin/ffmpeg',
-        '/usr/local/bin/ffmpeg',
-        '/usr/bin/ffmpeg'
-      );
+      paths.push('/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg');
     } else if (platform === 'win32') {
-      const programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+      const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
       paths.push(
         path.join(programFiles, 'ffmpeg', 'bin', 'ffmpeg.exe'),
-        'C:\\ffmpeg\\bin\\ffmpeg.exe'
+        'C:\\ffmpeg\\bin\\ffmpeg.exe',
       );
     } else {
-      paths.push(
-        '/usr/bin/ffmpeg',
-        '/usr/local/bin/ffmpeg'
-      );
+      paths.push('/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg');
     }
 
     // Check hardcoded paths first
@@ -300,9 +297,7 @@ export class FFmpegManager {
       try {
         await fs.access(ffmpegPath, fs.constants.X_OK);
         return ffmpegPath;
-      } catch {
-        continue;
-      }
+      } catch {}
     }
 
     // Check if ffmpeg is in PATH
@@ -316,13 +311,12 @@ export class FFmpegManager {
         await fs.access(ffmpegPath, fs.constants.X_OK);
         return ffmpegPath;
       }
-    } catch (e) {
+    } catch (_e) {
       // ffmpeg not in PATH or not executable
     }
 
     return null;
   }
-
 
   cancelDownload(): void {
     this.downloadController?.abort();
