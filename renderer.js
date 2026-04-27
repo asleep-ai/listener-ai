@@ -303,6 +303,17 @@ window.electronAPI.onTranscriptionProgress((progress) => {
   }
 });
 
+// Auto-refresh the list when the recordings directory changes externally
+// (e.g., a `listener` CLI run, or manual file ops). refreshRecordingsList is
+// defined later in this file but the listener only fires after first event.
+if (window.electronAPI.onRecordingsChanged) {
+  window.electronAPI.onRecordingsChanged(() => {
+    if (typeof refreshRecordingsList === 'function') {
+      refreshRecordingsList();
+    }
+  });
+}
+
 // Listen for release notes after an update
 if (window.electronAPI.onShowReleaseNotes) {
   window.electronAPI.onShowReleaseNotes((notes) => {
@@ -1496,40 +1507,10 @@ async function handleTranscribe(filePath, title) {
     return;
   }
 
-  // Make sure modal elements are loaded
-  if (!transcriptionModal) {
-    transcriptionModal = document.getElementById('transcriptionModal');
-  }
-
-  // Show transcription modal
-  if (transcriptionModal) {
-    transcriptionModal.style.display = 'block';
-    document.getElementById('transcriptionTitle').textContent = `Transcription - ${title}`;
-
-    // Show progress bar
-    if (progressContainer) {
-      progressContainer.style.display = 'block';
-      progressFill.style.width = '0%';
-      progressText.textContent = 'Initializing transcription...';
-    }
-  } else {
-    console.error('Transcription modal not found');
+  if (!prepareTranscriptionModal(`Transcription - ${title}`, 'Initializing transcription...')) {
     return;
   }
 
-  // Reset all tabs to loading state
-  document.getElementById('all').innerHTML = '<p class="loading">Loading...</p>';
-  document.getElementById('summary').innerHTML = '<p class="loading">Loading summary...</p>';
-  document.getElementById('transcript').innerHTML = '<p class="loading">Loading transcription...</p>';
-  resetModalChatFor(null);
-  document.querySelectorAll('.tab-button.dynamic').forEach(el => el.remove());
-  document.querySelectorAll('.tab-pane.dynamic').forEach(el => el.remove());
-  document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-  document.querySelector('[data-tab="all"]').classList.add('active');
-  document.getElementById('all').classList.add('active');
-
-  // Disable the transcribe button
   const button = document.querySelector(`[data-filepath="${filePath}"]`);
   if (button) {
     button.disabled = true;
@@ -1707,22 +1688,28 @@ async function showConfigModal() {
 
 
 // Function to load and display recordings
+// Monotonic token so a slow loadRecordings (per-item async metadata reads)
+// can't overwrite a fresher snapshot's render. Mirrors lastSearchToken.
+let lastLoadRecordingsToken = 0;
 async function loadRecordings() {
+  const myToken = ++lastLoadRecordingsToken;
   try {
     const result = await window.electronAPI.getRecordings();
 
     if (result.success && result.recordings.length > 0) {
-      recordingsList.innerHTML = '';
-
-      // Use Promise.all to handle async createRecordingItem
       const items = await Promise.all(
         result.recordings.map(recording => createRecordingItem(recording))
       );
+      // Drop if a newer load started while we were awaiting metadata.
+      if (myToken !== lastLoadRecordingsToken) return;
+      recordingsList.innerHTML = '';
       items.forEach(item => recordingsList.appendChild(item));
     } else {
+      if (myToken !== lastLoadRecordingsToken) return;
       recordingsList.innerHTML = '<p class="no-recordings">No recordings yet</p>';
     }
   } catch (error) {
+    if (myToken !== lastLoadRecordingsToken) return;
     console.error('Error loading recordings:', error);
     recordingsList.innerHTML = '<p class="no-recordings">Error loading recordings</p>';
   }
@@ -1760,6 +1747,9 @@ async function createRecordingItem(recording) {
           Transcribe
         </button>
       `}
+      <button class="action-button merge-btn" data-path="${recording.path}" title="Merge this with other recordings into a single note">
+        Merge
+      </button>
       <button class="action-button reveal-btn" data-path="${recording.path}" title="Reveal in Finder (right-click in Finder to share)">
         Show
       </button>
@@ -1803,6 +1793,13 @@ async function createRecordingItem(recording) {
     });
   }
 
+  const mergeBtn = item.querySelector('.merge-btn');
+  if (mergeBtn) {
+    mergeBtn.addEventListener('click', () => {
+      openMergeDialog(recording.path);
+    });
+  }
+
   return item;
 }
 
@@ -1838,6 +1835,235 @@ async function handleExportM4A(srcPath, button) {
       button.disabled = false;
       button.textContent = originalLabel;
     }
+  }
+}
+
+// --- Merge Recordings dialog ----------------------------------------------
+
+// Shared by handleTranscribe and performMerge. Returns false if the modal can't
+// be located (handler should bail).
+function prepareTranscriptionModal(modalTitle, progressMessage, allLoadingText) {
+  if (!transcriptionModal) {
+    transcriptionModal = document.getElementById('transcriptionModal');
+  }
+  if (!transcriptionModal) {
+    console.error('Transcription modal not found');
+    return false;
+  }
+  transcriptionModal.style.display = 'block';
+  document.getElementById('transcriptionTitle').textContent = modalTitle;
+  if (progressContainer) {
+    progressContainer.style.display = 'block';
+    progressFill.style.width = '0%';
+    progressText.textContent = progressMessage;
+  }
+  document.getElementById('all').innerHTML = `<p class="loading">${allLoadingText || 'Loading...'}</p>`;
+  document.getElementById('summary').innerHTML = '<p class="loading">Loading summary...</p>';
+  document.getElementById('transcript').innerHTML = '<p class="loading">Loading transcription...</p>';
+  resetModalChatFor(null);
+  document.querySelectorAll('.tab-button.dynamic').forEach(el => el.remove());
+  document.querySelectorAll('.tab-pane.dynamic').forEach(el => el.remove());
+  document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.querySelector('[data-tab="all"]').classList.add('active');
+  document.getElementById('all').classList.add('active');
+  return true;
+}
+
+async function openMergeDialog(initialFilePath) {
+  const modal = document.getElementById('mergeModal');
+  const list = document.getElementById('mergeList');
+  const status = document.getElementById('mergeStatus');
+  const titleInput = document.getElementById('mergeTitleInput');
+  const confirmBtn = document.getElementById('mergeConfirmBtn');
+  const cancelBtn = document.getElementById('mergeCancelBtn');
+  const closeBtn = document.getElementById('mergeModalClose');
+  if (!modal || !list || !status || !titleInput || !confirmBtn || !cancelBtn || !closeBtn) {
+    console.error('Merge modal elements missing');
+    return;
+  }
+
+  status.textContent = '';
+  status.classList.remove('error');
+  titleInput.value = '';
+  list.innerHTML = '<p class="merge-list-empty">Loading recordings...</p>';
+  modal.style.display = 'block';
+
+  let recordings = [];
+  try {
+    const result = await window.electronAPI.getRecordings();
+    recordings = result && result.success ? result.recordings : [];
+  } catch (err) {
+    list.innerHTML = '<p class="merge-list-empty">Failed to load recordings.</p>';
+    return;
+  }
+
+  if (recordings.length < 2) {
+    list.innerHTML = '<p class="merge-list-empty">Need at least 2 recordings to merge.</p>';
+    confirmBtn.disabled = true;
+    return;
+  }
+
+  // Seed with the clicked recording so the title-prefix heuristic below has
+  // something to work with even before the user picks anything else.
+  const selection = initialFilePath ? [initialFilePath] : [];
+
+  list.innerHTML = '';
+  for (const rec of recordings) {
+    const li = document.createElement('li');
+    li.dataset.path = rec.path;
+    const date = new Date(rec.createdAt);
+    const meta = `${date.toLocaleDateString()} ${date.toLocaleTimeString()} • ${formatFileSize(rec.size)}`;
+    li.innerHTML = `
+      <input type="checkbox" />
+      <div class="merge-list-item-info">
+        <div class="merge-list-item-title"></div>
+        <div class="merge-list-item-meta"></div>
+      </div>
+      <div class="merge-list-order"></div>
+    `;
+    li.querySelector('.merge-list-item-title').textContent = rec.title || 'Untitled';
+    li.querySelector('.merge-list-item-meta').textContent = meta;
+    const checkbox = li.querySelector('input[type="checkbox"]');
+    if (selection.includes(rec.path)) {
+      checkbox.checked = true;
+      li.classList.add('selected');
+    }
+    li.addEventListener('click', (e) => {
+      // Skip when the click hits the checkbox itself -- otherwise the change
+      // event fires twice.
+      if (e.target !== checkbox) {
+        checkbox.checked = !checkbox.checked;
+      }
+      onSelectionChange(rec.path, checkbox.checked, li);
+    });
+    list.appendChild(li);
+  }
+
+  function onSelectionChange(filePath, checked, li) {
+    if (checked) {
+      if (!selection.includes(filePath)) selection.push(filePath);
+      li.classList.add('selected');
+    } else {
+      const idx = selection.indexOf(filePath);
+      if (idx >= 0) selection.splice(idx, 1);
+      li.classList.remove('selected');
+    }
+    updateOrderBadges();
+    updateConfirmState();
+    updateDefaultTitle();
+  }
+
+  function updateOrderBadges() {
+    const items = list.querySelectorAll('li');
+    items.forEach((el) => {
+      const badge = el.querySelector('.merge-list-order');
+      const idx = selection.indexOf(el.dataset.path);
+      badge.textContent = idx >= 0 ? String(idx + 1) : '';
+    });
+  }
+
+  function updateConfirmState() {
+    confirmBtn.disabled = selection.length < 2;
+    if (selection.length === 1) {
+      status.textContent = 'Select at least one more recording.';
+      status.classList.remove('error');
+    } else {
+      status.textContent = '';
+      status.classList.remove('error');
+    }
+  }
+
+  function updateDefaultTitle() {
+    if (titleInput.dataset.userEdited === 'true') return;
+    const titles = selection
+      .map((p) => recordings.find((r) => r.path === p))
+      .filter(Boolean)
+      .map((r) => r.title || '');
+    const prefix = commonTitlePrefix(titles);
+    titleInput.placeholder = prefix || 'Merged Meeting';
+  }
+
+  const onTitleInput = () => {
+    titleInput.dataset.userEdited = titleInput.value.trim() === '' ? '' : 'true';
+  };
+  titleInput.addEventListener('input', onTitleInput);
+
+  updateOrderBadges();
+  updateConfirmState();
+  updateDefaultTitle();
+
+  const cleanup = () => {
+    modal.style.display = 'none';
+    titleInput.dataset.userEdited = '';
+    titleInput.removeEventListener('input', onTitleInput);
+    cancelBtn.removeEventListener('click', onCancel);
+    closeBtn.removeEventListener('click', onCancel);
+    confirmBtn.removeEventListener('click', onConfirm);
+  };
+  const onCancel = () => cleanup();
+  const onConfirm = async () => {
+    if (selection.length < 2) return;
+    const title = titleInput.value.trim() || titleInput.placeholder || 'Merged Meeting';
+    cleanup();
+    await performMerge(selection.slice(), title);
+  };
+  cancelBtn.addEventListener('click', onCancel);
+  closeBtn.addEventListener('click', onCancel);
+  confirmBtn.addEventListener('click', onConfirm);
+}
+
+// Longest shared prefix across titles, trimmed of trailing whitespace and
+// trailing single digits ("Meeting 1" / "Meeting 2" -> "Meeting").
+function commonTitlePrefix(titles) {
+  if (titles.length === 0) return '';
+  if (titles.length === 1) return titles[0];
+  let prefix = titles[0];
+  for (let i = 1; i < titles.length; i++) {
+    const t = titles[i];
+    let j = 0;
+    while (j < prefix.length && j < t.length && prefix[j] === t[j]) j++;
+    prefix = prefix.slice(0, j);
+    if (!prefix) break;
+  }
+  return prefix.replace(/[\s_\-]*\d*\s*$/, '').trim();
+}
+
+async function performMerge(paths, title) {
+  if (!prepareTranscriptionModal(`Merging - ${title}`, 'Preparing merge...', 'Merging audio and re-transcribing...')) {
+    return;
+  }
+
+  try {
+    const result = await window.electronAPI.mergeRecordings({ paths, title });
+    if (!result || !result.success) {
+      const message = (result && result.error) || 'Unknown error';
+      if (result && result.code === 'ffmpeg-missing') {
+        alert('FFmpeg is required to merge recordings. Transcribe a recording first to install it.');
+      } else {
+        alert('Failed to merge recordings: ' + message);
+      }
+      if (progressContainer) progressContainer.style.display = 'none';
+      if (transcriptionModal) transcriptionModal.style.display = 'none';
+      return;
+    }
+
+    if (progressContainer) progressContainer.style.display = 'none';
+    document.getElementById('transcriptionTitle').textContent = `Transcription - ${title}`;
+    currentTranscriptionData = result.data;
+    currentMeetingTitle = title;
+    currentFilePath = result.mergedAudioPath || null;
+    populateTranscriptionUI(result.data);
+
+    await refreshRecordingsList();
+
+    const notionConfig = await window.electronAPI.getConfig();
+    if (notionConfig.notionApiKey && notionConfig.notionDatabaseId && uploadToNotionBtn) {
+      uploadToNotionBtn.style.display = 'flex';
+    }
+  } catch (err) {
+    alert('Error merging recordings: ' + (err && err.message ? err.message : String(err)));
+    if (progressContainer) progressContainer.style.display = 'none';
   }
 }
 

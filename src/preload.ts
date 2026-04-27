@@ -48,6 +48,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Recording export
   exportRecordingM4A: (srcPath: string) => ipcRenderer.invoke('export-recording-m4a', srcPath),
 
+  // Merge multiple recordings into a single re-transcribed note
+  mergeRecordings: (opts: { paths: string[]; title?: string }) =>
+    ipcRenderer.invoke('merge-recordings', opts),
+
+  // Pushed by main when the recordings directory changes externally
+  // (CLI run, manual file ops). Renderer should re-fetch the list.
+  onRecordingsChanged: (callback: () => void) => {
+    ipcRenderer.on('recordings-changed', () => callback());
+  },
+
   // System settings
   openMicrophoneSettings: () => ipcRenderer.invoke('open-microphone-settings'),
   openScreenRecordingSettings: () => ipcRenderer.invoke('open-screen-recording-settings'),

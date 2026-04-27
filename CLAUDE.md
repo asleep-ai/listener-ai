@@ -152,8 +152,45 @@ Env-var fallbacks (read-only when the config key is empty): `GEMINI_API_KEY`, `N
 - `releaseNotesService.ts` — "what's new" modal driver (reads `lastSeenVersion`)
 
 ### Tests
-- Test files: `agentService.test.ts`, `searchService.test.ts`, `meetingDetectorService.test.ts`
 - Run: `pnpm test` (builds with tsc, then executes compiled `.test.js` with `node --test`)
+- Test files live next to source: `src/**/*.test.ts`
+- Existing: `agentService`, `searchService`, `meetingDetectorService`, `simpleAudioRecorder`, `outputService`, `services/audioConcatService`, `cli` (adb-style integration)
+- Shared helpers in `src/test-helpers.ts` (temp dirs, ffmpeg detection, synthetic audio fixtures)
+- Test escape hatches (read-only at process start, never set in production):
+  - `LISTENER_DATA_PATH` — overrides `getDataPath()` so tests run against a temp directory
+  - `LISTENER_TEST_MODE` — `GeminiService.transcribeAudio` returns a canned fixture instead of calling the API
+
+#### Patterns proven in this codebase
+
+- **Test against real external tools when behavior depends on them.** Mocking ffmpeg would have hidden the concat demuxer's silent-corruption bug — exit 0 + 28616s output for 1s+1s mismatched-codec inputs. For deterministic, cheap-to-invoke tools (ffmpeg, ffprobe), shell out instead of mocking.
+- **Test the assumption, not just the code.** When the implementation depends on "tool X errors on bad input", verify it. The original concat fallback assumed `-c copy` would throw on mismatched codecs; it doesn't.
+- **Generate synthetic fixtures with the tool itself.** `ffmpeg -f lavfi -i sine=frequency=440:duration=1` produces a 1-second webm in milliseconds — see `makeOpusWebm` in `test-helpers.ts`. No fixture binaries committed.
+- **No real Gemini calls in tests.** Add a `LISTENER_TEST_MODE` env-var stub before writing CLI/integration tests that exercise `GeminiService`.
+
+#### Conventions
+
+- Per-test temp dirs via `makeTempDir(suffix)` from `test-helpers.ts` (wraps `fs.mkdtempSync` under `os.tmpdir()`). Pair with `rmDir(...)` in `after()`. Never write to the real `getDataPath()`.
+- For `describe({ skip })` based on external-tool availability, detect synchronously at module load (`findFfmpegSync()`); `before()` runs too late because `describe` evaluates options at file-load time.
+- Skip gracefully when external tools are missing: `describe('...', { skip: !ffmpegPath ? 'ffmpeg not installed' : undefined }, ...)`. Tests should pass on a machine without ffmpeg, run for real where it's installed.
+
+#### Test pyramid for new features
+
+1. **Service-layer unit tests** with `node --test` — primary; covers logic and external-tool assumptions
+2. **CLI as adb-style integration test** — see `cli.test.ts`. Drive the compiled CLI as a subprocess with `LISTENER_DATA_PATH` (sandboxed temp) + `LISTENER_TEST_MODE` (Gemini stub). Catches what unit tests can't: argument parsing, IPC/handler wiring, full pipeline flow (resolve refs → readTranscription → concat → transcribe → save). Free, offline, deterministic.
+3. **Interactive verification** — see below. For UX/visual changes or paid-API happy paths, where automation is heavy.
+4. **Playwright Electron** — heaviest; reserve for GUI-only behaviors that can't be reached via CLI.
+
+#### Interactive verification (between unit tests and Playwright)
+
+For UX changes (button visibility, dialog UX, list refresh) or external paid APIs (Gemini), use the live-monitor pattern instead of full Playwright:
+
+1. Launch worktree build in the background (`pnpm start` via `run_in_background`).
+2. Tail stdout — main-process `console.log` lands here (transcription progress, ffmpeg invocations, errors).
+3. Snapshot baseline: file counts in `recordings/` and `transcriptions/` before the user acts.
+4. User drives the GUI; the model reports each observable: file counts, new folder names, log lines, summary.md frontmatter.
+5. Verify the result by reading produced files, not by clicking.
+
+This pattern caught two issues during issue #95 verification: a hard-to-see Merge button (CSS override) and an empty `mergedFrom` edge case dependent on input metadata. Service-layer tests would have missed both.
 
 ## Background Recording Policy
 Recording starts silently — never bring the window to foreground (no `show()`/`focus()`) and never fire a "Recording Started" notification. This applies to all recording triggers: global shortcut, tray click, meeting detection, and display detection. Display detection in particular is designed to be discreet — the user allows recording via the notification without the app becoming visible. Only explicit user actions (dock click, tray menu "Open", notification click for non-recording events) should show the window.
@@ -179,7 +216,7 @@ Recording starts silently — never bring the window to foreground (no `show()`/
 ## npm Distribution
 - Package name: `listener-ai`. Only the CLI portion is published to npm (Electron app ships via GitHub Releases).
 - Electron-only runtime deps (`electron-updater`, `@notionhq/client`) live in `optionalDependencies` — honest semantics for a package serving both Electron and CLI users. `build.files` includes `node_modules/**/*`, so they are still bundled in Electron builds.
-- `package.json.files` whitelists the exact compiled JS shipped to npm: `dist/cli.js`, `dataPath.js`, `configService.js`, `geminiService.js`, `outputService.js`, `searchService.js`, `agentService.js`, `services/ffmpegManager.js`.
+- `package.json.files` whitelists the exact compiled JS shipped to npm: `dist/cli.js`, `dataPath.js`, `configService.js`, `geminiService.js`, `outputService.js`, `searchService.js`, `agentService.js`, `audioFormats.js`, `services/ffmpegManager.js`, `services/audioConcatService.js`. When adding a new module imported by any of these, append it to the whitelist or `npm install -g listener-ai` will fail with `Cannot find module`.
 
 ## Future Enhancements (Optional)
 - Cloud sync of transcriptions, settings, and agent chat history across devices
