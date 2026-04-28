@@ -67,7 +67,9 @@
   "dependencies": {
     "@google/genai": "^1.13.0",
     "audiotee": "^0.0.7",
+    "buffer-equal-constant-time": "^1.0.1",
     "fs-extra": "^11.2.0",
+    "jwa": "^2.0.1",
     "marked": "^15.0.0"
   },
   "optionalDependencies": {
