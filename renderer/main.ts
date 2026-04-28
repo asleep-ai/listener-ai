@@ -2,7 +2,7 @@
 // Wires every feature module's `setup*()` after DOMContentLoaded so each
 // module owns its own DOM and IPC bindings.
 
-import { setupRecorder, startRecording } from './audio/recorder';
+import { setupRecorder } from './audio/recorder';
 import { setupFileHandler } from './services/file-handler';
 import { getDom, initDom } from './state';
 import { setupAgentConfirmHandler, setupHomeChat, setupModalChat } from './ui/chat-panel';
@@ -17,11 +17,6 @@ import { setupReleaseNotes } from './ui/release-notes';
 import { setupSearch } from './ui/search';
 import { setupTranscriptionModal } from './ui/transcription-modal';
 import { setupUpdateBadge } from './ui/update-badge';
-
-// FFmpeg dialog needs to re-trigger startRecording after a successful download
-// without importing recorder directly (would create a circular dep). Expose a
-// global symbol the dialog can reach. See ui/ffmpeg-dialog.ts.
-window.__startRecording = startRecording;
 
 // Global error handler -- shows a user-visible alert in production builds.
 window.addEventListener('error', (event) => {

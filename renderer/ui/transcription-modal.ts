@@ -154,7 +154,18 @@ export async function handleTranscribe(filePath: string, title: string): Promise
 
   try {
     // Call the transcription API
-    const result = await window.electronAPI.transcribeAudio(filePath);
+    let result = await window.electronAPI.transcribeAudio(filePath);
+
+    // FFmpeg is required for transcription. If it's missing, prompt the user
+    // to download it via the dialog and then retry once. The dialog handles
+    // its own progress UI; we just await its outcome.
+    if (!result.success && (result as { code?: string }).code === 'ffmpeg-missing') {
+      const { showFFmpegDownloadDialog } = await import('./ffmpeg-dialog');
+      const dlResult = await showFFmpegDownloadDialog();
+      if (dlResult.success) {
+        result = await window.electronAPI.transcribeAudio(filePath);
+      }
+    }
 
     if (result.success) {
       // Hide progress bar

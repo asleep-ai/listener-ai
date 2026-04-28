@@ -17,5 +17,5 @@
     "types": ["vite/client"]
   },
   "include": ["renderer/**/*", "vite.config.ts"],
-  "exclude": ["node_modules", "dist", "renderer/audio/pcm-stream-processor.ts"]
+  "exclude": ["node_modules", "dist", "renderer/audio/pcm-stream-processor.js"]
 }

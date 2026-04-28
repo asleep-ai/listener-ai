@@ -1,15 +1,9 @@
 // FFmpeg download progress dialog.
-// Extracted from legacy.ts (~lines 2258-2353). Behavior preserved verbatim.
-
-// `startRecording` lives in audio/recorder; this module is only invoked when
-// the user clicks Record and ffmpeg is missing. Once the download completes we
-// re-trigger startRecording. We import lazily via a globally-resolved symbol
-// to avoid a circular dependency between the audio recorder and this UI module.
-declare global {
-  interface Window {
-    __startRecording?: () => Promise<void> | void;
-  }
-}
+//
+// Shows the download overlay (`#ffmpegDownloadOverlay`) and drives it via the
+// `download-ffmpeg` IPC + `onFFmpegDownloadProgress` events. Returns a Promise
+// that resolves once the download completes, fails, or is cancelled. Callers
+// decide what to do next (e.g. retry transcription).
 
 type FFmpegProgress =
   | { status: 'preparing' }
@@ -19,100 +13,143 @@ type FFmpegProgress =
   | { status: 'complete' }
   | { status: 'error' };
 
-export async function showFFmpegDownloadDialog(): Promise<void> {
-  const overlay = document.getElementById('ffmpegDownloadOverlay');
-  if (!overlay) return;
+export type FFmpegDialogResult =
+  | { success: true }
+  | { success: false; reason: 'cancelled' | 'error'; error?: string };
 
-  // Show the overlay
-  overlay.style.display = 'block';
+export function showFFmpegDownloadDialog(): Promise<FFmpegDialogResult> {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('ffmpegDownloadOverlay');
+    if (!overlay) {
+      resolve({ success: false, reason: 'error', error: 'FFmpeg dialog overlay not found' });
+      return;
+    }
 
-  // Reset progress
-  const progressFillEl = document.getElementById('ffmpegProgressFill');
-  const progressPercentEl = document.getElementById('ffmpegProgressPercent');
-  const downloadSpeedEl = document.getElementById('downloadSpeed');
-  const downloadEtaEl = document.getElementById('downloadEta');
-  const downloadStatusEl = document.getElementById('downloadStatus');
+    overlay.style.display = 'block';
 
-  if (progressFillEl) (progressFillEl as HTMLElement).style.width = '0%';
-  if (progressPercentEl) progressPercentEl.textContent = '0%';
-  if (downloadSpeedEl) downloadSpeedEl.textContent = '0 MB/s';
-  if (downloadEtaEl) downloadEtaEl.textContent = 'Calculating...';
-  if (downloadStatusEl) downloadStatusEl.textContent = 'Downloading FFmpeg for audio recording...';
+    const progressFillEl = document.getElementById('ffmpegProgressFill');
+    const progressPercentEl = document.getElementById('ffmpegProgressPercent');
+    const downloadSpeedEl = document.getElementById('downloadSpeed');
+    const downloadEtaEl = document.getElementById('downloadEta');
+    const downloadStatusEl = document.getElementById('downloadStatus');
+    const cancelBtn = document.getElementById('cancelDownload') as HTMLButtonElement | null;
 
-  // Setup cancel button
-  const cancelBtn = document.getElementById('cancelDownload') as HTMLButtonElement | null;
-  if (cancelBtn) {
-    cancelBtn.onclick = async () => {
-      await window.electronAPI.cancelFFmpegDownload();
-      overlay.style.display = 'none';
+    // Reset visual state -- a previous run could have left it stuck on success.
+    if (progressFillEl) (progressFillEl as HTMLElement).style.width = '0%';
+    if (progressPercentEl) progressPercentEl.textContent = '0%';
+    if (downloadSpeedEl) downloadSpeedEl.textContent = '0 MB/s';
+    if (downloadEtaEl) downloadEtaEl.textContent = 'Calculating...';
+    if (downloadStatusEl) {
+      downloadStatusEl.textContent = 'Downloading FFmpeg for audio recording...';
+      (downloadStatusEl as HTMLElement).style.color = '';
+    }
+    if (cancelBtn) cancelBtn.textContent = 'Cancel';
+
+    let settled = false;
+    const settle = (result: FFmpegDialogResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
     };
-  }
 
-  // Listen for progress updates
-  const progressHandler = (progress: FFmpegProgress) => {
-    switch (progress.status) {
-      case 'preparing':
-        if (downloadStatusEl) downloadStatusEl.textContent = 'Preparing download...';
-        break;
-      case 'downloading':
-        if (downloadStatusEl) downloadStatusEl.textContent = 'Downloading FFmpeg...';
-        if (progressFillEl) (progressFillEl as HTMLElement).style.width = `${progress.percent}%`;
-        if (progressPercentEl) progressPercentEl.textContent = `${progress.percent}%`;
-        if (downloadSpeedEl) downloadSpeedEl.textContent = progress.speed;
-        if (downloadEtaEl) downloadEtaEl.textContent = progress.eta;
-        break;
-      case 'extracting':
-        if (downloadStatusEl) downloadStatusEl.textContent = 'Extracting FFmpeg...';
-        if (progressFillEl) (progressFillEl as HTMLElement).style.width = '90%';
-        if (progressPercentEl) progressPercentEl.textContent = '90%';
-        break;
-      case 'verifying':
-        if (downloadStatusEl) downloadStatusEl.textContent = 'Verifying installation...';
-        if (progressFillEl) (progressFillEl as HTMLElement).style.width = '95%';
-        if (progressPercentEl) progressPercentEl.textContent = '95%';
-        break;
-      case 'complete':
-        if (downloadStatusEl) downloadStatusEl.textContent = 'FFmpeg installed successfully!';
-        if (progressFillEl) (progressFillEl as HTMLElement).style.width = '100%';
-        if (progressPercentEl) progressPercentEl.textContent = '100%';
-        setTimeout(() => {
-          overlay.style.display = 'none';
-          // Try to start recording again
-          if (typeof window.__startRecording === 'function') {
-            window.__startRecording();
+    if (cancelBtn) {
+      cancelBtn.onclick = async () => {
+        await window.electronAPI.cancelFFmpegDownload();
+        overlay.style.display = 'none';
+        settle({ success: false, reason: 'cancelled' });
+      };
+    }
+
+    const progressHandler = (progress: FFmpegProgress) => {
+      switch (progress.status) {
+        case 'preparing':
+          if (downloadStatusEl) downloadStatusEl.textContent = 'Preparing download...';
+          break;
+        case 'downloading':
+          if (downloadStatusEl) downloadStatusEl.textContent = 'Downloading FFmpeg...';
+          if (progressFillEl) (progressFillEl as HTMLElement).style.width = `${progress.percent}%`;
+          if (progressPercentEl) progressPercentEl.textContent = `${progress.percent}%`;
+          if (downloadSpeedEl) downloadSpeedEl.textContent = progress.speed;
+          if (downloadEtaEl) downloadEtaEl.textContent = progress.eta;
+          break;
+        case 'extracting':
+          if (downloadStatusEl) downloadStatusEl.textContent = 'Extracting FFmpeg...';
+          if (progressFillEl) (progressFillEl as HTMLElement).style.width = '90%';
+          if (progressPercentEl) progressPercentEl.textContent = '90%';
+          break;
+        case 'verifying':
+          if (downloadStatusEl) downloadStatusEl.textContent = 'Verifying installation...';
+          if (progressFillEl) (progressFillEl as HTMLElement).style.width = '95%';
+          if (progressPercentEl) progressPercentEl.textContent = '95%';
+          break;
+        case 'complete':
+          if (downloadStatusEl) downloadStatusEl.textContent = 'FFmpeg installed successfully!';
+          if (progressFillEl) (progressFillEl as HTMLElement).style.width = '100%';
+          if (progressPercentEl) progressPercentEl.textContent = '100%';
+          setTimeout(() => {
+            overlay.style.display = 'none';
+            settle({ success: true });
+          }, 1000);
+          break;
+        case 'error':
+          if (downloadStatusEl) {
+            downloadStatusEl.textContent = 'Download failed. Please try again.';
+            (downloadStatusEl as HTMLElement).style.color = '#e74c3c';
           }
-        }, 1000);
-        break;
-      case 'error':
+          if (cancelBtn) cancelBtn.textContent = 'Close';
+          // settle on error too -- but only after the user dismisses, so caller
+          // can show a toast and the user can retry without the dialog stuck.
+          if (cancelBtn) {
+            cancelBtn.onclick = () => {
+              overlay.style.display = 'none';
+              settle({ success: false, reason: 'error' });
+            };
+          }
+          break;
+      }
+    };
+
+    window.electronAPI.onFFmpegDownloadProgress(progressHandler);
+
+    // Drive the actual download. The progress handler above resolves the
+    // promise on `complete`/`error`; this catches network/spawn failures that
+    // bypass the progress channel.
+    (async () => {
+      try {
+        const result = await window.electronAPI.downloadFFmpeg();
+        if (!result.success) {
+          if (downloadStatusEl) {
+            downloadStatusEl.textContent = `Download failed: ${result.error}`;
+            (downloadStatusEl as HTMLElement).style.color = '#e74c3c';
+          }
+          if (cancelBtn) {
+            cancelBtn.textContent = 'Close';
+            cancelBtn.onclick = () => {
+              overlay.style.display = 'none';
+              settle({ success: false, reason: 'error', error: result.error });
+            };
+          } else {
+            overlay.style.display = 'none';
+            settle({ success: false, reason: 'error', error: result.error });
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
         if (downloadStatusEl) {
-          downloadStatusEl.textContent = 'Download failed. Please try again.';
+          downloadStatusEl.textContent = `Download error: ${message}`;
           (downloadStatusEl as HTMLElement).style.color = '#e74c3c';
         }
-        if (cancelBtn) cancelBtn.textContent = 'Close';
-        break;
-    }
-  };
-
-  // Register progress handler
-  window.electronAPI.onFFmpegDownloadProgress(progressHandler);
-
-  // Start download
-  try {
-    const result = await window.electronAPI.downloadFFmpeg();
-    if (!result.success) {
-      if (downloadStatusEl) {
-        downloadStatusEl.textContent = `Download failed: ${result.error}`;
-        (downloadStatusEl as HTMLElement).style.color = '#e74c3c';
+        if (cancelBtn) {
+          cancelBtn.textContent = 'Close';
+          cancelBtn.onclick = () => {
+            overlay.style.display = 'none';
+            settle({ success: false, reason: 'error', error: message });
+          };
+        } else {
+          overlay.style.display = 'none';
+          settle({ success: false, reason: 'error', error: message });
+        }
       }
-      if (cancelBtn) cancelBtn.textContent = 'Close';
-    }
-  } catch (error) {
-    const downloadStatus = document.getElementById('downloadStatus');
-    if (downloadStatus) {
-      const message = error instanceof Error ? error.message : String(error);
-      downloadStatus.textContent = `Download error: ${message}`;
-      (downloadStatus as HTMLElement).style.color = '#e74c3c';
-    }
-    if (cancelBtn) cancelBtn.textContent = 'Close';
-  }
+    })();
+  });
 }
