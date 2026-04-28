@@ -134,6 +134,10 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
     const open = () => showSavedTranscript(recording.path, recording.title, metadataResult.data);
     item.addEventListener('click', open);
     item.addEventListener('keydown', (e) => {
+      // Only act on key presses targeting the row itself; ignore bubbling
+      // Enter/Space from focused child buttons so they keep their native
+      // keyboard activation.
+      if (e.target !== item) return;
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         open();
