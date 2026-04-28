@@ -99,6 +99,17 @@ function renderSearchResults(hits: SearchHit[], query: string): void {
 function createSearchResultItem(hit: SearchHit): HTMLElement {
   const item = document.createElement('div');
   item.className = 'recording-item search-result-item';
+  // Search hits always have a transcript by definition; mirror the
+  // recordings-list affordance so the whole row opens the transcript.
+  item.dataset.hasTranscript = 'true';
+  item.setAttribute('role', 'button');
+  item.setAttribute('tabindex', '0');
+  item.setAttribute('aria-label', `Open transcript for ${hit.title || hit.folderName}`);
+
+  const status = document.createElement('span');
+  status.className = 'recording-status';
+  status.setAttribute('aria-hidden', 'true');
+  item.appendChild(status);
 
   const date = hit.transcribedAt ? new Date(hit.transcribedAt).toLocaleDateString() : '';
   const matches = (hit.matchedFields || []).join(', ');
@@ -112,7 +123,7 @@ function createSearchResultItem(hit: SearchHit): HTMLElement {
 
   const meta = document.createElement('p');
   meta.className = 'recording-meta';
-  meta.textContent = date ? `${date} • matches: ${matches}` : `matches: ${matches}`;
+  meta.textContent = date ? `${date} · matches: ${matches}` : `matches: ${matches}`;
   info.appendChild(meta);
 
   if (hit.snippet) {
@@ -124,16 +135,22 @@ function createSearchResultItem(hit: SearchHit): HTMLElement {
 
   item.appendChild(info);
 
-  const actions = document.createElement('div');
-  actions.className = 'recording-actions';
-  const viewBtn = document.createElement('button');
-  viewBtn.className = 'action-button view-transcript-btn';
-  viewBtn.textContent = 'View Transcript';
-  viewBtn.addEventListener('click', () => {
+  const chevron = document.createElement('span');
+  chevron.className = 'recording-chevron';
+  chevron.setAttribute('aria-hidden', 'true');
+  chevron.textContent = '›';
+  item.appendChild(chevron);
+
+  const open = () =>
     showSavedTranscript(hit.audioFilePath || '', hit.title, hit.data, hit.folderName);
+  item.addEventListener('click', open);
+  item.addEventListener('keydown', (e) => {
+    if (e.target !== item) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      open();
+    }
   });
-  actions.appendChild(viewBtn);
-  item.appendChild(actions);
 
   return item;
 }
