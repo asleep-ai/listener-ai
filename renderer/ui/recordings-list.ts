@@ -72,9 +72,8 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   item.className = 'recording-item';
 
   const date = new Date(recording.createdAt);
-  const dateStr = date.toLocaleDateString();
-  const timeStr = date.toLocaleTimeString();
   const sizeStr = formatFileSize(recording.size);
+  const metaStr = formatRecordingMeta(date, sizeStr);
 
   // Check if metadata exists for this recording
   const metadataResult = (await window.electronAPI.getMetadata(
@@ -86,20 +85,25 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
     metadataResult.data.transcript
   );
 
+  item.dataset.hasTranscript = hasTranscript ? 'true' : 'false';
+  if (hasTranscript) {
+    item.setAttribute('role', 'button');
+    item.setAttribute('tabindex', '0');
+    item.setAttribute('aria-label', `Open transcript for ${recording.title}`);
+  }
+
   item.innerHTML = `
+    <span class="recording-status" aria-hidden="true"></span>
     <div class="recording-info">
       <h3>${recording.title}</h3>
-      <p class="recording-meta">${dateStr} ${timeStr} • ${sizeStr}</p>
+      <p class="recording-meta">${metaStr}</p>
     </div>
     <div class="recording-actions">
       ${
         hasTranscript
           ? `
-        <button class="action-button view-transcript-btn" data-path="${recording.path}" data-title="${recording.title}">
-          View Transcript
-        </button>
-        <button class="action-button regenerate-btn" data-path="${recording.path}" data-title="${recording.title}" title="Regenerate transcript">
-          🔄
+        <button class="action-button regenerate-btn" data-path="${recording.path}" data-title="${recording.title}" title="Regenerate transcript" aria-label="Regenerate transcript">
+          ↻
         </button>
       `
           : `
@@ -111,20 +115,29 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
       <button class="action-button merge-btn" data-path="${recording.path}" title="Merge this with other recordings into a single note">
         Merge
       </button>
-      <button class="action-button reveal-btn" data-path="${recording.path}" title="Reveal in Finder (right-click in Finder to share)">
+      <button class="action-button reveal-btn" data-path="${recording.path}" title="Reveal in Finder">
         Show
       </button>
-      <button class="action-button export-m4a-btn" data-path="${recording.path}" title="Export as M4A for sharing">
+      <button class="action-button export-m4a-btn" data-path="${recording.path}" title="Export as M4A for sharing" aria-label="Export as M4A">
         M4A
       </button>
+      ${hasTranscript ? '<span class="recording-chevron" aria-hidden="true">›</span>' : ''}
     </div>
   `;
 
-  // Add event listeners based on available actions
   if (hasTranscript) {
-    const viewBtn = item.querySelector('.view-transcript-btn') as HTMLButtonElement | null;
-    viewBtn?.addEventListener('click', () => {
-      showSavedTranscript(recording.path, recording.title, metadataResult.data);
+    // Whole-row entry: clicking (or Enter/Space) opens the transcript.
+    // Action buttons inside the row stop propagation so they don't double-fire.
+    item.querySelectorAll<HTMLButtonElement>('.action-button').forEach((btn) => {
+      btn.addEventListener('click', (e) => e.stopPropagation());
+    });
+    const open = () => showSavedTranscript(recording.path, recording.title, metadataResult.data);
+    item.addEventListener('click', open);
+    item.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        open();
+      }
     });
 
     const regenerateBtn = item.querySelector('.regenerate-btn') as HTMLButtonElement | null;
@@ -250,7 +263,7 @@ async function openMergeDialog(initialFilePath: string): Promise<void> {
     const li = document.createElement('li');
     li.dataset.path = rec.path;
     const date = new Date(rec.createdAt);
-    const meta = `${date.toLocaleDateString()} ${date.toLocaleTimeString()} • ${formatFileSize(rec.size)}`;
+    const meta = formatRecordingMeta(date, formatFileSize(rec.size));
     li.innerHTML = `
       <input type="checkbox" />
       <div class="merge-list-item-info">
@@ -433,6 +446,26 @@ function formatFileSize(bytes: number): string {
   const sizes = ['Bytes', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${Number.parseFloat((bytes / k ** i).toFixed(2))} ${sizes[i]}`;
+}
+
+// Compact meta line for the recordings list. Drops seconds, uses relative
+// labels for today/yesterday, and falls back to a short month-day format.
+function formatRecordingMeta(date: Date, sizeStr: string): string {
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const isYesterday = date.toDateString() === yesterday.toDateString();
+  const sameYear = date.getFullYear() === now.getFullYear();
+  const time = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  let label: string;
+  if (sameDay) label = `Today, ${time}`;
+  else if (isYesterday) label = `Yesterday, ${time}`;
+  else if (sameYear)
+    label = `${date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}, ${time}`;
+  else
+    label = date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  return `${label} · ${sizeStr}`;
 }
 
 // Function to refresh recordings list after a new recording.
