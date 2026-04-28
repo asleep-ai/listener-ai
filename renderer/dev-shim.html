@@ -1,0 +1,35 @@
+<script>
+  // Minimal electronAPI stub for layout iteration via `pnpm dev:renderer`.
+  // Returns plausible empty/no-op responses so the renderer renders without
+  // hitting an Electron-only handler. Injected into index.html only by the
+  // electronApiDevShim Vite plugin (`apply: 'serve'`); never shipped.
+  if (!window.electronAPI) {
+    const noop = () => {};
+    const asyncEmpty = async () => ({});
+    const asyncList = async () => [];
+    const fakeRecordings = [
+      { path: '/dev/r1', title: 'AI 영상 모델 도입 및 협력 방안 논의', createdAt: Date.now() - 1000 * 60 * 30, size: 5.2 * 1024 * 1024 },
+      { path: '/dev/r2', title: 'Q2 Roadmap Sync — Sleeptrack iOS', createdAt: Date.now() - 1000 * 60 * 60 * 4, size: 12.8 * 1024 * 1024 },
+      { path: '/dev/r3', title: 'Quick standup', createdAt: Date.now() - 1000 * 60 * 60 * 26, size: 1.4 * 1024 * 1024 },
+      { path: '/dev/r4', title: 'Customer Interview — Acme Corp', createdAt: Date.now() - 1000 * 60 * 60 * 48, size: 22.1 * 1024 * 1024 },
+      { path: '/dev/r5', title: '무제 미팅', createdAt: Date.now() - 1000 * 60 * 60 * 72, size: 0.4 * 1024 * 1024 },
+    ];
+    const transcribed = new Set(['/dev/r1', '/dev/r2', '/dev/r4']);
+    window.electronAPI = new Proxy({}, {
+      get(_, prop) {
+        if (prop === 'platform') return 'darwin';
+        if (typeof prop === 'string' && prop.startsWith('on')) return noop;
+        if (prop === 'getRecordings') return async () => ({ success: true, recordings: fakeRecordings });
+        if (prop === 'getMetadata') return async (path) => transcribed.has(path)
+          ? { success: true, data: { transcript: 'lorem ipsum', summary: 'demo summary' } }
+          : { success: true, data: null };
+        if (prop === 'searchTranscriptions' || prop === 'listReleases') return asyncList;
+        if (prop === 'checkConfig') return async () => ({ hasConfig: true, hasGeminiKey: true, hasNotionConfig: true, autoMode: false, missing: [] });
+        if (prop === 'getConfig') return async () => ({ globalShortcut: 'CommandOrControl+Shift+R' });
+        if (prop === 'getAudioInputDevices') return asyncList;
+        return asyncEmpty;
+      }
+    });
+    document.documentElement.dataset.devShim = '1';
+  }
+</script>

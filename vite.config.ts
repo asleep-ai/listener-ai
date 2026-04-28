@@ -1,5 +1,35 @@
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
+
+// Dev-only stub for `window.electronAPI` so the renderer boots in `vite dev`
+// without an Electron preload. Inert in production (apply: 'serve').
+const electronApiDevShim = (): Plugin => {
+  const shimPath = resolve(__dirname, 'renderer/dev-shim.html');
+  return {
+    name: 'electron-api-dev-shim',
+    apply: 'serve',
+    transformIndexHtml: {
+      order: 'pre',
+      handler() {
+        return [
+          {
+            tag: 'script',
+            attrs: { type: 'text/javascript' },
+            children: extractScriptBody(readFileSync(shimPath, 'utf8')),
+            injectTo: 'body-prepend',
+          },
+        ];
+      },
+    },
+  };
+};
+
+const extractScriptBody = (html: string): string => {
+  const match = html.match(/<script[^>]*>([\s\S]*?)<\/script>/);
+  if (!match) throw new Error('dev-shim.html must contain a <script> block');
+  return match[1];
+};
 
 // Renderer-only Vite config. Main process is compiled separately by tsc.
 //
@@ -10,6 +40,7 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   root: resolve(__dirname, 'renderer'),
   base: './',
+  plugins: [electronApiDevShim()],
   build: {
     outDir: resolve(__dirname, 'dist/renderer'),
     emptyOutDir: true,
