@@ -1,5 +1,5 @@
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
 import { hasSleepAssertionFrom } from './meetingDetectorService';
 
 // Sample pmset -g assertions output with a Microsoft Teams call in progress.

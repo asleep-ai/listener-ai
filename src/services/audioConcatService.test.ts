@@ -1,18 +1,18 @@
-import { describe, it, before, after } from 'node:test';
-import assert from 'node:assert/strict';
 import * as fs from 'fs';
+import assert from 'node:assert/strict';
+import { after, before, describe, it } from 'node:test';
 import * as os from 'os';
 import * as path from 'path';
-import { concatAudioFiles } from './audioConcatService';
 import {
-  findFfmpegSync,
   ffprobeFor,
+  findFfmpegSync,
+  getDurationSeconds,
+  makeMp3,
+  makeOpusWebm,
   makeTempDir,
   rmDir,
-  makeOpusWebm,
-  makeMp3,
-  getDurationSeconds,
 } from '../test-helpers';
+import { concatAudioFiles } from './audioConcatService';
 
 const ffmpegPath = findFfmpegSync();
 const ffprobePath = ffmpegPath ? ffprobeFor(ffmpegPath) : null;
@@ -55,7 +55,12 @@ describe('concatAudioFiles', { skip: !ffmpegPath ? 'ffmpeg not installed' : unde
   it('rejects when fewer than 2 inputs are provided', async () => {
     const a = await makeOpusWebm(ffmpegPath!, workDir, 'solo.webm', 440);
     await assert.rejects(
-      () => concatAudioFiles({ ffmpegPath: ffmpegPath!, inputPaths: [a], outputPath: path.join(workDir, 'never.webm') }),
+      () =>
+        concatAudioFiles({
+          ffmpegPath: ffmpegPath!,
+          inputPaths: [a],
+          outputPath: path.join(workDir, 'never.webm'),
+        }),
       /at least 2 input files/i,
     );
   });
@@ -64,7 +69,12 @@ describe('concatAudioFiles', { skip: !ffmpegPath ? 'ffmpeg not installed' : unde
     const a = await makeOpusWebm(ffmpegPath!, workDir, 'exists.webm', 440);
     const missing = path.join(workDir, 'does-not-exist.webm');
     await assert.rejects(
-      () => concatAudioFiles({ ffmpegPath: ffmpegPath!, inputPaths: [a, missing], outputPath: path.join(workDir, 'never.webm') }),
+      () =>
+        concatAudioFiles({
+          ffmpegPath: ffmpegPath!,
+          inputPaths: [a, missing],
+          outputPath: path.join(workDir, 'never.webm'),
+        }),
       /Input file not found/,
     );
   });
@@ -76,7 +86,11 @@ describe('concatAudioFiles', { skip: !ffmpegPath ? 'ffmpeg not installed' : unde
     const plain = await makeOpusWebm(ffmpegPath!, workDir, 'plain.webm', 880);
     const out = path.join(workDir, 'merged_quote.webm');
 
-    await concatAudioFiles({ ffmpegPath: ffmpegPath!, inputPaths: [tricky, plain], outputPath: out });
+    await concatAudioFiles({
+      ffmpegPath: ffmpegPath!,
+      inputPaths: [tricky, plain],
+      outputPath: out,
+    });
 
     assert.ok(fs.existsSync(out), 'output file should exist');
     const duration = await getDurationSeconds(ffprobePath!, out);
@@ -91,7 +105,11 @@ describe('concatAudioFiles', { skip: !ffmpegPath ? 'ffmpeg not installed' : unde
     const a = await makeOpusWebm(ffmpegPath!, workDir, 'keep.webm', 440);
     const missing = path.join(workDir, 'nope.webm');
     await assert.rejects(() =>
-      concatAudioFiles({ ffmpegPath: ffmpegPath!, inputPaths: [a, missing], outputPath: path.join(workDir, 'never.webm') })
+      concatAudioFiles({
+        ffmpegPath: ffmpegPath!,
+        inputPaths: [a, missing],
+        outputPath: path.join(workDir, 'never.webm'),
+      }),
     );
     const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith(manifestPrefix)).length;
     assert.equal(after, before, 'manifest file should be cleaned up after failure');

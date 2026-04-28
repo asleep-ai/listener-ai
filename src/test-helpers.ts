@@ -72,9 +72,17 @@ export async function makeOpusWebm(
 ): Promise<string> {
   const out = path.join(workDir, name);
   await execFileAsync(ffmpegPath, [
-    '-y', '-loglevel', 'error',
-    '-f', 'lavfi', '-i', `sine=frequency=${freq}:duration=${duration}:sample_rate=48000`,
-    '-c:a', 'libopus', '-b:a', '64k',
+    '-y',
+    '-loglevel',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    `sine=frequency=${freq}:duration=${duration}:sample_rate=48000`,
+    '-c:a',
+    'libopus',
+    '-b:a',
+    '64k',
     out,
   ]);
   return out;
@@ -90,9 +98,17 @@ export async function makeMp3(
 ): Promise<string> {
   const out = path.join(workDir, name);
   await execFileAsync(ffmpegPath, [
-    '-y', '-loglevel', 'error',
-    '-f', 'lavfi', '-i', `sine=frequency=${freq}:duration=${duration}`,
-    '-c:a', 'libmp3lame', '-b:a', '64k',
+    '-y',
+    '-loglevel',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    `sine=frequency=${freq}:duration=${duration}`,
+    '-c:a',
+    'libmp3lame',
+    '-b:a',
+    '64k',
     out,
   ]);
   return out;
@@ -101,10 +117,13 @@ export async function makeMp3(
 /** Read a media file's duration in seconds via ffprobe. */
 export async function getDurationSeconds(ffprobePath: string, p: string): Promise<number> {
   const { stdout } = await execFileAsync(ffprobePath, [
-    '-v', 'error',
-    '-show_entries', 'format=duration',
-    '-of', 'default=noprint_wrappers=1:nokey=1',
+    '-v',
+    'error',
+    '-show_entries',
+    'format=duration',
+    '-of',
+    'default=noprint_wrappers=1:nokey=1',
     p,
   ]);
-  return parseFloat(stdout.trim());
+  return Number.parseFloat(stdout.trim());
 }

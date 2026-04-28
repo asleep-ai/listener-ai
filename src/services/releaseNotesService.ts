@@ -3,7 +3,7 @@ const REPO = 'asleep-ai/listener-ai';
 const COMMON_HEADERS = {
   Accept: 'application/vnd.github+json',
   'User-Agent': 'listener-ai',
-  'X-GitHub-Api-Version': '2022-11-28'
+  'X-GitHub-Api-Version': '2022-11-28',
 };
 
 export interface ReleaseNotes {
@@ -35,14 +35,19 @@ export async function fetchReleaseNotes(version: string): Promise<ReleaseNotes |
       console.warn(`Release notes fetch failed: ${res.status} ${res.statusText}`);
       return null;
     }
-    const data = await res.json() as { body?: string; html_url?: string; published_at?: string | null; tag_name?: string };
+    const data = (await res.json()) as {
+      body?: string;
+      html_url?: string;
+      published_at?: string | null;
+      tag_name?: string;
+    };
     console.log(`Release notes fetch: ok, body=${(data.body || '').length} chars`);
     return {
       version,
       tag,
       body: data.body || '',
       url: data.html_url || `https://github.com/${REPO}/releases/tag/${tag}`,
-      publishedAt: data.published_at ?? null
+      publishedAt: data.published_at ?? null,
     };
   } catch (error) {
     console.error('Failed to fetch release notes:', error);
@@ -59,7 +64,7 @@ export async function fetchAllReleases(limit = 30): Promise<ReleaseSummary[]> {
       console.warn(`Release list fetch failed: ${res.status} ${res.statusText}`);
       return [];
     }
-    const data = await res.json() as Array<{
+    const data = (await res.json()) as Array<{
       tag_name?: string;
       name?: string;
       body?: string;
@@ -77,7 +82,7 @@ export async function fetchAllReleases(limit = 30): Promise<ReleaseSummary[]> {
         url: r.html_url || `https://github.com/${REPO}/releases`,
         publishedAt: r.published_at ?? null,
         prerelease: Boolean(r.prerelease),
-        draft: Boolean(r.draft)
+        draft: Boolean(r.draft),
       }));
     console.log(`Release list fetch: ok, ${results.length} releases`);
     return results;

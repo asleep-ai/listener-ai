@@ -1,8 +1,8 @@
-import { GoogleGenAI } from '@google/genai';
 import * as fs from 'fs';
 import * as path from 'path';
-import { FFmpegManager } from './services/ffmpegManager';
+import { GoogleGenAI } from '@google/genai';
 import { mimeTypeForExtension } from './audioFormats';
+import { FFmpegManager } from './services/ffmpegManager';
 
 export interface TranscriptionResult {
   transcript: string;
@@ -52,11 +52,15 @@ export class GeminiService {
 
   private buildGlossaryBlock(): string {
     if (this.knownWords.length === 0) return '';
-    const wordList = this.knownWords.map(w => `- ${w}`).join('\n');
+    const wordList = this.knownWords.map((w) => `- ${w}`).join('\n');
     return `The following proper nouns, names, and terms may appear in the audio. Transcribe them exactly as spelled:\n${wordList}\n\n`;
   }
 
-  async transcribeAudio(audioFilePath: string, progressCallback?: (percent: number, message: string) => void, summaryPrompt?: string): Promise<TranscriptionResult> {
+  async transcribeAudio(
+    audioFilePath: string,
+    progressCallback?: (percent: number, message: string) => void,
+    summaryPrompt?: string,
+  ): Promise<TranscriptionResult> {
     // Integration-test escape hatch: avoid the real Gemini call so tests can
     // exercise the surrounding pipeline (CLI parsing, IPC, ffmpeg, save) for
     // free and offline. Gated on NODE_ENV=test so a stray LISTENER_TEST_MODE
@@ -89,12 +93,19 @@ export class GeminiService {
 
       // If duration is 0, log a warning but continue processing
       if (duration === 0) {
-        console.warn('WARNING: Could not determine audio duration. Will process as single file without segmentation.');
+        console.warn(
+          'WARNING: Could not determine audio duration. Will process as single file without segmentation.',
+        );
       }
 
       // Always use the two-step approach for consistency
       console.log('Using two-step transcription approach...');
-      return await this.transcribeWithTwoSteps(audioFilePath, duration, progressCallback, summaryPrompt);
+      return await this.transcribeWithTwoSteps(
+        audioFilePath,
+        duration,
+        progressCallback,
+        summaryPrompt,
+      );
     } catch (error) {
       console.error('Error transcribing audio:', error);
 
@@ -109,7 +120,9 @@ export class GeminiService {
         }
       }
 
-      throw new Error(`Failed to transcribe audio: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(
+        `Failed to transcribe audio: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -136,9 +149,9 @@ export class GeminiService {
       // Extract duration from stderr (where ffmpeg outputs file info)
       const durationMatch = stderr?.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/);
       if (durationMatch) {
-        const hours = parseInt(durationMatch[1]);
-        const minutes = parseInt(durationMatch[2]);
-        const seconds = parseFloat(durationMatch[3]);
+        const hours = Number.parseInt(durationMatch[1]);
+        const minutes = Number.parseInt(durationMatch[2]);
+        const seconds = Number.parseFloat(durationMatch[3]);
         const totalSeconds = hours * 3600 + minutes * 60 + seconds;
         console.log(`FFmpeg extracted duration: ${totalSeconds} seconds`);
         return totalSeconds;
@@ -147,9 +160,9 @@ export class GeminiService {
       // Alternative regex pattern for different duration formats
       const altDurationMatch = stderr?.match(/Duration: (\d+):(\d+):(\d+)/);
       if (altDurationMatch) {
-        const hours = parseInt(altDurationMatch[1]);
-        const minutes = parseInt(altDurationMatch[2]);
-        const seconds = parseInt(altDurationMatch[3]);
+        const hours = Number.parseInt(altDurationMatch[1]);
+        const minutes = Number.parseInt(altDurationMatch[2]);
+        const seconds = Number.parseInt(altDurationMatch[3]);
         const totalSeconds = hours * 3600 + minutes * 60 + seconds;
         console.log(`FFmpeg extracted duration (alt format): ${totalSeconds} seconds`);
         return totalSeconds;
@@ -166,7 +179,10 @@ export class GeminiService {
   }
 
   // Split audio file into segments
-  private async splitAudioIntoSegments(audioFilePath: string, segmentDuration: number = 300): Promise<string[]> {
+  private async splitAudioIntoSegments(
+    audioFilePath: string,
+    segmentDuration = 300,
+  ): Promise<string[]> {
     const { exec } = require('child_process');
     const { promisify } = require('util');
     const execAsync = promisify(exec);
@@ -183,13 +199,14 @@ export class GeminiService {
     try {
       // Split audio into segments
       await execAsync(
-        `"${ffmpegPath}" -i "${audioFilePath}" -f segment -segment_time ${segmentDuration} -c copy "${segmentPath}"`
+        `"${ffmpegPath}" -i "${audioFilePath}" -f segment -segment_time ${segmentDuration} -c copy "${segmentPath}"`,
       );
 
       // Find all created segment files
-      const segmentFiles = fs.readdirSync(outputDir)
-        .filter(file => file.startsWith(`${baseName}_segment_`) && file.endsWith(ext))
-        .map(file => path.join(outputDir, file))
+      const segmentFiles = fs
+        .readdirSync(outputDir)
+        .filter((file) => file.startsWith(`${baseName}_segment_`) && file.endsWith(ext))
+        .map((file) => path.join(outputDir, file))
         .sort();
 
       console.log(`Split audio into ${segmentFiles.length} segments`);
@@ -198,11 +215,14 @@ export class GeminiService {
       console.error('Error splitting audio:', error);
 
       // Check if it's a Windows FFmpeg not found error
-      if (process.platform === 'win32' &&
+      if (
+        process.platform === 'win32' &&
         (error.message?.includes('is not recognized') ||
           error.message?.includes('ffmpeg.exe') ||
-          error.code === 'ENOENT')) {
-        let dialog: any, shell: any;
+          error.code === 'ENOENT')
+      ) {
+        let dialog: any;
+        let shell: any;
         try {
           ({ dialog, shell } = require('electron'));
         } catch {
@@ -212,17 +232,17 @@ export class GeminiService {
         dialog.showErrorBox(
           'FFmpeg Not Found',
           'FFmpeg is required for audio transcription but was not found.\n\n' +
-          'To install FFmpeg on Windows:\n\n' +
-          'Option 1 (Recommended):\n' +
-          '1. Open PowerShell as Administrator\n' +
-          '2. Run: winget install ffmpeg\n' +
-          '3. Restart Listener.AI\n\n' +
-          'Option 2 (Manual):\n' +
-          '1. Download from: https://www.gyan.dev/ffmpeg/builds/\n' +
-          '2. Download "release essentials" build\n' +
-          '3. Extract to C:\\ffmpeg\n' +
-          '4. The ffmpeg.exe should be at C:\\ffmpeg\\bin\\ffmpeg.exe\n' +
-          '5. Restart Listener.AI'
+            'To install FFmpeg on Windows:\n\n' +
+            'Option 1 (Recommended):\n' +
+            '1. Open PowerShell as Administrator\n' +
+            '2. Run: winget install ffmpeg\n' +
+            '3. Restart Listener.AI\n\n' +
+            'Option 2 (Manual):\n' +
+            '1. Download from: https://www.gyan.dev/ffmpeg/builds/\n' +
+            '2. Download "release essentials" build\n' +
+            '3. Extract to C:\\ffmpeg\n' +
+            '4. The ffmpeg.exe should be at C:\\ffmpeg\\bin\\ffmpeg.exe\n' +
+            '5. Restart Listener.AI',
         );
 
         // Offer to open download page
@@ -230,7 +250,7 @@ export class GeminiService {
           type: 'question',
           buttons: ['Open Download Page', 'Cancel'],
           defaultId: 0,
-          message: 'Open FFmpeg download page?'
+          message: 'Open FFmpeg download page?',
         });
 
         if (result === 0) {
@@ -244,9 +264,13 @@ export class GeminiService {
     }
   }
 
-
   // Two-step transcription approach for all audio files
-  private async transcribeWithTwoSteps(audioFilePath: string, duration: number, progressCallback?: (percent: number, message: string) => void, customSummaryPrompt?: string): Promise<TranscriptionResult> {
+  private async transcribeWithTwoSteps(
+    audioFilePath: string,
+    duration: number,
+    progressCallback?: (percent: number, message: string) => void,
+    customSummaryPrompt?: string,
+  ): Promise<TranscriptionResult> {
     try {
       let fullTranscript = '';
 
@@ -254,7 +278,11 @@ export class GeminiService {
       if (duration > 300) {
         // Use segmented approach for long audio
         console.log('Audio is longer than 5 minutes, using segmented transcription...');
-        fullTranscript = await this.getSegmentedTranscript(audioFilePath, duration, progressCallback);
+        fullTranscript = await this.getSegmentedTranscript(
+          audioFilePath,
+          duration,
+          progressCallback,
+        );
       } else {
         // Get transcript for short audio
         console.log('Transcribing short audio...');
@@ -266,7 +294,9 @@ export class GeminiService {
         progressCallback(85, 'Generating summary and key points...');
       }
 
-      const summaryPrompt = customSummaryPrompt || `Based on this meeting transcript, provide:
+      const summaryPrompt =
+        customSummaryPrompt ||
+        `Based on this meeting transcript, provide:
 
 1. A concise meeting title in Korean (10-20 characters that captures the main topic)
 2. A concise summary in Korean (2-3 paragraphs)
@@ -285,14 +315,12 @@ Return as JSON:
 
       const summaryResult = await this.ai.models.generateContent({
         model: this.proModel,
-        contents: [
-          { role: "user", parts: [{ text: summaryPrompt }, { text: fullTranscript }] }
-        ],
+        contents: [{ role: 'user', parts: [{ text: summaryPrompt }, { text: fullTranscript }] }],
         config: {
           temperature: 0.2,
           maxOutputTokens: 32768,
-          responseMimeType: "application/json"
-        }
+          responseMimeType: 'application/json',
+        },
       });
       const summaryText = summaryResult.text || '';
 
@@ -301,11 +329,17 @@ Return as JSON:
         summary: '',
         keyPoints: [] as string[],
         actionItems: [] as string[],
-        emoji: '📝'
+        emoji: '📝',
       };
 
-      const KNOWN_KEYS = new Set(['suggestedTitle', 'summary', 'keyPoints', 'actionItems', 'emoji']);
-      let customFields: Record<string, unknown> = {};
+      const KNOWN_KEYS = new Set([
+        'suggestedTitle',
+        'summary',
+        'keyPoints',
+        'actionItems',
+        'emoji',
+      ]);
+      const customFields: Record<string, unknown> = {};
 
       try {
         const parsed = JSON.parse(summaryText);
@@ -339,7 +373,6 @@ Return as JSON:
         suggestedTitle: summaryData.suggestedTitle,
         customFields: Object.keys(customFields).length > 0 ? customFields : undefined,
       };
-
     } catch (error) {
       console.error('Error in two-step transcription:', error);
       throw error;
@@ -347,7 +380,10 @@ Return as JSON:
   }
 
   // Get transcript for short audio files
-  private async getShortAudioTranscript(audioFilePath: string, progressCallback?: (percent: number, message: string) => void): Promise<string> {
+  private async getShortAudioTranscript(
+    audioFilePath: string,
+    progressCallback?: (percent: number, message: string) => void,
+  ): Promise<string> {
     try {
       const stats = fs.statSync(audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
@@ -369,7 +405,7 @@ Return as JSON:
 
         const fileData = fs.readFileSync(audioFilePath);
         const uploadResult = await this.ai.files.upload({
-          file: new Blob([fileData], { type: mimeType })
+          file: new Blob([fileData], { type: mimeType }),
         });
 
         fileUri = uploadResult.uri || '';
@@ -377,14 +413,14 @@ Return as JSON:
         // Wait for file to be active
         let file = await this.ai.files.get({ name: uploadResult.name || '' });
         let retries = 0;
-        while (file.state === "PROCESSING" && retries < 30) {
+        while (file.state === 'PROCESSING' && retries < 30) {
           console.log(`Waiting for file to be processed... (attempt ${retries + 1}/30)`);
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await new Promise((resolve) => setTimeout(resolve, 2000));
           file = await this.ai.files.get({ name: uploadResult.name || '' });
           retries++;
         }
 
-        if (file.state !== "ACTIVE") {
+        if (file.state !== 'ACTIVE') {
           throw new Error(`File is not active. State: ${file.state}`);
         }
       }
@@ -424,22 +460,22 @@ IMPORTANT:
           model: this.flashModel,
           contents: [
             {
-              role: "user",
+              role: 'user',
               parts: [
                 {
                   fileData: {
                     fileUri: fileUri,
-                    mimeType: mimeType
-                  }
+                    mimeType: mimeType,
+                  },
                 },
-                { text: transcriptPrompt }
-              ]
-            }
+                { text: transcriptPrompt },
+              ],
+            },
           ],
           config: {
             temperature: 0.2,
-            maxOutputTokens: 32768
-          }
+            maxOutputTokens: 32768,
+          },
         });
       } else {
         const audioData = fs.readFileSync(audioFilePath);
@@ -450,27 +486,26 @@ IMPORTANT:
           model: this.flashModel,
           contents: [
             {
-              role: "user",
+              role: 'user',
               parts: [
                 {
                   inlineData: {
                     mimeType: mimeType,
-                    data: base64Audio
-                  }
+                    data: base64Audio,
+                  },
                 },
-                { text: transcriptPrompt }
-              ]
-            }
+                { text: transcriptPrompt },
+              ],
+            },
           ],
           config: {
             temperature: 0.2,
-            maxOutputTokens: 32768
-          }
+            maxOutputTokens: 32768,
+          },
         });
       }
 
       return result.text || '';
-
     } catch (error) {
       console.error('Error transcribing short audio:', error);
       throw error;
@@ -486,7 +521,11 @@ IMPORTANT:
   }
 
   // Create segment header with time range
-  private createSegmentHeader(segmentIndex: number, segmentStartTime: number, segmentEndTime: number): string {
+  private createSegmentHeader(
+    segmentIndex: number,
+    segmentStartTime: number,
+    segmentEndTime: number,
+  ): string {
     return `[Segment ${segmentIndex + 1}: ${this.formatTime(segmentStartTime)} ~ ${this.formatTime(segmentEndTime)}]\n\n`;
   }
 
@@ -522,7 +561,7 @@ IMPORTANT:
     segmentIndex: number,
     totalSegments: number,
     segmentStartTime: number,
-    segmentEndTime: number
+    segmentEndTime: number,
   ): Promise<{ index: number; content: string }> {
     const maxRetries = 3;
     let lastError: any = null;
@@ -530,7 +569,9 @@ IMPORTANT:
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        console.log(`Starting transcription for segment ${segmentIndex + 1}/${totalSegments} (attempt ${attempt}/${maxRetries})...`);
+        console.log(
+          `Starting transcription for segment ${segmentIndex + 1}/${totalSegments} (attempt ${attempt}/${maxRetries})...`,
+        );
 
         const audioData = fs.readFileSync(segmentFile);
         const base64Audio = audioData.toString('base64');
@@ -540,22 +581,22 @@ IMPORTANT:
           model: this.flashModel,
           contents: [
             {
-              role: "user",
+              role: 'user',
               parts: [
                 {
                   inlineData: {
                     mimeType: mimeType,
-                    data: base64Audio
-                  }
+                    data: base64Audio,
+                  },
                 },
-                { text: segmentPrompt }
-              ]
-            }
+                { text: segmentPrompt },
+              ],
+            },
           ],
           config: {
             temperature: 0.2,
-            maxOutputTokens: 32768
-          }
+            maxOutputTokens: 32768,
+          },
         });
 
         const transcript = result.text || '';
@@ -563,36 +604,49 @@ IMPORTANT:
         console.log(`Completed transcription for segment ${segmentIndex + 1}/${totalSegments}`);
 
         // Add segment time range header
-        const segmentHeader = this.createSegmentHeader(segmentIndex, segmentStartTime, segmentEndTime);
+        const segmentHeader = this.createSegmentHeader(
+          segmentIndex,
+          segmentStartTime,
+          segmentEndTime,
+        );
 
         return {
           index: segmentIndex,
-          content: segmentHeader + transcript
+          content: segmentHeader + transcript,
         };
-
       } catch (segmentError) {
         lastError = segmentError;
-        console.error(`Error transcribing segment ${segmentIndex + 1} (attempt ${attempt}/${maxRetries}):`, segmentError);
+        console.error(
+          `Error transcribing segment ${segmentIndex + 1} (attempt ${attempt}/${maxRetries}):`,
+          segmentError,
+        );
 
         if (attempt < maxRetries) {
           // Wait before retry with exponential backoff
-          const retryDelay = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // Max 10 seconds
+          const retryDelay = Math.min(1000 * 2 ** (attempt - 1), 10000); // Max 10 seconds
           console.log(`Retrying segment ${segmentIndex + 1} in ${retryDelay}ms...`);
-          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
         }
       }
     }
 
     // All retries failed
-    console.error(`Failed to transcribe segment ${segmentIndex + 1} after ${maxRetries} attempts:`, lastError);
+    console.error(
+      `Failed to transcribe segment ${segmentIndex + 1} after ${maxRetries} attempts:`,
+      lastError,
+    );
     return {
       index: segmentIndex,
-      content: `[Segment ${segmentIndex + 1} transcription failed after ${maxRetries} attempts]`
+      content: `[Segment ${segmentIndex + 1} transcription failed after ${maxRetries} attempts]`,
     };
   }
 
   // Get segmented transcript (renamed from transcribeAudioSegmented)
-  private async getSegmentedTranscript(audioFilePath: string, duration: number, progressCallback?: (percent: number, message: string) => void): Promise<string> {
+  private async getSegmentedTranscript(
+    audioFilePath: string,
+    duration: number,
+    progressCallback?: (percent: number, message: string) => void,
+  ): Promise<string> {
     try {
       // Split audio into 5-minute segments
       const segmentFiles = await this.splitAudioIntoSegments(audioFilePath, 300);
@@ -611,21 +665,24 @@ IMPORTANT:
           i,
           segmentFiles.length,
           segmentStartTime,
-          segmentEndTime
+          segmentEndTime,
         );
       });
 
       // Track progress of concurrent transcriptions
       let completedCount = 0;
-      const progressTrackedPromises = transcriptionPromises.map(promise =>
-        promise.then(result => {
+      const progressTrackedPromises = transcriptionPromises.map((promise) =>
+        promise.then((result) => {
           completedCount++;
           if (progressCallback) {
             const progress = 20 + (completedCount / segmentFiles.length) * 60; // 20-80% range
-            progressCallback(progress, `Transcribed ${completedCount} of ${segmentFiles.length} segments...`);
+            progressCallback(
+              progress,
+              `Transcribed ${completedCount} of ${segmentFiles.length} segments...`,
+            );
           }
           return result;
-        })
+        }),
       );
 
       // Wait for all transcriptions to complete
@@ -640,24 +697,24 @@ IMPORTANT:
       }
 
       // Extract transcripts in order
-      const segmentTranscripts = segmentResults.map(result => result.content);
+      const segmentTranscripts = segmentResults.map((result) => result.content);
 
       // Clean up segment files
-      await Promise.all(segmentFiles.map(async (segmentFile) => {
-        try {
-          fs.unlinkSync(segmentFile);
-        } catch (e) {
-          console.error(`Failed to delete segment file: ${segmentFile}`, e);
-        }
-      }));
+      await Promise.all(
+        segmentFiles.map(async (segmentFile) => {
+          try {
+            fs.unlinkSync(segmentFile);
+          } catch (e) {
+            console.error(`Failed to delete segment file: ${segmentFile}`, e);
+          }
+        }),
+      );
 
       // Merge all transcripts with clear segment breaks
       return segmentTranscripts.join('\n\n---\n\n');
-
     } catch (error) {
       console.error('Error in segmented transcription:', error);
       throw error;
     }
   }
-
 }

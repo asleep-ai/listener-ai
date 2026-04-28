@@ -15,6 +15,6 @@ const newVersion = `${major}.${minor}.${patch + 1}`;
 
 // Update package.json
 packageJson.version = newVersion;
-fs.writeFileSync(packagePath, JSON.stringify(packageJson, null, 2) + '\n');
+fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
 
 console.log(`Version bumped from ${major}.${minor}.${patch} to ${newVersion}`);

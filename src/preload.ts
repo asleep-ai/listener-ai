@@ -11,8 +11,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
   },
   checkConfig: () => ipcRenderer.invoke('check-config'),
-  saveConfig: (config: { geminiApiKey?: string; notionApiKey?: string; notionDatabaseId?: string; autoMode?: boolean; meetingDetection?: boolean; displayDetection?: boolean; globalShortcut?: string; knownWords?: string[]; summaryPrompt?: string; recordSystemAudio?: boolean; audioDeviceId?: string }) =>
-    ipcRenderer.invoke('save-config', config),
+  saveConfig: (config: {
+    geminiApiKey?: string;
+    notionApiKey?: string;
+    notionDatabaseId?: string;
+    autoMode?: boolean;
+    meetingDetection?: boolean;
+    displayDetection?: boolean;
+    globalShortcut?: string;
+    knownWords?: string[];
+    summaryPrompt?: string;
+    recordSystemAudio?: boolean;
+    audioDeviceId?: string;
+  }) => ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   transcribeAudio: (filePath: string) => ipcRenderer.invoke('transcribe-audio', filePath),
   uploadToNotion: (data: { title: string; transcriptionData: any; audioFilePath?: string }) =>
@@ -23,9 +34,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRecordings: () => ipcRenderer.invoke('get-recordings'),
   searchTranscriptions: (opts: { query: string; fields?: string[]; limit?: number }) =>
     ipcRenderer.invoke('search-transcriptions', opts),
-  agentChat: (opts: { question: string; history?: Array<{ role: 'user' | 'model'; text: string }>; scope: { kind: 'all' } | { kind: 'single'; folderName: string } }) =>
-    ipcRenderer.invoke('agent-chat', opts),
-  onAgentConfirmRequest: (callback: (req: { id: string; proposal: { kind: 'setConfig'; key: string; value: unknown; currentValue?: unknown; description: string } }) => void) => {
+  agentChat: (opts: {
+    question: string;
+    history?: Array<{ role: 'user' | 'model'; text: string }>;
+    scope: { kind: 'all' } | { kind: 'single'; folderName: string };
+  }) => ipcRenderer.invoke('agent-chat', opts),
+  onAgentConfirmRequest: (
+    callback: (req: {
+      id: string;
+      proposal: {
+        kind: 'setConfig';
+        key: string;
+        value: unknown;
+        currentValue?: unknown;
+        description: string;
+      };
+    }) => void,
+  ) => {
     ipcRenderer.on('agent-confirm-request', (_, req) => callback(req));
   },
   sendAgentConfirmResponse: (payload: { id: string; approved: boolean }) =>
@@ -91,15 +116,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // File handling
-  saveAudioFile: (fileData: { name: string; data: number[] }) => ipcRenderer.invoke('save-audio-file', fileData),
-  saveAudioFileBase64: (fileData: { name: string; dataBase64: string }) => ipcRenderer.invoke('save-audio-file-base64', fileData),
-  copyAudioFile: (fileData: { sourcePath: string; name: string }) => ipcRenderer.invoke('copy-audio-file', fileData),
+  saveAudioFile: (fileData: { name: string; data: number[] }) =>
+    ipcRenderer.invoke('save-audio-file', fileData),
+  saveAudioFileBase64: (fileData: { name: string; dataBase64: string }) =>
+    ipcRenderer.invoke('save-audio-file-base64', fileData),
+  copyAudioFile: (fileData: { sourcePath: string; name: string }) =>
+    ipcRenderer.invoke('copy-audio-file', fileData),
   selectAudioFile: () => ipcRenderer.invoke('select-audio-file'),
   getFileInfo: (filePath: string) => ipcRenderer.invoke('get-file-info', filePath),
 
   // Metadata handling
   getMetadata: (filePath: string) => ipcRenderer.invoke('get-metadata', filePath),
-  saveMetadata: (filePath: string, metadata: any) => ipcRenderer.invoke('save-metadata', filePath, metadata),
+  saveMetadata: (filePath: string, metadata: any) =>
+    ipcRenderer.invoke('save-metadata', filePath, metadata),
 
   // Auto-update events
   onUpdateStatus: (callback: (updateInfo: { event: string; data?: any }) => void) => {
@@ -108,10 +137,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getUpdateState: () => ipcRenderer.invoke('update:get-state'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
-  simulateUpdateEvent: (event: string, data?: any) => ipcRenderer.invoke('update:simulate', event, data),
+  simulateUpdateEvent: (event: string, data?: any) =>
+    ipcRenderer.invoke('update:simulate', event, data),
 
   // Release notes (shown after a version update)
-  onShowReleaseNotes: (callback: (notes: { version: string; body: string; url: string }) => void) => {
+  onShowReleaseNotes: (
+    callback: (notes: { version: string; body: string; url: string }) => void,
+  ) => {
     ipcRenderer.on('show-release-notes', (_, notes) => callback(notes));
   },
   onOpenReleaseHistory: (callback: () => void) => {
@@ -123,5 +155,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getMeetingStatus: () => ipcRenderer.invoke('get-meeting-status'),
   onMeetingStatusChanged: (callback: (status: { active: boolean; app?: string }) => void) => {
     ipcRenderer.on('meeting-status-changed', (_, status) => callback(status));
-  }
+  },
 });

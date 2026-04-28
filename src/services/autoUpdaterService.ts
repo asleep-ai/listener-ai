@@ -1,5 +1,5 @@
+import { BrowserWindow, app, dialog, shell } from 'electron';
 import { autoUpdater } from 'electron-updater';
-import { BrowserWindow, dialog, app, shell } from 'electron';
 
 const RELEASES_URL = 'https://github.com/asleep-ai/listener-ai/releases/latest';
 const PERIODIC_CHECK_INTERVAL_MS = 2 * 60 * 60 * 1000;
@@ -79,19 +79,21 @@ export class AutoUpdaterService {
   }
 
   private showRestartPrompt(version: string) {
-    dialog.showMessageBox(this.mainWindow || new BrowserWindow({ show: false }), {
-      type: 'info',
-      title: 'Update Ready',
-      message: 'Update downloaded. The application will restart to apply the update.',
-      detail: `Version ${version} has been downloaded and will be installed after restart.`,
-      buttons: ['Restart Now', 'Later'],
-      defaultId: 0,
-      cancelId: 1
-    }).then((result) => {
-      if (result.response === 0) {
-        this.quitAndInstall();
-      }
-    });
+    dialog
+      .showMessageBox(this.mainWindow || new BrowserWindow({ show: false }), {
+        type: 'info',
+        title: 'Update Ready',
+        message: 'Update downloaded. The application will restart to apply the update.',
+        detail: `Version ${version} has been downloaded and will be installed after restart.`,
+        buttons: ['Restart Now', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      .then((result) => {
+        if (result.response === 0) {
+          this.quitAndInstall();
+        }
+      });
   }
 
   private sendStatusToWindow(event: string, data?: any) {
@@ -143,45 +145,50 @@ export class AutoUpdaterService {
     const version = this.updateState.version;
     const isDev = this.isDevelopment();
 
-    dialog.showMessageBox(this.mainWindow || new BrowserWindow({ show: false }), {
-      type: 'info',
-      title: 'Update Available',
-      message: `A new version (${version}) is available. Would you like to download it now?`,
-      detail: `Current version: ${app.getVersion()}\nNew version: ${version}`,
-      buttons: ['Download', 'Later'],
-      defaultId: 0,
-      cancelId: 1
-    }).then((result) => {
-      if (result.response !== 0) return;
-      if (this.updateState.type !== 'available') return;
+    dialog
+      .showMessageBox(this.mainWindow || new BrowserWindow({ show: false }), {
+        type: 'info',
+        title: 'Update Available',
+        message: `A new version (${version}) is available. Would you like to download it now?`,
+        detail: `Current version: ${app.getVersion()}\nNew version: ${version}`,
+        buttons: ['Download', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      .then((result) => {
+        if (result.response !== 0) return;
+        if (this.updateState.type !== 'available') return;
 
-      this.updateState = { type: 'downloading', version, percent: 0 };
-      this.sendStatusToWindow('download-progress', { percent: 0, version });
+        this.updateState = { type: 'downloading', version, percent: 0 };
+        this.sendStatusToWindow('download-progress', { percent: 0, version });
 
-      if (isDev) {
-        this.simulateFakeDownload();
-        return;
-      }
+        if (isDev) {
+          this.simulateFakeDownload();
+          return;
+        }
 
-      autoUpdater.downloadUpdate().catch((err) => {
-        console.error('Failed to download update:', err);
+        autoUpdater.downloadUpdate().catch((err) => {
+          console.error('Failed to download update:', err);
+        });
       });
-    });
   }
 
   private simulateFakeDownload() {
     const steps = [25, 60, 90, 100];
     steps.forEach((percent, idx) => {
-      setTimeout(() => {
-        if (this.updateState.type !== 'downloading') return;
-        if (percent < 100) {
-          this.simulateUpdateEvent('download-progress', { percent });
-        } else {
-          const version =
-            this.updateState.type === 'downloading' ? this.updateState.version : '9.9.9';
-          this.simulateUpdateEvent('update-downloaded', { version });
-        }
-      }, (idx + 1) * 500);
+      setTimeout(
+        () => {
+          if (this.updateState.type !== 'downloading') return;
+          if (percent < 100) {
+            this.simulateUpdateEvent('download-progress', { percent });
+          } else {
+            const version =
+              this.updateState.type === 'downloading' ? this.updateState.version : '9.9.9';
+            this.simulateUpdateEvent('update-downloaded', { version });
+          }
+        },
+        (idx + 1) * 500,
+      );
     });
   }
 
@@ -216,9 +223,10 @@ export class AutoUpdaterService {
         break;
       }
       case 'update-downloaded': {
-        const version = data?.version
-          ?? (this.updateState.type === 'downloading' ? this.updateState.version : undefined)
-          ?? '9.9.9';
+        const version =
+          data?.version ??
+          (this.updateState.type === 'downloading' ? this.updateState.version : undefined) ??
+          '9.9.9';
         this.updateState = { type: 'downloaded', version };
         this.sendStatusToWindow('update-downloaded', { version });
         this.showRestartPrompt(version);
@@ -249,42 +257,46 @@ export class AutoUpdaterService {
         type: 'info',
         title: 'Development Mode',
         message: 'Auto-update is disabled in development mode.',
-        buttons: ['OK']
+        buttons: ['OK'],
       });
       return;
     }
 
-    autoUpdater.checkForUpdates().then(() => {
-      if (this.updateState.type === 'idle') {
-        dialog.showMessageBox(this.mainWindow || new BrowserWindow({ show: false }), {
-          type: 'info',
-          title: 'No Updates',
-          message: 'You are running the latest version.',
-          detail: `Current version: ${app.getVersion()}`,
-          buttons: ['OK']
-        });
-      }
-    }).catch((err) => {
-      this.showUpdateFailedDialog(err.message);
-    });
+    autoUpdater
+      .checkForUpdates()
+      .then(() => {
+        if (this.updateState.type === 'idle') {
+          dialog.showMessageBox(this.mainWindow || new BrowserWindow({ show: false }), {
+            type: 'info',
+            title: 'No Updates',
+            message: 'You are running the latest version.',
+            detail: `Current version: ${app.getVersion()}`,
+            buttons: ['OK'],
+          });
+        }
+      })
+      .catch((err) => {
+        this.showUpdateFailedDialog(err.message);
+      });
   }
 
   private showUpdateFailedDialog(errorMessage: string) {
-    dialog.showMessageBox(this.mainWindow || new BrowserWindow({ show: false }), {
-      type: 'error',
-      title: 'Update Failed',
-      message: 'Failed to update automatically.',
-      detail: `${errorMessage}\n\nYou can download the latest version manually from GitHub.`,
-      buttons: ['Open GitHub Releases', 'Later'],
-      defaultId: 0,
-      cancelId: 1
-    }).then((result) => {
-      if (result.response === 0) {
-        shell.openExternal(RELEASES_URL);
-      }
-    });
+    dialog
+      .showMessageBox(this.mainWindow || new BrowserWindow({ show: false }), {
+        type: 'error',
+        title: 'Update Failed',
+        message: 'Failed to update automatically.',
+        detail: `${errorMessage}\n\nYou can download the latest version manually from GitHub.`,
+        buttons: ['Open GitHub Releases', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      .then((result) => {
+        if (result.response === 0) {
+          shell.openExternal(RELEASES_URL);
+        }
+      });
   }
-
 }
 
 export const autoUpdaterService = new AutoUpdaterService();

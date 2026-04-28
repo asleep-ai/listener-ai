@@ -20,7 +20,14 @@
   ],
   "scripts": {
     "start": "pnpm run build && electron .",
-    "build": "tsc",
+    "build": "tsc && vite build",
+    "build:main": "tsc",
+    "build:renderer": "vite build",
+    "build:check-renderer": "tsc -p tsconfig.renderer.json",
+    "dev:renderer": "vite",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
     "test": "tsc && node --test dist/meetingDetectorService.test.js dist/searchService.test.js dist/agentService.test.js dist/simpleAudioRecorder.test.js dist/outputService.test.js dist/services/audioConcatService.test.js dist/cli.test.js",
     "dist": "pnpm run build && electron-builder",
     "dist:mac": "pnpm run build && electron-builder --mac",
@@ -46,11 +53,13 @@
   },
   "homepage": "https://github.com/asleep-ai/listener-ai#readme",
   "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
     "@electron/notarize": "^3.0.1",
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^24.0.12",
     "dotenv": "^17.2.0",
     "electron": "^39.8.5",
+    "vite": "^5.4.10",
     "electron-builder": "^26.8.1",
     "semver": "^7.7.2",
     "typescript": "^5.8.3"
@@ -58,7 +67,9 @@
   "dependencies": {
     "@google/genai": "^1.13.0",
     "audiotee": "^0.0.7",
+    "buffer-equal-constant-time": "^1.0.1",
     "fs-extra": "^11.2.0",
+    "jwa": "^2.0.1",
     "marked": "^15.0.0"
   },
   "optionalDependencies": {
@@ -86,25 +97,11 @@
     "files": [
       "dist/**/*",
       "node_modules/**/*",
-      "index.html",
-      "styles.css",
-      "renderer.js",
       "package.json",
       "assets/icon.png",
       "!node_modules/ffmpeg-static/**/*",
-      "!scripts/**/*",
-      "!release/**/*",
-      "!src/**/*",
-      "!.git/**/*",
-      "!**/*.ts",
       "!**/*.test.js",
-      "!**/*.map",
-      "!.gitignore",
-      "!.eslintrc",
-      "!README.md",
-      "!CLAUDE.md",
-      "!tsconfig.json",
-      "!build/**/*"
+      "!**/*.map"
     ],
     "asarUnpack": [
       "node_modules/audiotee/bin/**"

@@ -3,7 +3,10 @@ import * as path from 'path';
 import type { TranscriptionResult } from './geminiService';
 
 export function sanitizeForPath(name: string): string {
-  return name.replace(/[\/\\:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
+  return name
+    .replace(/[\/\\:*?"<>|]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 export function formatTimestamp(): string {
@@ -19,16 +22,25 @@ export function formatTimestamp(): string {
 
 /** Convert camelCase key to a display label: "keyDecisions" -> "Key Decisions" */
 export function camelToLabel(key: string): string {
-  return key.replace(/([A-Z])/g, ' $1').replace(/^./, (s: string) => s.toUpperCase()).trim();
+  return key
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/^./, (s: string) => s.toUpperCase())
+    .trim();
 }
 
-export function formatSummary(result: TranscriptionResult, title: string, mergedFrom?: string[]): string {
+export function formatSummary(
+  result: TranscriptionResult,
+  title: string,
+  mergedFrom?: string[],
+): string {
   const lines: string[] = [];
   lines.push(`# ${title}\n`);
 
   if (mergedFrom?.length) {
-    lines.push(`## Sources\n`);
-    lines.push(`Merged from ${mergedFrom.length} recording${mergedFrom.length === 1 ? '' : 's'}:\n`);
+    lines.push('## Sources\n');
+    lines.push(
+      `Merged from ${mergedFrom.length} recording${mergedFrom.length === 1 ? '' : 's'}:\n`,
+    );
     for (const src of mergedFrom) {
       lines.push(`- ${src}`);
     }
@@ -36,12 +48,12 @@ export function formatSummary(result: TranscriptionResult, title: string, merged
   }
 
   if (result.summary) {
-    lines.push(`## Summary\n`);
+    lines.push('## Summary\n');
     lines.push(`${result.summary}\n`);
   }
 
   if (result.keyPoints?.length) {
-    lines.push(`## Key Points\n`);
+    lines.push('## Key Points\n');
     for (const point of result.keyPoints) {
       lines.push(`- ${point}`);
     }
@@ -49,7 +61,7 @@ export function formatSummary(result: TranscriptionResult, title: string, merged
   }
 
   if (result.actionItems?.length) {
-    lines.push(`## Action Items\n`);
+    lines.push('## Action Items\n');
     for (const item of result.actionItems) {
       lines.push(`- ${item}`);
     }
@@ -157,7 +169,7 @@ export function parseFrontmatter(content: string): { meta: Record<string, unknow
   let currentArray: string[] = [];
 
   for (const line of yamlBlock.split('\n')) {
-    const arrayItem = line.match(/^  - (.+)$/);
+    const arrayItem = line.match(/^ {2}- (.+)$/);
     if (arrayItem && currentArrayKey) {
       currentArray.push(yamlUnquote(arrayItem[1]));
       continue;
@@ -192,7 +204,8 @@ export function parseFrontmatter(content: string): { meta: Record<string, unknow
 
 function yamlUnquote(value: string): string {
   if (value.startsWith('"') && value.endsWith('"')) {
-    return value.slice(1, -1)
+    return value
+      .slice(1, -1)
       .replace(/\\n/g, '\n')
       .replace(/\\r/g, '\r')
       .replace(/\\"/g, '"')
@@ -210,7 +223,7 @@ export interface SaveTranscriptionOptions {
   result: TranscriptionResult;
   audioFilePath?: string;
   outputDir?: string; // override parent dir (for CLI --output)
-  dataPath: string;   // app data path (default location)
+  dataPath: string; // app data path (default location)
   mergedFrom?: string[]; // source folder names when this note was created by merging others
 }
 
@@ -241,10 +254,18 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
     mergedFrom: opts.mergedFrom,
   });
   const summaryBody = formatSummary(opts.result, opts.title, opts.mergedFrom);
-  fs.writeFileSync(path.join(folderPath, 'summary.md'), `${frontmatter}\n\n${summaryBody}`, 'utf-8');
+  fs.writeFileSync(
+    path.join(folderPath, 'summary.md'),
+    `${frontmatter}\n\n${summaryBody}`,
+    'utf-8',
+  );
 
   // transcript.md
-  fs.writeFileSync(path.join(folderPath, 'transcript.md'), formatTranscript(opts.result, opts.title), 'utf-8');
+  fs.writeFileSync(
+    path.join(folderPath, 'transcript.md'),
+    formatTranscript(opts.result, opts.title),
+    'utf-8',
+  );
 
   return folderPath;
 }
@@ -260,7 +281,10 @@ export interface TranscriptionEntry {
  * List transcription folders sorted by most-recent-first.
  * Performs a lightweight line scan of each summary.md to extract only title and transcribedAt.
  */
-export async function listTranscriptions(dataPath: string, limit?: number): Promise<TranscriptionEntry[]> {
+export async function listTranscriptions(
+  dataPath: string,
+  limit?: number,
+): Promise<TranscriptionEntry[]> {
   const dir = getTranscriptionsDir(dataPath);
   let dirents: fs.Dirent[];
   try {
@@ -341,7 +365,9 @@ export interface ReadTranscriptionResult {
  * Read transcription data from a transcription folder.
  * Returns raw data from frontmatter (machine-readable), not the markdown body.
  */
-export async function readTranscription(folderPath: string): Promise<ReadTranscriptionResult | null> {
+export async function readTranscription(
+  folderPath: string,
+): Promise<ReadTranscriptionResult | null> {
   try {
     const summaryPath = path.join(folderPath, 'summary.md');
 
@@ -352,9 +378,10 @@ export async function readTranscription(folderPath: string): Promise<ReadTranscr
     let customFields: Record<string, unknown> | undefined;
     if (meta.customFields) {
       try {
-        customFields = typeof meta.customFields === 'string'
-          ? JSON.parse(meta.customFields as string)
-          : meta.customFields as Record<string, unknown>;
+        customFields =
+          typeof meta.customFields === 'string'
+            ? JSON.parse(meta.customFields as string)
+            : (meta.customFields as Record<string, unknown>);
       } catch (e) {
         console.warn('Failed to parse customFields from frontmatter:', e);
       }

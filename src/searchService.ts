@@ -12,7 +12,13 @@ export const FIELD_WEIGHTS: Record<SearchField, number> = {
 };
 
 export const DEFAULT_FIELDS: SearchField[] = ['title', 'summary', 'keyPoints', 'actionItems'];
-export const ALL_FIELDS: SearchField[] = ['title', 'summary', 'keyPoints', 'actionItems', 'transcript'];
+export const ALL_FIELDS: SearchField[] = [
+  'title',
+  'summary',
+  'keyPoints',
+  'actionItems',
+  'transcript',
+];
 
 export interface SearchHit {
   entry: TranscriptionEntry;
@@ -38,8 +44,8 @@ export function makeSnippet(text: string, needle: string, width = 80, matchIndex
   const start = Math.max(0, idx - half);
   const end = Math.min(text.length, idx + needle.length + half);
   let snippet = text.slice(start, end).replace(/\s+/g, ' ').trim();
-  if (start > 0) snippet = '...' + snippet;
-  if (end < text.length) snippet = snippet + '...';
+  if (start > 0) snippet = `...${snippet}`;
+  if (end < text.length) snippet = `${snippet}...`;
   return snippet;
 }
 
@@ -49,7 +55,10 @@ function findIndex(haystack: string | undefined, needleLower: string): number {
   return haystack.toLowerCase().indexOf(needleLower);
 }
 
-function firstArrayHit(haystack: string[] | undefined, needleLower: string): { text: string; index: number } | undefined {
+function firstArrayHit(
+  haystack: string[] | undefined,
+  needleLower: string,
+): { text: string; index: number } | undefined {
   if (!haystack) return undefined;
   for (const s of haystack) {
     const idx = s.toLowerCase().indexOf(needleLower);
@@ -78,7 +87,11 @@ function scoreRecordPrepared(
   let snippetField: SearchField | undefined;
 
   const setSnippet = (field: SearchField, source: string, index: number) => {
-    if (!snippetField) { snippetField = field; snippetSource = source; snippetIndex = index; }
+    if (!snippetField) {
+      snippetField = field;
+      snippetSource = source;
+      snippetIndex = index;
+    }
   };
 
   if (scope.has('title') && findIndex(data.title, needle) !== -1) {
@@ -135,14 +148,20 @@ export function scoreRecord(
 }
 
 /** Resolve which fields to search based on CLI flags. */
-export function resolveFields(opts: { field?: SearchField | 'all'; includeTranscript?: boolean }): SearchField[] {
+export function resolveFields(opts: {
+  field?: SearchField | 'all';
+  includeTranscript?: boolean;
+}): SearchField[] {
   if (opts.field === 'all') return [...ALL_FIELDS];
   if (opts.field) return [opts.field];
   return opts.includeTranscript ? [...ALL_FIELDS] : [...DEFAULT_FIELDS];
 }
 
 /** Run a search against the local transcriptions archive. */
-export async function searchTranscriptions(dataPath: string, opts: SearchOptions): Promise<SearchHit[]> {
+export async function searchTranscriptions(
+  dataPath: string,
+  opts: SearchOptions,
+): Promise<SearchHit[]> {
   const entries = await listTranscriptions(dataPath, 0);
   const fields = opts.fields ?? DEFAULT_FIELDS;
   const needle = opts.query.toLowerCase();
