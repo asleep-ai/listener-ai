@@ -431,12 +431,12 @@ async function performMerge(paths: string[], title: string): Promise<void> {
 
     await refreshRecordingsList();
 
-    const notionConfig = await window.electronAPI.getConfig();
-    if (notionConfig.notionApiKey && notionConfig.notionDatabaseId && uploadToNotionBtn) {
+    const cfg = await window.electronAPI.getConfig();
+    if (cfg.notionApiKey && cfg.notionDatabaseId && uploadToNotionBtn) {
       uploadToNotionBtn.style.display = 'flex';
     }
     const sendToSlackBtn = document.getElementById('sendToSlack') as HTMLElement | null;
-    if (notionConfig.slackWebhookUrl && sendToSlackBtn) {
+    if (cfg.slackWebhookUrl && sendToSlackBtn) {
       sendToSlackBtn.style.display = 'flex';
     }
   } catch (err) {

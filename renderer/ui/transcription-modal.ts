@@ -135,7 +135,6 @@ export function showSavedTranscript(
 
     populateTranscriptionUI(currentTranscriptionData);
 
-    // Show upload to Notion / Slack buttons if configured
     window.electronAPI.getConfig().then((config) => {
       if (config.notionApiKey && config.notionDatabaseId) {
         if (uploadToNotionBtn) uploadToNotionBtn.style.display = 'flex';
@@ -227,7 +226,6 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       // state appear without requiring a manual reload.
       await refreshRecordingsList();
 
-      // Show upload to Notion / Slack buttons if configured
       const cfg = await window.electronAPI.getConfig();
       if (cfg.notionApiKey && cfg.notionDatabaseId) {
         if (uploadToNotionBtn) uploadToNotionBtn.style.display = 'flex';
@@ -395,15 +393,19 @@ export function setupTranscriptionModal(): void {
         alert('No transcription data available');
         return;
       }
-      if (!sendToSlackBtn) return;
+      if (!sendToSlackBtn || sendToSlackBtn.disabled) return;
+
+      // Disable before confirm() to block double-clicks during the prompt.
+      sendToSlackBtn.disabled = true;
 
       if (currentSlackSentAt) {
         const when = new Date(currentSlackSentAt).toLocaleString();
-        if (!confirm(`Already sent to Slack on ${when}. Send again?`)) return;
+        if (!confirm(`Already sent to Slack on ${when}. Send again?`)) {
+          sendToSlackBtn.disabled = false;
+          return;
+        }
       }
 
-      sendToSlackBtn.disabled = true;
-      const originalLabel = slackButtonLabel?.textContent || 'Send to Slack';
       if (slackButtonLabel) slackButtonLabel.textContent = 'Sending…';
 
       try {
@@ -415,7 +417,7 @@ export function setupTranscriptionModal(): void {
         });
 
         if (result.success) {
-          currentSlackSentAt = result.sentAt || new Date().toISOString();
+          currentSlackSentAt = result.sentAt ?? new Date().toISOString();
           showToast('Sent to Slack');
         } else {
           alert(`Failed to send to Slack: ${result.error}`);
@@ -424,10 +426,7 @@ export function setupTranscriptionModal(): void {
         const message = error instanceof Error ? error.message : String(error);
         alert(`Error sending to Slack: ${message}`);
       } finally {
-        if (sendToSlackBtn) {
-          sendToSlackBtn.disabled = false;
-        }
-        if (slackButtonLabel) slackButtonLabel.textContent = originalLabel;
+        if (sendToSlackBtn) sendToSlackBtn.disabled = false;
         refreshSlackButtonLabel();
       }
     });

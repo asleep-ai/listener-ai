@@ -167,6 +167,12 @@ export function resetRecordingUI(): void {
   recordingTime.classList.remove('active');
 }
 
+function pickMeetingTitle(recordingTitle: string, suggestedTitle?: string): string {
+  const isPlaceholder = recordingTitle === '' || recordingTitle === 'Untitled_Meeting';
+  if (isPlaceholder && suggestedTitle) return suggestedTitle;
+  return recordingTitle || suggestedTitle || 'Untitled Meeting';
+}
+
 export async function processAutoMode(
   audioPath: string | undefined,
   recordingTitle: string,
@@ -209,11 +215,10 @@ export async function processAutoMode(
         console.log('Auto mode: File renamed to:', finalAudioPath);
       }
 
-      const finalTitle =
-        (recordingTitle === '' || recordingTitle === 'Untitled_Meeting') &&
-        transcriptionResult.data.suggestedTitle
-          ? transcriptionResult.data.suggestedTitle
-          : recordingTitle || transcriptionResult.data.suggestedTitle || 'Untitled Meeting';
+      const finalTitle = pickMeetingTitle(
+        recordingTitle,
+        transcriptionResult.data.suggestedTitle,
+      );
 
       let notionUrl: string | undefined;
       let notionError: string | undefined;

@@ -12,16 +12,22 @@ export interface SlackSendOptions {
   notionError?: string;
 }
 
-export interface SlackSendResult {
-  success: boolean;
-  error?: string;
-  sentAt?: string;
-}
+export type SlackSendResult =
+  | { success: true; sentAt: string }
+  | { success: false; error: string };
 
-const SLACK_HOST_PATTERN = /^https:\/\/hooks\.slack\.com\/services\//;
+export const SLACK_WEBHOOK_PREFIX = 'https://hooks.slack.com/services/';
+
+const SLACK_HOST_PATTERN = new RegExp(
+  `^${SLACK_WEBHOOK_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+);
+const HEADER_MAX_CHARS = 150;
 const SUMMARY_PREVIEW_MAX_CHARS = 600;
 const SUMMARY_PREVIEW_MAX_LINES = 3;
 const KEY_POINTS_PREVIEW = 3;
+const NOTION_ERROR_PREVIEW_MAX_CHARS = 200;
+const FALLBACK_TEXT_MAX_CHARS = 1000;
+const ERROR_BODY_PREVIEW_MAX_CHARS = 200;
 
 export function isLikelySlackWebhookUrl(url: string): boolean {
   return SLACK_HOST_PATTERN.test(url.trim());
@@ -32,9 +38,7 @@ export class SlackService {
 
   constructor(config: SlackConfig) {
     if (!isLikelySlackWebhookUrl(config.webhookUrl)) {
-      throw new Error(
-        'Slack webhook URL must start with https://hooks.slack.com/services/',
-      );
+      throw new Error(`Slack webhook URL must start with ${SLACK_WEBHOOK_PREFIX}`);
     }
     this.webhookUrl = config.webhookUrl.trim();
   }
@@ -70,7 +74,7 @@ export class SlackService {
 
       if (!response.ok) {
         const body = await response.text().catch(() => '');
-        const trimmed = body.slice(0, 200);
+        const trimmed = body.slice(0, ERROR_BODY_PREVIEW_MAX_CHARS);
         return {
           success: false,
           error: `Slack responded ${response.status}${trimmed ? `: ${trimmed}` : ''}`,
@@ -91,7 +95,7 @@ export function buildMeetingSummaryPayload(options: SlackSendOptions): {
 } {
   const { title, date, result, notionUrl, notionError } = options;
   const emoji = (result.emoji || '📝').trim();
-  const headerText = truncate(`${emoji} ${title}`, 150);
+  const headerText = truncate(`${emoji} ${title}`, HEADER_MAX_CHARS);
   const dateLabel = formatDate(date);
   const summaryPreview = clampLines(
     result.summary || '',
@@ -119,7 +123,7 @@ export function buildMeetingSummaryPayload(options: SlackSendOptions): {
 
   const keyPoints = (result.keyPoints || [])
     .slice(0, KEY_POINTS_PREVIEW)
-    .map((p) => `• ${escapeMrkdwn(p)}`)
+    .map((p) => `• ${escapeSlackText(p)}`)
     .join('\n');
   if (keyPoints) {
     blocks.push({
@@ -145,7 +149,7 @@ export function buildMeetingSummaryPayload(options: SlackSendOptions): {
       elements: [
         {
           type: 'mrkdwn',
-          text: `:warning: Notion sync failed: ${escapeMrkdwn(truncate(notionError, 200))}`,
+          text: `:warning: Notion sync failed: ${escapeSlackText(truncate(notionError, NOTION_ERROR_PREVIEW_MAX_CHARS))}`,
         },
       ],
     });
@@ -154,7 +158,7 @@ export function buildMeetingSummaryPayload(options: SlackSendOptions): {
   const fallbackParts = [`${emoji} ${title}`, dateLabel];
   if (summaryPreview) fallbackParts.push(summaryPreview);
   if (notionUrl) fallbackParts.push(notionUrl);
-  const text = truncate(fallbackParts.join(' — '), 1000);
+  const text = truncate(fallbackParts.join(' — '), FALLBACK_TEXT_MAX_CHARS);
 
   return { text, blocks };
 }
@@ -179,7 +183,9 @@ function formatDate(date: Date): string {
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
 }
 
-function escapeMrkdwn(value: string): string {
+// Slack mrkdwn requires HTML-style entity escaping for `<`, `>`, `&` to prevent
+// it from interpreting them as link syntax (`<url|label>`) or entity refs.
+function escapeSlackText(value: string): string {
   return value.replace(/[<>&]/g, (ch) => {
     if (ch === '<') return '&lt;';
     if (ch === '>') return '&gt;';

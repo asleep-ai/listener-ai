@@ -36,7 +36,7 @@ import {
   saveTranscription,
   updateTranscriptionStatus,
 } from './outputService';
-import { isLikelySlackWebhookUrl, SlackService } from './slackService';
+import { isLikelySlackWebhookUrl, SLACK_WEBHOOK_PREFIX, SlackService } from './slackService';
 import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
 import { concatAudioFiles } from './services/audioConcatService';
 import { autoUpdaterService } from './services/autoUpdaterService';
@@ -1408,8 +1408,6 @@ ipcMain.handle(
         data.audioFilePath,
       );
 
-      // Persist the Notion URL to the transcription folder so a later Slack
-      // resend (or any other follow-up) can include the link without re-uploading.
       if (result.success && result.url && data.transcriptionPath) {
         try {
           await updateTranscriptionStatus(data.transcriptionPath, {
@@ -1461,8 +1459,8 @@ ipcMain.handle(
       if (data.transcriptionPath) {
         try {
           await updateTranscriptionStatus(data.transcriptionPath, {
-            slackSentAt: result.success ? (result.sentAt ?? new Date().toISOString()) : null,
-            slackError: result.success ? null : (result.error ?? 'Unknown error'),
+            slackSentAt: result.success ? result.sentAt : null,
+            slackError: result.success ? null : result.error,
           });
         } catch (error) {
           console.error('Failed to persist Slack status to transcription:', error);
@@ -1487,7 +1485,7 @@ ipcMain.handle('test-slack-webhook', async (_, webhookUrl?: string) => {
     if (!isLikelySlackWebhookUrl(url)) {
       return {
         success: false,
-        error: 'URL must start with https://hooks.slack.com/services/',
+        error: `URL must start with ${SLACK_WEBHOOK_PREFIX}`,
       };
     }
     const service = new SlackService({ webhookUrl: url });
