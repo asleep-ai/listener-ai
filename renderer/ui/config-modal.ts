@@ -192,7 +192,7 @@ export function setupConfigModal(): void {
           slackWebhookStatus.textContent = 'Test message sent. Check the channel.';
           slackWebhookStatus.className = 'slack-webhook-status is-success';
         } else {
-          slackWebhookStatus.textContent = result.error || 'Test failed.';
+          slackWebhookStatus.textContent = result.error;
           slackWebhookStatus.className = 'slack-webhook-status is-error';
         }
       } finally {

@@ -31,6 +31,7 @@ import { MenuBarManager } from './menuBarManager';
 import { NotionService } from './notionService';
 import {
   formatTimestamp,
+  getTranscriptionsDir,
   readTranscription,
   sanitizeForPath,
   saveTranscription,
@@ -1169,6 +1170,16 @@ function getSlackService(): SlackService | null {
   return slackService;
 }
 
+// Defense in depth: a renderer-supplied transcriptionPath could otherwise be
+// any path on disk and let an XSS-compromised renderer overwrite arbitrary
+// summary.md files via updateTranscriptionStatus.
+function isContainedTranscriptionPath(folderPath: string | undefined): folderPath is string {
+  if (!folderPath) return false;
+  const root = getTranscriptionsDir(app.getPath('userData'));
+  const resolved = path.resolve(folderPath);
+  return resolved === root || resolved.startsWith(root + path.sep);
+}
+
 // Tell the renderer the config has changed out-of-band so it can re-read and
 // re-render its UI state (toggle checkboxes etc.). Used by the agent flow.
 function broadcastConfigChanged(): void {
@@ -1408,7 +1419,7 @@ ipcMain.handle(
         data.audioFilePath,
       );
 
-      if (result.success && result.url && data.transcriptionPath) {
+      if (result.success && result.url && isContainedTranscriptionPath(data.transcriptionPath)) {
         try {
           await updateTranscriptionStatus(data.transcriptionPath, {
             notionPageUrl: result.url,
@@ -1456,7 +1467,7 @@ ipcMain.handle(
         notionError: data.notionError,
       });
 
-      if (data.transcriptionPath) {
+      if (isContainedTranscriptionPath(data.transcriptionPath)) {
         try {
           await updateTranscriptionStatus(data.transcriptionPath, {
             slackSentAt: result.success ? result.sentAt : null,

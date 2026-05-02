@@ -32,11 +32,9 @@ export type ConfigPayload = {
   slackAutoShare?: boolean;
 };
 
-export type SlackSendApiResult = {
-  success: boolean;
-  error?: string;
-  sentAt?: string;
-};
+export type SlackSendApiResult =
+  | { success: true; sentAt: string }
+  | { success: false; error: string };
 
 export type SystemAudioStartResult =
   | { success: true; format: { sampleRate: number; channelCount: number; bytesPerSample: number } }

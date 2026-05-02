@@ -432,12 +432,13 @@ async function performMerge(paths: string[], title: string): Promise<void> {
     await refreshRecordingsList();
 
     const cfg = await window.electronAPI.getConfig();
-    if (cfg.notionApiKey && cfg.notionDatabaseId && uploadToNotionBtn) {
-      uploadToNotionBtn.style.display = 'flex';
+    if (uploadToNotionBtn) {
+      uploadToNotionBtn.style.display =
+        cfg.notionApiKey && cfg.notionDatabaseId ? 'flex' : 'none';
     }
     const sendToSlackBtn = document.getElementById('sendToSlack') as HTMLElement | null;
-    if (cfg.slackWebhookUrl && sendToSlackBtn) {
-      sendToSlackBtn.style.display = 'flex';
+    if (sendToSlackBtn) {
+      sendToSlackBtn.style.display = cfg.slackWebhookUrl ? 'flex' : 'none';
     }
   } catch (err) {
     alert(

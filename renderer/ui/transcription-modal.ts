@@ -136,11 +136,12 @@ export function showSavedTranscript(
     populateTranscriptionUI(currentTranscriptionData);
 
     window.electronAPI.getConfig().then((config) => {
-      if (config.notionApiKey && config.notionDatabaseId) {
-        if (uploadToNotionBtn) uploadToNotionBtn.style.display = 'flex';
+      if (uploadToNotionBtn) {
+        uploadToNotionBtn.style.display =
+          config.notionApiKey && config.notionDatabaseId ? 'flex' : 'none';
       }
-      if (config.slackWebhookUrl) {
-        if (sendToSlackBtn) sendToSlackBtn.style.display = 'flex';
+      if (sendToSlackBtn) {
+        sendToSlackBtn.style.display = config.slackWebhookUrl ? 'flex' : 'none';
       }
     });
   }
@@ -227,11 +228,12 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       await refreshRecordingsList();
 
       const cfg = await window.electronAPI.getConfig();
-      if (cfg.notionApiKey && cfg.notionDatabaseId) {
-        if (uploadToNotionBtn) uploadToNotionBtn.style.display = 'flex';
+      if (uploadToNotionBtn) {
+        uploadToNotionBtn.style.display =
+          cfg.notionApiKey && cfg.notionDatabaseId ? 'flex' : 'none';
       }
-      if (cfg.slackWebhookUrl) {
-        if (sendToSlackBtn) sendToSlackBtn.style.display = 'flex';
+      if (sendToSlackBtn) {
+        sendToSlackBtn.style.display = cfg.slackWebhookUrl ? 'flex' : 'none';
       }
     } else {
       alert(`Failed to transcribe audio: ${result.error}`);
@@ -417,7 +419,7 @@ export function setupTranscriptionModal(): void {
         });
 
         if (result.success) {
-          currentSlackSentAt = result.sentAt ?? new Date().toISOString();
+          currentSlackSentAt = result.sentAt;
           showToast('Sent to Slack');
         } else {
           alert(`Failed to send to Slack: ${result.error}`);
@@ -438,8 +440,13 @@ export function _setCurrentTranscription(data: {
   transcriptionData: TranscriptionData | null;
   title: string;
   filePath: string | null | undefined;
+  transcriptionPath?: string | null;
 }): void {
   currentTranscriptionData = data.transcriptionData;
   currentMeetingTitle = data.title;
   currentFilePath = data.filePath;
+  currentTranscriptionPath = data.transcriptionPath ?? null;
+  currentNotionUrl = null;
+  currentSlackSentAt = null;
+  refreshSlackButtonLabel();
 }

@@ -223,6 +223,7 @@ export async function processAutoMode(
       let notionUrl: string | undefined;
       let notionError: string | undefined;
       let notionConfigured = false;
+      let notionSucceeded = false;
 
       if (config.notionApiKey && config.notionDatabaseId) {
         notionConfigured = true;
@@ -236,6 +237,7 @@ export async function processAutoMode(
         });
 
         if (uploadResult.success) {
+          notionSucceeded = true;
           notionUrl = uploadResult.url;
           statusText.textContent = 'Auto mode: Successfully uploaded to Notion!';
           if (uploadResult.url) {
@@ -258,9 +260,13 @@ export async function processAutoMode(
           notionError,
         });
         if (slackResult.success) {
-          statusText.textContent = notionConfigured
-            ? 'Auto mode: Sent to Notion and Slack.'
-            : 'Auto mode: Sent to Slack.';
+          if (notionSucceeded) {
+            statusText.textContent = 'Auto mode: Sent to Notion and Slack.';
+          } else if (notionConfigured) {
+            statusText.textContent = 'Auto mode: Sent to Slack (Notion failed).';
+          } else {
+            statusText.textContent = 'Auto mode: Sent to Slack.';
+          }
         } else {
           statusText.textContent = 'Auto mode: Failed to send to Slack';
           console.error('Auto mode: Slack send failed:', slackResult.error);

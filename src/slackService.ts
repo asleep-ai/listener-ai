@@ -28,6 +28,7 @@ const KEY_POINTS_PREVIEW = 3;
 const NOTION_ERROR_PREVIEW_MAX_CHARS = 200;
 const FALLBACK_TEXT_MAX_CHARS = 1000;
 const ERROR_BODY_PREVIEW_MAX_CHARS = 200;
+const REQUEST_TIMEOUT_MS = 15_000;
 
 export function isLikelySlackWebhookUrl(url: string): boolean {
   return SLACK_HOST_PATTERN.test(url.trim());
@@ -70,6 +71,7 @@ export class SlackService {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -83,6 +85,9 @@ export class SlackService {
 
       return { success: true, sentAt: new Date().toISOString() };
     } catch (error) {
+      if (error instanceof Error && error.name === 'TimeoutError') {
+        return { success: false, error: `Slack request timed out after ${REQUEST_TIMEOUT_MS}ms` };
+      }
       const message = error instanceof Error ? error.message : String(error);
       return { success: false, error: message };
     }
