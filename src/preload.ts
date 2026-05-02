@@ -41,8 +41,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     notionUrl?: string;
     notionError?: string;
   }) => ipcRenderer.invoke('send-to-slack', data),
-  testSlackWebhook: (webhookUrl?: string) =>
-    ipcRenderer.invoke('test-slack-webhook', webhookUrl),
+  testSlackWebhook: (webhookUrl?: string) => ipcRenderer.invoke('test-slack-webhook', webhookUrl),
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
   openRecordingsFolder: () => ipcRenderer.invoke('open-recordings-folder'),
   showInFinder: (filePath: string) => ipcRenderer.invoke('show-in-finder', filePath),

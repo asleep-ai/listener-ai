@@ -1,11 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import type { TranscriptionResult } from './geminiService';
-import {
-  buildMeetingSummaryPayload,
-  isLikelySlackWebhookUrl,
-  SlackService,
-} from './slackService';
+import { SlackService, buildMeetingSummaryPayload, isLikelySlackWebhookUrl } from './slackService';
 
 const sampleResult: TranscriptionResult = {
   transcript: 'A long transcript that should not be sent to Slack.',
@@ -19,10 +15,7 @@ const sampleResult: TranscriptionResult = {
 
 describe('isLikelySlackWebhookUrl', () => {
   it('accepts valid hooks.slack.com URLs', () => {
-    assert.equal(
-      isLikelySlackWebhookUrl('https://hooks.slack.com/services/T0/B0/abc'),
-      true,
-    );
+    assert.equal(isLikelySlackWebhookUrl('https://hooks.slack.com/services/T0/B0/abc'), true);
   });
 
   it('rejects unrelated hosts and schemes', () => {
@@ -54,8 +47,9 @@ describe('buildMeetingSummaryPayload', () => {
       date: new Date(),
       result: sampleResult,
     });
-    const sectionBlock = (payload.blocks as Array<{ type: string; text?: { text?: string } }>)
-      .find((b) => b.type === 'section');
+    const sectionBlock = (payload.blocks as Array<{ type: string; text?: { text?: string } }>).find(
+      (b) => b.type === 'section',
+    );
     const text = sectionBlock?.text?.text ?? '';
     assert.equal(text.split('\n').length, 3);
   });
@@ -66,8 +60,9 @@ describe('buildMeetingSummaryPayload', () => {
       date: new Date(),
       result: sampleResult,
     });
-    const keyPointsBlock = (payload.blocks as Array<{ type: string; text?: { text?: string } }>)
-      .find((b) => String(b.text?.text ?? '').startsWith('*Key points*'));
+    const keyPointsBlock = (
+      payload.blocks as Array<{ type: string; text?: { text?: string } }>
+    ).find((b) => String(b.text?.text ?? '').startsWith('*Key points*'));
     assert.ok(keyPointsBlock, 'key points block should exist');
     const lines = String(keyPointsBlock?.text?.text ?? '').split('\n');
     // Expect: header line + 3 bullets

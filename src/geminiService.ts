@@ -452,7 +452,7 @@ IMPORTANT:
 - Keep the transcription in the original spoken language
 - Return ONLY the transcription text, no JSON formatting`;
 
-      let result;
+      let result: Awaited<ReturnType<typeof this.ai.models.generateContent>>;
       if (fileUri) {
         const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
 

@@ -43,6 +43,13 @@ function refreshSlackButtonLabel(): void {
   }
 }
 
+function refreshNotionButtonLabel(): void {
+  if (!uploadToNotionBtn) return;
+  uploadToNotionBtn.innerHTML = currentNotionUrl
+    ? '<span class="notion-icon">📝</span> View in Notion'
+    : '<span class="notion-icon">📝</span> Upload to Notion';
+}
+
 function ensureTranscriptionModal(): HTMLElement | null {
   if (!transcriptionModal) {
     transcriptionModal = document.getElementById('transcriptionModal');
@@ -129,6 +136,7 @@ export function showSavedTranscript(
     currentNotionUrl = (metadata as { notionPageUrl?: string }).notionPageUrl ?? null;
     currentSlackSentAt = (metadata as { slackSentAt?: string }).slackSentAt ?? null;
     refreshSlackButtonLabel();
+    refreshNotionButtonLabel();
 
     // Prefer an explicit folderName; fall back to the one get-metadata attaches.
     resetModalChatFor(folderName || metadata?.folderName || null);
@@ -220,6 +228,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       currentNotionUrl = null;
       currentSlackSentAt = null;
       refreshSlackButtonLabel();
+      refreshNotionButtonLabel();
 
       populateTranscriptionUI(result.data);
 
@@ -345,14 +354,19 @@ export function setupTranscriptionModal(): void {
     });
   }
 
-  // Handle upload to Notion
+  // Handle upload to Notion (or open existing page if already uploaded)
   if (uploadToNotionBtn) {
     uploadToNotionBtn.addEventListener('click', async () => {
+      if (currentNotionUrl) {
+        window.electronAPI.openExternal(currentNotionUrl);
+        return;
+      }
+
       if (!currentTranscriptionData || !currentMeetingTitle) {
         alert('No transcription data available');
         return;
       }
-      if (!uploadToNotionBtn) return;
+      if (!uploadToNotionBtn || uploadToNotionBtn.disabled) return;
 
       uploadToNotionBtn.disabled = true;
       uploadToNotionBtn.textContent = 'Uploading...';
@@ -368,12 +382,9 @@ export function setupTranscriptionModal(): void {
         if (result.success) {
           if (result.url) {
             currentNotionUrl = result.url;
-          }
-          alert('Successfully uploaded to Notion!');
-          if (result.url) {
-            // Open the Notion page in browser
             window.electronAPI.openExternal(result.url);
           }
+          alert('Successfully uploaded to Notion!');
         } else {
           alert(`Failed to upload to Notion: ${result.error}`);
         }
@@ -381,10 +392,8 @@ export function setupTranscriptionModal(): void {
         const message = error instanceof Error ? error.message : String(error);
         alert(`Error uploading to Notion: ${message}`);
       } finally {
-        if (uploadToNotionBtn) {
-          uploadToNotionBtn.disabled = false;
-          uploadToNotionBtn.innerHTML = '<span class="notion-icon">📝</span> Upload to Notion';
-        }
+        if (uploadToNotionBtn) uploadToNotionBtn.disabled = false;
+        refreshNotionButtonLabel();
       }
     });
   }
@@ -449,4 +458,5 @@ export function _setCurrentTranscription(data: {
   currentNotionUrl = null;
   currentSlackSentAt = null;
   refreshSlackButtonLabel();
+  refreshNotionButtonLabel();
 }

@@ -62,7 +62,7 @@ export async function startRecording(): Promise<void> {
   // Open the output stream in main BEFORE starting MediaRecorder so the first chunk
   // has a file handle waiting for it. Build the Web Audio graph up front (without
   // calling start) — if construction fails we haven't touched main state yet.
-  let graph;
+  let graph: Awaited<ReturnType<typeof buildProcessedStream>>;
   try {
     const addSystemAudio = useSystemAudio
       ? async (ctx: AudioContext) => {
@@ -215,10 +215,7 @@ export async function processAutoMode(
         console.log('Auto mode: File renamed to:', finalAudioPath);
       }
 
-      const finalTitle = pickMeetingTitle(
-        recordingTitle,
-        transcriptionResult.data.suggestedTitle,
-      );
+      const finalTitle = pickMeetingTitle(recordingTitle, transcriptionResult.data.suggestedTitle);
 
       let notionUrl: string | undefined;
       let notionError: string | undefined;
@@ -272,8 +269,7 @@ export async function processAutoMode(
           console.error('Auto mode: Slack send failed:', slackResult.error);
         }
       } else if (!notionConfigured) {
-        statusText.textContent =
-          'Auto mode: Transcription complete (Notion/Slack not configured)';
+        statusText.textContent = 'Auto mode: Transcription complete (Notion/Slack not configured)';
       }
 
       await refreshRecordingsList();

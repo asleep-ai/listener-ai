@@ -165,16 +165,16 @@ function yamlQuote(value: string): string {
 
 export function parseFrontmatter(content: string): { meta: Record<string, unknown>; body: string } {
   // Normalize line endings
-  content = content.replace(/\r\n/g, '\n');
-  if (!content.startsWith('---\n')) {
-    return { meta: {}, body: content };
+  const normalized = content.replace(/\r\n/g, '\n');
+  if (!normalized.startsWith('---\n')) {
+    return { meta: {}, body: normalized };
   }
-  const end = content.indexOf('\n---', 4);
+  const end = normalized.indexOf('\n---', 4);
   if (end === -1) {
-    return { meta: {}, body: content };
+    return { meta: {}, body: normalized };
   }
-  const yamlBlock = content.slice(4, end);
-  const body = content.slice(end + 4).trimStart();
+  const yamlBlock = normalized.slice(4, end);
+  const body = normalized.slice(end + 4).trimStart();
 
   const meta: Record<string, unknown> = {};
   let currentArrayKey: string | null = null;
@@ -454,21 +454,16 @@ export async function updateTranscriptionStatus(
     }
   }
 
+  // Spread first so any unknown frontmatter keys (added by future writers, or
+  // by hand-edits) survive the round-trip; named fields override with proper
+  // typing and defaults.
   const merged: SummaryFrontmatter = {
+    ...(meta as unknown as Partial<SummaryFrontmatter>),
     title: (meta.title as string) || path.basename(folderPath),
-    suggestedTitle: meta.suggestedTitle as string | undefined,
     summary: (meta.summary as string) || '',
     transcript: (meta.transcript as string) || '',
-    keyPoints: meta.keyPoints as string[] | undefined,
-    actionItems: meta.actionItems as string[] | undefined,
-    customFields,
-    audioFilePath: meta.audioFilePath as string | undefined,
     transcribedAt: (meta.transcribedAt as string) || new Date().toISOString(),
-    emoji: meta.emoji as string | undefined,
-    mergedFrom: meta.mergedFrom as string[] | undefined,
-    notionPageUrl: meta.notionPageUrl as string | undefined,
-    slackSentAt: meta.slackSentAt as string | undefined,
-    slackError: meta.slackError as string | undefined,
+    customFields,
   };
 
   applyStatusUpdate(merged, 'notionPageUrl', updates.notionPageUrl);

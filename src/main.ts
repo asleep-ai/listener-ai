@@ -37,7 +37,6 @@ import {
   saveTranscription,
   updateTranscriptionStatus,
 } from './outputService';
-import { isLikelySlackWebhookUrl, SLACK_WEBHOOK_PREFIX, SlackService } from './slackService';
 import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
 import { concatAudioFiles } from './services/audioConcatService';
 import { autoUpdaterService } from './services/autoUpdaterService';
@@ -48,6 +47,7 @@ import { notificationService } from './services/notificationService';
 import { fetchAllReleases, fetchReleaseNotes } from './services/releaseNotesService';
 import { SYSTEM_AUDIO_FORMAT, SystemAudioService } from './services/systemAudioService';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
+import { SLACK_WEBHOOK_PREFIX, SlackService, isLikelySlackWebhookUrl } from './slackService';
 
 // Enable macOS system-audio loopback capture so getDisplayMedia({audio: 'loopback'})
 // can pull Zoom/Meet participant audio alongside the mic.
@@ -1459,9 +1459,20 @@ ipcMain.handle(
         return { success: false, error: 'Slack webhook URL is not configured' };
       }
 
+      // For a historical resend, use the original meeting time from frontmatter
+      // so the Slack message shows when the meeting actually happened, not now.
+      let meetingDate = new Date();
+      if (isContainedTranscriptionPath(data.transcriptionPath)) {
+        const stored = await readTranscription(data.transcriptionPath).catch(() => null);
+        if (stored?.transcribedAt) {
+          const parsed = new Date(stored.transcribedAt);
+          if (!Number.isNaN(parsed.getTime())) meetingDate = parsed;
+        }
+      }
+
       const result = await service.sendMeetingSummary({
         title: data.title,
-        date: new Date(),
+        date: meetingDate,
         result: data.transcriptionData,
         notionUrl: data.notionUrl,
         notionError: data.notionError,
@@ -1469,8 +1480,10 @@ ipcMain.handle(
 
       if (isContainedTranscriptionPath(data.transcriptionPath)) {
         try {
+          // Preserve the previous successful slackSentAt on a failed resend;
+          // only the error field reflects the new failure.
           await updateTranscriptionStatus(data.transcriptionPath, {
-            slackSentAt: result.success ? result.sentAt : null,
+            ...(result.success ? { slackSentAt: result.sentAt } : {}),
             slackError: result.success ? null : result.error,
           });
         } catch (error) {

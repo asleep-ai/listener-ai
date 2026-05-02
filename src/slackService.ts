@@ -12,9 +12,7 @@ export interface SlackSendOptions {
   notionError?: string;
 }
 
-export type SlackSendResult =
-  | { success: true; sentAt: string }
-  | { success: false; error: string };
+export type SlackSendResult = { success: true; sentAt: string } | { success: false; error: string };
 
 export const SLACK_WEBHOOK_PREFIX = 'https://hooks.slack.com/services/';
 
