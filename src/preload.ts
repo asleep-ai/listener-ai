@@ -23,11 +23,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
     summaryPrompt?: string;
     recordSystemAudio?: boolean;
     audioDeviceId?: string;
+    slackWebhookUrl?: string;
+    slackAutoShare?: boolean;
   }) => ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   transcribeAudio: (filePath: string) => ipcRenderer.invoke('transcribe-audio', filePath),
-  uploadToNotion: (data: { title: string; transcriptionData: any; audioFilePath?: string }) =>
-    ipcRenderer.invoke('upload-to-notion', data),
+  uploadToNotion: (data: {
+    title: string;
+    transcriptionData: any;
+    audioFilePath?: string;
+    transcriptionPath?: string;
+  }) => ipcRenderer.invoke('upload-to-notion', data),
+  sendToSlack: (data: {
+    title: string;
+    transcriptionData: any;
+    transcriptionPath?: string;
+    notionUrl?: string;
+    notionError?: string;
+  }) => ipcRenderer.invoke('send-to-slack', data),
+  testSlackWebhook: (webhookUrl?: string) =>
+    ipcRenderer.invoke('test-slack-webhook', webhookUrl),
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
   openRecordingsFolder: () => ipcRenderer.invoke('open-recordings-folder'),
   showInFinder: (filePath: string) => ipcRenderer.invoke('show-in-finder', filePath),

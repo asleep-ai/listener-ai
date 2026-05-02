@@ -209,32 +209,60 @@ export async function processAutoMode(
         console.log('Auto mode: File renamed to:', finalAudioPath);
       }
 
-      if (config.notionApiKey && config.notionDatabaseId) {
-        console.log('Auto mode: Uploading to Notion...');
+      const finalTitle =
+        (recordingTitle === '' || recordingTitle === 'Untitled_Meeting') &&
+        transcriptionResult.data.suggestedTitle
+          ? transcriptionResult.data.suggestedTitle
+          : recordingTitle || transcriptionResult.data.suggestedTitle || 'Untitled Meeting';
 
-        const finalTitle =
-          (recordingTitle === '' || recordingTitle === 'Untitled_Meeting') &&
-          transcriptionResult.data.suggestedTitle
-            ? transcriptionResult.data.suggestedTitle
-            : recordingTitle || transcriptionResult.data.suggestedTitle || 'Untitled Meeting';
+      let notionUrl: string | undefined;
+      let notionError: string | undefined;
+      let notionConfigured = false;
+
+      if (config.notionApiKey && config.notionDatabaseId) {
+        notionConfigured = true;
+        console.log('Auto mode: Uploading to Notion...');
 
         const uploadResult = await window.electronAPI.uploadToNotion({
           title: finalTitle,
           transcriptionData: transcriptionResult.data,
           audioFilePath: finalAudioPath,
+          transcriptionPath: transcriptionResult.transcriptionPath,
         });
 
         if (uploadResult.success) {
+          notionUrl = uploadResult.url;
           statusText.textContent = 'Auto mode: Successfully uploaded to Notion!';
           if (uploadResult.url) {
             window.electronAPI.openExternal(uploadResult.url);
           }
         } else {
+          notionError = uploadResult.error || 'Unknown error';
           statusText.textContent = 'Auto mode: Failed to upload to Notion';
           console.error('Auto mode: Notion upload failed:', uploadResult.error);
         }
-      } else {
-        statusText.textContent = 'Auto mode: Transcription complete (Notion not configured)';
+      }
+
+      if (config.slackWebhookUrl && config.slackAutoShare) {
+        console.log('Auto mode: Sending to Slack...');
+        const slackResult = await window.electronAPI.sendToSlack({
+          title: finalTitle,
+          transcriptionData: transcriptionResult.data,
+          transcriptionPath: transcriptionResult.transcriptionPath,
+          notionUrl,
+          notionError,
+        });
+        if (slackResult.success) {
+          statusText.textContent = notionConfigured
+            ? 'Auto mode: Sent to Notion and Slack.'
+            : 'Auto mode: Sent to Slack.';
+        } else {
+          statusText.textContent = 'Auto mode: Failed to send to Slack';
+          console.error('Auto mode: Slack send failed:', slackResult.error);
+        }
+      } else if (!notionConfigured) {
+        statusText.textContent =
+          'Auto mode: Transcription complete (Notion/Slack not configured)';
       }
 
       await refreshRecordingsList();

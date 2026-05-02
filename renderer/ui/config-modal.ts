@@ -13,6 +13,10 @@ let geminiModelInput: HTMLInputElement | null = null;
 let geminiFlashModelInput: HTMLInputElement | null = null;
 let notionApiKeyInput: HTMLInputElement | null = null;
 let notionDatabaseIdInput: HTMLInputElement | null = null;
+let slackWebhookUrlInput: HTMLInputElement | null = null;
+let slackAutoShareInput: HTMLInputElement | null = null;
+let testSlackWebhookBtn: HTMLButtonElement | null = null;
+let slackWebhookStatus: HTMLElement | null = null;
 let globalShortcutInput: HTMLInputElement | null = null;
 let knownWordsInput: HTMLTextAreaElement | null = null;
 
@@ -46,6 +50,8 @@ export async function showConfigModal(): Promise<void> {
     geminiFlashModel?: string;
     notionApiKey?: string;
     notionDatabaseId?: string;
+    slackWebhookUrl?: string;
+    slackAutoShare?: boolean;
     globalShortcut?: string;
     knownWords?: string[];
     maxRecordingMinutes?: number | string;
@@ -69,6 +75,16 @@ export async function showConfigModal(): Promise<void> {
   }
   if (notionDatabaseIdInput && config.notionDatabaseId) {
     notionDatabaseIdInput.value = config.notionDatabaseId;
+  }
+  if (slackWebhookUrlInput) {
+    slackWebhookUrlInput.value = config.slackWebhookUrl || '';
+  }
+  if (slackAutoShareInput) {
+    slackAutoShareInput.checked = !!config.slackAutoShare;
+  }
+  if (slackWebhookStatus) {
+    slackWebhookStatus.textContent = '';
+    slackWebhookStatus.className = 'slack-webhook-status';
   }
   if (globalShortcutInput && config.globalShortcut) {
     globalShortcutInput.value = config.globalShortcut;
@@ -142,8 +158,48 @@ export function setupConfigModal(): void {
   geminiFlashModelInput = document.getElementById('geminiFlashModel') as HTMLInputElement | null;
   notionApiKeyInput = document.getElementById('notionApiKey') as HTMLInputElement | null;
   notionDatabaseIdInput = document.getElementById('notionDatabaseId') as HTMLInputElement | null;
+  slackWebhookUrlInput = document.getElementById('slackWebhookUrl') as HTMLInputElement | null;
+  slackAutoShareInput = document.getElementById('slackAutoShare') as HTMLInputElement | null;
+  testSlackWebhookBtn = document.getElementById('testSlackWebhook') as HTMLButtonElement | null;
+  slackWebhookStatus = document.getElementById('slackWebhookStatus');
   globalShortcutInput = document.getElementById('globalShortcut') as HTMLInputElement | null;
   knownWordsInput = document.getElementById('knownWords') as HTMLTextAreaElement | null;
+
+  const openSlackAppCreatorBtn = document.getElementById(
+    'openSlackAppCreator',
+  ) as HTMLButtonElement | null;
+  if (openSlackAppCreatorBtn) {
+    openSlackAppCreatorBtn.addEventListener('click', () => {
+      window.electronAPI.openExternal('https://api.slack.com/apps?new_app=1');
+    });
+  }
+
+  if (testSlackWebhookBtn) {
+    testSlackWebhookBtn.addEventListener('click', async () => {
+      if (!slackWebhookUrlInput || !slackWebhookStatus) return;
+      const url = slackWebhookUrlInput.value.trim();
+      if (!url) {
+        slackWebhookStatus.textContent = 'Enter a webhook URL first.';
+        slackWebhookStatus.className = 'slack-webhook-status is-error';
+        return;
+      }
+      slackWebhookStatus.textContent = 'Sending test message…';
+      slackWebhookStatus.className = 'slack-webhook-status';
+      testSlackWebhookBtn!.disabled = true;
+      try {
+        const result = await window.electronAPI.testSlackWebhook(url);
+        if (result.success) {
+          slackWebhookStatus.textContent = 'Test message sent. Check the channel.';
+          slackWebhookStatus.className = 'slack-webhook-status is-success';
+        } else {
+          slackWebhookStatus.textContent = result.error || 'Test failed.';
+          slackWebhookStatus.className = 'slack-webhook-status is-error';
+        }
+      } finally {
+        testSlackWebhookBtn!.disabled = false;
+      }
+    });
+  }
 
   if (saveConfigBtn) {
     saveConfigBtn.addEventListener('click', async () => {
@@ -152,6 +208,8 @@ export function setupConfigModal(): void {
       const geminiFlashModel = geminiFlashModelInput ? geminiFlashModelInput.value.trim() : '';
       const notionKey = notionApiKeyInput?.value.trim() ?? '';
       const notionDb = notionDatabaseIdInput?.value.trim() ?? '';
+      const slackWebhookUrl = slackWebhookUrlInput?.value.trim() ?? '';
+      const slackAutoShare = !!slackAutoShareInput?.checked;
       const globalShortcut = globalShortcutInput?.value.trim() ?? '';
       const knownWords = knownWordsInput
         ? knownWordsInput.value
@@ -196,6 +254,8 @@ export function setupConfigModal(): void {
           geminiFlashModel: geminiFlashModel,
           notionApiKey: notionKey,
           notionDatabaseId: notionDb,
+          slackWebhookUrl: slackWebhookUrl,
+          slackAutoShare: slackAutoShare,
           globalShortcut: globalShortcut,
           knownWords: knownWords,
           summaryPrompt: summaryPrompt || DEFAULT_SUMMARY_PROMPT,

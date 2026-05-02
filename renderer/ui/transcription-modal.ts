@@ -22,10 +22,26 @@ import { refreshRecordingsList } from './recordings-list';
 let currentTranscriptionData: TranscriptionData | null = null;
 let currentMeetingTitle = '';
 let currentFilePath: string | null | undefined = '';
+let currentTranscriptionPath: string | null = null;
+let currentNotionUrl: string | null = null;
+let currentSlackSentAt: string | null = null;
 
 let transcriptionModal: HTMLElement | null = null;
 let closeTranscriptionBtn: Element | null = null;
 let uploadToNotionBtn: HTMLButtonElement | null = null;
+let sendToSlackBtn: HTMLButtonElement | null = null;
+let slackButtonLabel: HTMLElement | null = null;
+
+function refreshSlackButtonLabel(): void {
+  if (!slackButtonLabel || !sendToSlackBtn) return;
+  if (currentSlackSentAt) {
+    slackButtonLabel.textContent = 'Resend to Slack';
+    sendToSlackBtn.classList.add('is-resend');
+  } else {
+    slackButtonLabel.textContent = 'Send to Slack';
+    sendToSlackBtn.classList.remove('is-resend');
+  }
+}
 
 function ensureTranscriptionModal(): HTMLElement | null {
   if (!transcriptionModal) {
@@ -108,16 +124,24 @@ export function showSavedTranscript(
     };
     currentMeetingTitle = title;
     currentFilePath = filePath;
+    currentTranscriptionPath =
+      (metadata as { transcriptionPath?: string }).transcriptionPath ?? null;
+    currentNotionUrl = (metadata as { notionPageUrl?: string }).notionPageUrl ?? null;
+    currentSlackSentAt = (metadata as { slackSentAt?: string }).slackSentAt ?? null;
+    refreshSlackButtonLabel();
 
     // Prefer an explicit folderName; fall back to the one get-metadata attaches.
     resetModalChatFor(folderName || metadata?.folderName || null);
 
     populateTranscriptionUI(currentTranscriptionData);
 
-    // Show upload to Notion button if configured
+    // Show upload to Notion / Slack buttons if configured
     window.electronAPI.getConfig().then((config) => {
       if (config.notionApiKey && config.notionDatabaseId) {
         if (uploadToNotionBtn) uploadToNotionBtn.style.display = 'flex';
+      }
+      if (config.slackWebhookUrl) {
+        if (sendToSlackBtn) sendToSlackBtn.style.display = 'flex';
       }
     });
   }
@@ -191,6 +215,11 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       currentTranscriptionData = result.data;
       currentMeetingTitle = title;
       currentFilePath = filePath;
+      currentTranscriptionPath =
+        (result as { transcriptionPath?: string }).transcriptionPath ?? null;
+      currentNotionUrl = null;
+      currentSlackSentAt = null;
+      refreshSlackButtonLabel();
 
       populateTranscriptionUI(result.data);
 
@@ -198,10 +227,13 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       // state appear without requiring a manual reload.
       await refreshRecordingsList();
 
-      // Show upload to Notion button if configured
-      const notionConfig = await window.electronAPI.getConfig();
-      if (notionConfig.notionApiKey && notionConfig.notionDatabaseId) {
+      // Show upload to Notion / Slack buttons if configured
+      const cfg = await window.electronAPI.getConfig();
+      if (cfg.notionApiKey && cfg.notionDatabaseId) {
         if (uploadToNotionBtn) uploadToNotionBtn.style.display = 'flex';
+      }
+      if (cfg.slackWebhookUrl) {
+        if (sendToSlackBtn) sendToSlackBtn.style.display = 'flex';
       }
     } else {
       alert(`Failed to transcribe audio: ${result.error}`);
@@ -290,6 +322,8 @@ export function setupTranscriptionModal(): void {
   transcriptionModal = document.getElementById('transcriptionModal');
   closeTranscriptionBtn = document.querySelector('#transcriptionModal .close');
   uploadToNotionBtn = document.getElementById('uploadToNotion') as HTMLButtonElement | null;
+  sendToSlackBtn = document.getElementById('sendToSlack') as HTMLButtonElement | null;
+  slackButtonLabel = document.getElementById('slackButtonLabel');
 
   if (closeTranscriptionBtn) {
     closeTranscriptionBtn.addEventListener('click', () => {
@@ -328,9 +362,13 @@ export function setupTranscriptionModal(): void {
           title: currentMeetingTitle,
           transcriptionData: currentTranscriptionData,
           audioFilePath: currentFilePath || undefined,
+          transcriptionPath: currentTranscriptionPath || undefined,
         });
 
         if (result.success) {
+          if (result.url) {
+            currentNotionUrl = result.url;
+          }
           alert('Successfully uploaded to Notion!');
           if (result.url) {
             // Open the Notion page in browser
@@ -347,6 +385,50 @@ export function setupTranscriptionModal(): void {
           uploadToNotionBtn.disabled = false;
           uploadToNotionBtn.innerHTML = '<span class="notion-icon">📝</span> Upload to Notion';
         }
+      }
+    });
+  }
+
+  if (sendToSlackBtn) {
+    sendToSlackBtn.addEventListener('click', async () => {
+      if (!currentTranscriptionData || !currentMeetingTitle) {
+        alert('No transcription data available');
+        return;
+      }
+      if (!sendToSlackBtn) return;
+
+      if (currentSlackSentAt) {
+        const when = new Date(currentSlackSentAt).toLocaleString();
+        if (!confirm(`Already sent to Slack on ${when}. Send again?`)) return;
+      }
+
+      sendToSlackBtn.disabled = true;
+      const originalLabel = slackButtonLabel?.textContent || 'Send to Slack';
+      if (slackButtonLabel) slackButtonLabel.textContent = 'Sending…';
+
+      try {
+        const result = await window.electronAPI.sendToSlack({
+          title: currentMeetingTitle,
+          transcriptionData: currentTranscriptionData,
+          transcriptionPath: currentTranscriptionPath || undefined,
+          notionUrl: currentNotionUrl || undefined,
+        });
+
+        if (result.success) {
+          currentSlackSentAt = result.sentAt || new Date().toISOString();
+          showToast('Sent to Slack');
+        } else {
+          alert(`Failed to send to Slack: ${result.error}`);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        alert(`Error sending to Slack: ${message}`);
+      } finally {
+        if (sendToSlackBtn) {
+          sendToSlackBtn.disabled = false;
+        }
+        if (slackButtonLabel) slackButtonLabel.textContent = originalLabel;
+        refreshSlackButtonLabel();
       }
     });
   }

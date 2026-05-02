@@ -19,6 +19,8 @@ export interface AppConfig {
   recordSystemAudio?: boolean;
   audioDeviceId?: string;
   lastSeenVersion?: string;
+  slackWebhookUrl?: string;
+  slackAutoShare?: boolean;
 }
 
 export const DEFAULT_SUMMARY_PROMPT = `Based on this meeting transcript, provide:
@@ -237,6 +239,24 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getSlackWebhookUrl(): string | undefined {
+    return this.config.slackWebhookUrl || process.env.SLACK_WEBHOOK_URL;
+  }
+
+  setSlackWebhookUrl(url: string): void {
+    this.config.slackWebhookUrl = url;
+    this.saveConfig();
+  }
+
+  getSlackAutoShare(): boolean {
+    return this.config.slackAutoShare || false;
+  }
+
+  setSlackAutoShare(enabled: boolean): void {
+    this.config.slackAutoShare = enabled;
+    this.saveConfig();
+  }
+
   updateConfig(partial: Partial<AppConfig>): void {
     for (const [key, value] of Object.entries(partial)) {
       if (value !== undefined) {
@@ -265,6 +285,8 @@ export class ConfigService {
       recordSystemAudio: this.getRecordSystemAudio(),
       audioDeviceId: this.getAudioDeviceId(),
       lastSeenVersion: this.getLastSeenVersion(),
+      slackWebhookUrl: this.getSlackWebhookUrl(),
+      slackAutoShare: this.getSlackAutoShare(),
     };
   }
 }

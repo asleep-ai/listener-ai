@@ -28,6 +28,14 @@ export type ConfigPayload = {
   summaryPrompt?: string;
   recordSystemAudio?: boolean;
   audioDeviceId?: string;
+  slackWebhookUrl?: string;
+  slackAutoShare?: boolean;
+};
+
+export type SlackSendApiResult = {
+  success: boolean;
+  error?: string;
+  sentAt?: string;
 };
 
 export type SystemAudioStartResult =
@@ -62,14 +70,27 @@ export type ElectronAPI = {
   }>;
   saveConfig: (config: ConfigPayload) => Promise<{ success: boolean; error?: string }>;
   getConfig: () => Promise<Record<string, unknown>>;
-  transcribeAudio: (
-    filePath: string,
-  ) => Promise<{ success: boolean; data?: any; newFilePath?: string; error?: string }>;
+  transcribeAudio: (filePath: string) => Promise<{
+    success: boolean;
+    data?: any;
+    newFilePath?: string;
+    transcriptionPath?: string;
+    error?: string;
+  }>;
   uploadToNotion: (data: {
     title: string;
     transcriptionData: any;
     audioFilePath?: string;
+    transcriptionPath?: string;
   }) => Promise<{ success: boolean; url?: string; error?: string }>;
+  sendToSlack: (data: {
+    title: string;
+    transcriptionData: any;
+    transcriptionPath?: string;
+    notionUrl?: string;
+    notionError?: string;
+  }) => Promise<SlackSendApiResult>;
+  testSlackWebhook: (webhookUrl?: string) => Promise<SlackSendApiResult>;
   openExternal: (url: string) => Promise<void>;
   openRecordingsFolder: () => Promise<void>;
   showInFinder: (filePath: string) => Promise<void>;

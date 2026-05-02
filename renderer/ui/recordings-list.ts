@@ -435,6 +435,10 @@ async function performMerge(paths: string[], title: string): Promise<void> {
     if (notionConfig.notionApiKey && notionConfig.notionDatabaseId && uploadToNotionBtn) {
       uploadToNotionBtn.style.display = 'flex';
     }
+    const sendToSlackBtn = document.getElementById('sendToSlack') as HTMLElement | null;
+    if (notionConfig.slackWebhookUrl && sendToSlackBtn) {
+      sendToSlackBtn.style.display = 'flex';
+    }
   } catch (err) {
     alert(
       `Error merging recordings: ${err && (err as Error).message ? (err as Error).message : String(err)}`,
