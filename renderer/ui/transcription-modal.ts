@@ -22,10 +22,33 @@ import { refreshRecordingsList } from './recordings-list';
 let currentTranscriptionData: TranscriptionData | null = null;
 let currentMeetingTitle = '';
 let currentFilePath: string | null | undefined = '';
+let currentTranscriptionPath: string | null = null;
+let currentNotionUrl: string | null = null;
+let currentSlackSentAt: string | null = null;
 
 let transcriptionModal: HTMLElement | null = null;
 let closeTranscriptionBtn: Element | null = null;
 let uploadToNotionBtn: HTMLButtonElement | null = null;
+let sendToSlackBtn: HTMLButtonElement | null = null;
+let slackButtonLabel: HTMLElement | null = null;
+
+function refreshSlackButtonLabel(): void {
+  if (!slackButtonLabel || !sendToSlackBtn) return;
+  if (currentSlackSentAt) {
+    slackButtonLabel.textContent = 'Resend to Slack';
+    sendToSlackBtn.classList.add('is-resend');
+  } else {
+    slackButtonLabel.textContent = 'Send to Slack';
+    sendToSlackBtn.classList.remove('is-resend');
+  }
+}
+
+function refreshNotionButtonLabel(): void {
+  if (!uploadToNotionBtn) return;
+  uploadToNotionBtn.innerHTML = currentNotionUrl
+    ? '<span class="notion-icon">📝</span> View in Notion'
+    : '<span class="notion-icon">📝</span> Upload to Notion';
+}
 
 function ensureTranscriptionModal(): HTMLElement | null {
   if (!transcriptionModal) {
@@ -108,16 +131,25 @@ export function showSavedTranscript(
     };
     currentMeetingTitle = title;
     currentFilePath = filePath;
+    currentTranscriptionPath =
+      (metadata as { transcriptionPath?: string }).transcriptionPath ?? null;
+    currentNotionUrl = (metadata as { notionPageUrl?: string }).notionPageUrl ?? null;
+    currentSlackSentAt = (metadata as { slackSentAt?: string }).slackSentAt ?? null;
+    refreshSlackButtonLabel();
+    refreshNotionButtonLabel();
 
     // Prefer an explicit folderName; fall back to the one get-metadata attaches.
     resetModalChatFor(folderName || metadata?.folderName || null);
 
     populateTranscriptionUI(currentTranscriptionData);
 
-    // Show upload to Notion button if configured
     window.electronAPI.getConfig().then((config) => {
-      if (config.notionApiKey && config.notionDatabaseId) {
-        if (uploadToNotionBtn) uploadToNotionBtn.style.display = 'flex';
+      if (uploadToNotionBtn) {
+        uploadToNotionBtn.style.display =
+          config.notionApiKey && config.notionDatabaseId ? 'flex' : 'none';
+      }
+      if (sendToSlackBtn) {
+        sendToSlackBtn.style.display = config.slackWebhookUrl ? 'flex' : 'none';
       }
     });
   }
@@ -191,6 +223,12 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       currentTranscriptionData = result.data;
       currentMeetingTitle = title;
       currentFilePath = filePath;
+      currentTranscriptionPath =
+        (result as { transcriptionPath?: string }).transcriptionPath ?? null;
+      currentNotionUrl = null;
+      currentSlackSentAt = null;
+      refreshSlackButtonLabel();
+      refreshNotionButtonLabel();
 
       populateTranscriptionUI(result.data);
 
@@ -198,10 +236,13 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       // state appear without requiring a manual reload.
       await refreshRecordingsList();
 
-      // Show upload to Notion button if configured
-      const notionConfig = await window.electronAPI.getConfig();
-      if (notionConfig.notionApiKey && notionConfig.notionDatabaseId) {
-        if (uploadToNotionBtn) uploadToNotionBtn.style.display = 'flex';
+      const cfg = await window.electronAPI.getConfig();
+      if (uploadToNotionBtn) {
+        uploadToNotionBtn.style.display =
+          cfg.notionApiKey && cfg.notionDatabaseId ? 'flex' : 'none';
+      }
+      if (sendToSlackBtn) {
+        sendToSlackBtn.style.display = cfg.slackWebhookUrl ? 'flex' : 'none';
       }
     } else {
       alert(`Failed to transcribe audio: ${result.error}`);
@@ -290,6 +331,8 @@ export function setupTranscriptionModal(): void {
   transcriptionModal = document.getElementById('transcriptionModal');
   closeTranscriptionBtn = document.querySelector('#transcriptionModal .close');
   uploadToNotionBtn = document.getElementById('uploadToNotion') as HTMLButtonElement | null;
+  sendToSlackBtn = document.getElementById('sendToSlack') as HTMLButtonElement | null;
+  slackButtonLabel = document.getElementById('slackButtonLabel');
 
   if (closeTranscriptionBtn) {
     closeTranscriptionBtn.addEventListener('click', () => {
@@ -311,14 +354,19 @@ export function setupTranscriptionModal(): void {
     });
   }
 
-  // Handle upload to Notion
+  // Handle upload to Notion (or open existing page if already uploaded)
   if (uploadToNotionBtn) {
     uploadToNotionBtn.addEventListener('click', async () => {
+      if (currentNotionUrl) {
+        window.electronAPI.openExternal(currentNotionUrl);
+        return;
+      }
+
       if (!currentTranscriptionData || !currentMeetingTitle) {
         alert('No transcription data available');
         return;
       }
-      if (!uploadToNotionBtn) return;
+      if (!uploadToNotionBtn || uploadToNotionBtn.disabled) return;
 
       uploadToNotionBtn.disabled = true;
       uploadToNotionBtn.textContent = 'Uploading...';
@@ -328,14 +376,15 @@ export function setupTranscriptionModal(): void {
           title: currentMeetingTitle,
           transcriptionData: currentTranscriptionData,
           audioFilePath: currentFilePath || undefined,
+          transcriptionPath: currentTranscriptionPath || undefined,
         });
 
         if (result.success) {
-          alert('Successfully uploaded to Notion!');
           if (result.url) {
-            // Open the Notion page in browser
+            currentNotionUrl = result.url;
             window.electronAPI.openExternal(result.url);
           }
+          alert('Successfully uploaded to Notion!');
         } else {
           alert(`Failed to upload to Notion: ${result.error}`);
         }
@@ -343,10 +392,53 @@ export function setupTranscriptionModal(): void {
         const message = error instanceof Error ? error.message : String(error);
         alert(`Error uploading to Notion: ${message}`);
       } finally {
-        if (uploadToNotionBtn) {
-          uploadToNotionBtn.disabled = false;
-          uploadToNotionBtn.innerHTML = '<span class="notion-icon">📝</span> Upload to Notion';
+        if (uploadToNotionBtn) uploadToNotionBtn.disabled = false;
+        refreshNotionButtonLabel();
+      }
+    });
+  }
+
+  if (sendToSlackBtn) {
+    sendToSlackBtn.addEventListener('click', async () => {
+      if (!currentTranscriptionData || !currentMeetingTitle) {
+        alert('No transcription data available');
+        return;
+      }
+      if (!sendToSlackBtn || sendToSlackBtn.disabled) return;
+
+      // Disable before confirm() to block double-clicks during the prompt.
+      sendToSlackBtn.disabled = true;
+
+      if (currentSlackSentAt) {
+        const when = new Date(currentSlackSentAt).toLocaleString();
+        if (!confirm(`Already sent to Slack on ${when}. Send again?`)) {
+          sendToSlackBtn.disabled = false;
+          return;
         }
+      }
+
+      if (slackButtonLabel) slackButtonLabel.textContent = 'Sending…';
+
+      try {
+        const result = await window.electronAPI.sendToSlack({
+          title: currentMeetingTitle,
+          transcriptionData: currentTranscriptionData,
+          transcriptionPath: currentTranscriptionPath || undefined,
+          notionUrl: currentNotionUrl || undefined,
+        });
+
+        if (result.success) {
+          currentSlackSentAt = result.sentAt;
+          showToast('Sent to Slack');
+        } else {
+          alert(`Failed to send to Slack: ${result.error}`);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        alert(`Error sending to Slack: ${message}`);
+      } finally {
+        if (sendToSlackBtn) sendToSlackBtn.disabled = false;
+        refreshSlackButtonLabel();
       }
     });
   }
@@ -357,8 +449,14 @@ export function _setCurrentTranscription(data: {
   transcriptionData: TranscriptionData | null;
   title: string;
   filePath: string | null | undefined;
+  transcriptionPath?: string | null;
 }): void {
   currentTranscriptionData = data.transcriptionData;
   currentMeetingTitle = data.title;
   currentFilePath = data.filePath;
+  currentTranscriptionPath = data.transcriptionPath ?? null;
+  currentNotionUrl = null;
+  currentSlackSentAt = null;
+  refreshSlackButtonLabel();
+  refreshNotionButtonLabel();
 }

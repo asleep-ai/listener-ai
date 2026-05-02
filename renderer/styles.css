@@ -1181,6 +1181,109 @@ h1 {
   font-size: 18px;
 }
 
+.transcription-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.slack-button {
+  background-color: #4a154b;
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background-color 0.3s;
+}
+
+.slack-button:hover {
+  background-color: #611f64;
+}
+
+.slack-button:disabled {
+  background-color: #95a5a6;
+  cursor: not-allowed;
+}
+
+.slack-button.is-resend {
+  background-color: #2f7a64;
+}
+
+.slack-button.is-resend:hover {
+  background-color: #36927a;
+}
+
+.slack-icon {
+  font-size: 16px;
+}
+
+.slack-webhook-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.slack-webhook-status {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.slack-webhook-status.is-success {
+  color: #2f7a64;
+}
+
+.slack-webhook-status.is-error {
+  color: #c0392b;
+}
+
+.slack-help {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #475569;
+}
+
+.slack-help summary {
+  cursor: pointer;
+  color: #2563eb;
+  user-select: none;
+}
+
+.slack-help summary:hover {
+  text-decoration: underline;
+}
+
+.slack-help-steps {
+  margin: 8px 0 4px 20px;
+  padding: 0;
+  line-height: 1.6;
+}
+
+.slack-help-steps li {
+  margin-bottom: 4px;
+}
+
+.slack-help-steps code {
+  background: #f1f5f9;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.inline-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
 .recording-meta {
   font-size: 12px;
   color: #94a3b8;

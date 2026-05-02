@@ -169,6 +169,35 @@
           <small>Copy from your database URL: notion.so/[workspace]/[database-id]?v=...</small>
         </div>
         <div class="form-group">
+          <label for="slackWebhookUrl">Slack Incoming Webhook URL:</label>
+          <input type="password" id="slackWebhookUrl" placeholder="https://hooks.slack.com/services/...">
+          <div class="slack-webhook-row">
+            <button type="button" id="openSlackAppCreator" class="reset-prompt-button">Get Webhook URL</button>
+            <button type="button" id="testSlackWebhook" class="reset-prompt-button">Send Test Message</button>
+            <span id="slackWebhookStatus" class="slack-webhook-status"></span>
+          </div>
+          <details class="slack-help">
+            <summary>How do I get this URL?</summary>
+            <ol class="slack-help-steps">
+              <li>Click <strong>Get Webhook URL</strong> above (opens api.slack.com/apps).</li>
+              <li><strong>Create New App</strong> &rarr; <strong>From scratch</strong>. Name it anything (e.g. "Listener AI") and pick your workspace.</li>
+              <li>Sidebar &rarr; <strong>Features &rarr; Incoming Webhooks</strong>. Toggle <strong>Activate Incoming Webhooks</strong> on.</li>
+              <li>Scroll down &rarr; <strong>Add New Webhook to Workspace</strong>, pick the channel, and Allow.</li>
+              <li>Copy the URL (starts with <code>https://hooks.slack.com/services/</code>) and paste it above.</li>
+              <li>Click <strong>Send Test Message</strong> to confirm.</li>
+            </ol>
+            <small>If your workspace blocks app installs, ask an admin to do steps 1&ndash;4 for you.</small>
+          </details>
+          <small>Stored locally; never logged.</small>
+        </div>
+        <div class="form-group">
+          <label class="inline-label">
+            <input type="checkbox" id="slackAutoShare">
+            Automatically share completed meetings to Slack
+          </label>
+          <small>When auto mode is on, post the summary + Notion link to the configured webhook after each meeting.</small>
+        </div>
+        <div class="form-group">
           <label for="globalShortcut">Global Shortcut:</label>
           <input type="text" id="globalShortcut" placeholder="Press shortcut keys" readonly>
           <small>Click the input and press your desired shortcut combination</small>
@@ -227,9 +256,14 @@
             <button class="tab-button" data-tab="transcript">Transcript</button>
             <button class="tab-button" data-tab="ask">💬 Ask</button>
           </div>
-          <button id="uploadToNotion" class="notion-button" style="display: none;">
-            <span class="notion-icon">📝</span> Upload to Notion
-          </button>
+          <div class="transcription-actions">
+            <button id="uploadToNotion" class="notion-button" style="display: none;">
+              <span class="notion-icon">📝</span> Upload to Notion
+            </button>
+            <button id="sendToSlack" class="slack-button" style="display: none;">
+              <span class="slack-icon">💬</span> <span id="slackButtonLabel">Send to Slack</span>
+            </button>
+          </div>
         </div>
         <div class="transcription-body">
           <div class="tab-content">

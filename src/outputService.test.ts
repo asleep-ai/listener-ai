@@ -9,6 +9,7 @@ import {
   readTranscription,
   sanitizeForPath,
   saveTranscription,
+  updateTranscriptionStatus,
 } from './outputService';
 import { makeTempDir, rmDir } from './test-helpers';
 
@@ -81,6 +82,55 @@ describe('saveTranscription with mergedFrom', () => {
   it('omits the Sources section when mergedFrom is empty', () => {
     const body = formatSummary(baseResult, 'Solo Meeting');
     assert.doesNotMatch(body, /## Sources/);
+  });
+});
+
+describe('updateTranscriptionStatus', () => {
+  it('writes Notion URL and Slack send timestamp without losing the markdown body', async () => {
+    const dataPath = makeTmpDataPath();
+    const folderPath = saveTranscription({
+      title: 'Status Test',
+      result: baseResult,
+      dataPath,
+    });
+
+    const before = fs.readFileSync(path.join(folderPath, 'summary.md'), 'utf-8');
+    const bodyBefore = before.split('\n---').slice(1).join('\n---');
+
+    await updateTranscriptionStatus(folderPath, {
+      notionPageUrl: 'https://www.notion.so/abc123',
+      slackSentAt: '2026-04-30T09:30:00Z',
+    });
+
+    const after = fs.readFileSync(path.join(folderPath, 'summary.md'), 'utf-8');
+    const bodyAfter = after.split('\n---').slice(1).join('\n---');
+    assert.equal(bodyAfter, bodyBefore, 'body should be preserved verbatim');
+
+    const data = await readTranscription(folderPath);
+    assert.equal(data!.notionPageUrl, 'https://www.notion.so/abc123');
+    assert.equal(data!.slackSentAt, '2026-04-30T09:30:00Z');
+    assert.equal(data!.slackError, undefined);
+  });
+
+  it('clears a field when passed null', async () => {
+    const dataPath = makeTmpDataPath();
+    const folderPath = saveTranscription({
+      title: 'Status Test 2',
+      result: baseResult,
+      dataPath,
+    });
+
+    await updateTranscriptionStatus(folderPath, {
+      slackSentAt: '2026-04-30T09:30:00Z',
+      slackError: 'temporary failure',
+    });
+    let data = await readTranscription(folderPath);
+    assert.equal(data!.slackError, 'temporary failure');
+
+    await updateTranscriptionStatus(folderPath, { slackError: null });
+    data = await readTranscription(folderPath);
+    assert.equal(data!.slackError, undefined);
+    assert.equal(data!.slackSentAt, '2026-04-30T09:30:00Z');
   });
 });
 

@@ -35,6 +35,7 @@ type MergeRecordingsResult = {
   code?: string;
   data?: Record<string, unknown>;
   mergedAudioPath?: string;
+  transcriptionPath?: string;
 };
 
 // Monotonic token so a slow loadRecordings (per-item async metadata reads)
@@ -426,14 +427,19 @@ async function performMerge(paths: string[], title: string): Promise<void> {
       transcriptionData: (result.data || {}) as never,
       title,
       filePath: result.mergedAudioPath || null,
+      transcriptionPath: result.transcriptionPath ?? null,
     });
     populateTranscriptionUI((result.data || {}) as never);
 
     await refreshRecordingsList();
 
-    const notionConfig = await window.electronAPI.getConfig();
-    if (notionConfig.notionApiKey && notionConfig.notionDatabaseId && uploadToNotionBtn) {
-      uploadToNotionBtn.style.display = 'flex';
+    const cfg = await window.electronAPI.getConfig();
+    if (uploadToNotionBtn) {
+      uploadToNotionBtn.style.display = cfg.notionApiKey && cfg.notionDatabaseId ? 'flex' : 'none';
+    }
+    const sendToSlackBtn = document.getElementById('sendToSlack') as HTMLElement | null;
+    if (sendToSlackBtn) {
+      sendToSlackBtn.style.display = cfg.slackWebhookUrl ? 'flex' : 'none';
     }
   } catch (err) {
     alert(

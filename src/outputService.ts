@@ -107,6 +107,9 @@ interface SummaryFrontmatter {
   transcribedAt: string;
   emoji?: string;
   mergedFrom?: string[];
+  notionPageUrl?: string;
+  slackSentAt?: string;
+  slackError?: string;
 }
 
 function buildFrontmatter(meta: SummaryFrontmatter): string {
@@ -139,6 +142,15 @@ function buildFrontmatter(meta: SummaryFrontmatter): string {
     lines.push('mergedFrom:');
     for (const src of meta.mergedFrom) lines.push(`  - ${yamlQuote(src)}`);
   }
+  if (meta.notionPageUrl) {
+    lines.push(`notionPageUrl: ${yamlQuote(meta.notionPageUrl)}`);
+  }
+  if (meta.slackSentAt) {
+    lines.push(`slackSentAt: ${yamlQuote(meta.slackSentAt)}`);
+  }
+  if (meta.slackError) {
+    lines.push(`slackError: ${yamlQuote(meta.slackError)}`);
+  }
   lines.push('---');
   return lines.join('\n');
 }
@@ -153,16 +165,16 @@ function yamlQuote(value: string): string {
 
 export function parseFrontmatter(content: string): { meta: Record<string, unknown>; body: string } {
   // Normalize line endings
-  content = content.replace(/\r\n/g, '\n');
-  if (!content.startsWith('---\n')) {
-    return { meta: {}, body: content };
+  const normalized = content.replace(/\r\n/g, '\n');
+  if (!normalized.startsWith('---\n')) {
+    return { meta: {}, body: normalized };
   }
-  const end = content.indexOf('\n---', 4);
+  const end = normalized.indexOf('\n---', 4);
   if (end === -1) {
-    return { meta: {}, body: content };
+    return { meta: {}, body: normalized };
   }
-  const yamlBlock = content.slice(4, end);
-  const body = content.slice(end + 4).trimStart();
+  const yamlBlock = normalized.slice(4, end);
+  const body = normalized.slice(end + 4).trimStart();
 
   const meta: Record<string, unknown> = {};
   let currentArrayKey: string | null = null;
@@ -359,6 +371,9 @@ export interface ReadTranscriptionResult {
   transcribedAt?: string;
   emoji?: string;
   mergedFrom?: string[];
+  notionPageUrl?: string;
+  slackSentAt?: string;
+  slackError?: string;
 }
 
 /**
@@ -399,8 +414,75 @@ export async function readTranscription(
       transcribedAt: meta.transcribedAt as string | undefined,
       emoji: meta.emoji as string | undefined,
       mergedFrom: meta.mergedFrom as string[] | undefined,
+      notionPageUrl: meta.notionPageUrl as string | undefined,
+      slackSentAt: meta.slackSentAt as string | undefined,
+      slackError: meta.slackError as string | undefined,
     };
   } catch {
     return null;
   }
+}
+
+export interface TranscriptionStatusUpdate {
+  notionPageUrl?: string | null;
+  slackSentAt?: string | null;
+  slackError?: string | null;
+}
+
+/**
+ * Update tracking fields (Notion URL, Slack send status) in summary.md frontmatter
+ * without rewriting the markdown body. Pass `null` to clear a field, `undefined` to leave unchanged.
+ */
+export async function updateTranscriptionStatus(
+  folderPath: string,
+  updates: TranscriptionStatusUpdate,
+): Promise<void> {
+  const summaryPath = path.join(folderPath, 'summary.md');
+  const content = await fs.promises.readFile(summaryPath, 'utf-8');
+  const { meta, body } = parseFrontmatter(content);
+
+  // Recover customFields shape (parseFrontmatter returns it as a JSON string)
+  let customFields: Record<string, unknown> | undefined;
+  if (meta.customFields) {
+    try {
+      customFields =
+        typeof meta.customFields === 'string'
+          ? JSON.parse(meta.customFields as string)
+          : (meta.customFields as Record<string, unknown>);
+    } catch {
+      customFields = undefined;
+    }
+  }
+
+  // Spread first so any unknown frontmatter keys (added by future writers, or
+  // by hand-edits) survive the round-trip; named fields override with proper
+  // typing and defaults.
+  const merged: SummaryFrontmatter = {
+    ...(meta as unknown as Partial<SummaryFrontmatter>),
+    title: (meta.title as string) || path.basename(folderPath),
+    summary: (meta.summary as string) || '',
+    transcript: (meta.transcript as string) || '',
+    transcribedAt: (meta.transcribedAt as string) || new Date().toISOString(),
+    customFields,
+  };
+
+  applyStatusUpdate(merged, 'notionPageUrl', updates.notionPageUrl);
+  applyStatusUpdate(merged, 'slackSentAt', updates.slackSentAt);
+  applyStatusUpdate(merged, 'slackError', updates.slackError);
+
+  const frontmatter = buildFrontmatter(merged);
+  await fs.promises.writeFile(summaryPath, `${frontmatter}\n\n${body}`, 'utf-8');
+}
+
+function applyStatusUpdate(
+  meta: SummaryFrontmatter,
+  key: 'notionPageUrl' | 'slackSentAt' | 'slackError',
+  value: string | null | undefined,
+): void {
+  if (value === undefined) return;
+  if (value === null || value === '') {
+    delete meta[key];
+    return;
+  }
+  meta[key] = value;
 }

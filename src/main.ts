@@ -31,9 +31,11 @@ import { MenuBarManager } from './menuBarManager';
 import { NotionService } from './notionService';
 import {
   formatTimestamp,
+  getTranscriptionsDir,
   readTranscription,
   sanitizeForPath,
   saveTranscription,
+  updateTranscriptionStatus,
 } from './outputService';
 import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
 import { concatAudioFiles } from './services/audioConcatService';
@@ -45,6 +47,7 @@ import { notificationService } from './services/notificationService';
 import { fetchAllReleases, fetchReleaseNotes } from './services/releaseNotesService';
 import { SYSTEM_AUDIO_FORMAT, SystemAudioService } from './services/systemAudioService';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
+import { SLACK_WEBHOOK_PREFIX, SlackService, isLikelySlackWebhookUrl } from './slackService';
 
 // Enable macOS system-audio loopback capture so getDisplayMedia({audio: 'loopback'})
 // can pull Zoom/Meet participant audio alongside the mic.
@@ -77,6 +80,7 @@ const displayDetector = new DisplayDetectorService();
 let meetingAutoStartedRecording = false;
 let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
+let slackService: SlackService | null = null;
 let agentService: AgentService | null = null;
 
 function getAgentService(): AgentService | null {
@@ -1153,6 +1157,27 @@ function applyConfigSideEffects(changed: Partial<AppConfig>): void {
       notionService = new NotionService({ apiKey, databaseId });
     }
   }
+  if (changed.slackWebhookUrl !== undefined) {
+    slackService = null; // re-init lazily on next send
+  }
+}
+
+function getSlackService(): SlackService | null {
+  if (slackService) return slackService;
+  const url = configService.getSlackWebhookUrl();
+  if (!url || !isLikelySlackWebhookUrl(url)) return null;
+  slackService = new SlackService({ webhookUrl: url });
+  return slackService;
+}
+
+// Defense in depth: a renderer-supplied transcriptionPath could otherwise be
+// any path on disk and let an XSS-compromised renderer overwrite arbitrary
+// summary.md files via updateTranscriptionStatus.
+function isContainedTranscriptionPath(folderPath: string | undefined): folderPath is string {
+  if (!folderPath) return false;
+  const root = getTranscriptionsDir(app.getPath('userData'));
+  const resolved = path.resolve(folderPath);
+  return resolved === root || resolved.startsWith(root + path.sep);
 }
 
 // Tell the renderer the config has changed out-of-band so it can re-read and
@@ -1341,10 +1366,10 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
         await metadataService.saveMetadata(newFilePath, existingMetadata);
       }
 
-      return { success: true, data: result, newFilePath };
+      return { success: true, data: result, newFilePath, transcriptionPath };
     }
 
-    return { success: true, data: result };
+    return { success: true, data: result, transcriptionPath };
   } catch (error) {
     console.error('Error transcribing audio:', error);
     notificationService.notifyTranscriptionFailed(
@@ -1357,7 +1382,15 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
 // Notion upload handler
 ipcMain.handle(
   'upload-to-notion',
-  async (_, data: { title: string; transcriptionData: any; audioFilePath?: string }) => {
+  async (
+    _,
+    data: {
+      title: string;
+      transcriptionData: any;
+      audioFilePath?: string;
+      transcriptionPath?: string;
+    },
+  ) => {
     try {
       console.log('Uploading to Notion:', data.title);
 
@@ -1386,6 +1419,16 @@ ipcMain.handle(
         data.audioFilePath,
       );
 
+      if (result.success && result.url && isContainedTranscriptionPath(data.transcriptionPath)) {
+        try {
+          await updateTranscriptionStatus(data.transcriptionPath, {
+            notionPageUrl: result.url,
+          });
+        } catch (error) {
+          console.error('Failed to persist Notion URL to transcription:', error);
+        }
+      }
+
       notificationService.notifyUploadComplete(data.title);
       return result;
     } catch (error) {
@@ -1395,6 +1438,87 @@ ipcMain.handle(
     }
   },
 );
+
+ipcMain.handle(
+  'send-to-slack',
+  async (
+    _,
+    data: {
+      title: string;
+      transcriptionData: any;
+      transcriptionPath?: string;
+      notionUrl?: string;
+      notionError?: string;
+    },
+  ) => {
+    try {
+      console.log('Sending to Slack:', data.title);
+
+      const service = getSlackService();
+      if (!service) {
+        return { success: false, error: 'Slack webhook URL is not configured' };
+      }
+
+      // For a historical resend, use the original meeting time from frontmatter
+      // so the Slack message shows when the meeting actually happened, not now.
+      let meetingDate = new Date();
+      if (isContainedTranscriptionPath(data.transcriptionPath)) {
+        const stored = await readTranscription(data.transcriptionPath).catch(() => null);
+        if (stored?.transcribedAt) {
+          const parsed = new Date(stored.transcribedAt);
+          if (!Number.isNaN(parsed.getTime())) meetingDate = parsed;
+        }
+      }
+
+      const result = await service.sendMeetingSummary({
+        title: data.title,
+        date: meetingDate,
+        result: data.transcriptionData,
+        notionUrl: data.notionUrl,
+        notionError: data.notionError,
+      });
+
+      if (isContainedTranscriptionPath(data.transcriptionPath)) {
+        try {
+          // Preserve the previous successful slackSentAt on a failed resend;
+          // only the error field reflects the new failure.
+          await updateTranscriptionStatus(data.transcriptionPath, {
+            ...(result.success ? { slackSentAt: result.sentAt } : {}),
+            slackError: result.success ? null : result.error,
+          });
+        } catch (error) {
+          console.error('Failed to persist Slack status to transcription:', error);
+        }
+      }
+
+      return result;
+    } catch (error) {
+      console.error('Error sending to Slack:', error);
+      const message = error instanceof Error ? error.message : String(error);
+      return { success: false, error: message };
+    }
+  },
+);
+
+ipcMain.handle('test-slack-webhook', async (_, webhookUrl?: string) => {
+  try {
+    const url = (webhookUrl ?? configService.getSlackWebhookUrl() ?? '').trim();
+    if (!url) {
+      return { success: false, error: 'Slack webhook URL is not provided' };
+    }
+    if (!isLikelySlackWebhookUrl(url)) {
+      return {
+        success: false,
+        error: `URL must start with ${SLACK_WEBHOOK_PREFIX}`,
+      };
+    }
+    const service = new SlackService({ webhookUrl: url });
+    return await service.sendTestMessage();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { success: false, error: message };
+  }
+});
 
 // Open external URL
 ipcMain.handle('open-external', async (_, url: string) => {
@@ -1422,6 +1546,9 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
             actionItems: transcription.actionItems,
             customFields: transcription.customFields ?? metadata.customFields,
             emoji: transcription.emoji,
+            notionPageUrl: transcription.notionPageUrl,
+            slackSentAt: transcription.slackSentAt,
+            slackError: transcription.slackError,
           },
         };
       }

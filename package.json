@@ -28,7 +28,7 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
-    "test": "tsc && node --test dist/meetingDetectorService.test.js dist/searchService.test.js dist/agentService.test.js dist/simpleAudioRecorder.test.js dist/outputService.test.js dist/services/audioConcatService.test.js dist/cli.test.js",
+    "test": "tsc && node --test dist/meetingDetectorService.test.js dist/searchService.test.js dist/agentService.test.js dist/simpleAudioRecorder.test.js dist/outputService.test.js dist/slackService.test.js dist/services/audioConcatService.test.js dist/cli.test.js",
     "dist": "pnpm run build && electron-builder",
     "dist:mac": "pnpm run build && electron-builder --mac",
     "dist:mac-x64": "pnpm run build && electron-builder --mac --x64",

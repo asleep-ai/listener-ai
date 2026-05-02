@@ -62,7 +62,7 @@ export async function startRecording(): Promise<void> {
   // Open the output stream in main BEFORE starting MediaRecorder so the first chunk
   // has a file handle waiting for it. Build the Web Audio graph up front (without
   // calling start) — if construction fails we haven't touched main state yet.
-  let graph;
+  let graph: Awaited<ReturnType<typeof buildProcessedStream>>;
   try {
     const addSystemAudio = useSystemAudio
       ? async (ctx: AudioContext) => {
@@ -167,6 +167,12 @@ export function resetRecordingUI(): void {
   recordingTime.classList.remove('active');
 }
 
+function pickMeetingTitle(recordingTitle: string, suggestedTitle?: string): string {
+  const isPlaceholder = recordingTitle === '' || recordingTitle === 'Untitled_Meeting';
+  if (isPlaceholder && suggestedTitle) return suggestedTitle;
+  return recordingTitle || suggestedTitle || 'Untitled Meeting';
+}
+
 export async function processAutoMode(
   audioPath: string | undefined,
   recordingTitle: string,
@@ -209,32 +215,61 @@ export async function processAutoMode(
         console.log('Auto mode: File renamed to:', finalAudioPath);
       }
 
-      if (config.notionApiKey && config.notionDatabaseId) {
-        console.log('Auto mode: Uploading to Notion...');
+      const finalTitle = pickMeetingTitle(recordingTitle, transcriptionResult.data.suggestedTitle);
 
-        const finalTitle =
-          (recordingTitle === '' || recordingTitle === 'Untitled_Meeting') &&
-          transcriptionResult.data.suggestedTitle
-            ? transcriptionResult.data.suggestedTitle
-            : recordingTitle || transcriptionResult.data.suggestedTitle || 'Untitled Meeting';
+      let notionUrl: string | undefined;
+      let notionError: string | undefined;
+      let notionConfigured = false;
+      let notionSucceeded = false;
+
+      if (config.notionApiKey && config.notionDatabaseId) {
+        notionConfigured = true;
+        console.log('Auto mode: Uploading to Notion...');
 
         const uploadResult = await window.electronAPI.uploadToNotion({
           title: finalTitle,
           transcriptionData: transcriptionResult.data,
           audioFilePath: finalAudioPath,
+          transcriptionPath: transcriptionResult.transcriptionPath,
         });
 
         if (uploadResult.success) {
+          notionSucceeded = true;
+          notionUrl = uploadResult.url;
           statusText.textContent = 'Auto mode: Successfully uploaded to Notion!';
           if (uploadResult.url) {
             window.electronAPI.openExternal(uploadResult.url);
           }
         } else {
+          notionError = uploadResult.error || 'Unknown error';
           statusText.textContent = 'Auto mode: Failed to upload to Notion';
           console.error('Auto mode: Notion upload failed:', uploadResult.error);
         }
-      } else {
-        statusText.textContent = 'Auto mode: Transcription complete (Notion not configured)';
+      }
+
+      if (config.slackWebhookUrl && config.slackAutoShare) {
+        console.log('Auto mode: Sending to Slack...');
+        const slackResult = await window.electronAPI.sendToSlack({
+          title: finalTitle,
+          transcriptionData: transcriptionResult.data,
+          transcriptionPath: transcriptionResult.transcriptionPath,
+          notionUrl,
+          notionError,
+        });
+        if (slackResult.success) {
+          if (notionSucceeded) {
+            statusText.textContent = 'Auto mode: Sent to Notion and Slack.';
+          } else if (notionConfigured) {
+            statusText.textContent = 'Auto mode: Sent to Slack (Notion failed).';
+          } else {
+            statusText.textContent = 'Auto mode: Sent to Slack.';
+          }
+        } else {
+          statusText.textContent = 'Auto mode: Failed to send to Slack';
+          console.error('Auto mode: Slack send failed:', slackResult.error);
+        }
+      } else if (!notionConfigured) {
+        statusText.textContent = 'Auto mode: Transcription complete (Notion/Slack not configured)';
       }
 
       await refreshRecordingsList();
