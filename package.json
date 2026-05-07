@@ -59,7 +59,7 @@
     "@types/node": "^24.0.12",
     "dotenv": "^17.2.0",
     "electron": "^39.8.5",
-    "vite": "^5.4.10",
+    "vite": "^6.4.2",
     "electron-builder": "^26.8.1",
     "oxfmt": "^0.48.0",
     "oxlint": "^1.63.0",
