@@ -22,7 +22,7 @@ Listener.AI is an Electron desktop application for recording meetings and produc
 - Settings modal for API keys, models, auto mode, detection toggles, global shortcut, custom summary prompt, and known words
 - AI agent chat panel in the main window (see §6)
 - Progress indicators for transcription, Notion upload, and ffmpeg download
-- Renderer is vanilla JS (no React/framework); talks to main only via IPC
+- Renderer is TypeScript with plain DOM (no React/framework), bundled by Vite; talks to main only via IPC
 
 ### 3. AI Transcription and Summarization
 - Google Gemini 2.5 (Flash/Pro, configurable via `geminiModel` and `geminiFlashModel`)
@@ -125,9 +125,10 @@ Env-var fallbacks (read-only when the config key is empty): `GEMINI_API_KEY`, `N
 - `src/preload.ts` — `contextBridge` exposing `window.electronAPI` to the renderer
 - `src/cli.ts` — CLI entry, shares services with main
 
-### Renderer (at repo root, not under `src/`)
-- `index.html`, `renderer.js`, `styles.css` — vanilla JS, no framework
-- Included in the packaged build via `build.files`
+### Renderer (`renderer/`, separate from `src/`)
+- TypeScript + plain DOM, no framework — entry at `renderer/index.html` → `renderer/main.ts`
+- Bundled by Vite (`vite.config.ts`) into `dist/renderer/`, picked up by electron-builder's `dist/**/*` glob
+- Type-checked separately via `tsconfig.renderer.json` (`pnpm run build:check-renderer`)
 
 ### Top-level services (`src/*.ts`)
 - `simpleAudioRecorder.ts` — thin session state + final file writer. Receives the encoded Opus/WebM blob from the renderer after `MediaRecorder` finalizes and writes it to the recordings directory. No ffmpeg spawn, no OS-specific device detection — all capture happens in the renderer.
