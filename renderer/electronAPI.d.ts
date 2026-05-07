@@ -93,9 +93,11 @@ export type ElectronAPI = {
   openRecordingsFolder: () => Promise<void>;
   showInFinder: (filePath: string) => Promise<void>;
   getRecordings: () => Promise<Array<Record<string, any>>>;
-  searchTranscriptions: (opts: { query: string; fields?: string[]; limit?: number }) => Promise<
-    Array<Record<string, any>>
-  >;
+  searchTranscriptions: (opts: {
+    query: string;
+    fields?: string[];
+    limit?: number;
+  }) => Promise<Array<Record<string, any>>>;
   agentChat: (opts: {
     question: string;
     history?: AgentChatMessage[];
