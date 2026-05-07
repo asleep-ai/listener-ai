@@ -77,13 +77,20 @@ listener export <ref> [<path>] [--json] [--transcript]
                                      Export a transcription
 listener search <query> [--limit <n>] [--transcript] [--field <name>]
                                      Search past transcriptions
+listener merge <ref1> <ref2> [<ref3>...] [--title <t>]
+                                     Concat source audio of two or more notes,
+                                     re-transcribe end-to-end, save as a new note
 listener ask <question> [--ref <ref>]
                                      Ask the AI agent about meetings or settings
-listener config list|get|set|path    Manage configuration
+listener config list|get|set|unset|path
+                                     Manage configuration
+listener --version                   Print CLI version
+listener --help                      Show usage
 ```
 
 - `<ref>` is either an index from `listener list` or a transcription folder name.
 - `--field` accepts: `title`, `summary`, `keyPoints`, `actionItems`, `transcript`, `all`.
+- `config set` / `config unset` accept the keys listed in the Configuration table below, except `audioDeviceId` (UI-only) and `lastSeenVersion` (managed by the app).
 - CLI and GUI share the same `config.json` in the app data directory.
 
 ## Configuration

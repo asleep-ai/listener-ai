@@ -266,6 +266,11 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  unsetKey(key: keyof AppConfig): void {
+    delete this.config[key];
+    this.saveConfig();
+  }
+
   getAllConfig(): AppConfig {
     return {
       geminiApiKey: this.getGeminiApiKey(),
