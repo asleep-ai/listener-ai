@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { type AgentScope, AgentService, type ConfigProposal } from './agentService';
 import { extensionForMimeType } from './audioFormats';
-import { ConfigService } from './configService';
+import { type AppConfig, ConfigService } from './configService';
 import { getDataPath } from './dataPath';
 import { GeminiService } from './geminiService';
 import {
@@ -33,33 +33,51 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.webm',
 ]);
 
-function usage(): never {
-  process.stderr.write(
-    'Usage: listener <file> [--output <dir>]    Transcribe an audio file\n' +
-      '       listener list [--limit <n>]         List past transcriptions\n' +
-      '       listener show <ref>                 Print summary to stdout\n' +
-      '       listener export <ref> [<path>] [--json] [--transcript]\n' +
-      '                                           Export transcription\n' +
-      '       listener search <query> [--limit <n>] [--transcript] [--field <name>]\n' +
-      '                                           Search past transcriptions\n' +
-      '       listener merge <ref1> <ref2> [<ref3>...] [--title <t>]\n' +
-      '                                           Concat the source audio of two or more notes,\n' +
-      '                                           re-transcribe end-to-end, and save as a new note\n' +
-      '       listener ask <question> [--ref <ref>]\n' +
-      '                                           Ask the AI agent about saved meetings or settings\n' +
-      '       listener config list|get|set|path   Manage configuration\n' +
-      '\n' +
-      '<ref> is a number from `listener list` or a folder name.\n' +
-      '\n' +
-      'Options:\n' +
-      '  --output <dir>   Parent directory for the output folder\n' +
-      '  --limit <n>      Max results (0 = all, default: 20)\n' +
-      '  --json           Export as JSON instead of markdown\n' +
-      '  --transcript     Include transcript body (export: append; search: widen scope)\n' +
-      '  --field <name>   Restrict search to one of: title, summary, keyPoints, actionItems, transcript, all\n' +
-      '  --help           Show this help message\n',
-  );
+const VERSION = (() => {
+  try {
+    const pkgPath = path.join(__dirname, '..', 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as { version?: string };
+    return pkg.version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+})();
+
+const USAGE_TEXT =
+  'Usage: listener <file> [--output <dir>]    Transcribe an audio file\n' +
+  '       listener list [--limit <n>]         List past transcriptions\n' +
+  '       listener show <ref>                 Print summary to stdout\n' +
+  '       listener export <ref> [<path>] [--json] [--transcript]\n' +
+  '                                           Export transcription\n' +
+  '       listener search <query> [--limit <n>] [--transcript] [--field <name>]\n' +
+  '                                           Search past transcriptions\n' +
+  '       listener merge <ref1> <ref2> [<ref3>...] [--title <t>]\n' +
+  '                                           Concat the source audio of two or more notes,\n' +
+  '                                           re-transcribe end-to-end, and save as a new note\n' +
+  '       listener ask <question> [--ref <ref>]\n' +
+  '                                           Ask the AI agent about saved meetings or settings\n' +
+  '       listener config list|get|set|unset|path\n' +
+  '                                           Manage configuration\n' +
+  '\n' +
+  '<ref> is a number from `listener list` or a folder name.\n' +
+  '\n' +
+  'Options:\n' +
+  '  --output <dir>   Parent directory for the output folder\n' +
+  '  --limit <n>      Max results (0 = all, default: 20)\n' +
+  '  --json           Export as JSON instead of markdown\n' +
+  '  --transcript     Include transcript body (export: append; search: widen scope)\n' +
+  '  --field <name>   Restrict search to one of: title, summary, keyPoints, actionItems, transcript, all\n' +
+  '  --version, -V    Print CLI version\n' +
+  '  --help, -h       Show this help message\n';
+
+function usageError(): never {
+  process.stderr.write(USAGE_TEXT);
   process.exit(1);
+}
+
+function showHelp(): never {
+  process.stdout.write(USAGE_TEXT);
+  process.exit(0);
 }
 
 const KNOWN_CONFIG_KEYS = [
@@ -69,17 +87,118 @@ const KNOWN_CONFIG_KEYS = [
   'notionApiKey',
   'notionDatabaseId',
   'autoMode',
+  'meetingDetection',
+  'displayDetection',
   'globalShortcut',
+  'knownWords',
+  'summaryPrompt',
+  'maxRecordingMinutes',
+  'recordingReminderMinutes',
   'minRecordingSeconds',
+  'recordSystemAudio',
+  'slackWebhookUrl',
+  'slackAutoShare',
 ] as const;
 type ConfigKey = (typeof KNOWN_CONFIG_KEYS)[number];
 
-function maskValue(key: string, value: string | undefined): string {
+function isSensitiveKey(key: string): boolean {
+  const lk = key.toLowerCase();
+  return lk.includes('key') || lk.includes('webhook');
+}
+
+function maskValue(key: string, value: unknown): string {
   if (value == null || value === '') return '(not set)';
-  if (key.toLowerCase().includes('key')) {
-    return value.length > 4 ? `****${value.slice(-4)}` : '****';
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '(none)';
+    const joined = value.map((x) => String(x)).join(', ');
+    return joined.length > 60 ? `${joined.slice(0, 57)}...` : joined;
   }
-  return value;
+  const str = String(value);
+  if (isSensitiveKey(key)) {
+    return str.length > 4 ? `****${str.slice(-4)}` : '****';
+  }
+  if (str.length > 60) return `${str.slice(0, 57)}...`;
+  return str;
+}
+
+function parseBool(key: string, v: string): boolean {
+  if (v !== 'true' && v !== 'false') {
+    process.stderr.write(`Error: ${key} must be "true" or "false"\n`);
+    process.exit(1);
+  }
+  return v === 'true';
+}
+
+function parseNonNegInt(key: string, v: string): number {
+  const n = Number.parseInt(v, 10);
+  if (Number.isNaN(n) || n < 0 || String(n) !== v.trim()) {
+    process.stderr.write(`Error: ${key} must be a non-negative integer\n`);
+    process.exit(1);
+  }
+  return n;
+}
+
+function parseKnownWords(v: string): string[] {
+  return v
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+function applyConfigSet(config: ConfigService, key: ConfigKey, value: string): void {
+  switch (key) {
+    case 'geminiApiKey':
+      config.setGeminiApiKey(value);
+      return;
+    case 'geminiModel':
+      config.setGeminiModel(value);
+      return;
+    case 'geminiFlashModel':
+      config.setGeminiFlashModel(value);
+      return;
+    case 'notionApiKey':
+      config.setNotionApiKey(value);
+      return;
+    case 'notionDatabaseId':
+      config.setNotionDatabaseId(value);
+      return;
+    case 'autoMode':
+      config.setAutoMode(parseBool('autoMode', value));
+      return;
+    case 'meetingDetection':
+      config.updateConfig({ meetingDetection: parseBool('meetingDetection', value) });
+      return;
+    case 'displayDetection':
+      config.setDisplayDetection(parseBool('displayDetection', value));
+      return;
+    case 'globalShortcut':
+      config.setGlobalShortcut(value);
+      return;
+    case 'knownWords':
+      config.setKnownWords(parseKnownWords(value));
+      return;
+    case 'summaryPrompt':
+      config.setSummaryPrompt(value);
+      return;
+    case 'maxRecordingMinutes':
+      config.setMaxRecordingMinutes(parseNonNegInt('maxRecordingMinutes', value));
+      return;
+    case 'recordingReminderMinutes':
+      config.setRecordingReminderMinutes(parseNonNegInt('recordingReminderMinutes', value));
+      return;
+    case 'minRecordingSeconds':
+      config.setMinRecordingSeconds(parseNonNegInt('minRecordingSeconds', value));
+      return;
+    case 'recordSystemAudio':
+      config.setRecordSystemAudio(parseBool('recordSystemAudio', value));
+      return;
+    case 'slackWebhookUrl':
+      config.setSlackWebhookUrl(value);
+      return;
+    case 'slackAutoShare':
+      config.setSlackAutoShare(parseBool('slackAutoShare', value));
+      return;
+  }
 }
 
 function handleConfig(subArgs: string[]): void {
@@ -87,8 +206,12 @@ function handleConfig(subArgs: string[]): void {
   const config = new ConfigService(dataPath);
   const sub = subArgs[0];
 
-  if (!sub || sub === '--help') {
-    usage();
+  if (!sub) {
+    usageError();
+  }
+
+  if (sub === '--help' || sub === '-h') {
+    showHelp();
   }
 
   if (sub === 'path') {
@@ -100,8 +223,7 @@ function handleConfig(subArgs: string[]): void {
     const all = config.getAllConfig();
     for (const key of KNOWN_CONFIG_KEYS) {
       const raw = all[key as keyof typeof all];
-      const display = maskValue(key, raw == null ? undefined : String(raw));
-      process.stdout.write(`${key}=${display}\n`);
+      process.stdout.write(`${key}=${maskValue(key, raw)}\n`);
     }
     return;
   }
@@ -119,7 +241,11 @@ function handleConfig(subArgs: string[]): void {
     }
     const all = config.getAllConfig();
     const val = all[key as keyof typeof all];
-    process.stdout.write(`${val ?? ''}\n`);
+    if (Array.isArray(val)) {
+      process.stdout.write(`${val.join(',')}\n`);
+    } else {
+      process.stdout.write(`${val ?? ''}\n`);
+    }
     return;
   }
 
@@ -137,38 +263,29 @@ function handleConfig(subArgs: string[]): void {
       process.stderr.write(`Known keys: ${KNOWN_CONFIG_KEYS.join(', ')}\n`);
       process.exit(1);
     }
-    const setters: Record<ConfigKey, (v: string) => void> = {
-      geminiApiKey: (v) => config.setGeminiApiKey(v),
-      geminiModel: (v) => config.setGeminiModel(v),
-      geminiFlashModel: (v) => config.setGeminiFlashModel(v),
-      notionApiKey: (v) => config.setNotionApiKey(v),
-      notionDatabaseId: (v) => config.setNotionDatabaseId(v),
-      autoMode: (v) => {
-        if (v !== 'true' && v !== 'false') {
-          process.stderr.write('Error: autoMode must be "true" or "false"\n');
-          process.exit(1);
-        }
-        config.setAutoMode(v === 'true');
-      },
-      globalShortcut: (v) => config.setGlobalShortcut(v),
-      minRecordingSeconds: (v) => {
-        const n = Number.parseInt(v, 10);
-        if (Number.isNaN(n) || n < 0 || String(n) !== v.trim()) {
-          process.stderr.write(
-            'Error: minRecordingSeconds must be a non-negative integer (0 disables)\n',
-          );
-          process.exit(1);
-        }
-        config.setMinRecordingSeconds(n);
-      },
-    };
-    setters[key](value);
+    applyConfigSet(config, key, value);
     process.stderr.write(`Set ${key}\n`);
     return;
   }
 
+  if (sub === 'unset') {
+    const key = subArgs[1] as ConfigKey;
+    if (!key) {
+      process.stderr.write('Error: Missing key. Usage: listener config unset <key>\n');
+      process.exit(1);
+    }
+    if (!KNOWN_CONFIG_KEYS.includes(key)) {
+      process.stderr.write(`Error: Unknown key: ${key}\n`);
+      process.stderr.write(`Known keys: ${KNOWN_CONFIG_KEYS.join(', ')}\n`);
+      process.exit(1);
+    }
+    config.unsetKey(key as keyof AppConfig);
+    process.stderr.write(`Unset ${key}\n`);
+    return;
+  }
+
   process.stderr.write(`Error: Unknown config command: ${sub}\n`);
-  usage();
+  usageError();
 }
 
 async function resolveRef(ref: string, dataPath: string): Promise<string> {
@@ -606,8 +723,17 @@ async function handleAsk(args: string[]): Promise<void> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
-  if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
-    usage();
+  if (args.includes('--version') || args.includes('-V')) {
+    process.stdout.write(`listener ${VERSION}\n`);
+    return;
+  }
+
+  if (args.includes('--help') || args.includes('-h')) {
+    showHelp();
+  }
+
+  if (args.length === 0) {
+    usageError();
   }
 
   if (args[0] === 'config') {
@@ -654,7 +780,7 @@ async function main(): Promise<void> {
       outputDir = args[++i];
     } else if (args[i].startsWith('-')) {
       process.stderr.write(`Error: Unknown option: ${args[i]}\n`);
-      usage();
+      usageError();
     } else {
       filePath = args[i];
     }
@@ -662,7 +788,7 @@ async function main(): Promise<void> {
 
   if (!filePath) {
     process.stderr.write('Error: No audio file specified.\n');
-    usage();
+    usageError();
   }
 
   // Resolve to absolute path

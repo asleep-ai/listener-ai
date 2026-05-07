@@ -41,8 +41,13 @@ listener config set notionDatabaseId <your-id>
 ```bash
 listener recording.mp3                # Transcribe to default output dir
 listener recording.m4a --output ./    # Transcribe to current directory
-listener config list                  # Show all config values
+listener config list                  # Show all config values (secrets masked)
+listener config get <key>             # Print one config value
+listener config set <key> <value>     # Set a config value
+listener config unset <key>           # Clear a config value (falls back to default)
 listener config path                  # Print config file path
+listener --version                    # Print CLI version
+listener --help                       # Show usage
 ```
 
 Supported formats: mp3, m4a, wav, ogg, flac, aac, wma, opus, webm
