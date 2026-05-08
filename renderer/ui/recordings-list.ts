@@ -93,38 +93,57 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
     item.setAttribute('aria-label', `Open transcript for ${recording.title}`);
   }
 
-  item.innerHTML = `
-    <span class="recording-status" aria-hidden="true"></span>
-    <div class="recording-info">
-      <h3>${recording.title}</h3>
-      <p class="recording-meta">${metaStr}</p>
-    </div>
-    <div class="recording-actions">
-      ${
-        hasTranscript
-          ? `
-        <button class="action-button regenerate-btn" data-path="${recording.path}" data-title="${recording.title}" title="Regenerate transcript" aria-label="Regenerate transcript">
-          ↻
-        </button>
-      `
-          : `
-        <button class="action-button transcribe-btn" data-path="${recording.path}" data-title="${recording.title}">
-          Transcribe
-        </button>
-      `
-      }
-      <button class="action-button merge-btn" data-path="${recording.path}" title="Merge this with other recordings into a single note">
-        Merge
-      </button>
-      <button class="action-button reveal-btn" data-path="${recording.path}" title="Reveal in Finder">
-        Show
-      </button>
-      <button class="action-button export-m4a-btn" data-path="${recording.path}" title="Export as M4A for sharing" aria-label="Export as M4A">
-        M4A
-      </button>
-      ${hasTranscript ? '<span class="recording-chevron" aria-hidden="true">›</span>' : ''}
-    </div>
-  `;
+  const status = document.createElement('span');
+  status.className = 'recording-status';
+  status.setAttribute('aria-hidden', 'true');
+  item.appendChild(status);
+
+  const info = document.createElement('div');
+  info.className = 'recording-info';
+  const title = document.createElement('h3');
+  title.textContent = recording.title;
+  const meta = document.createElement('p');
+  meta.className = 'recording-meta';
+  meta.textContent = metaStr;
+  info.append(title, meta);
+  item.appendChild(info);
+
+  const actions = document.createElement('div');
+  actions.className = 'recording-actions';
+
+  if (hasTranscript) {
+    actions.appendChild(
+      createActionButton('regenerate-btn', '↻', {
+        title: 'Regenerate transcript',
+        ariaLabel: 'Regenerate transcript',
+      }),
+    );
+  } else {
+    actions.appendChild(createActionButton('transcribe-btn', 'Transcribe'));
+  }
+
+  actions.appendChild(
+    createActionButton('merge-btn', 'Merge', {
+      title: 'Merge this with other recordings into a single note',
+    }),
+  );
+  actions.appendChild(createActionButton('reveal-btn', 'Show', { title: 'Reveal in Finder' }));
+  actions.appendChild(
+    createActionButton('export-m4a-btn', 'M4A', {
+      title: 'Export as M4A for sharing',
+      ariaLabel: 'Export as M4A',
+    }),
+  );
+
+  if (hasTranscript) {
+    const chevron = document.createElement('span');
+    chevron.className = 'recording-chevron';
+    chevron.setAttribute('aria-hidden', 'true');
+    chevron.textContent = '›';
+    actions.appendChild(chevron);
+  }
+
+  item.appendChild(actions);
 
   if (hasTranscript) {
     // Whole-row entry: clicking (or Enter/Space) opens the transcript.
@@ -184,6 +203,20 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   }
 
   return item;
+}
+
+function createActionButton(
+  className: string,
+  label: string,
+  options: { title?: string; ariaLabel?: string } = {},
+): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.className = `action-button ${className}`;
+  button.type = 'button';
+  if (options.title) button.title = options.title;
+  if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
+  button.textContent = label;
+  return button;
 }
 
 // On ffmpeg-missing, point the user at transcription (which downloads ffmpeg)

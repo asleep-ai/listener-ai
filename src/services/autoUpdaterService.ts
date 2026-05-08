@@ -32,6 +32,11 @@ export class AutoUpdaterService {
       return;
     }
 
+    if (this.isWindowsAutoUpdateDisabled()) {
+      console.log('Auto-updater disabled on Windows; using GitHub Releases instead');
+      return;
+    }
+
     autoUpdater.on('checking-for-update', () => {
       console.log('Checking for updates...');
       this.sendStatusToWindow('checking-for-update');
@@ -109,7 +114,7 @@ export class AutoUpdaterService {
   }
 
   public checkForUpdates() {
-    if (this.isDevelopment()) return;
+    if (this.isDevelopment() || this.isWindowsAutoUpdateDisabled()) return;
 
     autoUpdater.checkForUpdatesAndNotify().catch((err) => {
       console.error('Failed to check for updates:', err);
@@ -117,7 +122,7 @@ export class AutoUpdaterService {
   }
 
   public startPeriodicCheck(intervalMs: number = PERIODIC_CHECK_INTERVAL_MS) {
-    if (this.isDevelopment()) return;
+    if (this.isDevelopment() || this.isWindowsAutoUpdateDisabled()) return;
     if (this.periodicTimer) return;
 
     this.periodicTimer = setInterval(() => {
@@ -140,6 +145,10 @@ export class AutoUpdaterService {
   }
 
   public downloadUpdate() {
+    if (this.isWindowsAutoUpdateDisabled()) {
+      this.showManualUpdateDialog();
+      return;
+    }
     if (this.updateState.type !== 'available') return;
 
     const version = this.updateState.version;
@@ -193,7 +202,7 @@ export class AutoUpdaterService {
   }
 
   public quitAndInstall() {
-    if (this.isDevelopment()) return;
+    if (this.isDevelopment() || this.isWindowsAutoUpdateDisabled()) return;
     if (this.updateState.type !== 'downloaded') return;
 
     // Prevent the macOS close handler's hide-instead-of-quit fallback from
@@ -251,6 +260,16 @@ export class AutoUpdaterService {
     return process.env.NODE_ENV === 'development' || app.isPackaged === false;
   }
 
+  private isWindowsAutoUpdateDisabled(): boolean {
+    return process.platform === 'win32';
+  }
+
+  public getManualUpdateLabel(): string {
+    return this.isWindowsAutoUpdateDisabled()
+      ? 'Download Latest Version...'
+      : 'Check for Updates...';
+  }
+
   public checkForUpdatesManually() {
     if (this.isDevelopment()) {
       dialog.showMessageBox(this.mainWindow || new BrowserWindow({ show: false }), {
@@ -259,6 +278,11 @@ export class AutoUpdaterService {
         message: 'Auto-update is disabled in development mode.',
         buttons: ['OK'],
       });
+      return;
+    }
+
+    if (this.isWindowsAutoUpdateDisabled()) {
+      this.showManualUpdateDialog();
       return;
     }
 
@@ -277,6 +301,24 @@ export class AutoUpdaterService {
       })
       .catch((err) => {
         this.showUpdateFailedDialog(err.message);
+      });
+  }
+
+  private showManualUpdateDialog() {
+    dialog
+      .showMessageBox(this.mainWindow || new BrowserWindow({ show: false }), {
+        type: 'info',
+        title: 'Manual Update Required',
+        message: 'Automatic updates are disabled on Windows.',
+        detail: `Download the latest installer from GitHub Releases.\n\nCurrent version: ${app.getVersion()}`,
+        buttons: ['Open GitHub Releases', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      .then((result) => {
+        if (result.response === 0) {
+          shell.openExternal(RELEASES_URL);
+        }
       });
   }
 

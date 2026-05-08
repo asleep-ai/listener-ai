@@ -1,8 +1,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { GoogleGenAI } from '@google/genai';
 import { mimeTypeForExtension } from './audioFormats';
 import { FFmpegManager } from './services/ffmpegManager';
+
+const execFileAsync = promisify(execFile);
 
 export interface TranscriptionResult {
   transcript: string;
@@ -126,24 +130,26 @@ export class GeminiService {
     }
   }
 
-  // Get audio duration using ffprobe
+  // Get audio duration using ffmpeg
   private async getAudioDuration(audioFilePath: string): Promise<number> {
-    const { exec } = require('child_process');
-    const { promisify } = require('util');
-    const execAsync = promisify(exec);
-
     try {
       const ffmpegPath = await this.getFFmpegPath();
 
       // Use ffmpeg with -f null to get file info including duration
       // This will output file info to stderr which we can parse
-      const ffmpegCommand = `"${ffmpegPath}" -i "${audioFilePath}" -f null -`;
-      console.log('Running ffmpeg command for duration:', ffmpegCommand);
+      console.log('Running ffmpeg for duration:', ffmpegPath, audioFilePath);
 
-      const { stderr } = await execAsync(ffmpegCommand).catch((e: any) => {
+      const { stderr } = await execFileAsync(ffmpegPath, [
+        '-i',
+        audioFilePath,
+        '-f',
+        'null',
+        '-',
+      ]).catch((error: unknown) => {
+        const execError = error as { stdout?: string; stderr?: string };
         // FFmpeg exits with non-zero code when output is null, but still provides info in stderr
         // This is expected behavior, so we return the error object which contains stdout/stderr
-        return { stdout: e.stdout || '', stderr: e.stderr || '' };
+        return { stdout: execError.stdout || '', stderr: execError.stderr || '' };
       });
 
       // Extract duration from stderr (where ffmpeg outputs file info)
@@ -183,10 +189,6 @@ export class GeminiService {
     audioFilePath: string,
     segmentDuration = 300,
   ): Promise<string[]> {
-    const { exec } = require('child_process');
-    const { promisify } = require('util');
-    const execAsync = promisify(exec);
-
     const outputDir = path.dirname(audioFilePath);
     const baseName = path.basename(audioFilePath, path.extname(audioFilePath));
     const ext = path.extname(audioFilePath);
@@ -198,9 +200,17 @@ export class GeminiService {
 
     try {
       // Split audio into segments
-      await execAsync(
-        `"${ffmpegPath}" -i "${audioFilePath}" -f segment -segment_time ${segmentDuration} -c copy "${segmentPath}"`,
-      );
+      await execFileAsync(ffmpegPath, [
+        '-i',
+        audioFilePath,
+        '-f',
+        'segment',
+        '-segment_time',
+        String(segmentDuration),
+        '-c',
+        'copy',
+        segmentPath,
+      ]);
 
       // Find all created segment files
       const segmentFiles = fs
