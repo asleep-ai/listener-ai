@@ -438,7 +438,7 @@ app.whenReady().then(() => {
           },
         },
         {
-          label: 'Check for Updates...',
+          label: autoUpdaterService.getManualUpdateLabel(),
           click: () => {
             autoUpdaterService.checkForUpdatesManually();
           },
@@ -454,7 +454,7 @@ app.whenReady().then(() => {
         { role: 'about' } as any,
         { type: 'separator' } as any,
         {
-          label: 'Check for Updates...',
+          label: autoUpdaterService.getManualUpdateLabel(),
           click: () => {
             autoUpdaterService.checkForUpdatesManually();
           },
@@ -1659,34 +1659,48 @@ ipcMain.handle('get-recordings', async () => {
     // Read all files in the recordings directory
     const files = fs.readdirSync(recordingsDir);
 
-    // Filter for audio files and get their stats
-    const recordings = files
-      .filter((file: string) => {
-        // Filter out segment files
-        if (file.includes('_segment_')) return false;
-        return isSupportedAudioExtension(path.extname(file));
-      })
-      .map((file: string) => {
-        const filePath = path.join(recordingsDir, file);
-        const stats = fs.statSync(filePath);
+    // Filter for audio files and get their stats. Skip per-file races so one
+    // deleted recording does not make the whole list fail.
+    const recordings: Array<{
+      filename: string;
+      path: string;
+      title: string;
+      timestamp: string | undefined;
+      size: number;
+      createdAt: Date;
+      modifiedAt: Date;
+    }> = [];
+    for (const file of files) {
+      if (file.includes('_segment_')) continue;
+      if (!isSupportedAudioExtension(path.extname(file))) continue;
 
-        // Extract title from filename (format: title_timestamp.ext)
-        const nameWithoutExt = path.basename(file, path.extname(file));
-        const parts = nameWithoutExt.split('_');
-        const timestamp = parts.pop(); // Remove timestamp
-        const title = parts.join('_') || 'Untitled';
+      const filePath = path.join(recordingsDir, file);
+      let stats: fs.Stats;
+      try {
+        stats = fs.statSync(filePath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw err;
+      }
 
-        return {
-          filename: file,
-          path: filePath,
-          title: title,
-          timestamp: timestamp,
-          size: stats.size,
-          createdAt: stats.birthtime,
-          modifiedAt: stats.mtime,
-        };
-      })
-      .sort((a: any, b: any) => b.createdAt.getTime() - a.createdAt.getTime()); // Sort by newest first
+      // Extract title from filename (format: title_timestamp.ext)
+      const nameWithoutExt = path.basename(file, path.extname(file));
+      const parts = nameWithoutExt.split('_');
+      const timestamp = parts.pop(); // Remove timestamp
+      const title = parts.join('_') || 'Untitled';
+
+      recordings.push({
+        filename: file,
+        path: filePath,
+        title,
+        timestamp,
+        size: stats.size,
+        createdAt: stats.birthtime,
+        modifiedAt: stats.mtime,
+      });
+    }
+
+    recordings.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()); // Sort by newest first
 
     return { success: true, recordings };
   } catch (error) {

@@ -103,4 +103,5 @@ Add secrets to your GitHub repository:
 - `WIN_CSC_LINK` - Base64 encoded .pfx certificate
 - `WIN_CSC_KEY_PASSWORD` - Windows certificate password
 
-The GitHub Actions workflow will automatically sign and notarize releases.
+The GitHub Actions workflow passes these Windows secrets to electron-builder when they are configured, so signed Windows releases do not require workflow changes once a certificate exists.
+For GitHub Releases + NSIS auto-update, there is no reliable free public-distribution path around trusted Windows code signing; the app disables automatic updates on Windows and sends users to the latest GitHub Release instead.
