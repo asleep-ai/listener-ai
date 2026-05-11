@@ -100,6 +100,49 @@ export interface HighlightEntry {
   bullets?: string[];
 }
 
+export interface TranscriptionOptions {
+  transcriptOnly?: boolean;
+  /**
+   * Override the default speaker-identification instruction sent to Gemini
+   * during transcription. The user-supplied glossary (knownWords) and
+   * per-segment positional prefix are still applied automatically.
+   */
+  transcriptionPrompt?: string;
+}
+
+function transcriptOnlyResult(transcript: string): TranscriptionResult {
+  return {
+    transcript,
+    summary: '',
+    keyPoints: [],
+    actionItems: [],
+    emoji: '',
+  };
+}
+
+const DEFAULT_TRANSCRIPT_PROMPT = `Please transcribe this audio recording with proper speaker identification.
+
+Format requirements:
+1. IDENTIFY different speakers and label them as 참가자1, 참가자2, etc.
+2. Each speaker's turn MUST start on a NEW LINE
+3. Format: 참가자X: [what they said]
+4. Add a blank line between different speakers
+
+Example format:
+참가자1: 안녕하세요, 오늘 회의를 시작하겠습니다.
+
+참가자2: 네, 준비됐습니다.
+
+참가자1: 첫 번째 안건은...
+
+IMPORTANT:
+- You MUST identify and differentiate between speakers
+- Each speaker turn MUST start on a new line
+- Add blank line between different speakers
+- DO NOT include timestamps
+- Keep the transcription in the original spoken language
+- Return ONLY the transcription text, no JSON formatting`;
+
 export interface GeminiServiceOptions {
   apiKey: string;
   dataPath?: string;
@@ -147,6 +190,7 @@ export class GeminiService {
     progressCallback?: (percent: number, message: string) => void,
     summaryPrompt?: string,
     liveNotes?: LiveNote[],
+    options: TranscriptionOptions = {},
   ): Promise<TranscriptionResult> {
     // Integration-test escape hatch: avoid the real Gemini call so tests can
     // exercise the surrounding pipeline (CLI parsing, IPC, ffmpeg, save) for
@@ -154,6 +198,9 @@ export class GeminiService {
     // in a packaged user's shell rc can't silently stub their transcripts.
     if (process.env.LISTENER_TEST_MODE && process.env.NODE_ENV === 'test') {
       if (progressCallback) progressCallback(100, 'Stubbed transcription');
+      if (options.transcriptOnly) {
+        return transcriptOnlyResult('Stubbed transcript.');
+      }
       return {
         transcript: 'Stubbed transcript.',
         summary: 'Stubbed summary.',
@@ -168,7 +215,7 @@ export class GeminiService {
       // Check file size
       const stats = fs.statSync(audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
-      console.log(`Audio file size: ${fileSizeInMB.toFixed(2)} MB`);
+      console.error(`Audio file size: ${fileSizeInMB.toFixed(2)} MB`);
 
       if (progressCallback) {
         progressCallback(15, `Processing ${fileSizeInMB.toFixed(1)} MB audio file...`);
@@ -176,7 +223,7 @@ export class GeminiService {
 
       // Get audio duration using ffmpeg
       const duration = await this.getAudioDuration(audioFilePath);
-      console.log(`Audio duration: ${duration} seconds`);
+      console.error(`Audio duration: ${duration} seconds`);
 
       // If duration is 0, log a warning but continue processing
       if (duration === 0) {
@@ -186,13 +233,14 @@ export class GeminiService {
       }
 
       // Always use the two-step approach for consistency
-      console.log('Using two-step transcription approach...');
+      console.error('Using two-step transcription approach...');
       return await this.transcribeWithTwoSteps(
         audioFilePath,
         duration,
         progressCallback,
         summaryPrompt,
         liveNotes,
+        options,
       );
     } catch (error) {
       console.error('Error transcribing audio:', error);
@@ -221,7 +269,7 @@ export class GeminiService {
 
       // Use ffmpeg with -f null to get file info including duration
       // This will output file info to stderr which we can parse
-      console.log('Running ffmpeg for duration:', ffmpegPath, audioFilePath);
+      console.error('Running ffmpeg for duration:', ffmpegPath, audioFilePath);
 
       const { stderr } = await execFileAsync(ffmpegPath, [
         '-i',
@@ -243,7 +291,7 @@ export class GeminiService {
         const minutes = Number.parseInt(durationMatch[2]);
         const seconds = Number.parseFloat(durationMatch[3]);
         const totalSeconds = hours * 3600 + minutes * 60 + seconds;
-        console.log(`FFmpeg extracted duration: ${totalSeconds} seconds`);
+        console.error(`FFmpeg extracted duration: ${totalSeconds} seconds`);
         return totalSeconds;
       }
 
@@ -254,7 +302,7 @@ export class GeminiService {
         const minutes = Number.parseInt(altDurationMatch[2]);
         const seconds = Number.parseInt(altDurationMatch[3]);
         const totalSeconds = hours * 3600 + minutes * 60 + seconds;
-        console.log(`FFmpeg extracted duration (alt format): ${totalSeconds} seconds`);
+        console.error(`FFmpeg extracted duration (alt format): ${totalSeconds} seconds`);
         return totalSeconds;
       }
 
@@ -303,7 +351,7 @@ export class GeminiService {
         .map((file) => path.join(outputDir, file))
         .sort();
 
-      console.log(`Split audio into ${segmentFiles.length} segments`);
+      console.error(`Split audio into ${segmentFiles.length} segments`);
       return segmentFiles;
     } catch (error: any) {
       console.error('Error splitting audio:', error);
@@ -365,6 +413,7 @@ export class GeminiService {
     progressCallback?: (percent: number, message: string) => void,
     customSummaryPrompt?: string,
     liveNotes?: LiveNote[],
+    options: TranscriptionOptions = {},
   ): Promise<TranscriptionResult> {
     try {
       let fullTranscript = '';
@@ -372,16 +421,28 @@ export class GeminiService {
       // Step 1: Get transcript
       if (duration > 300) {
         // Use segmented approach for long audio
-        console.log('Audio is longer than 5 minutes, using segmented transcription...');
+        console.error('Audio is longer than 5 minutes, using segmented transcription...');
         fullTranscript = await this.getSegmentedTranscript(
           audioFilePath,
           duration,
           progressCallback,
+          options.transcriptionPrompt,
         );
       } else {
         // Get transcript for short audio
-        console.log('Transcribing short audio...');
-        fullTranscript = await this.getShortAudioTranscript(audioFilePath, progressCallback);
+        console.error('Transcribing short audio...');
+        fullTranscript = await this.getShortAudioTranscript(
+          audioFilePath,
+          progressCallback,
+          options.transcriptionPrompt,
+        );
+      }
+
+      if (options.transcriptOnly) {
+        if (progressCallback) {
+          progressCallback(100, 'Transcript ready');
+        }
+        return transcriptOnlyResult(fullTranscript);
       }
 
       // Step 2: Generate summary, key points, action items from transcript
@@ -488,6 +549,7 @@ Return as JSON:
   private async getShortAudioTranscript(
     audioFilePath: string,
     progressCallback?: (percent: number, message: string) => void,
+    customPrompt?: string,
   ): Promise<string> {
     try {
       const stats = fs.statSync(audioFilePath);
@@ -500,7 +562,7 @@ Return as JSON:
       // Use Files API for files over 20MB
       let fileUri: string | null = null;
       if (fileSizeInMB > 20) {
-        console.log('File is over 20MB, using Files API for upload...');
+        console.error('File is over 20MB, using Files API for upload...');
 
         if (progressCallback) {
           progressCallback(25, 'Uploading large file to Gemini...');
@@ -519,7 +581,7 @@ Return as JSON:
         let file = await this.ai.files.get({ name: uploadResult.name || '' });
         let retries = 0;
         while (file.state === 'PROCESSING' && retries < 30) {
-          console.log(`Waiting for file to be processed... (attempt ${retries + 1}/30)`);
+          console.error(`Waiting for file to be processed... (attempt ${retries + 1}/30)`);
           await new Promise((resolve) => setTimeout(resolve, 2000));
           file = await this.ai.files.get({ name: uploadResult.name || '' });
           retries++;
@@ -534,28 +596,7 @@ Return as JSON:
         progressCallback(50, 'Transcribing audio...');
       }
 
-      const transcriptPrompt = `${this.buildGlossaryBlock()}Please transcribe this audio recording with proper speaker identification.
-
-Format requirements:
-1. IDENTIFY different speakers and label them as 참가자1, 참가자2, etc.
-2. Each speaker's turn MUST start on a NEW LINE
-3. Format: 참가자X: [what they said]
-4. Add a blank line between different speakers
-
-Example format:
-참가자1: 안녕하세요, 오늘 회의를 시작하겠습니다.
-
-참가자2: 네, 준비됐습니다.
-
-참가자1: 첫 번째 안건은...
-
-IMPORTANT:
-- You MUST identify and differentiate between speakers
-- Each speaker turn MUST start on a new line
-- Add blank line between different speakers
-- DO NOT include timestamps
-- Keep the transcription in the original spoken language
-- Return ONLY the transcription text, no JSON formatting`;
+      const transcriptPrompt = `${this.buildGlossaryBlock()}${customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT}`;
 
       let result: Awaited<ReturnType<typeof this.ai.models.generateContent>>;
       if (fileUri) {
@@ -635,29 +676,14 @@ IMPORTANT:
   }
 
   // Create prompt for segment transcription
-  private createSegmentPrompt(segmentIndex: number, totalSegments: number): string {
-    return `${this.buildGlossaryBlock()}Please transcribe audio segment ${segmentIndex + 1} of ${totalSegments} with proper speaker identification.
-
-Format requirements:
-1. IDENTIFY different speakers and label them as 참가자1, 참가자2, etc.
-2. Each speaker's turn MUST start on a NEW LINE
-3. Format: 참가자X: [what they said]
-4. Add a blank line between different speakers
-
-Example format:
-참가자1: 안녕하세요, 오늘 회의를 시작하겠습니다.
-
-참가자2: 네, 준비됐습니다.
-
-참가자1: 첫 번째 안건은...
-
-IMPORTANT:
-- You MUST identify and differentiate between speakers
-- Each speaker turn MUST start on a new line
-- Add blank line between different speakers
-- DO NOT include timestamps
-- Keep the transcription in the original spoken language
-- Return ONLY the transcription text, no JSON formatting`;
+  private createSegmentPrompt(
+    segmentIndex: number,
+    totalSegments: number,
+    customPrompt?: string,
+  ): string {
+    const positional = `[Audio segment ${segmentIndex + 1} of ${totalSegments}]\n\n`;
+    const body = customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT;
+    return `${this.buildGlossaryBlock()}${positional}${body}`;
   }
 
   // Transcribe a single segment with retry logic
@@ -667,14 +693,15 @@ IMPORTANT:
     totalSegments: number,
     segmentStartTime: number,
     segmentEndTime: number,
+    customPrompt?: string,
   ): Promise<{ index: number; content: string }> {
     const maxRetries = 3;
     let lastError: any = null;
-    const segmentPrompt = this.createSegmentPrompt(segmentIndex, totalSegments);
+    const segmentPrompt = this.createSegmentPrompt(segmentIndex, totalSegments, customPrompt);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        console.log(
+        console.error(
           `Starting transcription for segment ${segmentIndex + 1}/${totalSegments} (attempt ${attempt}/${maxRetries})...`,
         );
 
@@ -706,7 +733,7 @@ IMPORTANT:
 
         const transcript = result.text || '';
 
-        console.log(`Completed transcription for segment ${segmentIndex + 1}/${totalSegments}`);
+        console.error(`Completed transcription for segment ${segmentIndex + 1}/${totalSegments}`);
 
         // Add segment time range header
         const segmentHeader = this.createSegmentHeader(
@@ -729,7 +756,7 @@ IMPORTANT:
         if (attempt < maxRetries) {
           // Wait before retry with exponential backoff
           const retryDelay = Math.min(1000 * 2 ** (attempt - 1), 10000); // Max 10 seconds
-          console.log(`Retrying segment ${segmentIndex + 1} in ${retryDelay}ms...`);
+          console.error(`Retrying segment ${segmentIndex + 1} in ${retryDelay}ms...`);
           await new Promise((resolve) => setTimeout(resolve, retryDelay));
         }
       }
@@ -751,6 +778,7 @@ IMPORTANT:
     audioFilePath: string,
     duration: number,
     progressCallback?: (percent: number, message: string) => void,
+    customPrompt?: string,
   ): Promise<string> {
     try {
       // Split audio into 5-minute segments
@@ -771,6 +799,7 @@ IMPORTANT:
           segmentFiles.length,
           segmentStartTime,
           segmentEndTime,
+          customPrompt,
         );
       });
 

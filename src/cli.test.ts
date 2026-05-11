@@ -141,6 +141,114 @@ describe('listener CLI basics', () => {
   });
 });
 
+describe('listener transcript (CLI integration)', () => {
+  let transcriptDataPath: string;
+
+  before(() => {
+    transcriptDataPath = makeTempDir('cli-transcript');
+  });
+
+  after(() => rmDir(transcriptDataPath));
+
+  function runCli(
+    args: string[],
+  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    return new Promise((resolve) => {
+      const { spawn } = require('child_process') as typeof import('child_process');
+      const child = spawn('node', [cliPath, ...args], {
+        env: {
+          ...process.env,
+          NODE_ENV: 'test',
+          LISTENER_DATA_PATH: transcriptDataPath,
+          LISTENER_TEST_MODE: '1',
+          GEMINI_API_KEY: 'test-mode-key',
+        },
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d: Buffer) => {
+        stdout += d.toString();
+      });
+      child.stderr.on('data', (d: Buffer) => {
+        stderr += d.toString();
+      });
+      child.on('close', (code: number | null) => {
+        resolve({ stdout, stderr, code });
+      });
+    });
+  }
+
+  function makeAudio(name: string): string {
+    const audioPath = path.join(transcriptDataPath, name);
+    fs.writeFileSync(audioPath, '');
+    return audioPath;
+  }
+
+  it('prints transcript to stdout and creates no transcription folder', async () => {
+    const audio = makeAudio('stdout.mp3');
+    const { stdout, stderr, code } = await runCli(['transcript', audio]);
+    assert.equal(code, 0, stderr);
+    assert.match(stdout, /Stubbed transcript\./);
+
+    const store = path.join(transcriptDataPath, 'transcriptions');
+    const entries = fs.existsSync(store) ? fs.readdirSync(store) : [];
+    assert.equal(entries.length, 0, 'transcript subcommand must not write to the store');
+  });
+
+  it('writes to --output <file> and prints the file path on stdout', async () => {
+    const audio = makeAudio('file-out.mp3');
+    const outFile = path.join(transcriptDataPath, 'out.txt');
+    const { stdout, stderr, code } = await runCli(['transcript', audio, '--output', outFile]);
+    assert.equal(code, 0, stderr);
+    assert.equal(stdout.trim(), outFile);
+    assert.match(fs.readFileSync(outFile, 'utf-8'), /Stubbed transcript\./);
+  });
+
+  it('-o is an alias for --output and a directory target writes <basename>.transcript.md', async () => {
+    const audio = makeAudio('meeting.mp3');
+    const outDir = path.join(transcriptDataPath, 'transcripts-out');
+    fs.mkdirSync(outDir, { recursive: true });
+
+    const { stdout, stderr, code } = await runCli(['transcript', audio, '-o', outDir]);
+    assert.equal(code, 0, stderr);
+    const expected = path.join(outDir, 'meeting.transcript.md');
+    assert.equal(stdout.trim(), expected);
+    assert.match(fs.readFileSync(expected, 'utf-8'), /Stubbed transcript\./);
+  });
+
+  it('accepts --prompt and still emits the transcript on stdout', async () => {
+    const audio = makeAudio('with-prompt.mp3');
+    const { stdout, stderr, code } = await runCli([
+      'transcript',
+      audio,
+      '--prompt',
+      'Translate to English while transcribing',
+    ]);
+    assert.equal(code, 0, stderr);
+    assert.match(stdout, /Stubbed transcript\./);
+  });
+
+  it('errors when no audio file is given', async () => {
+    const { stderr, code } = await runCli(['transcript']);
+    assert.equal(code, 1);
+    assert.match(stderr, /No audio file specified/);
+  });
+
+  it('errors when the audio file does not exist', async () => {
+    const { stderr, code } = await runCli(['transcript', '/nonexistent/path/audio.mp3']);
+    assert.equal(code, 1);
+    assert.match(stderr, /File not found/);
+  });
+
+  it('errors when the output parent directory does not exist', async () => {
+    const audio = makeAudio('bad-parent.mp3');
+    const bogus = path.join(transcriptDataPath, 'no-such-dir', 'out.txt');
+    const { stderr, code } = await runCli(['transcript', audio, '--output', bogus]);
+    assert.equal(code, 1);
+    assert.match(stderr, /Output directory does not exist/);
+  });
+});
+
 describe(
   'listener merge (CLI integration)',
   { skip: !ffmpegPath ? 'ffmpeg not installed' : undefined },

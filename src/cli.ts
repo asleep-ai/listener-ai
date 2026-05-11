@@ -46,7 +46,9 @@ const VERSION = (() => {
 })();
 
 const USAGE_TEXT =
-  'Usage: listener <file> [--output <dir>]    Transcribe an audio file\n' +
+  'Usage: listener <file> [--output <dir>]    Transcribe an audio file into a meeting note\n' +
+  '       listener transcript <file> [--output <path>] [--prompt <text>]\n' +
+  '                                           Transcribe to plain text only (no summary)\n' +
   '       listener list [--limit <n>]         List past transcriptions\n' +
   '       listener show <ref>                 Print summary to stdout\n' +
   '       listener export <ref> [<path>] [--json] [--transcript]\n' +
@@ -64,7 +66,10 @@ const USAGE_TEXT =
   '<ref> is a number from `listener list` or a folder name.\n' +
   '\n' +
   'Options:\n' +
-  '  --output <dir>   Parent directory for the output folder\n' +
+  '  --output, -o <path>\n' +
+  '                   Parent directory for the output folder (transcribe);\n' +
+  '                   destination file or directory (transcript)\n' +
+  '  --prompt <text>  Override the default transcription instruction (transcript)\n' +
   '  --limit <n>      Max results (0 = all, default: 20)\n' +
   '  --json           Export as JSON instead of markdown\n' +
   '  --transcript     Include transcript body (export: append; search: widen scope)\n' +
@@ -726,6 +731,120 @@ async function handleAsk(args: string[]): Promise<void> {
   }
 }
 
+async function handleTranscript(args: string[]): Promise<void> {
+  let filePath: string | undefined;
+  let outputArg: string | undefined;
+  let promptText: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if ((a === '--output' || a === '-o') && i + 1 < args.length) {
+      outputArg = args[++i];
+      continue;
+    }
+    if (a === '--prompt' && i + 1 < args.length) {
+      promptText = args[++i];
+      continue;
+    }
+    if (a.startsWith('-')) {
+      process.stderr.write(`Error: Unknown option: ${a}\n`);
+      process.exit(1);
+    }
+    if (filePath) {
+      process.stderr.write(`Error: Unexpected argument: ${a}\n`);
+      process.exit(1);
+    }
+    filePath = a;
+  }
+
+  if (!filePath) {
+    process.stderr.write(
+      'Error: No audio file specified. Usage: listener transcript <file> [--output <path>] [--prompt <text>]\n',
+    );
+    process.exit(1);
+  }
+
+  filePath = path.resolve(filePath);
+
+  if (!fs.existsSync(filePath)) {
+    process.stderr.write(`Error: File not found: ${filePath}\n`);
+    process.exit(1);
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  if (!SUPPORTED_EXTENSIONS.has(ext)) {
+    process.stderr.write(`Error: Unsupported file type: ${ext}\n`);
+    process.stderr.write(`Supported formats: ${[...SUPPORTED_EXTENSIONS].join(', ')}\n`);
+    process.exit(1);
+  }
+
+  const dataPath = getDataPath();
+  const config = new ConfigService(dataPath);
+  const apiKey = config.getGeminiApiKey();
+  if (!apiKey) {
+    process.stderr.write(
+      'Error: Gemini API key not found.\n' +
+        'Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n',
+    );
+    process.exit(1);
+  }
+
+  // Resolve --output before the expensive transcription so we fail fast on a
+  // bad path. Existing directory => <dir>/<basename>.transcript.md.
+  // Anything else => the path itself, treated as a file.
+  let outputPath: string | undefined;
+  if (outputArg) {
+    const resolved = path.resolve(outputArg);
+    let isDir = false;
+    try {
+      isDir = fs.statSync(resolved).isDirectory();
+    } catch {
+      // ENOENT or similar: treat as a file path, validated below.
+    }
+    if (isDir) {
+      outputPath = path.join(resolved, `${path.basename(filePath, ext)}.transcript.md`);
+    } else {
+      outputPath = resolved;
+      const parent = path.dirname(outputPath);
+      if (!fs.existsSync(parent)) {
+        process.stderr.write(`Error: Output directory does not exist: ${parent}\n`);
+        process.exit(1);
+      }
+    }
+  }
+
+  const gemini = new GeminiService({
+    apiKey,
+    dataPath,
+    knownWords: config.getKnownWords(),
+    proModel: config.getGeminiModel(),
+    flashModel: config.getGeminiFlashModel(),
+  });
+
+  process.stderr.write(`Processing: ${filePath}\n`);
+
+  const result = await gemini.transcribeAudio(
+    filePath,
+    (_percent, message) => {
+      process.stderr.write(`  ${message}\n`);
+    },
+    undefined,
+    undefined,
+    { transcriptOnly: true, transcriptionPrompt: promptText },
+  );
+
+  if (outputPath) {
+    fs.writeFileSync(outputPath, result.transcript, 'utf-8');
+    process.stderr.write('Done.\n');
+    process.stdout.write(`${outputPath}\n`);
+  } else {
+    // Wait for the OS to drain the write before returning, so multi-MB
+    // transcripts piped to a slow consumer are not truncated on process exit.
+    const out = result.transcript.endsWith('\n') ? result.transcript : `${result.transcript}\n`;
+    await new Promise<void>((resolve) => process.stdout.write(out, () => resolve()));
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
@@ -777,12 +896,17 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === 'transcript') {
+    await handleTranscript(args.slice(1));
+    return;
+  }
+
   // Parse arguments
   let filePath: string | undefined;
   let outputDir: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--output' && i + 1 < args.length) {
+    if ((args[i] === '--output' || args[i] === '-o') && i + 1 < args.length) {
       outputDir = args[++i];
     } else if (args[i].startsWith('-')) {
       process.stderr.write(`Error: Unknown option: ${args[i]}\n`);

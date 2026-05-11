@@ -41,6 +41,11 @@ listener config set notionDatabaseId <your-id>
 ```bash
 listener recording.mp3                # Transcribe to default output dir
 listener recording.m4a --output ./    # Transcribe to current directory
+listener transcript recording.wav     # Print transcript to stdout (no summary)
+listener transcript recording.wav -o out.txt
+                                      # Write transcript to a file
+listener transcript recording.wav --prompt "Translate to English while transcribing"
+                                      # Override the default transcription instruction
 listener config list                  # Show all config values (secrets masked)
 listener config get <key>             # Print one config value
 listener config set <key> <value>     # Set a config value
