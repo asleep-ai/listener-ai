@@ -48,6 +48,25 @@
 
       <div id="recordingTime" class="recording-time">00:00</div>
 
+      <div id="liveNotesPanel" class="live-notes-panel" style="display: none;">
+        <div class="live-notes-header">
+          <span class="live-notes-title">🗒️ Highlights</span>
+          <button type="button" id="liveNoteFlagButton" class="live-note-flag-button" title="Add a timestamped flag">
+            🏴 Flag
+          </button>
+        </div>
+        <ul id="liveNotesList" class="live-notes-list" aria-live="polite"></ul>
+        <p id="liveNotesEmpty" class="live-notes-empty">No highlights yet. Hit Flag to mark a moment, or type below.</p>
+        <input
+          type="text"
+          id="liveNoteInput"
+          class="live-note-input"
+          placeholder="Type a note and press Enter -- captures the current time"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </div>
+
       <div class="auto-mode-container">
         <label class="toggle-container">
           <input type="checkbox" id="autoModeToggle">

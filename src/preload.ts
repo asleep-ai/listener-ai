@@ -1,11 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { LiveNote } from './outputService';
 
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
   startRecording: (payload: { title: string; mimeType: string }) =>
     ipcRenderer.invoke('start-recording', payload),
   sendRecordingChunk: (data: ArrayBuffer) => ipcRenderer.send('recording-chunk', data),
-  stopRecording: () => ipcRenderer.invoke('stop-recording'),
+  stopRecording: (opts?: { liveNotes?: LiveNote[] }) => ipcRenderer.invoke('stop-recording', opts),
   abortRecording: () => ipcRenderer.invoke('abort-recording'),
   onRecordingStatus: (callback: (status: string) => void) => {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
@@ -27,7 +28,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     slackAutoShare?: boolean;
   }) => ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
-  transcribeAudio: (filePath: string) => ipcRenderer.invoke('transcribe-audio', filePath),
+  transcribeAudio: (filePath: string, liveNotes?: LiveNote[]) =>
+    ipcRenderer.invoke('transcribe-audio', filePath, liveNotes),
   uploadToNotion: (data: {
     title: string;
     transcriptionData: any;

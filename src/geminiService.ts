@@ -4,9 +4,75 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { GoogleGenAI } from '@google/genai';
 import { mimeTypeForExtension } from './audioFormats';
+import { formatOffsetTimestamp, type LiveNote } from './outputService';
 import { FFmpegManager } from './services/ffmpegManager';
 
 const execFileAsync = promisify(execFile);
+
+// Append a section to the summary prompt instructing Gemini to enrich each
+// user-flagged moment with a subtitle + categorized bullets, returned as a
+// `highlights` array on the JSON response. Returns '' when there's nothing to
+// enrich -- prompt stays untouched in that case so we don't pay for empty
+// instructions.
+function buildHighlightsPromptBlock(notes: LiveNote[]): string {
+  if (notes.length === 0) return '';
+  const lines = notes.map(
+    (n) =>
+      `- offsetMs=${n.offsetMs}, timestamp=${formatOffsetTimestamp(n.offsetMs)}, userText=${JSON.stringify(n.text)}`,
+  );
+  return `In addition, the user flagged the following moments during the meeting. For each note, produce a structured analysis tied to that moment in the transcript:
+
+${lines.join('\n')}
+
+For every flagged moment above, write one entry in a JSON array named "highlights". Each entry must include:
+- "offsetMs": the exact integer from the input
+- "userText": the user's typed text, copied verbatim
+- "subtitle": a short topic label in Korean (3-7 words) summarising what was being discussed at that timestamp
+- "bullets": 2-5 short Korean bullet strings categorising the discussion at that point. Prefix each bullet with one of these categories when applicable, omitting categories that don't fit: "결정 사항:", "주요 인사이트:", "실행 항목:", "식별된 리스크:". If none of the categories fit, just write the bullet without a prefix.
+
+Use the transcript as the ground truth -- if the user's typed text doesn't clearly match anything in the transcript, fall back to the meeting content nearest the given timestamp. Return the highlights array as an additional key alongside the other fields in the JSON.`;
+}
+
+function mergeHighlights(
+  liveNotes: LiveNote[] | undefined,
+  raw: unknown,
+): HighlightEntry[] | undefined {
+  if (!liveNotes || liveNotes.length === 0) return undefined;
+  // Index Gemini's returned highlights by offsetMs so we can attach
+  // enrichment to the matching user note. Treat anything malformed as
+  // "no enrichment for that note" -- the bare offset+userText still
+  // round-trips so the user's data is never lost.
+  const byOffset = new Map<number, { subtitle?: string; bullets?: string[] }>();
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue;
+      const offsetMs = Number((item as { offsetMs?: unknown }).offsetMs);
+      if (!Number.isFinite(offsetMs)) continue;
+      const subtitleRaw = (item as { subtitle?: unknown }).subtitle;
+      const bulletsRaw = (item as { bullets?: unknown }).bullets;
+      const subtitle =
+        typeof subtitleRaw === 'string' && subtitleRaw.trim().length > 0
+          ? subtitleRaw.trim()
+          : undefined;
+      const bullets = Array.isArray(bulletsRaw)
+        ? bulletsRaw.map((b) => (typeof b === 'string' ? b.trim() : '')).filter((b) => b.length > 0)
+        : undefined;
+      byOffset.set(offsetMs, {
+        subtitle,
+        bullets: bullets && bullets.length > 0 ? bullets : undefined,
+      });
+    }
+  }
+  return liveNotes.map((note) => {
+    const enrichment = byOffset.get(note.offsetMs);
+    return {
+      offsetMs: note.offsetMs,
+      userText: note.text,
+      subtitle: enrichment?.subtitle,
+      bullets: enrichment?.bullets,
+    };
+  });
+}
 
 export interface TranscriptionResult {
   transcript: string;
@@ -16,6 +82,22 @@ export interface TranscriptionResult {
   emoji: string;
   suggestedTitle?: string;
   customFields?: Record<string, unknown>;
+  // Notes captured live by the user during the recording. Not produced by
+  // Gemini -- attached by main after transcription returns.
+  liveNotes?: LiveNote[];
+  // Plaud-style enriched view of the user's live notes: each entry pairs the
+  // user-typed text with an AI-generated subtitle + categorized bullets that
+  // describe what was being discussed around that moment in the meeting.
+  // Pure flag-only notes (empty text) round-trip as `userText: ""` with no
+  // subtitle/bullets -- they remain bare timestamp markers.
+  highlights?: HighlightEntry[];
+}
+
+export interface HighlightEntry {
+  offsetMs: number;
+  userText: string;
+  subtitle?: string;
+  bullets?: string[];
 }
 
 export interface GeminiServiceOptions {
@@ -64,6 +146,7 @@ export class GeminiService {
     audioFilePath: string,
     progressCallback?: (percent: number, message: string) => void,
     summaryPrompt?: string,
+    liveNotes?: LiveNote[],
   ): Promise<TranscriptionResult> {
     // Integration-test escape hatch: avoid the real Gemini call so tests can
     // exercise the surrounding pipeline (CLI parsing, IPC, ffmpeg, save) for
@@ -109,6 +192,7 @@ export class GeminiService {
         duration,
         progressCallback,
         summaryPrompt,
+        liveNotes,
       );
     } catch (error) {
       console.error('Error transcribing audio:', error);
@@ -280,6 +364,7 @@ export class GeminiService {
     duration: number,
     progressCallback?: (percent: number, message: string) => void,
     customSummaryPrompt?: string,
+    liveNotes?: LiveNote[],
   ): Promise<TranscriptionResult> {
     try {
       let fullTranscript = '';
@@ -304,7 +389,7 @@ export class GeminiService {
         progressCallback(85, 'Generating summary and key points...');
       }
 
-      const summaryPrompt =
+      const basePrompt =
         customSummaryPrompt ||
         `Based on this meeting transcript, provide:
 
@@ -322,6 +407,10 @@ Return as JSON:
   "actionItems": ["action 1", "action 2"],
   "emoji": "📝"
 }`;
+
+      const enrichableNotes = (liveNotes ?? []).filter((n) => (n.text ?? '').trim().length > 0);
+      const highlightsBlock = buildHighlightsPromptBlock(enrichableNotes);
+      const summaryPrompt = highlightsBlock ? `${basePrompt}\n\n${highlightsBlock}` : basePrompt;
 
       const summaryResult = await this.ai.models.generateContent({
         model: this.proModel,
@@ -348,12 +437,15 @@ Return as JSON:
         'keyPoints',
         'actionItems',
         'emoji',
+        'highlights',
       ]);
       const customFields: Record<string, unknown> = {};
+      let rawHighlights: unknown;
 
       try {
         const parsed = JSON.parse(summaryText);
         summaryData = parsed;
+        rawHighlights = (parsed as { highlights?: unknown }).highlights;
 
         // Extract custom fields (any keys not in the known set)
         for (const [key, value] of Object.entries(parsed)) {
@@ -370,6 +462,8 @@ Return as JSON:
         }
       }
 
+      const highlights = mergeHighlights(liveNotes, rawHighlights);
+
       if (progressCallback) {
         progressCallback(95, 'Finalizing results...');
       }
@@ -382,6 +476,7 @@ Return as JSON:
         emoji: summaryData.emoji,
         suggestedTitle: summaryData.suggestedTitle,
         customFields: Object.keys(customFields).length > 0 ? customFields : undefined,
+        highlights,
       };
     } catch (error) {
       console.error('Error in two-step transcription:', error);

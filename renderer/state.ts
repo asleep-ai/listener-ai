@@ -6,6 +6,11 @@
 // (lines ~34-57, 262, 292-296). Field names are preserved for greppability
 // against the original code during review.
 
+export type LiveNote = {
+  offsetMs: number;
+  text: string;
+};
+
 export type RecorderState = {
   isRecording: boolean;
   recordingStartTime: number | null;
@@ -29,6 +34,10 @@ export type RecorderState = {
 
   // System-audio cleanup (set by createSystemAudioSource).
   systemAudioCleanup: (() => void | Promise<void>) | null;
+
+  // Timestamped notes captured while recording. Cleared on start. Forwarded
+  // to main via transcribeAudio so they land in summary.md + Notion.
+  liveNotes: LiveNote[];
 };
 
 export const state: RecorderState = {
@@ -45,6 +54,7 @@ export const state: RecorderState = {
   graphHead: null,
   chunkSendChain: Promise.resolve(),
   systemAudioCleanup: null,
+  liveNotes: [],
 };
 
 // DOM references resolved once at DOMContentLoaded, used by many UI modules.

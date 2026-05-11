@@ -13,6 +13,8 @@ import {
   getTranscriptionsDir,
   listTranscriptions,
   parseFrontmatter,
+  parseHighlightsField,
+  parseLiveNotesField,
   readTranscription,
   sanitizeForPath,
   saveTranscription,
@@ -436,6 +438,8 @@ async function handleExport(args: string[]): Promise<void> {
         /* ignore */
       }
     }
+    const liveNotes = parseLiveNotesField(meta.liveNotes);
+    const highlights = parseHighlightsField(meta.highlights);
     const obj: Record<string, unknown> = {
       title: meta.title || '',
       transcribedAt: meta.transcribedAt || '',
@@ -443,6 +447,8 @@ async function handleExport(args: string[]): Promise<void> {
       keyPoints: meta.keyPoints || [],
       actionItems: meta.actionItems || [],
       customFields,
+      ...(liveNotes ? { liveNotes } : {}),
+      ...(highlights ? { highlights } : {}),
     };
     if (includeTranscript) {
       obj.transcript = meta.transcript || '';

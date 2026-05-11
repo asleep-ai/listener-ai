@@ -1,7 +1,7 @@
 import { Client } from '@notionhq/client';
 import type { BlockObjectRequest } from '@notionhq/client/build/src/api-endpoints';
 import type { TranscriptionResult } from './geminiService';
-import { camelToLabel } from './outputService';
+import { camelToLabel, formatOffsetTimestamp } from './outputService';
 
 export interface NotionConfig {
   apiKey: string;
@@ -138,6 +138,74 @@ export class NotionService {
             },
           } as BlockObjectRequest);
         });
+      }
+
+      // Highlights section -- prefer the AI-enriched view (per-moment title +
+      // subtitle + categorized bullets, Plaud-style) when Gemini populated it,
+      // and fall back to the bare bullet list when only the raw liveNotes are
+      // available (e.g. pure flags with no typed text).
+      const enrichedHighlights = transcriptionResult.highlights?.length
+        ? transcriptionResult.highlights
+        : null;
+      const fallbackNotes = transcriptionResult.liveNotes?.length
+        ? transcriptionResult.liveNotes
+        : null;
+      if (enrichedHighlights || fallbackNotes) {
+        children.push({
+          type: 'heading_2',
+          heading_2: {
+            rich_text: [{ type: 'text', text: { content: '🗒️ Highlights' } }],
+          },
+        } as BlockObjectRequest);
+        if (enrichedHighlights) {
+          for (const h of enrichedHighlights) {
+            const ts = formatOffsetTimestamp(h.offsetMs);
+            const title = (h.userText ?? '').trim();
+            const headingContent = (title ? `[${ts}] ${title}` : `[${ts}] 🏴`).slice(0, 1900);
+            children.push({
+              type: 'heading_3',
+              heading_3: {
+                rich_text: [{ type: 'text', text: { content: headingContent } }],
+              },
+            } as BlockObjectRequest);
+            if (h.subtitle?.trim()) {
+              children.push({
+                type: 'paragraph',
+                paragraph: {
+                  rich_text: [
+                    {
+                      type: 'text',
+                      text: { content: h.subtitle.trim().slice(0, 1900) },
+                      annotations: { italic: true },
+                    },
+                  ],
+                },
+              } as BlockObjectRequest);
+            }
+            if (h.bullets?.length) {
+              for (const bullet of h.bullets) {
+                children.push({
+                  type: 'bulleted_list_item',
+                  bulleted_list_item: {
+                    rich_text: [{ type: 'text', text: { content: bullet.slice(0, 1900) } }],
+                  },
+                } as BlockObjectRequest);
+              }
+            }
+          }
+        } else if (fallbackNotes) {
+          for (const note of fallbackNotes) {
+            const ts = formatOffsetTimestamp(note.offsetMs);
+            const text = (note.text ?? '').trim();
+            const content = text ? `[${ts}] ${text}`.slice(0, 1900) : `[${ts}] 🏴`;
+            children.push({
+              type: 'bulleted_list_item',
+              bulleted_list_item: {
+                rich_text: [{ type: 'text', text: { content } }],
+              },
+            } as BlockObjectRequest);
+          }
+        }
       }
 
       // Add custom fields

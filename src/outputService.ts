@@ -1,6 +1,29 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type { TranscriptionResult } from './geminiService';
+import type { HighlightEntry, TranscriptionResult } from './geminiService';
+
+/** One timestamped note captured while recording. Empty `text` = bare flag. */
+export interface LiveNote {
+  offsetMs: number;
+  text: string;
+}
+
+/**
+ * Format a millisecond offset as `mm:ss` (or `hh:mm:ss` when the offset crosses
+ * one hour) — used by every Highlights-rendering sink (summary.md, Notion,
+ * modal, CLI) and by the Gemini prompt so the LLM sees the same coordinate
+ * system as the saved output.
+ */
+export function formatOffsetTimestamp(offsetMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(offsetMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return hours > 0
+    ? `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`
+    : `${pad(minutes)}:${pad(seconds)}`;
+}
 
 export function sanitizeForPath(name: string): string {
   return name
@@ -32,6 +55,8 @@ export function formatSummary(
   result: TranscriptionResult,
   title: string,
   mergedFrom?: string[],
+  liveNotes?: LiveNote[],
+  highlights?: HighlightEntry[],
 ): string {
   const lines: string[] = [];
   lines.push(`# ${title}\n`);
@@ -66,6 +91,36 @@ export function formatSummary(
       lines.push(`- ${item}`);
     }
     lines.push('');
+  }
+
+  // Prefer the AI-enriched "highlights" view when present -- it carries the
+  // same user notes plus per-moment subtitle/bullets. Fall back to the bare
+  // bullet list of liveNotes when Gemini didn't produce highlights.
+  const enriched = highlights && highlights.length > 0 ? highlights : null;
+  if (enriched || liveNotes?.length) {
+    lines.push('## 🗒️ Highlights\n');
+    if (enriched) {
+      for (const h of enriched) {
+        const ts = formatOffsetTimestamp(h.offsetMs);
+        const title = (h.userText ?? '').trim();
+        lines.push(title ? `### [${ts}] ${title}` : `### [${ts}] 🏴`);
+        if (h.subtitle?.trim()) {
+          lines.push(`*${h.subtitle.trim()}*`);
+        }
+        if (h.bullets?.length) {
+          lines.push('');
+          for (const b of h.bullets) lines.push(`- ${b}`);
+        }
+        lines.push('');
+      }
+    } else {
+      for (const note of liveNotes!) {
+        const ts = formatOffsetTimestamp(note.offsetMs);
+        const text = note.text?.trim();
+        lines.push(text ? `- [${ts}] ${text}` : `- [${ts}] 🏴`);
+      }
+      lines.push('');
+    }
   }
 
   if (result.customFields) {
@@ -107,6 +162,8 @@ interface SummaryFrontmatter {
   transcribedAt: string;
   emoji?: string;
   mergedFrom?: string[];
+  liveNotes?: LiveNote[];
+  highlights?: HighlightEntry[];
   notionPageUrl?: string;
   slackSentAt?: string;
   slackError?: string;
@@ -141,6 +198,12 @@ function buildFrontmatter(meta: SummaryFrontmatter): string {
   if (meta.mergedFrom?.length) {
     lines.push('mergedFrom:');
     for (const src of meta.mergedFrom) lines.push(`  - ${yamlQuote(src)}`);
+  }
+  if (meta.liveNotes?.length) {
+    lines.push(`liveNotes: ${yamlQuote(JSON.stringify(meta.liveNotes))}`);
+  }
+  if (meta.highlights?.length) {
+    lines.push(`highlights: ${yamlQuote(JSON.stringify(meta.highlights))}`);
   }
   if (meta.notionPageUrl) {
     lines.push(`notionPageUrl: ${yamlQuote(meta.notionPageUrl)}`);
@@ -214,6 +277,58 @@ export function parseFrontmatter(content: string): { meta: Record<string, unknow
   return { meta, body };
 }
 
+export function parseLiveNotesField(raw: unknown): LiveNote[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!Array.isArray(parsed)) return undefined;
+    const notes: LiveNote[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const offsetMs = Number((item as { offsetMs?: unknown }).offsetMs);
+      const text = (item as { text?: unknown }).text;
+      if (!Number.isFinite(offsetMs)) continue;
+      notes.push({
+        offsetMs: Math.max(0, Math.floor(offsetMs)),
+        text: typeof text === 'string' ? text : '',
+      });
+    }
+    return notes.length > 0 ? notes : undefined;
+  } catch (e) {
+    console.warn('Failed to parse liveNotes from frontmatter:', e);
+    return undefined;
+  }
+}
+
+export function parseHighlightsField(raw: unknown): HighlightEntry[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!Array.isArray(parsed)) return undefined;
+    const entries: HighlightEntry[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const offsetMs = Number((item as { offsetMs?: unknown }).offsetMs);
+      if (!Number.isFinite(offsetMs)) continue;
+      const userText = (item as { userText?: unknown }).userText;
+      const subtitle = (item as { subtitle?: unknown }).subtitle;
+      const bullets = (item as { bullets?: unknown }).bullets;
+      entries.push({
+        offsetMs: Math.max(0, Math.floor(offsetMs)),
+        userText: typeof userText === 'string' ? userText : '',
+        subtitle: typeof subtitle === 'string' && subtitle.trim().length > 0 ? subtitle : undefined,
+        bullets: Array.isArray(bullets)
+          ? bullets.map((b) => (typeof b === 'string' ? b : '')).filter((b) => b.length > 0)
+          : undefined,
+      });
+    }
+    return entries.length > 0 ? entries : undefined;
+  } catch (e) {
+    console.warn('Failed to parse highlights from frontmatter:', e);
+    return undefined;
+  }
+}
+
 function yamlUnquote(value: string): string {
   if (value.startsWith('"') && value.endsWith('"')) {
     return value
@@ -237,6 +352,11 @@ export interface SaveTranscriptionOptions {
   outputDir?: string; // override parent dir (for CLI --output)
   dataPath: string; // app data path (default location)
   mergedFrom?: string[]; // source folder names when this note was created by merging others
+  liveNotes?: LiveNote[]; // timestamped notes captured during recording
+}
+
+function getResultHighlights(result: TranscriptionResult): HighlightEntry[] | undefined {
+  return result.highlights && result.highlights.length > 0 ? result.highlights : undefined;
 }
 
 /**
@@ -251,6 +371,7 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
 
   const transcribedAt = new Date().toISOString();
 
+  const highlights = getResultHighlights(opts.result);
   // summary.md with frontmatter (stores all raw data for machine reading)
   const frontmatter = buildFrontmatter({
     title: opts.title,
@@ -264,8 +385,16 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
     transcribedAt,
     emoji: opts.result.emoji,
     mergedFrom: opts.mergedFrom,
+    liveNotes: opts.liveNotes,
+    highlights,
   });
-  const summaryBody = formatSummary(opts.result, opts.title, opts.mergedFrom);
+  const summaryBody = formatSummary(
+    opts.result,
+    opts.title,
+    opts.mergedFrom,
+    opts.liveNotes,
+    highlights,
+  );
   fs.writeFileSync(
     path.join(folderPath, 'summary.md'),
     `${frontmatter}\n\n${summaryBody}`,
@@ -371,6 +500,8 @@ export interface ReadTranscriptionResult {
   transcribedAt?: string;
   emoji?: string;
   mergedFrom?: string[];
+  liveNotes?: LiveNote[];
+  highlights?: HighlightEntry[];
   notionPageUrl?: string;
   slackSentAt?: string;
   slackError?: string;
@@ -402,6 +533,9 @@ export async function readTranscription(
       }
     }
 
+    const liveNotes = parseLiveNotesField(meta.liveNotes);
+    const highlights = parseHighlightsField(meta.highlights);
+
     return {
       title: (meta.title as string) || path.basename(folderPath),
       suggestedTitle: meta.suggestedTitle as string | undefined,
@@ -414,6 +548,8 @@ export async function readTranscription(
       transcribedAt: meta.transcribedAt as string | undefined,
       emoji: meta.emoji as string | undefined,
       mergedFrom: meta.mergedFrom as string[] | undefined,
+      liveNotes,
+      highlights,
       notionPageUrl: meta.notionPageUrl as string | undefined,
       slackSentAt: meta.slackSentAt as string | undefined,
       slackError: meta.slackError as string | undefined,
@@ -454,6 +590,9 @@ export async function updateTranscriptionStatus(
     }
   }
 
+  const liveNotes = parseLiveNotesField(meta.liveNotes);
+  const highlights = parseHighlightsField(meta.highlights);
+
   // Spread first so any unknown frontmatter keys (added by future writers, or
   // by hand-edits) survive the round-trip; named fields override with proper
   // typing and defaults.
@@ -464,6 +603,8 @@ export async function updateTranscriptionStatus(
     transcript: (meta.transcript as string) || '',
     transcribedAt: (meta.transcribedAt as string) || new Date().toISOString(),
     customFields,
+    liveNotes,
+    highlights,
   };
 
   applyStatusUpdate(merged, 'notionPageUrl', updates.notionPageUrl);

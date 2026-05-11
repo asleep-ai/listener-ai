@@ -31,6 +31,58 @@ export function escapeHtml(str: unknown): string {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type TranscriptionData = any;
 
+function formatLiveNoteTimestamp(offsetMs: unknown): string {
+  const n = Number(offsetMs);
+  const totalSeconds = Number.isFinite(n) ? Math.max(0, Math.floor(n / 1000)) : 0;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function liveNotesToLines(liveNotes: unknown): string[] {
+  if (!Array.isArray(liveNotes) || liveNotes.length === 0) return [];
+  const lines: string[] = [];
+  for (const note of liveNotes) {
+    if (!note || typeof note !== 'object') continue;
+    const ts = formatLiveNoteTimestamp((note as { offsetMs?: unknown }).offsetMs);
+    const raw = (note as { text?: unknown }).text;
+    const text = typeof raw === 'string' ? raw.trim() : '';
+    lines.push(text ? `- [${ts}] ${text}` : `- [${ts}] 🏴`);
+  }
+  return lines;
+}
+
+function highlightsToLines(highlights: unknown): string[] {
+  if (!Array.isArray(highlights) || highlights.length === 0) return [];
+  const lines: string[] = [];
+  for (const h of highlights) {
+    if (!h || typeof h !== 'object') continue;
+    const ts = formatLiveNoteTimestamp((h as { offsetMs?: unknown }).offsetMs);
+    const userText = (h as { userText?: unknown }).userText;
+    const title = typeof userText === 'string' ? userText.trim() : '';
+    lines.push(title ? `### [${ts}] ${title}` : `### [${ts}] 🏴`);
+    const subtitle = (h as { subtitle?: unknown }).subtitle;
+    if (typeof subtitle === 'string' && subtitle.trim()) {
+      lines.push(`*${subtitle.trim()}*`);
+    }
+    const bullets = (h as { bullets?: unknown }).bullets;
+    if (Array.isArray(bullets) && bullets.length > 0) {
+      lines.push('');
+      for (const b of bullets) {
+        if (typeof b === 'string' && b.trim()) lines.push(`- ${b}`);
+      }
+    }
+    lines.push('');
+  }
+  return lines;
+}
+
+function renderHighlightLines(data: TranscriptionData): string[] {
+  const enriched = highlightsToLines(data.highlights);
+  if (enriched.length > 0) return enriched;
+  return liveNotesToLines(data.liveNotes);
+}
+
 // Convert structured transcription data to a markdown string
 export function structuredToMarkdown(data: TranscriptionData, section: string): string {
   const lines: string[] = [];
@@ -59,6 +111,15 @@ export function structuredToMarkdown(data: TranscriptionData, section: string): 
       for (const item of data.actionItems) {
         lines.push(`- ${item}`);
       }
+      lines.push('');
+    }
+  }
+
+  if (section === 'all' || section === 'livenotes') {
+    const noteLines = renderHighlightLines(data);
+    if (noteLines.length > 0) {
+      if (section === 'all') lines.push('## 🗒️ Highlights\n');
+      lines.push(...noteLines);
       lines.push('');
     }
   }
@@ -112,6 +173,15 @@ export function renderDynamicFields(data: TranscriptionData): void {
   }
   if (data.actionItems?.length) {
     fields.push({ key: 'actions', label: 'Action Items', value: data.actionItems });
+  }
+  const hasHighlights = Array.isArray(data.highlights) && data.highlights.length > 0;
+  const hasLiveNotes = Array.isArray(data.liveNotes) && data.liveNotes.length > 0;
+  if (hasHighlights || hasLiveNotes) {
+    fields.push({
+      key: 'livenotes',
+      label: '🗒️ Highlights',
+      value: hasHighlights ? data.highlights : data.liveNotes,
+    });
   }
   if (data.customFields) {
     for (const [key, value] of Object.entries(data.customFields)) {

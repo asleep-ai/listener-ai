@@ -9,6 +9,7 @@ import { setupAgentConfirmHandler, setupHomeChat, setupModalChat } from './ui/ch
 import { checkAndPromptForConfig, setupConfigModal } from './ui/config-modal';
 import { setupDragAndDrop, setupPasteListener } from './ui/drag-drop';
 import { setupHomeToggles } from './ui/home-toggles';
+import { setupLiveNotes } from './ui/live-notes';
 import { setupMicSelector } from './ui/mic-selector';
 import { setupNotifications } from './ui/notifications';
 import { setupPermissionStatus } from './ui/permission-status';
@@ -80,6 +81,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     // recorder before UI that triggers it, then UI modules in any order.
     setupNotifications();
     setupRecorder();
+    setupLiveNotes();
     setupHomeToggles();
     setupMicSelector();
     setupPermissionStatus();
