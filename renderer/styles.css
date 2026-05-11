@@ -360,6 +360,123 @@ h1 {
   display: block;
 }
 
+.live-notes-panel {
+  margin-top: 14px;
+  padding: 14px;
+  background: #f8fafc;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+}
+
+.live-notes-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.live-notes-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  letter-spacing: -0.005em;
+}
+
+.live-note-flag-button {
+  appearance: none;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: white;
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.live-note-flag-button:hover {
+  background: #eff6ff;
+  border-color: rgba(52, 152, 219, 0.5);
+}
+
+.live-note-flag-button:active {
+  background: #dbeafe;
+}
+
+.live-notes-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.live-note-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 8px;
+  background: white;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  border-radius: 6px;
+  font-size: 13px;
+  color: #0f172a;
+  line-height: 1.4;
+}
+
+.live-note-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.live-note-text {
+  flex: 1;
+  word-break: break-word;
+}
+
+.live-note-text--flag {
+  color: #64748b;
+}
+
+.live-notes-empty {
+  margin: 4px 0 0;
+  padding: 6px 4px;
+  font-size: 12px;
+  color: #94a3b8;
+  text-align: center;
+}
+
+.live-note-input {
+  margin-top: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 8px;
+  background: white;
+  color: #0f172a;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.live-note-input::placeholder {
+  color: #94a3b8;
+}
+
+.live-note-input:focus {
+  outline: none;
+  border-color: rgba(52, 152, 219, 0.55);
+  box-shadow: var(--focus-ring);
+}
+
 .recordings-section {
   background: white;
   border-radius: 12px;

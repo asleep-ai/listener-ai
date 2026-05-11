@@ -8,6 +8,13 @@ export interface NotionConfig {
   databaseId: string;
 }
 
+function formatLiveNoteTimestamp(offsetMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(offsetMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
 export class NotionService {
   private notion: Client;
   private databaseId: string;
@@ -138,6 +145,72 @@ export class NotionService {
             },
           } as BlockObjectRequest);
         });
+      }
+
+      // Highlights section -- prefer the AI-enriched view (per-moment title +
+      // subtitle + categorized bullets, Plaud-style) when Gemini populated it,
+      // and fall back to the bare bullet list when only the raw liveNotes are
+      // available (e.g. pure flags with no typed text).
+      if (transcriptionResult.highlights && transcriptionResult.highlights.length > 0) {
+        children.push({
+          type: 'heading_2',
+          heading_2: {
+            rich_text: [{ type: 'text', text: { content: '🗒️ Highlights' } }],
+          },
+        } as BlockObjectRequest);
+        for (const h of transcriptionResult.highlights) {
+          const ts = formatLiveNoteTimestamp(h.offsetMs);
+          const title = (h.userText ?? '').trim();
+          const headingContent = (title ? `[${ts}] ${title}` : `[${ts}] 🏴`).slice(0, 1900);
+          children.push({
+            type: 'heading_3',
+            heading_3: {
+              rich_text: [{ type: 'text', text: { content: headingContent } }],
+            },
+          } as BlockObjectRequest);
+          if (h.subtitle?.trim()) {
+            children.push({
+              type: 'paragraph',
+              paragraph: {
+                rich_text: [
+                  {
+                    type: 'text',
+                    text: { content: h.subtitle.trim().slice(0, 1900) },
+                    annotations: { italic: true },
+                  },
+                ],
+              },
+            } as BlockObjectRequest);
+          }
+          if (h.bullets?.length) {
+            for (const bullet of h.bullets) {
+              children.push({
+                type: 'bulleted_list_item',
+                bulleted_list_item: {
+                  rich_text: [{ type: 'text', text: { content: bullet.slice(0, 1900) } }],
+                },
+              } as BlockObjectRequest);
+            }
+          }
+        }
+      } else if (transcriptionResult.liveNotes && transcriptionResult.liveNotes.length > 0) {
+        children.push({
+          type: 'heading_2',
+          heading_2: {
+            rich_text: [{ type: 'text', text: { content: '🗒️ Highlights' } }],
+          },
+        } as BlockObjectRequest);
+        for (const note of transcriptionResult.liveNotes) {
+          const ts = formatLiveNoteTimestamp(note.offsetMs);
+          const text = (note.text ?? '').trim();
+          const content = text ? `[${ts}] ${text}`.slice(0, 1900) : `[${ts}] 🏴`;
+          children.push({
+            type: 'bulleted_list_item',
+            bulleted_list_item: {
+              rich_text: [{ type: 'text', text: { content } }],
+            },
+          } as BlockObjectRequest);
+        }
       }
 
       // Add custom fields

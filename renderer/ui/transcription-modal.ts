@@ -128,6 +128,8 @@ export function showSavedTranscript(
       suggestedTitle: metadata.suggestedTitle,
       customFields: metadata.customFields,
       emoji: metadata.emoji,
+      liveNotes: metadata.liveNotes,
+      highlights: metadata.highlights,
     };
     currentMeetingTitle = title;
     currentFilePath = filePath;

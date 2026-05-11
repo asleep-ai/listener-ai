@@ -32,6 +32,7 @@ import { NotionService } from './notionService';
 import {
   formatTimestamp,
   getTranscriptionsDir,
+  type LiveNote,
   readTranscription,
   sanitizeForPath,
   saveTranscription,
@@ -1069,7 +1070,7 @@ ipcMain.on('recording-chunk', (_event, data: ArrayBuffer | Uint8Array) => {
   }
 });
 
-ipcMain.handle('stop-recording', async () => {
+ipcMain.handle('stop-recording', async (_, opts?: { liveNotes?: unknown }) => {
   try {
     finalizeRecordingSession();
     const result = await audioRecorder.stopRecording();
@@ -1082,6 +1083,18 @@ ipcMain.handle('stop-recording', async () => {
         // Silently skip if ffmpeg isn't available — file still plays, transcription
         // pipeline is unaffected.
         await remuxRecordingHeader(result.filePath);
+
+        // Persist live notes alongside the audio so they survive even if the
+        // user transcribes later (auto-mode off). transcribe-audio falls back
+        // to this when its own arg is missing.
+        const liveNotes = sanitizeLiveNotes(opts?.liveNotes);
+        if (liveNotes && liveNotes.length > 0) {
+          try {
+            await metadataService.saveMetadata(result.filePath, { liveNotes });
+          } catch (err) {
+            console.error('Failed to persist live notes to metadata:', err);
+          }
+        }
       }
     }
     return result;
@@ -1180,6 +1193,28 @@ function isContainedTranscriptionPath(folderPath: string | undefined): folderPat
   return resolved === root || resolved.startsWith(root + path.sep);
 }
 
+// Validate + normalize the renderer's live-notes payload before it touches disk.
+// Renderer state is untrusted (compromised content scripts, future agent flows)
+// so this enforces shape + caps text length to keep summary.md/Notion sane.
+const LIVE_NOTE_MAX_TEXT = 2000;
+const LIVE_NOTE_MAX_COUNT = 500;
+function sanitizeLiveNotes(raw: unknown): LiveNote[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: LiveNote[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const offsetMs = Number((item as { offsetMs?: unknown }).offsetMs);
+    const text = (item as { text?: unknown }).text;
+    if (!Number.isFinite(offsetMs)) continue;
+    out.push({
+      offsetMs: Math.max(0, Math.floor(offsetMs)),
+      text: typeof text === 'string' ? text.slice(0, LIVE_NOTE_MAX_TEXT) : '',
+    });
+    if (out.length >= LIVE_NOTE_MAX_COUNT) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 // Tell the renderer the config has changed out-of-band so it can re-read and
 // re-render its UI state (toggle checkboxes etc.). Used by the agent flow.
 function broadcastConfigChanged(): void {
@@ -1264,9 +1299,23 @@ ipcMain.handle('get-meeting-status', async () => {
 });
 
 // Transcription handler
-ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
+ipcMain.handle('transcribe-audio', async (_, filePath: string, liveNotesRaw?: unknown) => {
   try {
     console.log('Transcription requested for:', filePath);
+    let liveNotes = sanitizeLiveNotes(liveNotesRaw);
+    if (!liveNotes || liveNotes.length === 0) {
+      // Fall back to whatever stop-recording persisted -- covers the
+      // record-now-transcribe-later flow when auto-mode is off.
+      try {
+        const existing = await metadataService.getMetadata(filePath);
+        const fromMetadata = sanitizeLiveNotes(existing?.liveNotes);
+        if (fromMetadata && fromMetadata.length > 0) {
+          liveNotes = fromMetadata;
+        }
+      } catch (err) {
+        console.warn('Failed to read live notes from metadata:', err);
+      }
+    }
 
     // Send progress update
     if (mainWindow) {
@@ -1305,9 +1354,20 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
     };
 
     const summaryPrompt = configService.getSummaryPrompt();
-    const result = await geminiService.transcribeAudio(filePath, progressCallback, summaryPrompt);
+    const result = await geminiService.transcribeAudio(
+      filePath,
+      progressCallback,
+      summaryPrompt,
+      liveNotes,
+    );
     console.log('Transcription completed successfully');
     console.log('Saving metadata for:', filePath);
+
+    // Attach renderer-captured notes so downstream consumers (Notion upload,
+    // re-render in the modal) can read them off the result object.
+    if (liveNotes && liveNotes.length > 0) {
+      result.liveNotes = liveNotes;
+    }
 
     // Save transcription files (summary.md + transcript.md)
     const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));
@@ -1318,6 +1378,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
         result,
         audioFilePath: filePath,
         dataPath: app.getPath('userData'),
+        liveNotes,
       });
       console.log('Transcription saved to:', transcriptionPath);
     } catch (error) {
@@ -1332,6 +1393,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
           suggestedTitle: result.suggestedTitle,
           transcriptionPath,
           customFields: result.customFields,
+          liveNotes,
           transcribedAt: new Date().toISOString(),
         });
       } else {
@@ -1344,6 +1406,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string) => {
           keyPoints: result.keyPoints,
           actionItems: result.actionItems,
           customFields: result.customFields,
+          liveNotes,
           transcribedAt: new Date().toISOString(),
         });
       }
@@ -1546,6 +1609,8 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
             actionItems: transcription.actionItems,
             customFields: transcription.customFields ?? metadata.customFields,
             emoji: transcription.emoji,
+            liveNotes: transcription.liveNotes ?? metadata.liveNotes,
+            highlights: transcription.highlights,
             notionPageUrl: transcription.notionPageUrl,
             slackSentAt: transcription.slackSentAt,
             slackError: transcription.slackError,

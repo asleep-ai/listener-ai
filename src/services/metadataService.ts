@@ -15,6 +15,7 @@ interface RecordingMetadata {
   suggestedTitle?: string;
   transcribedAt?: string;
   customFields?: Record<string, unknown>;
+  liveNotes?: Array<{ offsetMs: number; text: string }>;
 }
 
 export class MetadataService {

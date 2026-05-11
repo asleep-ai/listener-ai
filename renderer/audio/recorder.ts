@@ -2,6 +2,7 @@
 // auto-mode post-processing. Owns the click handler on the record button.
 
 import { getDom, state } from '../state';
+import { hideLiveNotesPanel, showLiveNotesPanel } from '../ui/live-notes';
 import { showNotification, showToast } from '../ui/notifications';
 import { refreshRecordingsList } from '../ui/recordings-list';
 import { buildProcessedStream, cleanupAudioState, pickRecordingMimeType } from './graph';
@@ -152,6 +153,7 @@ export async function startRecording(): Promise<void> {
   statusIndicator.classList.add('recording');
   statusText.textContent = 'Recording...';
   recordingTime.classList.add('active');
+  showLiveNotesPanel();
 
   startTimer();
 }
@@ -165,6 +167,7 @@ export function resetRecordingUI(): void {
   statusIndicator.classList.remove('recording');
   statusText.textContent = 'Ready to record';
   recordingTime.classList.remove('active');
+  hideLiveNotesPanel();
 }
 
 function pickMeetingTitle(recordingTitle: string, suggestedTitle?: string): string {
@@ -177,6 +180,7 @@ export async function processAutoMode(
   audioPath: string | undefined,
   recordingTitle: string,
   durationMs: number | undefined,
+  liveNotes?: Array<{ offsetMs: number; text: string }>,
 ): Promise<void> {
   const { autoModeToggle, recordButton, statusText } = getDom();
   if (!autoModeToggle.checked || !audioPath) return;
@@ -204,7 +208,7 @@ export async function processAutoMode(
 
   try {
     console.log('Auto mode: Starting transcription...');
-    const transcriptionResult = await window.electronAPI.transcribeAudio(audioPath);
+    const transcriptionResult = await window.electronAPI.transcribeAudio(audioPath, liveNotes);
 
     if (transcriptionResult.success) {
       console.log('Auto mode: Transcription complete');
@@ -300,21 +304,29 @@ export async function handleRecordingStopped(
   durationMs: number | undefined,
 ): Promise<void> {
   const { meetingTitle } = getDom();
+  // Snapshot before resetRecordingUI clears state.liveNotes via hideLiveNotesPanel.
+  const liveNotesSnapshot = state.liveNotes.length > 0 ? state.liveNotes.slice() : undefined;
   resetRecordingUI();
   const recordingTitle = meetingTitle.value.trim() || 'Untitled_Meeting';
   meetingTitle.value = '';
   await refreshRecordingsList();
-  await processAutoMode(audioPath, recordingTitle, durationMs);
+  await processAutoMode(audioPath, recordingTitle, durationMs, liveNotesSnapshot);
 }
 
 export async function stopRecording(): Promise<void> {
+  // Snapshot live notes before they get cleared by the UI reset. Passed to
+  // main so they're persisted alongside the audio file regardless of whether
+  // auto-mode kicks off transcription right away.
+  const liveNotesPayload =
+    state.liveNotes.length > 0 ? { liveNotes: state.liveNotes.slice() } : undefined;
+
   // If the recorder already transitioned to inactive on its own (e.g. USB mic
   // unplugged, stream ended, Chromium force-stopped encoding), still unwind the
   // session so the next recording isn't blocked by stuck state.
   if (!state.mediaRecorder || state.mediaRecorder.state === 'inactive') {
     cleanupAudioState();
     try {
-      const result = await window.electronAPI.stopRecording();
+      const result = await window.electronAPI.stopRecording(liveNotesPayload);
       if (result?.success) {
         await handleRecordingStopped(result.filePath, result.durationMs);
         return;
@@ -340,7 +352,7 @@ export async function stopRecording(): Promise<void> {
     await state.chunkSendChain;
     cleanupAudioState();
 
-    const result = await window.electronAPI.stopRecording();
+    const result = await window.electronAPI.stopRecording(liveNotesPayload);
 
     if (result.success) {
       await handleRecordingStopped(result.filePath, result.durationMs);

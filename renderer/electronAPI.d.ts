@@ -52,7 +52,7 @@ export type ElectronAPI = {
     filePath?: string;
   }>;
   sendRecordingChunk: (data: ArrayBuffer) => void;
-  stopRecording: () => Promise<{
+  stopRecording: (opts?: { liveNotes?: Array<{ offsetMs: number; text: string }> }) => Promise<{
     success: boolean;
     filePath?: string;
     durationMs?: number;
@@ -68,7 +68,10 @@ export type ElectronAPI = {
   }>;
   saveConfig: (config: ConfigPayload) => Promise<{ success: boolean; error?: string }>;
   getConfig: () => Promise<Record<string, unknown>>;
-  transcribeAudio: (filePath: string) => Promise<{
+  transcribeAudio: (
+    filePath: string,
+    liveNotes?: Array<{ offsetMs: number; text: string }>,
+  ) => Promise<{
     success: boolean;
     data?: any;
     newFilePath?: string;
