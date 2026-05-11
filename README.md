@@ -43,6 +43,7 @@ listener recording.mp3                # Transcribe to default output dir
 listener recording.m4a --output ./    # Transcribe to current directory
 listener recording.wav --transcript-only
                                       # Skip summary/key points/action items
+listener merge 1 2 --transcript-only  # Merge recordings and save transcript only
 listener config list                  # Show all config values (secrets masked)
 listener config get <key>             # Print one config value
 listener config set <key> <value>     # Set a config value

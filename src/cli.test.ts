@@ -251,5 +251,74 @@ describe(
       assert.ok(fs.existsSync(folderA), 'source folder A should be preserved');
       assert.ok(fs.existsSync(folderB), 'source folder B should be preserved');
     });
+
+    it('merges with --transcript-only and skips summary data', async () => {
+      const recordingsDir = path.join(dataPath, 'recordings');
+      fs.mkdirSync(recordingsDir, { recursive: true });
+
+      const audioA = await makeOpusWebm(ffmpegPath!, recordingsDir, 'transcriptOnlyA.webm', 440);
+      const audioB = await makeOpusWebm(ffmpegPath!, recordingsDir, 'transcriptOnlyB.webm', 880);
+
+      const folderA = saveTranscription({
+        title: 'Transcript Only Part One',
+        result: {
+          transcript: 'Part one body.',
+          summary: 'Part one summary.',
+          keyPoints: ['a1'],
+          actionItems: ['a-action'],
+          emoji: 'A',
+          suggestedTitle: 'Transcript Only Part One',
+        },
+        audioFilePath: audioA,
+        dataPath,
+      });
+      const folderB = saveTranscription({
+        title: 'Transcript Only Part Two',
+        result: {
+          transcript: 'Part two body.',
+          summary: 'Part two summary.',
+          keyPoints: ['b1'],
+          actionItems: ['b-action'],
+          emoji: 'B',
+          suggestedTitle: 'Transcript Only Part Two',
+        },
+        audioFilePath: audioB,
+        dataPath,
+      });
+
+      const env = {
+        ...process.env,
+        NODE_ENV: 'test',
+        LISTENER_DATA_PATH: dataPath,
+        LISTENER_TEST_MODE: '1',
+        GEMINI_API_KEY: 'test-mode-key',
+      };
+
+      const { stdout, stderr } = await execFileAsync(
+        'node',
+        [
+          cliPath,
+          'merge',
+          path.basename(folderA),
+          path.basename(folderB),
+          '--title',
+          'Transcript Only Merge',
+          '--transcript-only',
+        ],
+        { env },
+      );
+
+      const resultFolder = stdout.trim();
+      const transcript = fs.readFileSync(path.join(resultFolder, 'transcript.md'), 'utf-8');
+      const summary = fs.readFileSync(path.join(resultFolder, 'summary.md'), 'utf-8');
+
+      assert.match(transcript, /Stubbed transcript\./);
+      assert.match(summary, /^title: Transcript Only Merge$/m);
+      assert.match(summary, /## Sources/);
+      assert.doesNotMatch(summary, /Stubbed summary/);
+      assert.doesNotMatch(summary, /stub point/);
+      assert.doesNotMatch(summary, /stub action/);
+      assert.match(stderr, /Skipping summary generation/);
+    });
   },
 );

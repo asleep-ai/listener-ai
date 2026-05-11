@@ -77,7 +77,7 @@ export class GeminiService {
     if (process.env.LISTENER_TEST_MODE && process.env.NODE_ENV === 'test') {
       if (progressCallback) progressCallback(100, 'Stubbed transcription');
       if (options.transcriptOnly) {
-        if (progressCallback) progressCallback(95, 'Skipping summary generation...');
+        if (progressCallback) progressCallback(100, 'Skipping summary generation...');
         return {
           transcript: 'Stubbed transcript.',
           summary: '',
@@ -319,7 +319,7 @@ export class GeminiService {
 
       if (options.transcriptOnly) {
         if (progressCallback) {
-          progressCallback(95, 'Skipping summary generation...');
+          progressCallback(100, 'Skipping summary generation...');
         }
         return {
           transcript: fullTranscript,

@@ -52,7 +52,7 @@ const USAGE_TEXT =
   '                                           Export transcription\n' +
   '       listener search <query> [--limit <n>] [--transcript] [--field <name>]\n' +
   '                                           Search past transcriptions\n' +
-  '       listener merge <ref1> <ref2> [<ref3>...] [--title <t>]\n' +
+  '       listener merge <ref1> <ref2> [<ref3>...] [--title <t>] [--transcript-only]\n' +
   '                                           Concat the source audio of two or more notes,\n' +
   '                                           re-transcribe end-to-end, and save as a new note\n' +
   '       listener ask <question> [--ref <ref>]\n' +
@@ -553,11 +553,16 @@ async function promptYesNo(message: string): Promise<boolean> {
 async function handleMerge(args: string[]): Promise<void> {
   const refs: string[] = [];
   let title: string | undefined;
+  let transcriptOnly = false;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--title' && i + 1 < args.length) {
       title = args[++i];
+      continue;
+    }
+    if (a === '--transcript-only') {
+      transcriptOnly = true;
       continue;
     }
     if (a.startsWith('-')) {
@@ -569,7 +574,7 @@ async function handleMerge(args: string[]): Promise<void> {
 
   if (refs.length < 2) {
     process.stderr.write(
-      'Error: merge requires at least 2 refs. Usage: listener merge <ref1> <ref2> [<ref3>...] [--title <t>]\n',
+      'Error: merge requires at least 2 refs. Usage: listener merge <ref1> <ref2> [<ref3>...] [--title <t>] [--transcript-only]\n',
     );
     process.exit(1);
   }
@@ -645,6 +650,7 @@ async function handleMerge(args: string[]): Promise<void> {
       process.stderr.write(`  ${message}\n`);
     },
     config.getSummaryPrompt(),
+    { transcriptOnly },
   );
 
   // User-supplied --title wins; Gemini's suggestion is the fallback.
