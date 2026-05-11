@@ -71,6 +71,12 @@ Listener.AI is an Electron desktop application for recording meetings and produc
 
 ```
 listener <file> [--output <dir>]    Transcribe and summarize an audio file
+listener transcript <file> [--output <path>] [--prompt <text>]
+                                     Transcribe to plain text only (stdout by default;
+                                     --output writes to a file, or to <dir>/<basename>.transcript.md
+                                     if the path is an existing directory). --prompt replaces
+                                     the default speaker-identification instruction; glossary
+                                     (knownWords) and per-segment positional prefix stay automatic.
 listener list [--limit <n>]         List past transcriptions
 listener show <ref>                  Print summary to stdout
 listener export <ref> [<path>] [--json] [--transcript]
