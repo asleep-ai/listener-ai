@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
+import type { LiveNote } from '../outputService';
 
 interface RecordingMetadata {
   filePath: string;
@@ -15,7 +16,7 @@ interface RecordingMetadata {
   suggestedTitle?: string;
   transcribedAt?: string;
   customFields?: Record<string, unknown>;
-  liveNotes?: Array<{ offsetMs: number; text: string }>;
+  liveNotes?: LiveNote[];
 }
 
 export class MetadataService {

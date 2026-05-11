@@ -4,30 +4,21 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { GoogleGenAI } from '@google/genai';
 import { mimeTypeForExtension } from './audioFormats';
+import { formatOffsetTimestamp, type LiveNote } from './outputService';
 import { FFmpegManager } from './services/ffmpegManager';
 
 const execFileAsync = promisify(execFile);
-
-function formatOffsetTimestamp(offsetMs: number): string {
-  const totalSeconds = Math.max(0, Math.floor(offsetMs / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return hours > 0 ? `${pad(hours)}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
-}
 
 // Append a section to the summary prompt instructing Gemini to enrich each
 // user-flagged moment with a subtitle + categorized bullets, returned as a
 // `highlights` array on the JSON response. Returns '' when there's nothing to
 // enrich -- prompt stays untouched in that case so we don't pay for empty
 // instructions.
-function buildHighlightsPromptBlock(
-  notes: Array<{ offsetMs: number; text: string }>,
-): string {
+function buildHighlightsPromptBlock(notes: LiveNote[]): string {
   if (notes.length === 0) return '';
   const lines = notes.map(
-    (n) => `- offsetMs=${n.offsetMs}, timestamp=${formatOffsetTimestamp(n.offsetMs)}, userText=${JSON.stringify(n.text)}`,
+    (n) =>
+      `- offsetMs=${n.offsetMs}, timestamp=${formatOffsetTimestamp(n.offsetMs)}, userText=${JSON.stringify(n.text)}`,
   );
   return `In addition, the user flagged the following moments during the meeting. For each note, produce a structured analysis tied to that moment in the transcript:
 
@@ -43,7 +34,7 @@ Use the transcript as the ground truth -- if the user's typed text doesn't clear
 }
 
 function mergeHighlights(
-  liveNotes: Array<{ offsetMs: number; text: string }> | undefined,
+  liveNotes: LiveNote[] | undefined,
   raw: unknown,
 ): HighlightEntry[] | undefined {
   if (!liveNotes || liveNotes.length === 0) return undefined;
@@ -64,9 +55,7 @@ function mergeHighlights(
           ? subtitleRaw.trim()
           : undefined;
       const bullets = Array.isArray(bulletsRaw)
-        ? bulletsRaw
-            .map((b) => (typeof b === 'string' ? b.trim() : ''))
-            .filter((b) => b.length > 0)
+        ? bulletsRaw.map((b) => (typeof b === 'string' ? b.trim() : '')).filter((b) => b.length > 0)
         : undefined;
       byOffset.set(offsetMs, {
         subtitle,
@@ -95,7 +84,7 @@ export interface TranscriptionResult {
   customFields?: Record<string, unknown>;
   // Notes captured live by the user during the recording. Not produced by
   // Gemini -- attached by main after transcription returns.
-  liveNotes?: Array<{ offsetMs: number; text: string }>;
+  liveNotes?: LiveNote[];
   // Plaud-style enriched view of the user's live notes: each entry pairs the
   // user-typed text with an AI-generated subtitle + categorized bullets that
   // describe what was being discussed around that moment in the meeting.
@@ -157,7 +146,7 @@ export class GeminiService {
     audioFilePath: string,
     progressCallback?: (percent: number, message: string) => void,
     summaryPrompt?: string,
-    liveNotes?: Array<{ offsetMs: number; text: string }>,
+    liveNotes?: LiveNote[],
   ): Promise<TranscriptionResult> {
     // Integration-test escape hatch: avoid the real Gemini call so tests can
     // exercise the surrounding pipeline (CLI parsing, IPC, ffmpeg, save) for
@@ -375,7 +364,7 @@ export class GeminiService {
     duration: number,
     progressCallback?: (percent: number, message: string) => void,
     customSummaryPrompt?: string,
-    liveNotes?: Array<{ offsetMs: number; text: string }>,
+    liveNotes?: LiveNote[],
   ): Promise<TranscriptionResult> {
     try {
       let fullTranscript = '';

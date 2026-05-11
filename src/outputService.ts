@@ -8,11 +8,21 @@ export interface LiveNote {
   text: string;
 }
 
-function formatNoteTimestamp(offsetMs: number): string {
+/**
+ * Format a millisecond offset as `mm:ss` (or `hh:mm:ss` when the offset crosses
+ * one hour) — used by every Highlights-rendering sink (summary.md, Notion,
+ * modal, CLI) and by the Gemini prompt so the LLM sees the same coordinate
+ * system as the saved output.
+ */
+export function formatOffsetTimestamp(offsetMs: number): string {
   const totalSeconds = Math.max(0, Math.floor(offsetMs / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return hours > 0
+    ? `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`
+    : `${pad(minutes)}:${pad(seconds)}`;
 }
 
 export function sanitizeForPath(name: string): string {
@@ -86,30 +96,31 @@ export function formatSummary(
   // Prefer the AI-enriched "highlights" view when present -- it carries the
   // same user notes plus per-moment subtitle/bullets. Fall back to the bare
   // bullet list of liveNotes when Gemini didn't produce highlights.
-  const renderedHighlights = highlights && highlights.length > 0 ? highlights : null;
-  if (renderedHighlights) {
+  const enriched = highlights && highlights.length > 0 ? highlights : null;
+  if (enriched || liveNotes?.length) {
     lines.push('## 🗒️ Highlights\n');
-    for (const h of renderedHighlights) {
-      const ts = formatNoteTimestamp(h.offsetMs);
-      const title = (h.userText ?? '').trim();
-      lines.push(title ? `### [${ts}] ${title}` : `### [${ts}] 🏴`);
-      if (h.subtitle?.trim()) {
-        lines.push(`*${h.subtitle.trim()}*`);
-      }
-      if (h.bullets?.length) {
+    if (enriched) {
+      for (const h of enriched) {
+        const ts = formatOffsetTimestamp(h.offsetMs);
+        const title = (h.userText ?? '').trim();
+        lines.push(title ? `### [${ts}] ${title}` : `### [${ts}] 🏴`);
+        if (h.subtitle?.trim()) {
+          lines.push(`*${h.subtitle.trim()}*`);
+        }
+        if (h.bullets?.length) {
+          lines.push('');
+          for (const b of h.bullets) lines.push(`- ${b}`);
+        }
         lines.push('');
-        for (const b of h.bullets) lines.push(`- ${b}`);
+      }
+    } else {
+      for (const note of liveNotes!) {
+        const ts = formatOffsetTimestamp(note.offsetMs);
+        const text = note.text?.trim();
+        lines.push(text ? `- [${ts}] ${text}` : `- [${ts}] 🏴`);
       }
       lines.push('');
     }
-  } else if (liveNotes?.length) {
-    lines.push('## 🗒️ Highlights\n');
-    for (const note of liveNotes) {
-      const ts = formatNoteTimestamp(note.offsetMs);
-      const text = note.text?.trim();
-      lines.push(text ? `- [${ts}] ${text}` : `- [${ts}] 🏴`);
-    }
-    lines.push('');
   }
 
   if (result.customFields) {
@@ -266,7 +277,7 @@ export function parseFrontmatter(content: string): { meta: Record<string, unknow
   return { meta, body };
 }
 
-function parseLiveNotesField(raw: unknown): LiveNote[] | undefined {
+export function parseLiveNotesField(raw: unknown): LiveNote[] | undefined {
   if (!raw) return undefined;
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
@@ -289,7 +300,7 @@ function parseLiveNotesField(raw: unknown): LiveNote[] | undefined {
   }
 }
 
-function parseHighlightsField(raw: unknown): HighlightEntry[] | undefined {
+export function parseHighlightsField(raw: unknown): HighlightEntry[] | undefined {
   if (!raw) return undefined;
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
@@ -305,8 +316,7 @@ function parseHighlightsField(raw: unknown): HighlightEntry[] | undefined {
       entries.push({
         offsetMs: Math.max(0, Math.floor(offsetMs)),
         userText: typeof userText === 'string' ? userText : '',
-        subtitle:
-          typeof subtitle === 'string' && subtitle.trim().length > 0 ? subtitle : undefined,
+        subtitle: typeof subtitle === 'string' && subtitle.trim().length > 0 ? subtitle : undefined,
         bullets: Array.isArray(bullets)
           ? bullets.map((b) => (typeof b === 'string' ? b : '')).filter((b) => b.length > 0)
           : undefined,

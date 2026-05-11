@@ -302,23 +302,23 @@ export async function processAutoMode(
 export async function handleRecordingStopped(
   audioPath: string | undefined,
   durationMs: number | undefined,
+  liveNotes?: Array<{ offsetMs: number; text: string }>,
 ): Promise<void> {
   const { meetingTitle } = getDom();
-  // Snapshot before resetRecordingUI clears state.liveNotes via hideLiveNotesPanel.
-  const liveNotesSnapshot = state.liveNotes.length > 0 ? state.liveNotes.slice() : undefined;
   resetRecordingUI();
   const recordingTitle = meetingTitle.value.trim() || 'Untitled_Meeting';
   meetingTitle.value = '';
   await refreshRecordingsList();
-  await processAutoMode(audioPath, recordingTitle, durationMs, liveNotesSnapshot);
+  await processAutoMode(audioPath, recordingTitle, durationMs, liveNotes);
 }
 
 export async function stopRecording(): Promise<void> {
   // Snapshot live notes before they get cleared by the UI reset. Passed to
   // main so they're persisted alongside the audio file regardless of whether
-  // auto-mode kicks off transcription right away.
-  const liveNotesPayload =
-    state.liveNotes.length > 0 ? { liveNotes: state.liveNotes.slice() } : undefined;
+  // auto-mode kicks off transcription right away, and forwarded into the
+  // auto-mode path so transcribe-audio gets them without re-reading state.
+  const liveNotesSnapshot = state.liveNotes.length > 0 ? state.liveNotes.slice() : undefined;
+  const liveNotesPayload = liveNotesSnapshot ? { liveNotes: liveNotesSnapshot } : undefined;
 
   // If the recorder already transitioned to inactive on its own (e.g. USB mic
   // unplugged, stream ended, Chromium force-stopped encoding), still unwind the
@@ -328,7 +328,7 @@ export async function stopRecording(): Promise<void> {
     try {
       const result = await window.electronAPI.stopRecording(liveNotesPayload);
       if (result?.success) {
-        await handleRecordingStopped(result.filePath, result.durationMs);
+        await handleRecordingStopped(result.filePath, result.durationMs, liveNotesSnapshot);
         return;
       }
     } catch {
@@ -355,7 +355,7 @@ export async function stopRecording(): Promise<void> {
     const result = await window.electronAPI.stopRecording(liveNotesPayload);
 
     if (result.success) {
-      await handleRecordingStopped(result.filePath, result.durationMs);
+      await handleRecordingStopped(result.filePath, result.durationMs, liveNotesSnapshot);
     } else if (result.reason === 'empty') {
       alert('No audio captured.');
       resetRecordingUI();

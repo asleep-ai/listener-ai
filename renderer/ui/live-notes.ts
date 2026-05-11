@@ -78,10 +78,10 @@ function commitTextInput(): void {
 }
 
 export function showLiveNotesPanel(): void {
-  state.liveNotes = [];
+  // hideLiveNotesPanel (via resetRecordingUI) already clears state.liveNotes
+  // when a previous recording ends, so we only render+show here.
   renderList();
   if (panelEl) panelEl.style.display = '';
-  if (inputEl) inputEl.value = '';
 }
 
 export function hideLiveNotesPanel(): void {
