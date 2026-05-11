@@ -18,6 +18,10 @@ export interface TranscriptionResult {
   customFields?: Record<string, unknown>;
 }
 
+export interface TranscriptionOptions {
+  transcriptOnly?: boolean;
+}
+
 export interface GeminiServiceOptions {
   apiKey: string;
   dataPath?: string;
@@ -64,6 +68,7 @@ export class GeminiService {
     audioFilePath: string,
     progressCallback?: (percent: number, message: string) => void,
     summaryPrompt?: string,
+    options: TranscriptionOptions = {},
   ): Promise<TranscriptionResult> {
     // Integration-test escape hatch: avoid the real Gemini call so tests can
     // exercise the surrounding pipeline (CLI parsing, IPC, ffmpeg, save) for
@@ -71,6 +76,17 @@ export class GeminiService {
     // in a packaged user's shell rc can't silently stub their transcripts.
     if (process.env.LISTENER_TEST_MODE && process.env.NODE_ENV === 'test') {
       if (progressCallback) progressCallback(100, 'Stubbed transcription');
+      if (options.transcriptOnly) {
+        if (progressCallback) progressCallback(95, 'Skipping summary generation...');
+        return {
+          transcript: 'Stubbed transcript.',
+          summary: '',
+          keyPoints: [],
+          actionItems: [],
+          emoji: '',
+          suggestedTitle: undefined,
+        };
+      }
       return {
         transcript: 'Stubbed transcript.',
         summary: 'Stubbed summary.',
@@ -109,6 +125,7 @@ export class GeminiService {
         duration,
         progressCallback,
         summaryPrompt,
+        options,
       );
     } catch (error) {
       console.error('Error transcribing audio:', error);
@@ -280,6 +297,7 @@ export class GeminiService {
     duration: number,
     progressCallback?: (percent: number, message: string) => void,
     customSummaryPrompt?: string,
+    options: TranscriptionOptions = {},
   ): Promise<TranscriptionResult> {
     try {
       let fullTranscript = '';
@@ -297,6 +315,20 @@ export class GeminiService {
         // Get transcript for short audio
         console.log('Transcribing short audio...');
         fullTranscript = await this.getShortAudioTranscript(audioFilePath, progressCallback);
+      }
+
+      if (options.transcriptOnly) {
+        if (progressCallback) {
+          progressCallback(95, 'Skipping summary generation...');
+        }
+        return {
+          transcript: fullTranscript,
+          summary: '',
+          keyPoints: [],
+          actionItems: [],
+          emoji: '',
+          suggestedTitle: undefined,
+        };
       }
 
       // Step 2: Generate summary, key points, action items from transcript

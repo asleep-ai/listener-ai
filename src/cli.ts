@@ -44,7 +44,8 @@ const VERSION = (() => {
 })();
 
 const USAGE_TEXT =
-  'Usage: listener <file> [--output <dir>]    Transcribe an audio file\n' +
+  'Usage: listener <file> [--output <dir>] [--transcript-only]\n' +
+  '                                           Transcribe an audio file\n' +
   '       listener list [--limit <n>]         List past transcriptions\n' +
   '       listener show <ref>                 Print summary to stdout\n' +
   '       listener export <ref> [<path>] [--json] [--transcript]\n' +
@@ -63,6 +64,8 @@ const USAGE_TEXT =
   '\n' +
   'Options:\n' +
   '  --output <dir>   Parent directory for the output folder\n' +
+  '  --transcript-only\n' +
+  '                   Skip summary/key point/action item generation\n' +
   '  --limit <n>      Max results (0 = all, default: 20)\n' +
   '  --json           Export as JSON instead of markdown\n' +
   '  --transcript     Include transcript body (export: append; search: widen scope)\n' +
@@ -774,10 +777,13 @@ async function main(): Promise<void> {
   // Parse arguments
   let filePath: string | undefined;
   let outputDir: string | undefined;
+  let transcriptOnly = false;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--output' && i + 1 < args.length) {
       outputDir = args[++i];
+    } else if (args[i] === '--transcript-only') {
+      transcriptOnly = true;
     } else if (args[i].startsWith('-')) {
       process.stderr.write(`Error: Unknown option: ${args[i]}\n`);
       usageError();
@@ -834,9 +840,14 @@ async function main(): Promise<void> {
 
   process.stderr.write(`Processing: ${filePath}\n`);
 
-  const result = await gemini.transcribeAudio(filePath, (_percent, message) => {
-    process.stderr.write(`  ${message}\n`);
-  });
+  const result = await gemini.transcribeAudio(
+    filePath,
+    (_percent, message) => {
+      process.stderr.write(`  ${message}\n`);
+    },
+    undefined,
+    { transcriptOnly },
+  );
 
   const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));
 

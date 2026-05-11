@@ -44,6 +44,8 @@ describe('listener CLI basics', () => {
           ...process.env,
           NODE_ENV: 'test',
           LISTENER_DATA_PATH: basicsDataPath,
+          LISTENER_TEST_MODE: '1',
+          GEMINI_API_KEY: 'test-mode-key',
         },
       });
       let stdout = '';
@@ -138,6 +140,30 @@ describe('listener CLI basics', () => {
     const { code, stderr } = await runCli(['config', 'unset', 'bogusKey']);
     assert.equal(code, 1);
     assert.match(stderr, /Unknown key/);
+  });
+
+  it('--transcript-only skips summary data while saving the transcript', async () => {
+    const audioPath = path.join(basicsDataPath, 'sample.mp3');
+    const outputDir = path.join(basicsDataPath, 'exports');
+    fs.writeFileSync(audioPath, '');
+
+    const { stdout, stderr, code } = await runCli([
+      audioPath,
+      '--transcript-only',
+      '--output',
+      outputDir,
+    ]);
+
+    assert.equal(code, 0, stderr);
+    const folderPath = stdout.trim();
+    const transcript = fs.readFileSync(path.join(folderPath, 'transcript.md'), 'utf-8');
+    const summary = fs.readFileSync(path.join(folderPath, 'summary.md'), 'utf-8');
+
+    assert.match(transcript, /Stubbed transcript\./);
+    assert.doesNotMatch(summary, /Stubbed summary/);
+    assert.doesNotMatch(summary, /stub point/);
+    assert.doesNotMatch(summary, /stub action/);
+    assert.match(stderr, /Skipping summary generation/);
   });
 });
 
