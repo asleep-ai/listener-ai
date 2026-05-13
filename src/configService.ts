@@ -1,10 +1,28 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_TRANSCRIPTION_MODEL,
+  DEFAULT_GEMINI_FLASH_MODEL,
+  DEFAULT_GEMINI_MODEL,
+  type AiProvider,
+  normalizeAiProvider,
+} from './aiProvider';
+import {
+  type CodexOAuthCredentials,
+  getCodexOAuthEnvCredentials,
+  hasCodexOAuthEnvCredentials,
+} from './codexOAuth';
 
 export interface AppConfig {
+  aiProvider?: AiProvider;
   geminiApiKey?: string;
   geminiModel?: string;
   geminiFlashModel?: string;
+  codexModel?: string;
+  codexTranscriptionModel?: string;
+  codexOAuth?: CodexOAuthCredentials;
+  codexOAuthConfigured?: boolean;
   notionApiKey?: string;
   notionDatabaseId?: string;
   autoMode?: boolean;
@@ -93,6 +111,50 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getAiProvider(): AiProvider {
+    const envProvider = normalizeAiProvider(process.env.LISTENER_AI_PROVIDER);
+    if (envProvider) return envProvider;
+
+    const configured = normalizeAiProvider(this.config.aiProvider);
+    if (configured) return configured;
+
+    if (!this.getGeminiApiKey() && this.hasCodexOAuth()) return 'codex';
+    return 'gemini';
+  }
+
+  setAiProvider(provider: AiProvider): void {
+    this.config.aiProvider = provider;
+    this.saveConfig();
+  }
+
+  getCodexOAuth(): CodexOAuthCredentials | undefined {
+    return this.config.codexOAuth || getCodexOAuthEnvCredentials();
+  }
+
+  setCodexOAuth(credentials: CodexOAuthCredentials): void {
+    this.config.codexOAuth = credentials;
+    this.saveConfig();
+  }
+
+  clearCodexOAuth(): void {
+    delete this.config.codexOAuth;
+    this.saveConfig();
+  }
+
+  hasCodexOAuth(): boolean {
+    const credentials = this.config.codexOAuth;
+    return (
+      hasCodexOAuthEnvCredentials() ||
+      !!(credentials?.access && credentials.refresh && Number.isFinite(credentials.expires))
+    );
+  }
+
+  hasAiAuth(): boolean {
+    const provider = this.getAiProvider();
+    if (provider === 'codex') return this.hasCodexOAuth();
+    return !!this.getGeminiApiKey();
+  }
+
   getNotionApiKey(): string | undefined {
     return this.config.notionApiKey || process.env.NOTION_API_KEY;
   }
@@ -112,12 +174,14 @@ export class ConfigService {
   }
 
   hasRequiredConfig(): boolean {
-    return !!this.getGeminiApiKey() && !!this.getNotionApiKey() && !!this.getNotionDatabaseId();
+    return this.hasAiAuth() && !!this.getNotionApiKey() && !!this.getNotionDatabaseId();
   }
 
   getMissingConfigs(): string[] {
     const missing: string[] = [];
-    if (!this.getGeminiApiKey()) missing.push('Gemini API Key');
+    if (!this.hasAiAuth()) {
+      missing.push(this.getAiProvider() === 'codex' ? 'Codex OAuth sign-in' : 'Gemini API Key');
+    }
     if (!this.getNotionApiKey()) missing.push('Notion Integration Token');
     if (!this.getNotionDatabaseId()) missing.push('Notion Database ID');
     return missing;
@@ -164,7 +228,7 @@ export class ConfigService {
   }
 
   getGeminiModel(): string {
-    return this.config.geminiModel || 'gemini-2.5-pro';
+    return this.config.geminiModel || DEFAULT_GEMINI_MODEL;
   }
 
   setGeminiModel(model: string): void {
@@ -173,11 +237,29 @@ export class ConfigService {
   }
 
   getGeminiFlashModel(): string {
-    return this.config.geminiFlashModel || 'gemini-2.5-flash';
+    return this.config.geminiFlashModel || DEFAULT_GEMINI_FLASH_MODEL;
   }
 
   setGeminiFlashModel(model: string): void {
     this.config.geminiFlashModel = model;
+    this.saveConfig();
+  }
+
+  getCodexModel(): string {
+    return this.config.codexModel || DEFAULT_CODEX_MODEL;
+  }
+
+  setCodexModel(model: string): void {
+    this.config.codexModel = model;
+    this.saveConfig();
+  }
+
+  getCodexTranscriptionModel(): string {
+    return this.config.codexTranscriptionModel || DEFAULT_CODEX_TRANSCRIPTION_MODEL;
+  }
+
+  setCodexTranscriptionModel(model: string): void {
+    this.config.codexTranscriptionModel = model;
     this.saveConfig();
   }
 
@@ -273,9 +355,13 @@ export class ConfigService {
 
   getAllConfig(): AppConfig {
     return {
+      aiProvider: this.getAiProvider(),
       geminiApiKey: this.getGeminiApiKey(),
       geminiModel: this.getGeminiModel(),
       geminiFlashModel: this.getGeminiFlashModel(),
+      codexModel: this.getCodexModel(),
+      codexTranscriptionModel: this.getCodexTranscriptionModel(),
+      codexOAuthConfigured: this.hasCodexOAuth(),
       notionApiKey: this.getNotionApiKey(),
       notionDatabaseId: this.getNotionDatabaseId(),
       autoMode: this.getAutoMode(),

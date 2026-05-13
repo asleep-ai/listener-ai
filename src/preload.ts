@@ -13,7 +13,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   checkConfig: () => ipcRenderer.invoke('check-config'),
   saveConfig: (config: {
+    aiProvider?: 'gemini' | 'codex';
     geminiApiKey?: string;
+    codexModel?: string;
+    codexTranscriptionModel?: string;
     notionApiKey?: string;
     notionDatabaseId?: string;
     autoMode?: boolean;
@@ -28,6 +31,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     slackAutoShare?: boolean;
   }) => ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
+  loginCodexOAuth: () => ipcRenderer.invoke('codex-oauth-login'),
+  clearCodexOAuth: () => ipcRenderer.invoke('codex-oauth-clear'),
   transcribeAudio: (filePath: string, liveNotes?: LiveNote[]) =>
     ipcRenderer.invoke('transcribe-audio', filePath, liveNotes),
   uploadToNotion: (data: {
@@ -52,7 +57,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('search-transcriptions', opts),
   agentChat: (opts: {
     question: string;
-    history?: Array<{ role: 'user' | 'model'; text: string }>;
+    history?: Array<{
+      role: 'user' | 'model';
+      text: string;
+      turns?: unknown[];
+      codexItems?: unknown[];
+    }>;
     scope: { kind: 'all' } | { kind: 'single'; folderName: string };
   }) => ipcRenderer.invoke('agent-chat', opts),
   onAgentConfirmRequest: (

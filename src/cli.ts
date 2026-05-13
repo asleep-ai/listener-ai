@@ -2,10 +2,13 @@
 
 import { randomUUID } from 'crypto';
 import * as fs from 'fs';
+import * as readline from 'readline';
 import * as path from 'path';
 import { type AgentScope, AgentService, type ConfigProposal } from './agentService';
+import { isAiProvider } from './aiProvider';
 import { extensionForMimeType } from './audioFormats';
 import { type AppConfig, ConfigService } from './configService';
+import { loginCodexOAuth } from './codexOAuth';
 import { getDataPath } from './dataPath';
 import { GeminiService } from './geminiService';
 import {
@@ -60,6 +63,7 @@ const USAGE_TEXT =
   '                                           re-transcribe end-to-end, and save as a new note\n' +
   '       listener ask <question> [--ref <ref>]\n' +
   '                                           Ask the AI agent about saved meetings or settings\n' +
+  '       listener codex login|logout|status  Manage OpenAI Codex OAuth sign-in\n' +
   '       listener config list|get|set|unset|path\n' +
   '                                           Manage configuration\n' +
   '\n' +
@@ -88,9 +92,12 @@ function showHelp(): never {
 }
 
 const KNOWN_CONFIG_KEYS = [
+  'aiProvider',
   'geminiApiKey',
   'geminiModel',
   'geminiFlashModel',
+  'codexModel',
+  'codexTranscriptionModel',
   'notionApiKey',
   'notionDatabaseId',
   'autoMode',
@@ -110,7 +117,7 @@ type ConfigKey = (typeof KNOWN_CONFIG_KEYS)[number];
 
 function isSensitiveKey(key: string): boolean {
   const lk = key.toLowerCase();
-  return lk.includes('key') || lk.includes('webhook');
+  return lk.includes('key') || lk.includes('webhook') || lk.includes('oauth');
 }
 
 function maskValue(key: string, value: unknown): string {
@@ -154,6 +161,14 @@ function parseKnownWords(v: string): string[] {
 
 function applyConfigSet(config: ConfigService, key: ConfigKey, value: string): void {
   switch (key) {
+    case 'aiProvider': {
+      if (!isAiProvider(value)) {
+        process.stderr.write('Error: aiProvider must be "gemini" or "codex"\n');
+        process.exit(1);
+      }
+      config.setAiProvider(value);
+      return;
+    }
     case 'geminiApiKey':
       config.setGeminiApiKey(value);
       return;
@@ -162,6 +177,12 @@ function applyConfigSet(config: ConfigService, key: ConfigKey, value: string): v
       return;
     case 'geminiFlashModel':
       config.setGeminiFlashModel(value);
+      return;
+    case 'codexModel':
+      config.setCodexModel(value);
+      return;
+    case 'codexTranscriptionModel':
+      config.setCodexTranscriptionModel(value);
       return;
     case 'notionApiKey':
       config.setNotionApiKey(value);
@@ -206,6 +227,94 @@ function applyConfigSet(config: ConfigService, key: ConfigKey, value: string): v
       config.setSlackAutoShare(parseBool('slackAutoShare', value));
       return;
   }
+}
+
+function formatAiCredentialsError(config: ConfigService): string {
+  if (config.getAiProvider() === 'codex') {
+    return (
+      'Error: Codex OAuth is not configured.\n' +
+      'Run `listener codex login` or set aiProvider back to gemini with a Gemini API key.\n'
+    );
+  }
+  return (
+    'Error: Gemini API key not found.\n' +
+    'Set GEMINI_API_KEY env var, run `listener config set geminiApiKey <key>`, or run `listener codex login`.\n'
+  );
+}
+
+function createTranscriptionService(config: ConfigService, dataPath: string): GeminiService {
+  return new GeminiService({
+    provider: config.getAiProvider(),
+    apiKey: config.getGeminiApiKey(),
+    codexOAuth: config.getCodexOAuth(),
+    onCodexOAuthUpdate: (credentials) => config.setCodexOAuth(credentials),
+    dataPath,
+    knownWords: config.getKnownWords(),
+    proModel: config.getGeminiModel(),
+    flashModel: config.getGeminiFlashModel(),
+    codexModel: config.getCodexModel(),
+    codexTranscriptionModel: config.getCodexTranscriptionModel(),
+  });
+}
+
+function createAgentService(config: ConfigService, dataPath: string): AgentService {
+  return new AgentService({
+    provider: config.getAiProvider(),
+    apiKey: config.getGeminiApiKey(),
+    codexOAuth: config.getCodexOAuth(),
+    onCodexOAuthUpdate: (credentials) => config.setCodexOAuth(credentials),
+    dataPath,
+    configService: config,
+    codexModel: config.getCodexModel(),
+  });
+}
+
+function promptLine(message: string): Promise<string> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  return new Promise((resolve) => {
+    rl.question(`${message} `, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
+async function handleCodex(args: string[]): Promise<void> {
+  const sub = args[0];
+  const dataPath = getDataPath();
+  const config = new ConfigService(dataPath);
+
+  if (sub === 'status') {
+    process.stdout.write(`aiProvider=${config.getAiProvider()}\n`);
+    process.stdout.write(`codexOAuthConfigured=${config.hasCodexOAuth()}\n`);
+    process.stdout.write(`codexModel=${config.getCodexModel()}\n`);
+    process.stdout.write(`codexTranscriptionModel=${config.getCodexTranscriptionModel()}\n`);
+    return;
+  }
+
+  if (sub === 'logout') {
+    config.clearCodexOAuth();
+    process.stderr.write('Signed out of Codex OAuth.\n');
+    return;
+  }
+
+  if (sub !== 'login') {
+    process.stderr.write(
+      'Error: Unknown codex command. Usage: listener codex login|logout|status\n',
+    );
+    process.exit(1);
+  }
+
+  const credentials = await loginCodexOAuth({
+    openUrl: (url) => {
+      process.stderr.write(`Open this URL in your browser:\n${url}\n`);
+    },
+    onPrompt: async (prompt) => await promptLine(prompt.message),
+    onProgress: (message) => process.stderr.write(`${message}\n`),
+  });
+  config.setCodexOAuth(credentials);
+  config.setAiProvider('codex');
+  process.stderr.write('Signed in with Codex OAuth and set aiProvider=codex.\n');
 }
 
 function handleConfig(subArgs: string[]): void {
@@ -584,11 +693,8 @@ async function handleMerge(args: string[]): Promise<void> {
 
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
-  const apiKey = config.getGeminiApiKey();
-  if (!apiKey) {
-    process.stderr.write(
-      'Error: Gemini API key not found. Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n',
-    );
+  if (!config.hasAiAuth()) {
+    process.stderr.write(formatAiCredentialsError(config));
     process.exit(1);
   }
 
@@ -638,13 +744,7 @@ async function handleMerge(args: string[]): Promise<void> {
   });
   process.stderr.write(`  -> ${mergedAudioPath}\n`);
 
-  const gemini = new GeminiService({
-    apiKey,
-    dataPath,
-    knownWords: config.getKnownWords(),
-    proModel: config.getGeminiModel(),
-    flashModel: config.getGeminiFlashModel(),
-  });
+  const gemini = createTranscriptionService(config, dataPath);
 
   process.stderr.write('Transcribing merged recording...\n');
   const result = await gemini.transcribeAudio(
@@ -698,11 +798,8 @@ async function handleAsk(args: string[]): Promise<void> {
 
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
-  const apiKey = config.getGeminiApiKey();
-  if (!apiKey) {
-    process.stderr.write(
-      'Error: Gemini API key not found. Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n',
-    );
+  if (!config.hasAiAuth()) {
+    process.stderr.write(formatAiCredentialsError(config));
     process.exit(1);
   }
 
@@ -712,7 +809,7 @@ async function handleAsk(args: string[]): Promise<void> {
     scope = { kind: 'single', folderName: path.basename(folderPath) };
   }
 
-  const agent = new AgentService({ apiKey, dataPath, configService: config });
+  const agent = createAgentService(config, dataPath);
 
   const confirm = async (proposal: ConfigProposal): Promise<boolean> => {
     process.stderr.write('\n');
@@ -780,12 +877,8 @@ async function handleTranscript(args: string[]): Promise<void> {
 
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
-  const apiKey = config.getGeminiApiKey();
-  if (!apiKey) {
-    process.stderr.write(
-      'Error: Gemini API key not found.\n' +
-        'Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n',
-    );
+  if (!config.hasAiAuth()) {
+    process.stderr.write(formatAiCredentialsError(config));
     process.exit(1);
   }
 
@@ -813,13 +906,7 @@ async function handleTranscript(args: string[]): Promise<void> {
     }
   }
 
-  const gemini = new GeminiService({
-    apiKey,
-    dataPath,
-    knownWords: config.getKnownWords(),
-    proModel: config.getGeminiModel(),
-    flashModel: config.getGeminiFlashModel(),
-  });
+  const gemini = createTranscriptionService(config, dataPath);
 
   process.stderr.write(`Processing: ${filePath}\n`);
 
@@ -863,6 +950,11 @@ async function main(): Promise<void> {
 
   if (args[0] === 'config') {
     handleConfig(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'codex') {
+    await handleCodex(args.slice(1));
     return;
   }
 
@@ -941,26 +1033,14 @@ async function main(): Promise<void> {
     outputDir = path.resolve(outputDir);
   }
 
-  // Get API key
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
-  const apiKey = config.getGeminiApiKey();
-
-  if (!apiKey) {
-    process.stderr.write(
-      'Error: Gemini API key not found.\n' +
-        'Set GEMINI_API_KEY env var or configure via the Listener.AI app.\n',
-    );
+  if (!config.hasAiAuth()) {
+    process.stderr.write(formatAiCredentialsError(config));
     process.exit(1);
   }
 
-  const gemini = new GeminiService({
-    apiKey,
-    dataPath,
-    knownWords: config.getKnownWords(),
-    proModel: config.getGeminiModel(),
-    flashModel: config.getGeminiFlashModel(),
-  });
+  const gemini = createTranscriptionService(config, dataPath);
 
   process.stderr.write(`Processing: ${filePath}\n`);
 

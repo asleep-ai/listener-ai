@@ -24,6 +24,8 @@ import {
 } from './agentService';
 import { extensionForMimeType, isSupportedAudioExtension } from './audioFormats';
 import { type AppConfig, ConfigService } from './configService';
+import { loginCodexOAuth } from './codexOAuth';
+import { getDataPath } from './dataPath';
 import { DisplayDetectorService } from './displayDetectorService';
 import { GeminiService } from './geminiService';
 import { MeetingDetectorService } from './meetingDetectorService';
@@ -69,6 +71,8 @@ declare global {
 }
 global.isQuitting = false;
 
+app.setPath('userData', getDataPath());
+
 let mainWindow: BrowserWindow | null = null;
 const audioRecorder = new SimpleAudioRecorder();
 const systemAudioService = new SystemAudioService();
@@ -84,12 +88,24 @@ let notionService: NotionService | null = null;
 let slackService: SlackService | null = null;
 let agentService: AgentService | null = null;
 
+function formatAiCredentialsError(): string {
+  return configService.getAiProvider() === 'codex'
+    ? 'Codex OAuth is not configured. Sign in with Codex OAuth or switch back to Gemini.'
+    : 'Gemini API key not configured.';
+}
+
 function getAgentService(): AgentService | null {
   if (agentService) return agentService;
-  const apiKey = configService.getGeminiApiKey();
-  if (!apiKey) return null;
+  if (!configService.hasAiAuth()) return null;
   agentService = new AgentService({
-    apiKey,
+    provider: configService.getAiProvider(),
+    apiKey: configService.getGeminiApiKey(),
+    codexOAuth: configService.getCodexOAuth(),
+    onCodexOAuthUpdate: (credentials) => {
+      configService.setCodexOAuth(credentials);
+      broadcastConfigChanged();
+    },
+    codexModel: configService.getCodexModel(),
     dataPath: app.getPath('userData'),
     configService,
   });
@@ -134,13 +150,21 @@ function trackFinalize(work: Promise<void>): void {
 }
 
 function createGeminiService(): GeminiService | null {
-  const apiKey = configService.getGeminiApiKey();
-  if (!apiKey) return null;
+  if (!configService.hasAiAuth()) return null;
   return new GeminiService({
-    apiKey,
+    provider: configService.getAiProvider(),
+    apiKey: configService.getGeminiApiKey(),
+    codexOAuth: configService.getCodexOAuth(),
+    onCodexOAuthUpdate: (credentials) => {
+      configService.setCodexOAuth(credentials);
+      broadcastConfigChanged();
+    },
     knownWords: configService.getKnownWords(),
     proModel: configService.getGeminiModel(),
     flashModel: configService.getGeminiFlashModel(),
+    codexModel: configService.getCodexModel(),
+    codexTranscriptionModel: configService.getCodexTranscriptionModel(),
+    dataPath: app.getPath('userData'),
   });
 }
 
@@ -874,9 +898,8 @@ ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: st
     }
 
     if (!geminiService) {
-      const apiKey = configService.getGeminiApiKey();
-      if (!apiKey) {
-        return { success: false, error: 'Gemini API key not configured' };
+      if (!configService.hasAiAuth()) {
+        return { success: false, error: formatAiCredentialsError() };
       }
       geminiService = createGeminiService()!;
     }
@@ -1147,9 +1170,13 @@ ipcMain.handle('abort-recording', async () => {
 function applyConfigSideEffects(changed: Partial<AppConfig>): void {
   if (
     changed.knownWords !== undefined ||
+    changed.aiProvider !== undefined ||
     changed.geminiApiKey !== undefined ||
     changed.geminiModel !== undefined ||
-    changed.geminiFlashModel !== undefined
+    changed.geminiFlashModel !== undefined ||
+    changed.codexOAuth !== undefined ||
+    changed.codexModel !== undefined ||
+    changed.codexTranscriptionModel !== undefined
   ) {
     geminiService = createGeminiService();
     agentService = null;
@@ -1242,6 +1269,40 @@ ipcMain.handle('get-config', async () => {
   return configService.getAllConfig();
 });
 
+ipcMain.handle('codex-oauth-login', async () => {
+  try {
+    const credentials = await loginCodexOAuth({
+      openUrl: (url) => shell.openExternal(url),
+      onPrompt: async (_prompt) => {
+        throw new Error(
+          'Codex OAuth manual callback is only supported from the CLI. Run `listener codex login` if browser sign-in does not complete.',
+        );
+      },
+      onProgress: (message) => console.log(`Codex OAuth: ${message}`),
+    });
+    configService.setCodexOAuth(credentials);
+    configService.setAiProvider('codex');
+    applyConfigSideEffects({ aiProvider: 'codex', codexOAuth: credentials });
+    broadcastConfigChanged();
+    return { success: true, config: configService.getAllConfig() };
+  } catch (error) {
+    console.error('Codex OAuth login failed:', error);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('codex-oauth-clear', async () => {
+  try {
+    configService.clearCodexOAuth();
+    applyConfigSideEffects({ aiProvider: configService.getAiProvider() });
+    broadcastConfigChanged();
+    return { success: true, config: configService.getAllConfig() };
+  } catch (error) {
+    console.error('Codex OAuth clear failed:', error);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
 ipcMain.handle('get-all-releases', async () => {
   console.log('Release list IPC: get-all-releases invoked');
   const results = await fetchAllReleases();
@@ -1269,6 +1330,9 @@ ipcMain.handle('update:simulate', async (_, event: string, data?: any) => {
 ipcMain.handle('check-config', async () => {
   return {
     hasConfig: configService.hasRequiredConfig(),
+    hasAiAuth: configService.hasAiAuth(),
+    aiProvider: configService.getAiProvider(),
+    codexOAuthConfigured: configService.hasCodexOAuth(),
     missing: configService.getMissingConfigs(),
   };
 });
@@ -1321,17 +1385,16 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string, liveNotesRaw?: un
     if (mainWindow) {
       mainWindow.webContents.send('transcription-progress', {
         percent: 0,
-        message: 'Initializing Gemini service...',
+        message: 'Initializing AI service...',
       });
     }
 
-    // Initialize Gemini service if not already initialized
+    // Initialize AI service if not already initialized
     if (!geminiService) {
-      const apiKey = configService.getGeminiApiKey();
-      console.log('API key configured:', !!apiKey);
+      console.log('AI credentials configured:', configService.hasAiAuth());
 
-      if (!apiKey) {
-        return { success: false, error: 'Gemini API key not configured' };
+      if (!configService.hasAiAuth()) {
+        return { success: false, error: formatAiCredentialsError() };
       }
       geminiService = createGeminiService()!;
     }
@@ -1840,7 +1903,7 @@ ipcMain.handle(
     try {
       const agent = getAgentService();
       if (!agent) {
-        return { success: false, error: 'Gemini API key not configured.' };
+        return { success: false, error: formatAiCredentialsError() };
       }
       const question = (opts?.question ?? '').trim();
       if (!question) return { success: false, error: 'Empty question.' };

@@ -43,6 +43,7 @@ describe('listener CLI basics', () => {
         env: {
           ...process.env,
           NODE_ENV: 'test',
+          LISTENER_AI_PROVIDER: '',
           LISTENER_DATA_PATH: basicsDataPath,
         },
       });
@@ -109,6 +110,20 @@ describe('listener CLI basics', () => {
     assert.equal(stdout.trim(), 'true');
   });
 
+  it('config set + get round-trips aiProvider', async () => {
+    const set = await runCli(['config', 'set', 'aiProvider', 'codex']);
+    assert.equal(set.code, 0);
+    const get = await runCli(['config', 'get', 'aiProvider']);
+    assert.equal(get.code, 0);
+    assert.equal(get.stdout.trim(), 'codex');
+  });
+
+  it('config set rejects invalid aiProvider', async () => {
+    const { stderr, code } = await runCli(['config', 'set', 'aiProvider', 'openai']);
+    assert.equal(code, 1);
+    assert.match(stderr, /aiProvider must be "gemini" or "codex"/);
+  });
+
   it('config unset clears the stored value', async () => {
     await runCli(['config', 'set', 'geminiModel', 'gemini-2.5-flash']);
     const before = await runCli(['config', 'get', 'geminiModel']);
@@ -159,6 +174,7 @@ describe('listener transcript (CLI integration)', () => {
         env: {
           ...process.env,
           NODE_ENV: 'test',
+          LISTENER_AI_PROVIDER: 'gemini',
           LISTENER_DATA_PATH: transcriptDataPath,
           LISTENER_TEST_MODE: '1',
           GEMINI_API_KEY: 'test-mode-key',
@@ -293,6 +309,7 @@ describe(
       const env = {
         ...process.env,
         NODE_ENV: 'test',
+        LISTENER_AI_PROVIDER: 'gemini',
         LISTENER_DATA_PATH: dataPath,
         LISTENER_TEST_MODE: '1',
         GEMINI_API_KEY: 'test-mode-key',

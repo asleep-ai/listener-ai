@@ -51,12 +51,20 @@ npx listener-ai <audio-file>
 ### Prerequisites
 
 - **FFmpeg** installed on your system (`brew install ffmpeg` / `apt install ffmpeg`)
-- **Google Gemini API key** from [Google AI Studio](https://makersuite.google.com/app/apikey)
+- One of:
+  - **Google Gemini API key** from [Google AI Studio](https://makersuite.google.com/app/apikey), or
+  - **ChatGPT Plus / Pro subscription** (Codex OAuth)
 
 ### Setup
 
+Pick one AI provider. Gemini uses a static API key; Codex uses a ChatGPT subscription via OAuth sign-in.
+
 ```bash
+# Option A -- Gemini
 listener config set geminiApiKey <your-key>
+
+# Option B -- Codex (uses your ChatGPT Plus/Pro account)
+listener codex login                   # browser sign-in, sets aiProvider=codex
 ```
 
 Optional Notion integration:
@@ -90,6 +98,9 @@ listener export <ref> --transcript    # Export a saved note with transcript
 listener merge <ref1> <ref2>          # Merge and re-transcribe multiple notes
 listener ask "What did we decide?" --ref <ref>
                                       # Ask about a saved meeting
+listener codex login                  # Sign in with ChatGPT and set aiProvider=codex
+listener codex status                 # Show Codex OAuth + provider/model status
+listener codex logout                 # Clear stored Codex OAuth credentials
 listener config list                  # Show all config values with secrets masked
 listener config get <key>             # Print one config value
 listener config set <key> <value>     # Set a config value
@@ -107,11 +118,11 @@ Full meeting-note output is a folder containing `transcript.md` and `summary.md`
 
 Config is stored in your system application data folder:
 
-- **macOS**: `~/Library/Application Support/Listener.AI/config.json`
-- **Windows**: `%APPDATA%/Listener.AI/config.json`
-- **Linux**: `~/.config/Listener.AI/config.json`
+- **macOS**: `~/Library/Application Support/listener-ai/config.json`
+- **Windows**: `%APPDATA%/listener-ai/config.json`
+- **Linux**: `~/.config/listener-ai/config.json`
 
-CLI and desktop app share the same config file.
+CLI and desktop app share the same config file. Existing installs that already have a `Listener.AI` data folder continue to use it when `listener-ai` is not present.
 
 ### Getting API Keys
 
@@ -120,6 +131,14 @@ CLI and desktop app share the same config file.
 1. Visit [Google AI Studio](https://makersuite.google.com/app/apikey)
 2. Click "Create API Key"
 3. Copy the generated key
+
+#### Codex OAuth (ChatGPT Plus/Pro)
+
+1. Run `listener codex login` (or sign in from the desktop app's Settings panel).
+2. Complete the browser sign-in to ChatGPT.
+3. Confirm `listener codex status` shows `codexOAuthConfigured=true`.
+
+Codex transcription, summarization, and the Ask Listener agent all go through your ChatGPT subscription -- no separate API key needed.
 
 #### Notion Integration
 

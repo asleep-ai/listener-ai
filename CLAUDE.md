@@ -25,8 +25,8 @@ Listener.AI is an Electron desktop application for recording meetings and produc
 - Renderer is TypeScript with plain DOM (no React/framework), bundled by Vite; talks to main only via IPC
 
 ### 3. AI Transcription and Summarization
-- Google Gemini 2.5 (Flash/Pro, configurable via `geminiModel` and `geminiFlashModel`)
-- Uploads audio through the Gemini files API; segments recordings longer than ~5 minutes
+- Provider is selected by `aiProvider`: `gemini` uses Google Gemini 2.5 (Flash/Pro, configurable via `geminiModel` and `geminiFlashModel`); `codex` uses Codex OAuth tokens plus OpenAI transcription/Responses endpoints (configurable via `codexTranscriptionModel` and `codexModel`)
+- Gemini uploads large audio through the Gemini files API; Codex converts unsupported audio formats to WebM/Opus first; both providers segment long or over-limit recordings
 - Korean-focused output: full transcript with speaker identification, summary, key points, action items, auto-generated title, and emoji icon
 - User-supplied `summaryPrompt` and `knownWords` (proper-noun hints) are injected into the prompt
 
@@ -43,7 +43,7 @@ Listener.AI is an Electron desktop application for recording meetings and produc
 - Exposed via GUI search box and `listener search` CLI
 
 ### 6. AI Agent Chat
-- Conversational access to saved meetings and settings (`src/agentService.ts`), backed by Gemini with a fixed tool set
+- Conversational access to saved meetings and settings (`src/agentService.ts`), backed by the selected AI provider with a fixed tool set
 - Tools: `search_transcriptions`, `list_recent_transcriptions`, `get_transcription`, `get_config`, `set_config`
 - `set_config` write whitelist (non-secret keys only): `autoMode`, `meetingDetection`, `displayDetection`, `globalShortcut`, `maxRecordingMinutes`, `recordingReminderMinutes`, `minRecordingSeconds`, `geminiModel`, `geminiFlashModel`. API keys and Notion database ID can neither be read nor written by the agent.
 - Every `set_config` call requires explicit user confirmation through an IPC approval flow
@@ -61,6 +61,8 @@ Listener.AI is an Electron desktop application for recording meetings and produc
 - TypeScript 5.8, Node.js 24.x
 - pnpm (no workspaces)
 - `@google/genai` for Gemini
+- `@earendil-works/pi-ai/oauth` for Codex OAuth token acquisition/refresh
+- native `fetch` for Codex Responses and OpenAI transcription calls
 - `@notionhq/client` (optional dependency)
 - `marked` for markdown rendering
 - Chromium `MediaRecorder` + Web Audio for mic capture (no external binary)
@@ -88,6 +90,7 @@ listener merge <ref1> <ref2> [<ref3>...] [--title <t>]
                                      re-transcribe end-to-end, save as a new note
 listener ask <question> [--ref <ref>]
                                      Ask the AI agent about meetings or settings
+listener codex login|logout|status   Manage Codex OAuth sign-in
 listener config list|get|set|unset|path
                                      Manage configuration
 listener --version                   Print CLI version
@@ -105,9 +108,12 @@ All values are stored in plaintext JSON at `getDataPath()/config.json`.
 
 | Key | Purpose |
 |---|---|
-| `geminiApiKey` | Gemini API key (required for transcription) |
+| `aiProvider` | `gemini` or `codex` |
+| `geminiApiKey` | Gemini API key (required when `aiProvider=gemini`) |
 | `geminiModel` | Gemini model for summary/agent |
 | `geminiFlashModel` | Flash model for cheaper/faster calls |
+| `codexModel` | Codex model for summary/agent |
+| `codexTranscriptionModel` | OpenAI transcription model used with Codex OAuth |
 | `notionApiKey`, `notionDatabaseId` | Optional Notion integration (BYOK) |
 | `autoMode` | Auto-transcribe and upload to Notion after recording |
 | `meetingDetection`, `displayDetection` | Auto-trigger sources |
@@ -120,7 +126,7 @@ All values are stored in plaintext JSON at `getDataPath()/config.json`.
 | `recordSystemAudio` | Mix system audio loopback (Zoom/Meet) into the recording (macOS only) |
 | `lastSeenVersion` | Drives "what's new" release-notes modal |
 
-Env-var fallbacks (read-only when the config key is empty): `GEMINI_API_KEY`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`.
+Env-var fallbacks (read-only when the config key is empty): `GEMINI_API_KEY`, `LISTENER_AI_PROVIDER`, `CODEX_OAUTH_ACCESS_TOKEN`, `CODEX_OAUTH_REFRESH_TOKEN`, `CODEX_OAUTH_EXPIRES`, `OPENAI_CODEX_ACCESS_TOKEN`, `OPENAI_CODEX_REFRESH_TOKEN`, `OPENAI_CODEX_EXPIRES`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`.
 
 ## Transcription Storage
 
@@ -146,12 +152,14 @@ Env-var fallbacks (read-only when the config key is empty): `GEMINI_API_KEY`, `N
 ### Top-level services (`src/*.ts`)
 - `simpleAudioRecorder.ts` — thin session state + final file writer. Receives the encoded Opus/WebM blob from the renderer after `MediaRecorder` finalizes and writes it to the recordings directory. No ffmpeg spawn, no OS-specific device detection — all capture happens in the renderer.
 - `audioFormats.ts` — shared MIME/extension mapping (`mimeTypeForExtension`, `extensionForMimeType`, `SUPPORTED_AUDIO_EXTENSIONS`) used across main, CLI, Gemini upload, and file import paths.
-- `geminiService.ts` — file upload, transcription, summarization, segmentation
+- `geminiService.ts` — provider-aware audio transcription, summarization, and segmentation
+- `codexOAuth.ts` — Codex OAuth sign-in and token refresh wrapper
+- `openaiCodexClient.ts` — OpenAI transcription and Codex Responses client helpers
 - `notionService.ts` — Notion client, block splitting, page assembly
 - `configService.ts` — `config.json` read/write, env-var fallback, masking
 - `outputService.ts` — transcription folder layout and frontmatter serialization
 - `searchService.ts` — in-memory field-weighted search
-- `agentService.ts` — tool-using Gemini agent with confirmation flow
+- `agentService.ts` — tool-using AI agent with confirmation flow
 - `meetingDetectorService.ts` — pmset-based in-call detection (macOS)
 - `displayDetectorService.ts` — Electron `screen` event wrapper
 - `menuBarManager.ts` — system tray / dock menu
@@ -229,8 +237,9 @@ Recording starts silently — never bring the window to foreground (no `show()`/
 
 ## npm Distribution
 - Package name: `listener-ai`. Only the CLI portion is published to npm (Electron app ships via GitHub Releases).
+- `THIRD_PARTY_NOTICES.md` is shipped in npm and Electron artifacts for direct third-party notices.
 - Electron-only runtime deps (`electron-updater`, `@notionhq/client`) live in `optionalDependencies` — honest semantics for a package serving both Electron and CLI users. `build.files` includes `node_modules/**/*`, so they are still bundled in Electron builds.
-- `package.json.files` whitelists the exact compiled JS shipped to npm: `dist/cli.js`, `dataPath.js`, `configService.js`, `geminiService.js`, `outputService.js`, `searchService.js`, `agentService.js`, `audioFormats.js`, `services/ffmpegManager.js`, `services/audioConcatService.js`. When adding a new module imported by any of these, append it to the whitelist or `npm install -g listener-ai` will fail with `Cannot find module`.
+- `package.json.files` whitelists the exact compiled JS shipped to npm plus `THIRD_PARTY_NOTICES.md`: `dist/cli.js`, `aiProvider.js`, `codexOAuth.js`, `dataPath.js`, `configService.js`, `geminiService.js`, `openaiCodexClient.js`, `outputService.js`, `searchService.js`, `agentService.js`, `audioFormats.js`, `services/ffmpegManager.js`, `services/audioConcatService.js`. When adding a new module imported by any of these, append it to the whitelist or `npm install -g listener-ai` will fail with `Cannot find module`.
 
 ## Future Enhancements (Optional)
 - Cloud sync of transcriptions, settings, and agent chat history across devices

@@ -3,7 +3,18 @@ import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { GoogleGenAI } from '@google/genai';
+import {
+  type AiProvider,
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_TRANSCRIPTION_MODEL,
+} from './aiProvider';
 import { mimeTypeForExtension } from './audioFormats';
+import { type CodexOAuthCredentials, requireCodexAccessToken } from './codexOAuth';
+import {
+  OPENAI_TRANSCRIPTION_EXTENSIONS,
+  generateCodexResponseText,
+  transcribeCodexAudio,
+} from './openaiCodexClient';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
 import { FFmpegManager } from './services/ffmpegManager';
 
@@ -144,20 +155,29 @@ IMPORTANT:
 - Return ONLY the transcription text, no JSON formatting`;
 
 export interface GeminiServiceOptions {
-  apiKey: string;
+  provider?: AiProvider;
+  apiKey?: string;
+  codexOAuth?: CodexOAuthCredentials;
+  onCodexOAuthUpdate?: (credentials: CodexOAuthCredentials) => void | Promise<void>;
   dataPath?: string;
   knownWords?: string[];
   proModel: string;
   flashModel: string;
+  codexModel?: string;
+  codexTranscriptionModel?: string;
 }
 
 export class GeminiService {
-  private ai: GoogleGenAI;
-  private apiKey: string;
+  private ai?: GoogleGenAI;
+  private provider: AiProvider;
   private ffmpegManager: FFmpegManager;
   private knownWords: string[];
   private proModel: string;
   private flashModel: string;
+  private codexOAuth?: CodexOAuthCredentials;
+  private onCodexOAuthUpdate?: (credentials: CodexOAuthCredentials) => void | Promise<void>;
+  private codexModel: string;
+  private codexTranscriptionModel: string;
 
   // Get FFmpeg path for this service
   private async getFFmpegPath(): Promise<string> {
@@ -171,12 +191,75 @@ export class GeminiService {
   }
 
   constructor(options: GeminiServiceOptions) {
-    this.apiKey = options.apiKey;
-    this.ai = new GoogleGenAI({ apiKey: options.apiKey });
+    this.provider = options.provider ?? 'gemini';
+    if (this.provider === 'gemini') {
+      if (!options.apiKey) {
+        throw new Error('Gemini API key is required for the Gemini provider.');
+      }
+      this.ai = new GoogleGenAI({ apiKey: options.apiKey });
+    }
     this.ffmpegManager = new FFmpegManager(options.dataPath);
     this.knownWords = options.knownWords || [];
     this.proModel = options.proModel;
     this.flashModel = options.flashModel;
+    this.codexOAuth = options.codexOAuth;
+    this.onCodexOAuthUpdate = options.onCodexOAuthUpdate;
+    this.codexModel = options.codexModel || DEFAULT_CODEX_MODEL;
+    this.codexTranscriptionModel =
+      options.codexTranscriptionModel || DEFAULT_CODEX_TRANSCRIPTION_MODEL;
+  }
+
+  private gemini(): GoogleGenAI {
+    if (!this.ai) {
+      throw new Error('Gemini client is not configured for the selected AI provider.');
+    }
+    return this.ai;
+  }
+
+  private async getCodexToken(): Promise<string> {
+    return await requireCodexAccessToken({
+      credentials: this.codexOAuth,
+      onCredentialsChanged: async (credentials) => {
+        this.codexOAuth = credentials;
+        await this.onCodexOAuthUpdate?.(credentials);
+      },
+    });
+  }
+
+  private async prepareAudioForProvider(audioFilePath: string): Promise<{
+    audioFilePath: string;
+    cleanup?: () => void;
+  }> {
+    if (this.provider !== 'codex') return { audioFilePath };
+
+    const ext = path.extname(audioFilePath).toLowerCase();
+    if (OPENAI_TRANSCRIPTION_EXTENSIONS.has(ext)) return { audioFilePath };
+
+    const outputPath = path.join(
+      path.dirname(audioFilePath),
+      `${path.basename(audioFilePath, ext)}_codex_${Date.now()}.webm`,
+    );
+    const ffmpegPath = await this.getFFmpegPath();
+    await execFileAsync(ffmpegPath, [
+      '-i',
+      audioFilePath,
+      '-vn',
+      '-c:a',
+      'libopus',
+      '-b:a',
+      '48k',
+      outputPath,
+    ]);
+    return {
+      audioFilePath: outputPath,
+      cleanup: () => {
+        try {
+          fs.unlinkSync(outputPath);
+        } catch {
+          /* ignore */
+        }
+      },
+    };
   }
 
   private buildGlossaryBlock(): string {
@@ -211,9 +294,10 @@ export class GeminiService {
       };
     }
 
+    const prepared = await this.prepareAudioForProvider(audioFilePath);
     try {
       // Check file size
-      const stats = fs.statSync(audioFilePath);
+      const stats = fs.statSync(prepared.audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
       console.error(`Audio file size: ${fileSizeInMB.toFixed(2)} MB`);
 
@@ -222,7 +306,7 @@ export class GeminiService {
       }
 
       // Get audio duration using ffmpeg
-      const duration = await this.getAudioDuration(audioFilePath);
+      const duration = await this.getAudioDuration(prepared.audioFilePath);
       console.error(`Audio duration: ${duration} seconds`);
 
       // If duration is 0, log a warning but continue processing
@@ -235,7 +319,7 @@ export class GeminiService {
       // Always use the two-step approach for consistency
       console.error('Using two-step transcription approach...');
       return await this.transcribeWithTwoSteps(
-        audioFilePath,
+        prepared.audioFilePath,
         duration,
         progressCallback,
         summaryPrompt,
@@ -248,7 +332,11 @@ export class GeminiService {
       // Provide more specific error messages
       if (error instanceof Error) {
         if (error.message.includes('API key')) {
-          throw new Error('Invalid API key. Please check your Gemini API key configuration.');
+          throw new Error(
+            this.provider === 'codex'
+              ? 'Invalid Codex OAuth token. Please sign in again.'
+              : 'Invalid API key. Please check your Gemini API key configuration.',
+          );
         } else if (error.message.includes('quota')) {
           throw new Error('API quota exceeded. Please try again later.');
         } else if (error.message.includes('model')) {
@@ -259,6 +347,8 @@ export class GeminiService {
       throw new Error(
         `Failed to transcribe audio: ${error instanceof Error ? error.message : String(error)}`,
       );
+    } finally {
+      prepared.cleanup?.();
     }
   }
 
@@ -417,16 +507,24 @@ export class GeminiService {
   ): Promise<TranscriptionResult> {
     try {
       let fullTranscript = '';
+      const stats = fs.statSync(audioFilePath);
+      const fileSizeInMB = stats.size / (1024 * 1024);
+      const shouldSegment = duration > 300 || (this.provider === 'codex' && fileSizeInMB > 24);
+      const segmentDuration =
+        this.provider === 'codex' && duration > 0 && fileSizeInMB > 20
+          ? Math.max(30, Math.min(300, Math.floor((20 / fileSizeInMB) * duration)))
+          : 300;
 
       // Step 1: Get transcript
-      if (duration > 300) {
+      if (shouldSegment) {
         // Use segmented approach for long audio
-        console.error('Audio is longer than 5 minutes, using segmented transcription...');
+        console.error('Using segmented transcription...');
         fullTranscript = await this.getSegmentedTranscript(
           audioFilePath,
           duration,
           progressCallback,
           options.transcriptionPrompt,
+          segmentDuration,
         );
       } else {
         // Get transcript for short audio
@@ -473,16 +571,26 @@ Return as JSON:
       const highlightsBlock = buildHighlightsPromptBlock(enrichableNotes);
       const summaryPrompt = highlightsBlock ? `${basePrompt}\n\n${highlightsBlock}` : basePrompt;
 
-      const summaryResult = await this.ai.models.generateContent({
-        model: this.proModel,
-        contents: [{ role: 'user', parts: [{ text: summaryPrompt }, { text: fullTranscript }] }],
-        config: {
-          temperature: 0.2,
-          maxOutputTokens: 32768,
-          responseMimeType: 'application/json',
-        },
-      });
-      const summaryText = summaryResult.text || '';
+      const summaryText =
+        this.provider === 'codex'
+          ? await generateCodexResponseText({
+              getToken: () => this.getCodexToken(),
+              model: this.codexModel,
+              inputText: `${summaryPrompt}\n\nTranscript:\n${fullTranscript}`,
+            })
+          : (
+              await this.gemini().models.generateContent({
+                model: this.proModel,
+                contents: [
+                  { role: 'user', parts: [{ text: summaryPrompt }, { text: fullTranscript }] },
+                ],
+                config: {
+                  temperature: 0.2,
+                  maxOutputTokens: 32768,
+                  responseMimeType: 'application/json',
+                },
+              })
+            ).text || '';
 
       let summaryData = {
         suggestedTitle: '',
@@ -559,6 +667,18 @@ Return as JSON:
         progressCallback(20, 'Processing audio file...');
       }
 
+      const transcriptPrompt = `${this.buildGlossaryBlock()}${customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT}`;
+      if (this.provider === 'codex') {
+        return await transcribeCodexAudio({
+          getToken: () => this.getCodexToken(),
+          audioFilePath,
+          model: this.codexTranscriptionModel,
+          prompt: transcriptPrompt,
+        });
+      }
+
+      const ai = this.gemini();
+
       // Use Files API for files over 20MB
       let fileUri: string | null = null;
       if (fileSizeInMB > 20) {
@@ -571,19 +691,19 @@ Return as JSON:
         const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
 
         const fileData = fs.readFileSync(audioFilePath);
-        const uploadResult = await this.ai.files.upload({
+        const uploadResult = await ai.files.upload({
           file: new Blob([fileData], { type: mimeType }),
         });
 
         fileUri = uploadResult.uri || '';
 
         // Wait for file to be active
-        let file = await this.ai.files.get({ name: uploadResult.name || '' });
+        let file = await ai.files.get({ name: uploadResult.name || '' });
         let retries = 0;
         while (file.state === 'PROCESSING' && retries < 30) {
           console.error(`Waiting for file to be processed... (attempt ${retries + 1}/30)`);
           await new Promise((resolve) => setTimeout(resolve, 2000));
-          file = await this.ai.files.get({ name: uploadResult.name || '' });
+          file = await ai.files.get({ name: uploadResult.name || '' });
           retries++;
         }
 
@@ -596,13 +716,11 @@ Return as JSON:
         progressCallback(50, 'Transcribing audio...');
       }
 
-      const transcriptPrompt = `${this.buildGlossaryBlock()}${customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT}`;
-
-      let result: Awaited<ReturnType<typeof this.ai.models.generateContent>>;
+      let result: Awaited<ReturnType<typeof ai.models.generateContent>>;
       if (fileUri) {
         const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
 
-        result = await this.ai.models.generateContent({
+        result = await ai.models.generateContent({
           model: this.flashModel,
           contents: [
             {
@@ -628,7 +746,7 @@ Return as JSON:
         const base64Audio = audioData.toString('base64');
         const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
 
-        result = await this.ai.models.generateContent({
+        result = await ai.models.generateContent({
           model: this.flashModel,
           contents: [
             {
@@ -705,11 +823,26 @@ Return as JSON:
           `Starting transcription for segment ${segmentIndex + 1}/${totalSegments} (attempt ${attempt}/${maxRetries})...`,
         );
 
+        if (this.provider === 'codex') {
+          const transcript = await transcribeCodexAudio({
+            getToken: () => this.getCodexToken(),
+            audioFilePath: segmentFile,
+            model: this.codexTranscriptionModel,
+            prompt: segmentPrompt,
+          });
+          console.error(`Completed transcription for segment ${segmentIndex + 1}/${totalSegments}`);
+          return {
+            index: segmentIndex,
+            content:
+              this.createSegmentHeader(segmentIndex, segmentStartTime, segmentEndTime) + transcript,
+          };
+        }
+
         const audioData = fs.readFileSync(segmentFile);
         const base64Audio = audioData.toString('base64');
         const mimeType = mimeTypeForExtension(path.extname(segmentFile));
 
-        const result = await this.ai.models.generateContent({
+        const result = await this.gemini().models.generateContent({
           model: this.flashModel,
           contents: [
             {
@@ -779,10 +912,11 @@ Return as JSON:
     duration: number,
     progressCallback?: (percent: number, message: string) => void,
     customPrompt?: string,
+    segmentDuration = 300,
   ): Promise<string> {
     try {
       // Split audio into 5-minute segments
-      const segmentFiles = await this.splitAudioIntoSegments(audioFilePath, 300);
+      const segmentFiles = await this.splitAudioIntoSegments(audioFilePath, segmentDuration);
 
       if (progressCallback) {
         progressCallback(20, `Processing ${segmentFiles.length} segments...`);
@@ -790,8 +924,8 @@ Return as JSON:
 
       // Create promises for all segment transcriptions
       const transcriptionPromises = segmentFiles.map(async (segmentFile, i) => {
-        const segmentStartTime = i * 300; // 5 minutes in seconds
-        const segmentEndTime = Math.min(segmentStartTime + 300, duration);
+        const segmentStartTime = i * segmentDuration;
+        const segmentEndTime = Math.min(segmentStartTime + segmentDuration, duration);
 
         return this.transcribeSingleSegment(
           segmentFile,

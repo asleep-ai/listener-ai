@@ -7,7 +7,10 @@ import {
   type Part,
   Type,
 } from '@google/genai';
+import { DEFAULT_CODEX_MODEL, type AiProvider } from './aiProvider';
 import type { ConfigService } from './configService';
+import { type CodexOAuthCredentials, requireCodexAccessToken } from './codexOAuth';
+import { createCodexResponse, extractCodexResponseText } from './openaiCodexClient';
 import {
   type ReadTranscriptionResult,
   getTranscriptionsDir,
@@ -36,6 +39,9 @@ export interface AgentChatMessage {
   // Preserved so the next run sees the full tool-use history, not just text.
   // Only populated on model messages produced by `run`.
   turns?: Content[];
+  // Raw Codex Responses items belonging to this message. Kept for the same
+  // tool-memory reason as `turns`, but only populated for the Codex provider.
+  codexItems?: unknown[];
 }
 
 export interface AgentRunOptions {
@@ -75,8 +81,11 @@ export type WritableConfigKey = (typeof WRITABLE_CONFIG_KEYS)[number];
 
 export const READABLE_CONFIG_KEYS = [
   ...WRITABLE_CONFIG_KEYS,
+  'aiProvider',
   'geminiModel',
   'geminiFlashModel',
+  'codexModel',
+  'codexTranscriptionModel',
 ] as const;
 
 export type ReadableConfigKey = (typeof READABLE_CONFIG_KEYS)[number];
@@ -272,6 +281,95 @@ function historyToContents(history: AgentChatMessage[]): Content[] {
   return out;
 }
 
+function normalizeCodexSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeCodexSchema);
+  if (!value || typeof value !== 'object') return value;
+
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (key === 'propertyOrdering') continue;
+    if (key === 'type' && typeof raw === 'string') {
+      out[key] = raw.toLowerCase();
+      continue;
+    }
+    out[key] = normalizeCodexSchema(raw);
+  }
+  return out;
+}
+
+function toCodexTool(tool: FunctionDeclaration): Record<string, unknown> | undefined {
+  if (!tool.name) return undefined;
+  return {
+    type: 'function',
+    name: tool.name,
+    description: tool.description ?? '',
+    parameters: normalizeCodexSchema(
+      tool.parameters ?? { type: Type.OBJECT, properties: {}, required: [] },
+    ),
+  };
+}
+
+function codexMessage(role: 'user' | 'assistant', text: string): Record<string, unknown> {
+  return {
+    role,
+    content: [{ type: role === 'user' ? 'input_text' : 'output_text', text }],
+  };
+}
+
+function historyToCodexInput(history: AgentChatMessage[]): unknown[] {
+  const out: unknown[] = [];
+  for (const m of history) {
+    if (m.role === 'model' && m.codexItems && m.codexItems.length > 0) {
+      out.push(...m.codexItems);
+      continue;
+    }
+    out.push(codexMessage(m.role === 'model' ? 'assistant' : 'user', m.text));
+  }
+  return out;
+}
+
+function parseCodexFunctionArgs(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw as Record<string, unknown>;
+  if (typeof raw !== 'string') return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function extractCodexFunctionCalls(response: unknown): Array<{
+  callId: string;
+  name: string;
+  args: Record<string, unknown>;
+}> {
+  const output = (response as { output?: unknown }).output;
+  if (!Array.isArray(output)) return [];
+
+  const calls: Array<{ callId: string; name: string; args: Record<string, unknown> }> = [];
+  for (const item of output) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    if (record.type !== 'function_call') continue;
+    if (typeof record.name !== 'string' || record.name.length === 0) continue;
+    const callId =
+      typeof record.call_id === 'string'
+        ? record.call_id
+        : typeof record.id === 'string'
+          ? record.id
+          : '';
+    if (!callId) continue;
+    calls.push({
+      callId,
+      name: record.name,
+      args: parseCodexFunctionArgs(record.arguments),
+    });
+  }
+  return calls;
+}
+
 function extractFinalText(parts: Part[] | undefined): string {
   if (!parts) return '';
   return parts
@@ -282,27 +380,67 @@ function extractFinalText(parts: Part[] | undefined): string {
 }
 
 export interface AgentServiceOptions {
-  apiKey: string;
+  provider?: AiProvider;
+  apiKey?: string;
+  codexOAuth?: CodexOAuthCredentials;
+  onCodexOAuthUpdate?: (credentials: CodexOAuthCredentials) => void | Promise<void>;
   dataPath: string;
   configService: ConfigService;
   /** Default model for agent reasoning. Falls back to configService.getGeminiFlashModel(). */
   defaultModel?: string;
+  codexModel?: string;
 }
 
 export class AgentService {
-  private ai: GoogleGenAI;
+  private provider: AiProvider;
+  private ai?: GoogleGenAI;
   private dataPath: string;
   private configService: ConfigService;
   private defaultModel: string;
+  private codexOAuth?: CodexOAuthCredentials;
+  private onCodexOAuthUpdate?: (credentials: CodexOAuthCredentials) => void | Promise<void>;
 
   constructor(opts: AgentServiceOptions) {
-    this.ai = new GoogleGenAI({ apiKey: opts.apiKey });
+    this.provider = opts.provider ?? 'gemini';
+    if (this.provider === 'gemini') {
+      if (!opts.apiKey) {
+        throw new Error('Gemini API key is required for the Gemini provider.');
+      }
+      this.ai = new GoogleGenAI({ apiKey: opts.apiKey });
+    }
     this.dataPath = opts.dataPath;
     this.configService = opts.configService;
-    this.defaultModel = opts.defaultModel ?? opts.configService.getGeminiFlashModel();
+    this.defaultModel =
+      opts.defaultModel ??
+      (this.provider === 'codex'
+        ? opts.codexModel || DEFAULT_CODEX_MODEL
+        : opts.configService.getGeminiFlashModel());
+    this.codexOAuth = opts.codexOAuth;
+    this.onCodexOAuthUpdate = opts.onCodexOAuthUpdate;
+  }
+
+  private gemini(): GoogleGenAI {
+    if (!this.ai) {
+      throw new Error('Gemini client is not configured for the selected AI provider.');
+    }
+    return this.ai;
+  }
+
+  private async getCodexToken(): Promise<string> {
+    return await requireCodexAccessToken({
+      credentials: this.codexOAuth,
+      onCredentialsChanged: async (credentials) => {
+        this.codexOAuth = credentials;
+        await this.onCodexOAuthUpdate?.(credentials);
+      },
+    });
   }
 
   async run(opts: AgentRunOptions): Promise<AgentRunResult> {
+    if (this.provider === 'codex') {
+      return await this.runCodex(opts);
+    }
+
     const model = opts.model ?? this.defaultModel;
     const maxSteps = opts.maxSteps ?? 6;
     const tools = buildTools(opts.scope, !!opts.confirm);
@@ -337,7 +475,7 @@ export class AgentService {
     let finalAnswer = '';
 
     for (let step = 0; step < maxSteps; step++) {
-      const response = await this.ai.models.generateContent({
+      const response = await this.gemini().models.generateContent({
         model,
         contents,
         config: {
@@ -383,6 +521,77 @@ export class AgentService {
 
     const modelTurns = contents.slice(modelTurnsStart);
     history.push({ role: 'model', text: finalAnswer, turns: modelTurns });
+    return { answer: finalAnswer, appliedActions: applied, history };
+  }
+
+  private async runCodex(opts: AgentRunOptions): Promise<AgentRunResult> {
+    const model = opts.model ?? this.defaultModel;
+    const maxSteps = opts.maxSteps ?? 6;
+    const tools = buildTools(opts.scope, !!opts.confirm)
+      .map(toCodexTool)
+      .filter((tool): tool is Record<string, unknown> => !!tool);
+
+    const singleData =
+      opts.scope.kind === 'single' && isValidFolderName(opts.scope.folderName)
+        ? await readTranscription(
+            path.join(getTranscriptionsDir(this.dataPath), opts.scope.folderName),
+          )
+        : null;
+    const systemInstruction = systemInstructionFor(opts.scope, singleData?.title);
+
+    const history = opts.history ? [...opts.history] : [];
+    const input: unknown[] = [];
+    if (singleData) {
+      input.push(codexMessage('user', buildSinglePrimer(singleData)));
+    }
+    input.push(...historyToCodexInput(history));
+    input.push(codexMessage('user', opts.question));
+    history.push({ role: 'user', text: opts.question });
+
+    const applied: AppliedAction[] = [];
+    const codexItems: unknown[] = [];
+    let finalAnswer = '';
+
+    for (let step = 0; step < maxSteps; step++) {
+      const response = await createCodexResponse({
+        getToken: () => this.getCodexToken(),
+        model,
+        instructions: systemInstruction,
+        input,
+        tools,
+      });
+
+      const output = (response as { output?: unknown }).output;
+      if (Array.isArray(output)) {
+        input.push(...output);
+        codexItems.push(...output);
+      }
+
+      const functionCalls = extractCodexFunctionCalls(response);
+      if (functionCalls.length === 0) {
+        finalAnswer = extractCodexResponseText(response);
+        break;
+      }
+
+      const results = await Promise.all(
+        functionCalls.map((call) =>
+          this.dispatchTool({ name: call.name, args: call.args } as FunctionCall, opts, applied),
+        ),
+      );
+      const toolOutputs = functionCalls.map((call, i) => ({
+        type: 'function_call_output',
+        call_id: call.callId,
+        output: JSON.stringify(results[i]),
+      }));
+      input.push(...toolOutputs);
+      codexItems.push(...toolOutputs);
+    }
+
+    if (!finalAnswer) {
+      finalAnswer = '(no answer produced within step limit)';
+    }
+
+    history.push({ role: 'model', text: finalAnswer, codexItems });
     return { answer: finalAnswer, appliedActions: applied, history };
   }
 
