@@ -101,10 +101,15 @@ function getAgentService(): AgentService | null {
     provider: configService.getAiProvider(),
     apiKey: configService.getGeminiApiKey(),
     codexOAuth: configService.getCodexOAuth(),
-    onCodexOAuthUpdate: (credentials) => {
-      configService.setCodexOAuth(credentials);
-      broadcastConfigChanged();
-    },
+    // Only persist refreshed tokens when the credentials originated in config.json.
+    // Env-only credentials must stay ephemeral -- writing refreshed tokens to disk
+    // would leak ephemeral env creds into the persistent store.
+    onCodexOAuthUpdate: configService.hasStoredCodexOAuth()
+      ? (credentials) => {
+          configService.setCodexOAuth(credentials);
+          broadcastConfigChanged();
+        }
+      : undefined,
     codexModel: configService.getCodexModel(),
     dataPath: app.getPath('userData'),
     configService,
@@ -155,10 +160,13 @@ function createGeminiService(): GeminiService | null {
     provider: configService.getAiProvider(),
     apiKey: configService.getGeminiApiKey(),
     codexOAuth: configService.getCodexOAuth(),
-    onCodexOAuthUpdate: (credentials) => {
-      configService.setCodexOAuth(credentials);
-      broadcastConfigChanged();
-    },
+    // See note in getAgentService(): persist refreshed tokens only for stored creds.
+    onCodexOAuthUpdate: configService.hasStoredCodexOAuth()
+      ? (credentials) => {
+          configService.setCodexOAuth(credentials);
+          broadcastConfigChanged();
+        }
+      : undefined,
     knownWords: configService.getKnownWords(),
     proModel: configService.getGeminiModel(),
     flashModel: configService.getGeminiFlashModel(),

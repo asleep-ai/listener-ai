@@ -214,6 +214,12 @@ For UX changes (button visibility, dialog UX, list refresh) or external paid API
 
 This pattern caught two issues during issue #95 verification: a hard-to-see Merge button (CSS override) and an empty `mergedFrom` edge case dependent on input metadata. Service-layer tests would have missed both.
 
+## Startup, Config, and OAuth Gotchas
+
+- **Electron `app.setPath()` ordering.** `main.ts` calls `app.setPath('userData', getDataPath())` near the top. Any module-level singleton instantiated by an `import` earlier in the file (or transitively) that calls `app.getPath('userData')` in its constructor resolves the path BEFORE the override is applied, producing a split-brain where one subsystem writes to `Listener.AI/...` while the rest write to `listener-ai/...`. For any service that needs `userData` at construction time, defer with a lazy getter that resolves on first method call.
+- **Codex OAuth credential source distinction.** `ConfigService.getCodexOAuth()` returns either stored (config.json) or env-supplied (`CODEX_OAUTH_*` / `OPENAI_CODEX_*`) credentials. Anywhere a refresh-callback persists rotated tokens to disk, gate it on `hasStoredCodexOAuth()` first -- if the credentials came from env vars, persisting them silently leaks ephemeral env tokens into the on-disk store.
+- **Concurrent `config.json` writes.** Electron app and CLI both instantiate `ConfigService` against the same `config.json` and can refresh OAuth tokens in parallel. `saveConfig()` re-reads disk and applies only this process's `dirtyKeys` so writers don't clobber each other's unrelated keys. Setters that mutate config must go through `setKey()`, never `this.config.X = ...` directly, or the change won't be marked dirty and gets lost on the next save.
+
 ## Background Recording Policy
 Recording starts silently — never bring the window to foreground (no `show()`/`focus()`) and never fire a "Recording Started" notification. This applies to all recording triggers: global shortcut, tray click, meeting detection, and display detection. Display detection in particular is designed to be discreet — the user allows recording via the notification without the app becoming visible. Only explicit user actions (dock click, tray menu "Open", notification click for non-recording events) should show the window.
 

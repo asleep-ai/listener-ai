@@ -247,7 +247,12 @@ function createTranscriptionService(config: ConfigService, dataPath: string): Ge
     provider: config.getAiProvider(),
     apiKey: config.getGeminiApiKey(),
     codexOAuth: config.getCodexOAuth(),
-    onCodexOAuthUpdate: (credentials) => config.setCodexOAuth(credentials),
+    // Persist refreshed tokens only when credentials are stored in config.json.
+    // Env-only credentials must stay ephemeral; persisting them silently writes
+    // env-provided OAuth tokens to disk on every refresh.
+    onCodexOAuthUpdate: config.hasStoredCodexOAuth()
+      ? (credentials) => config.setCodexOAuth(credentials)
+      : undefined,
     dataPath,
     knownWords: config.getKnownWords(),
     proModel: config.getGeminiModel(),
@@ -262,7 +267,10 @@ function createAgentService(config: ConfigService, dataPath: string): AgentServi
     provider: config.getAiProvider(),
     apiKey: config.getGeminiApiKey(),
     codexOAuth: config.getCodexOAuth(),
-    onCodexOAuthUpdate: (credentials) => config.setCodexOAuth(credentials),
+    // See note in createTranscriptionService(): persist only for stored creds.
+    onCodexOAuthUpdate: config.hasStoredCodexOAuth()
+      ? (credentials) => config.setCodexOAuth(credentials)
+      : undefined,
     dataPath,
     configService: config,
     codexModel: config.getCodexModel(),

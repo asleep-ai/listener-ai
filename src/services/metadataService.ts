@@ -20,18 +20,22 @@ interface RecordingMetadata {
 }
 
 export class MetadataService {
-  private metadataDir: string;
+  // Resolved lazily on first use. Resolving in the constructor caused split-brain
+  // bugs: this module is imported at the top of main.ts, but app.setPath('userData', ...)
+  // is called a few lines later. An eager constructor would call app.getPath('userData')
+  // before the override was applied, leaving metadataDir pointing at the wrong path.
+  private _metadataDir: string | undefined;
 
-  constructor() {
-    this.metadataDir = path.join(app.getPath('userData'), 'metadata');
-    console.log('Metadata directory:', this.metadataDir);
-    // Create directory synchronously in constructor
+  private get metadataDir(): string {
+    if (this._metadataDir) return this._metadataDir;
+    const dir = path.join(app.getPath('userData'), 'metadata');
     try {
-      require('fs').mkdirSync(this.metadataDir, { recursive: true });
-      console.log('Metadata directory created/verified:', this.metadataDir);
+      require('fs').mkdirSync(dir, { recursive: true });
     } catch (error) {
       console.error('Failed to create metadata directory:', error);
     }
+    this._metadataDir = dir;
+    return dir;
   }
 
   private getMetadataPath(audioFilePath: string): string {
