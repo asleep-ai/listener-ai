@@ -1,14 +1,12 @@
 // Thin wrapper around `@earendil-works/pi-ai`. The package is ESM-only and
-// our codebase compiles to CommonJS (tsc module=commonjs), so a normal
-// `import { complete } from '@earendil-works/pi-ai'` would compile to a `require`
-// that fails at runtime ("ERR_REQUIRE_ESM"). The Function-eval'd `import()`
-// below bypasses tsc's import-to-require rewriting and is the same pattern
-// used in src/codexOAuth.ts for the OAuth subpath.
-//
-// Types are still imported normally via `import type` -- those are erased at
-// compile time and don't emit runtime code.
+// our codebase compiles to CommonJS, so we can't statically `import` it --
+// see src/esmImport.ts for the workaround. Types are imported normally and
+// erased at compile time.
+
+import { importEsm } from './esmImport';
 
 import type {
+  Api,
   AssistantMessage,
   Context,
   Message,
@@ -23,55 +21,57 @@ export type {
   AssistantMessage,
   Context,
   Message,
-  Model,
   StreamOptions,
   Tool,
   ToolCall,
   ToolResultMessage,
 };
 
+// Opaque model handle. Domain code shouldn't depend on pi-ai's TApi
+// discriminator -- we never read api-specific fields off the model.
+export type PiAiModel = Model<Api>;
+
 type PiAiModule = typeof import('@earendil-works/pi-ai');
 
 let modulePromise: Promise<PiAiModule> | undefined;
 function loadPiAi(): Promise<PiAiModule> {
-  modulePromise ??= (
-    Function('return import("@earendil-works/pi-ai")') as () => Promise<PiAiModule>
-  )();
+  modulePromise ??= importEsm<PiAiModule>('@earendil-works/pi-ai');
   return modulePromise;
 }
 
-// Subset of pi-ai's KnownProvider that we ever pass to getModel. Keeping it
-// narrow forces a compile error if we accidentally pick an unsupported
-// provider id (e.g. typo'd "google-vertex" instead of "google").
-export type SupportedProvider = 'google' | 'openai-codex';
+import { type AiProvider, toPiAiProvider } from './aiProvider';
 
-export async function getModel(
-  provider: SupportedProvider,
-  modelId: string,
-): Promise<Model<never>> {
+export async function getModel(provider: AiProvider, modelId: string): Promise<PiAiModel> {
   const m = await loadPiAi();
-  // pi-ai's getModel signature is typed against literal model ids per provider,
-  // but config-supplied model strings are dynamic. The cast is necessary and
-  // matches the documented usage for non-literal model ids (see pi-ai README,
-  // "Custom Models").
-  return m.getModel(provider as never, modelId as never) as unknown as Model<never>;
+  const piId = toPiAiProvider(provider);
+  // pi-ai's getModel is typed against literal model ids per provider; our
+  // model strings come from user config. Cast is documented as the supported
+  // path for non-literal ids ("Custom Models" in pi-ai's README).
+  return m.getModel(piId as never, modelId as never) as unknown as PiAiModel;
 }
 
-// pi-ai's complete() expects ProviderStreamOptions (StreamOptions + an open
-// record). We accept the plain StreamOptions shape here for cleaner callsites
-// and spread it into a record at the boundary.
 export async function complete(
-  model: Model<never>,
+  model: PiAiModel,
   context: Context,
   options?: StreamOptions,
 ): Promise<AssistantMessage> {
   const m = await loadPiAi();
+  // pi-ai's ProviderStreamOptions is `StreamOptions & Record<string, unknown>`;
+  // spread to satisfy the index-signature constraint.
   return await m.complete(model, context, options ? { ...options } : undefined);
 }
 
-// TypeBox `Type` builder for tool parameter schemas. Lazy-loaded because
-// pi-ai is ESM-only -- consumers await this once at module setup and reuse.
 export async function getTypeBox(): Promise<PiAiModule['Type']> {
   const m = await loadPiAi();
   return m.Type;
+}
+
+// Reduce a pi-ai assistant message to its concatenated text content.
+// Filters out thinking and tool-call blocks; trims trailing whitespace.
+export function extractFinalText(message: AssistantMessage): string {
+  return message.content
+    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n')
+    .trim();
 }

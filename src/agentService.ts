@@ -1,15 +1,17 @@
 import * as path from 'path';
 import { DEFAULT_CODEX_MODEL, type AiProvider } from './aiProvider';
-import { type CodexOAuthCredentials, requireCodexAccessToken } from './codexOAuth';
+import { type CodexOAuthCredentials } from './codexOAuth';
+import { CodexOAuthHolder } from './codexOAuthHolder';
 import type { ConfigService } from './configService';
 import {
   type AssistantMessage,
   type Context,
   type Message,
-  type Model,
+  type PiAiModel,
   type Tool,
   type ToolCall,
   complete,
+  extractFinalText,
   getModel,
   getTypeBox,
 } from './piAiClient';
@@ -257,7 +259,23 @@ function buildSinglePrimer(data: ReadTranscriptionResult): string {
 // the model can reason about its earlier tool use. Without those, we degrade
 // gracefully to plain text -- this is the path old-format history entries
 // (pre-migration) take, and the path the renderer takes on a fresh session.
-function historyToMessages(history: AgentChatMessage[]): Message[] {
+// Replay an old AgentChatMessage as a pi-ai assistant message when the
+// caller didn't carry the full `piaiMessages` cluster forward. The api /
+// provider / model fields on assistant messages drive cross-provider handoff
+// transformations inside pi-ai, but plain-text replay carries no thinking or
+// tool-call content for pi-ai to massage -- the values just need to parse.
+function synthAssistantText(text: string, provider: AiProvider): AssistantMessage {
+  const isCodex = provider === 'codex';
+  return {
+    role: 'assistant',
+    content: [{ type: 'text', text }],
+    api: isCodex ? 'openai-codex-responses' : 'google-generative-ai',
+    provider: isCodex ? 'openai-codex' : 'google',
+    model: '',
+  } as AssistantMessage;
+}
+
+function historyToMessages(history: AgentChatMessage[], provider: AiProvider): Message[] {
   const out: Message[] = [];
   for (const m of history) {
     if (m.role === 'model' && m.piaiMessages && m.piaiMessages.length > 0) {
@@ -265,26 +283,12 @@ function historyToMessages(history: AgentChatMessage[]): Message[] {
       continue;
     }
     if (m.role === 'model') {
-      out.push({
-        role: 'assistant',
-        content: [{ type: 'text', text: m.text }],
-        api: 'openai-codex-responses',
-        provider: 'openai-codex',
-        model: '',
-      } as AssistantMessage);
+      out.push(synthAssistantText(m.text, provider));
       continue;
     }
     out.push({ role: 'user', content: m.text, timestamp: Date.now() });
   }
   return out;
-}
-
-function extractFinalText(message: AssistantMessage): string {
-  return message.content
-    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-    .map((b) => b.text)
-    .join('\n')
-    .trim();
 }
 
 function extractToolCalls(message: AssistantMessage): ToolCall[] {
@@ -306,11 +310,10 @@ export interface AgentServiceOptions {
 export class AgentService {
   private provider: AiProvider;
   private geminiApiKey?: string;
+  private codexAuth?: CodexOAuthHolder;
   private dataPath: string;
   private configService: ConfigService;
   private defaultModel: string;
-  private codexOAuth?: CodexOAuthCredentials;
-  private onCodexOAuthUpdate?: (credentials: CodexOAuthCredentials) => void | Promise<void>;
 
   constructor(opts: AgentServiceOptions) {
     this.provider = opts.provider ?? 'gemini';
@@ -319,6 +322,11 @@ export class AgentService {
         throw new Error('Gemini API key is required for the Gemini provider.');
       }
       this.geminiApiKey = opts.apiKey;
+    } else {
+      this.codexAuth = new CodexOAuthHolder({
+        credentials: opts.codexOAuth,
+        onUpdate: opts.onCodexOAuthUpdate,
+      });
     }
     this.dataPath = opts.dataPath;
     this.configService = opts.configService;
@@ -327,33 +335,16 @@ export class AgentService {
       (this.provider === 'codex'
         ? opts.codexModel || DEFAULT_CODEX_MODEL
         : opts.configService.getGeminiFlashModel());
-    this.codexOAuth = opts.codexOAuth;
-    this.onCodexOAuthUpdate = opts.onCodexOAuthUpdate;
   }
 
-  // Resolve a per-request API key. For Codex we go through pi-ai's OAuth
-  // refresher (cached credentials in memory, persisted callback for config-
-  // sourced creds only -- env-only creds intentionally stay ephemeral). For
-  // Gemini we just hand back the static key.
+  // For Codex we mint a fresh access token per request (the holder rotates
+  // it transparently). For Gemini we already have the static key in hand.
   private async resolveApiKey(): Promise<string> {
-    if (this.provider === 'codex') {
-      return await requireCodexAccessToken({
-        credentials: this.codexOAuth,
-        onCredentialsChanged: async (credentials) => {
-          this.codexOAuth = credentials;
-          await this.onCodexOAuthUpdate?.(credentials);
-        },
-      });
-    }
+    if (this.codexAuth) return await this.codexAuth.getToken();
     if (!this.geminiApiKey) {
       throw new Error('Gemini API key is not configured.');
     }
     return this.geminiApiKey;
-  }
-
-  private async resolveModel(modelId: string): Promise<Model<never>> {
-    const piProvider = this.provider === 'codex' ? 'openai-codex' : 'google';
-    return await getModel(piProvider, modelId);
   }
 
   async run(opts: AgentRunOptions): Promise<AgentRunResult> {
@@ -386,13 +377,11 @@ export class AgentService {
         timestamp: Date.now(),
       });
     }
-    for (const m of historyToMessages(history)) context.messages.push(m);
+    for (const m of historyToMessages(history, this.provider)) context.messages.push(m);
     context.messages.push({ role: 'user', content: opts.question, timestamp: Date.now() });
     history.push({ role: 'user', text: opts.question });
 
-    // Pi-ai's `Model` discriminator is invariant in TApi so we keep it loose
-    // here; we never read api-specific fields off the model in this service.
-    const model = await this.resolveModel(modelId);
+    const model: PiAiModel = await getModel(this.provider, modelId);
     const turnsStart = context.messages.length;
     const applied: AppliedAction[] = [];
     let finalAnswer = '';

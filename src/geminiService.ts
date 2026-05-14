@@ -9,10 +9,11 @@ import {
   DEFAULT_CODEX_TRANSCRIPTION_MODEL,
 } from './aiProvider';
 import { mimeTypeForExtension } from './audioFormats';
-import { type CodexOAuthCredentials, requireCodexAccessToken } from './codexOAuth';
+import { type CodexOAuthCredentials } from './codexOAuth';
+import { CodexOAuthHolder } from './codexOAuthHolder';
 import { OPENAI_TRANSCRIPTION_EXTENSIONS, transcribeCodexAudio } from './codexTranscription';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
-import { complete, getModel, type Context } from './piAiClient';
+import { type Context, complete, extractFinalText, getModel } from './piAiClient';
 import { FFmpegManager } from './services/ffmpegManager';
 
 const execFileAsync = promisify(execFile);
@@ -167,13 +168,12 @@ export interface GeminiServiceOptions {
 export class GeminiService {
   private ai?: GoogleGenAI;
   private geminiApiKey?: string;
+  private codexAuth?: CodexOAuthHolder;
   private provider: AiProvider;
   private ffmpegManager: FFmpegManager;
   private knownWords: string[];
   private proModel: string;
   private flashModel: string;
-  private codexOAuth?: CodexOAuthCredentials;
-  private onCodexOAuthUpdate?: (credentials: CodexOAuthCredentials) => void | Promise<void>;
   private codexModel: string;
   private codexTranscriptionModel: string;
 
@@ -196,13 +196,16 @@ export class GeminiService {
       }
       this.ai = new GoogleGenAI({ apiKey: options.apiKey });
       this.geminiApiKey = options.apiKey;
+    } else {
+      this.codexAuth = new CodexOAuthHolder({
+        credentials: options.codexOAuth,
+        onUpdate: options.onCodexOAuthUpdate,
+      });
     }
     this.ffmpegManager = new FFmpegManager(options.dataPath);
     this.knownWords = options.knownWords || [];
     this.proModel = options.proModel;
     this.flashModel = options.flashModel;
-    this.codexOAuth = options.codexOAuth;
-    this.onCodexOAuthUpdate = options.onCodexOAuthUpdate;
     this.codexModel = options.codexModel || DEFAULT_CODEX_MODEL;
     this.codexTranscriptionModel =
       options.codexTranscriptionModel || DEFAULT_CODEX_TRANSCRIPTION_MODEL;
@@ -216,35 +219,29 @@ export class GeminiService {
   }
 
   private async getCodexToken(): Promise<string> {
-    return await requireCodexAccessToken({
-      credentials: this.codexOAuth,
-      onCredentialsChanged: async (credentials) => {
-        this.codexOAuth = credentials;
-        await this.onCodexOAuthUpdate?.(credentials);
-      },
-    });
+    if (!this.codexAuth) {
+      throw new Error('Codex OAuth holder is not configured.');
+    }
+    return await this.codexAuth.getToken();
   }
 
-  // Unified provider-agnostic summary generation via pi-ai. Used by both the
-  // Codex Responses path and the Gemini Pro path -- pi-ai handles the protocol
-  // differences (SSE format, streaming events, auth header shape) internally.
-  //
-  // We lost the Gemini-specific `responseMimeType: 'application/json'` knob
-  // here (not exposed by pi-ai's GoogleOptions), so callers must tolerate
-  // models that wrap the JSON in ```json``` fences -- see stripJsonFences()
-  // in transcribeWithTwoSteps.
+  private requireGeminiApiKey(): string {
+    if (!this.geminiApiKey) {
+      throw new Error('Gemini API key is not configured.');
+    }
+    return this.geminiApiKey;
+  }
+
+  // Pi-ai's GoogleOptions doesn't expose Gemini's `responseMimeType=application/json`
+  // knob, so models may wrap the JSON in ```json``` fences. The summary-text
+  // consumer strips fences before parsing (see stripJsonFences in
+  // transcribeWithTwoSteps).
   private async generateSummary(promptText: string, transcript: string): Promise<string> {
-    const piProvider = this.provider === 'codex' ? 'openai-codex' : 'google';
     const modelId = this.provider === 'codex' ? this.codexModel : this.proModel;
     const apiKey =
-      this.provider === 'codex'
-        ? await this.getCodexToken()
-        : (this.geminiApiKey ??
-          (() => {
-            throw new Error('Gemini API key is not configured.');
-          })());
+      this.provider === 'codex' ? await this.getCodexToken() : this.requireGeminiApiKey();
 
-    const model = await getModel(piProvider, modelId);
+    const model = await getModel(this.provider, modelId);
     const context: Context = {
       messages: [
         {
@@ -259,11 +256,7 @@ export class GeminiService {
       temperature: 0.2,
       maxTokens: 32768,
     });
-    return response.content
-      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-      .trim();
+    return extractFinalText(response);
   }
 
   private async prepareAudioForProvider(audioFilePath: string): Promise<{

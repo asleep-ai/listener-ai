@@ -15,11 +15,11 @@ import assert from 'node:assert/strict';
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import { AgentService } from './agentService';
 import { ConfigService } from './configService';
+import { importEsm } from './esmImport';
 import { makeTempDir, rmDir } from './test-helpers';
 
 type PiAiModule = typeof import('@earendil-works/pi-ai');
-const loadPiAi = (): Promise<PiAiModule> =>
-  (Function('return import("@earendil-works/pi-ai")') as () => Promise<PiAiModule>)();
+const loadPiAi = (): Promise<PiAiModule> => importEsm<PiAiModule>('@earendil-works/pi-ai');
 
 let workDir: string;
 let configDir: string;

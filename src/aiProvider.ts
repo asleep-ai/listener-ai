@@ -16,3 +16,11 @@ export function normalizeAiProvider(value: unknown): AiProvider | undefined {
   const normalized = value.trim().toLowerCase();
   return isAiProvider(normalized) ? normalized : undefined;
 }
+
+// pi-ai uses different provider ids than our internal `AiProvider`. Map at the
+// boundary so callsites don't sprinkle inline ternaries.
+export type PiAiProviderId = 'google' | 'openai-codex';
+
+export function toPiAiProvider(provider: AiProvider): PiAiProviderId {
+  return provider === 'codex' ? 'openai-codex' : 'google';
+}

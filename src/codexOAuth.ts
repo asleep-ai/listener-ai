@@ -1,3 +1,5 @@
+import { importEsm } from './esmImport';
+
 type OAuthCredentials = {
   access: string;
   refresh: string;
@@ -26,14 +28,10 @@ export type CodexOAuthCredentials = OAuthCredentials & {
   email?: string;
 };
 
-const importEsm = new Function('specifier', 'return import(specifier)') as (
-  specifier: string,
-) => Promise<CodexOAuthRuntime>;
-
 let runtimePromise: Promise<CodexOAuthRuntime> | undefined;
 
 async function loadCodexOAuthRuntime(): Promise<CodexOAuthRuntime> {
-  runtimePromise ??= importEsm('@earendil-works/pi-ai/oauth');
+  runtimePromise ??= importEsm<CodexOAuthRuntime>('@earendil-works/pi-ai/oauth');
   return await runtimePromise;
 }
 
