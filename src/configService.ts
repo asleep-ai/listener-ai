@@ -100,17 +100,20 @@ export class ConfigService {
   // legacy default before gpt-4o-transcribe-diarize shipped; clearing it
   // here lets `getCodexTranscriptionModel()` return the current default
   // (diarize) without forcing every user to manually unset it.
+  //
+  // The marker semantics are "we've considered migrating this user" --
+  // it lands on EVERY install on first launch, not just the ones we
+  // actually had to migrate. That way if a user later opts back into
+  // `gpt-4o-transcribe` deliberately (e.g. for glossary support), the
+  // next ConfigService construction sees the marker and skips the
+  // migration entirely instead of clobbering their explicit choice.
   private migrateLegacyDefaults(): void {
-    let touched = false;
-    if (
-      !this.config.codexTranscriptionMigratedToDiarize &&
-      this.config.codexTranscriptionModel === 'gpt-4o-transcribe'
-    ) {
+    if (this.config.codexTranscriptionMigratedToDiarize) return;
+    if (this.config.codexTranscriptionModel === 'gpt-4o-transcribe') {
       this.setKey('codexTranscriptionModel', undefined);
-      this.setKey('codexTranscriptionMigratedToDiarize', true);
-      touched = true;
     }
-    if (touched) this.saveConfig();
+    this.setKey('codexTranscriptionMigratedToDiarize', true);
+    this.saveConfig();
   }
 
   private loadConfig(): void {

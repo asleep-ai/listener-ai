@@ -456,7 +456,13 @@ export class GeminiService {
     const baseName = path.basename(audioFilePath, path.extname(audioFilePath));
     const ext = path.extname(audioFilePath);
 
-    const segmentPath = path.join(outputDir, `${baseName}_segment_%03d${ext}`);
+    // When re-encoding to opus we MUST force a container that supports
+    // opus -- ffmpeg picks the muxer from the output extension, so leaving
+    // an imported `.mp3`/`.m4a`/`.wav` source as `.mp3` makes ffmpeg pick
+    // the MP3 muxer and reject the opus stream. `.webm` is in OpenAI's
+    // supported transcription extensions, so the segments still upload.
+    const segmentExt = reencode ? '.webm' : ext;
+    const segmentPath = path.join(outputDir, `${baseName}_segment_%03d${segmentExt}`);
 
     // Get the bundled FFmpeg path
     const ffmpegPath = await this.getFFmpegPath();
@@ -482,10 +488,12 @@ export class GeminiService {
         segmentPath,
       ]);
 
-      // Find all created segment files
+      // Find all created segment files. Match on the EXTENSION WE TOLD
+      // FFMPEG TO WRITE -- when re-encoding, that's `.webm` regardless of
+      // the source's original extension.
       const segmentFiles = fs
         .readdirSync(outputDir)
-        .filter((file) => file.startsWith(`${baseName}_segment_`) && file.endsWith(ext))
+        .filter((file) => file.startsWith(`${baseName}_segment_`) && file.endsWith(segmentExt))
         .map((file) => path.join(outputDir, file))
         .sort();
 
