@@ -443,6 +443,14 @@ export class GeminiService {
   private async splitAudioIntoSegments(
     audioFilePath: string,
     segmentDuration = 300,
+    // re-encode segments instead of `-c copy`. ffmpeg's segment muxer can
+    // only cut at keyframes when copying, and webm-opus has near-zero
+    // keyframes by default -- so `-c copy -segment_time 300` silently
+    // produces 30+ minute segments that blow past gpt-4o-transcribe's
+    // 1400-second per-request limit. Caller passes `reencode: true` for
+    // the Codex transcription path; Gemini's API is tolerant of long
+    // inputs and stays on the faster `-c copy` path.
+    reencode = false,
   ): Promise<string[]> {
     const outputDir = path.dirname(audioFilePath);
     const baseName = path.basename(audioFilePath, path.extname(audioFilePath));
@@ -454,7 +462,13 @@ export class GeminiService {
     const ffmpegPath = await this.getFFmpegPath();
 
     try {
-      // Split audio into segments
+      const codecArgs = reencode ? ['-c:a', 'libopus', '-b:a', '48k'] : ['-c', 'copy'];
+      // Split audio into segments. `-reset_timestamps 1` makes each segment
+      // start at PTS 0 and gives it its own container duration. Without it,
+      // webm output keeps the source file's total duration in the header --
+      // and OpenAI rejects the request based on the header value even when
+      // the actual encoded audio is short (`audio duration N seconds is
+      // longer than 1400` errors on small last-segment files).
       await execFileAsync(ffmpegPath, [
         '-i',
         audioFilePath,
@@ -462,8 +476,9 @@ export class GeminiService {
         'segment',
         '-segment_time',
         String(segmentDuration),
-        '-c',
-        'copy',
+        '-reset_timestamps',
+        '1',
+        ...codecArgs,
         segmentPath,
       ]);
 
@@ -542,6 +557,13 @@ export class GeminiService {
       let fullTranscript = '';
       const stats = fs.statSync(audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
+      // Segment intentionally for parallelism: even when the API would
+      // accept the whole file (Gemini long-context, gpt-4o-transcribe-diarize
+      // via chunking_strategy=auto), N parallel 5-min requests finish much
+      // faster than one big sequential pass. Trade-off for the diarize
+      // model: speaker IDs are mapped fresh per segment ("Speaker 0" in
+      // segment 1 may not be the same physical person as "Speaker 0" in
+      // segment 2). See docs/model-pricing.md.
       const shouldSegment = duration > 300 || (this.provider === 'codex' && fileSizeInMB > 24);
       const segmentDuration =
         this.provider === 'codex' && duration > 0 && fileSizeInMB > 20
@@ -696,7 +718,14 @@ Return as JSON:
           getToken: () => this.getCodexToken(),
           audioFilePath,
           model: this.codexTranscriptionModel,
+          // `prompt` is dropped inside transcribeCodexAudio when the
+          // diarize model is active. Keep passing it -- the helper picks
+          // the right shape per model.
           prompt: transcriptPrompt,
+          // Intentionally NOT passing `language: 'ko'`. Whisper-derived
+          // transcription auto-detects from the first ~30s, which handles
+          // bilingual/code-switched meetings (Korean primary, English
+          // acronyms/quotes) better than forcing a single language.
         });
       }
 
@@ -938,8 +967,15 @@ Return as JSON:
     segmentDuration = 300,
   ): Promise<string> {
     try {
-      // Split audio into 5-minute segments
-      const segmentFiles = await this.splitAudioIntoSegments(audioFilePath, segmentDuration);
+      // Split audio into 5-minute segments. Codex transcription requires
+      // accurate cut times (gpt-4o-transcribe rejects >1400s/segment), so
+      // force re-encode there; Gemini's API tolerates long inputs and we
+      // keep the cheaper `-c copy` path for it.
+      const segmentFiles = await this.splitAudioIntoSegments(
+        audioFilePath,
+        segmentDuration,
+        this.provider === 'codex',
+      );
 
       if (progressCallback) {
         progressCallback(20, `Processing ${segmentFiles.length} segments...`);

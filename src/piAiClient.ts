@@ -50,15 +50,75 @@ export async function getModel(provider: AiProvider, modelId: string): Promise<P
   return m.getModel(piId as never, modelId as never) as unknown as PiAiModel;
 }
 
+function summarizeContextSize(context: Context): string {
+  let chars = 0;
+  let toolCalls = 0;
+  let toolResults = 0;
+  for (const msg of context.messages) {
+    if (msg.role === 'user') {
+      chars +=
+        typeof msg.content === 'string'
+          ? msg.content.length
+          : msg.content.reduce((n, b) => n + (b.type === 'text' ? b.text.length : 0), 0);
+    } else if (msg.role === 'assistant') {
+      for (const b of msg.content) {
+        if (b.type === 'text') chars += b.text.length;
+        else if (b.type === 'toolCall') toolCalls++;
+      }
+    } else if (msg.role === 'toolResult') {
+      toolResults++;
+      for (const b of msg.content) if (b.type === 'text') chars += b.text.length;
+    }
+  }
+  const systemChars = context.systemPrompt?.length ?? 0;
+  return `messages=${context.messages.length} chars=${chars + systemChars} (system=${systemChars}) toolCalls=${toolCalls} toolResults=${toolResults} tools=${context.tools?.length ?? 0}`;
+}
+
+// Strip options the target provider doesn't accept. OpenAI Codex routes
+// through GPT-5.x reasoning models which reject sampling parameters
+// (`Unsupported parameter: temperature`). pi-ai forwards options verbatim,
+// so the adjustment has to happen at our boundary -- doing it here keeps
+// callsites free of provider conditionals.
+function adjustOptionsForModel(
+  model: PiAiModel,
+  options: StreamOptions | undefined,
+): Record<string, unknown> | undefined {
+  if (!options) return undefined;
+  const isCodex = model.api === 'openai-codex-responses' || model.provider === 'openai-codex';
+  if (isCodex) {
+    const { temperature: _t, ...rest } = options;
+    return { ...rest };
+  }
+  return { ...options };
+}
+
 export async function complete(
   model: PiAiModel,
   context: Context,
   options?: StreamOptions,
 ): Promise<AssistantMessage> {
   const m = await loadPiAi();
-  // pi-ai's ProviderStreamOptions is `StreamOptions & Record<string, unknown>`;
-  // spread to satisfy the index-signature constraint.
-  return await m.complete(model, context, options ? { ...options } : undefined);
+  const tag = `[pi-ai ${model.provider}/${model.id}]`;
+  const startedAt = Date.now();
+  console.log(`${tag} -> ${summarizeContextSize(context)}`);
+  const adjustedOptions = adjustOptionsForModel(model, options);
+  const response = await m.complete(model, context, adjustedOptions);
+  const elapsed = Date.now() - startedAt;
+  const stop = response.stopReason ?? 'unknown';
+  const textChars = extractFinalText(response).length;
+  console.log(
+    `${tag} <- ${elapsed}ms stop=${stop} textChars=${textChars} usage=in:${response.usage?.input ?? '?'}/out:${response.usage?.output ?? '?'}${response.errorMessage ? ` errorMessage=${response.errorMessage.slice(0, 300)}` : ''}`,
+  );
+  // pi-ai surfaces upstream failures via stopReason='error' rather than
+  // throwing. Without this, geminiService.generateSummary returns "" and
+  // agentService.run returns "(no answer)" with no breadcrumb. Promote the
+  // diagnostic into a thrown error so it reaches the renderer / CLI surface.
+  if (response.stopReason === 'error') {
+    throw new Error(
+      `Pi-ai ${model.provider}/${model.id} failed: ${response.errorMessage ?? 'no errorMessage'}`,
+    );
+  }
+  return response;
 }
 
 export async function getTypeBox(): Promise<PiAiModule['Type']> {
