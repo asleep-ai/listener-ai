@@ -236,3 +236,66 @@ describe('ConfigService: saveConfig file mode + concurrent merge', () => {
     assert.equal(onDisk.globalShortcut, 'CommandOrControl+Shift+L', 'other A-keys must survive');
   });
 });
+
+describe('ConfigService: codexTranscriptionModel migration to diarize default', () => {
+  it('clears the legacy `gpt-4o-transcribe` value and stamps the marker', () => {
+    const dataPath = freshDataPath('migrate-legacy');
+    const configPath = path.join(dataPath, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ codexTranscriptionModel: 'gpt-4o-transcribe' }));
+
+    new ConfigService(dataPath);
+
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    assert.equal(
+      onDisk.codexTranscriptionModel,
+      undefined,
+      'legacy default must be cleared so the new default applies',
+    );
+    assert.equal(onDisk.codexTranscriptionMigratedToDiarize, true);
+  });
+
+  it('stamps the marker even for fresh installs that never had the legacy default', () => {
+    // Regression for the P2 review: if the marker only landed when the
+    // migration cleared something, a user who never had a stored value
+    // could later explicitly opt back into `gpt-4o-transcribe` and have
+    // their choice clobbered on the next restart.
+    const dataPath = freshDataPath('migrate-fresh');
+    const configPath = path.join(dataPath, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({}));
+
+    new ConfigService(dataPath);
+
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    assert.equal(onDisk.codexTranscriptionMigratedToDiarize, true);
+  });
+
+  it('preserves a deliberate `gpt-4o-transcribe` opt-out after the marker is set', () => {
+    const dataPath = freshDataPath('migrate-deliberate-optout');
+    // First launch: empty config -> marker gets stamped, no model cleared.
+    new ConfigService(dataPath);
+    // Second session: user deliberately picks the non-diarize model.
+    const second = new ConfigService(dataPath);
+    second.setCodexTranscriptionModel('gpt-4o-transcribe');
+    // Third launch must not re-migrate.
+    const third = new ConfigService(dataPath);
+    assert.equal(third.getCodexTranscriptionModel(), 'gpt-4o-transcribe');
+  });
+
+  it('does not re-run the migration once the marker is set', () => {
+    const dataPath = freshDataPath('migrate-idempotent');
+    const configPath = path.join(dataPath, 'config.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        codexTranscriptionModel: 'gpt-4o-transcribe',
+        codexTranscriptionMigratedToDiarize: true,
+      }),
+    );
+
+    new ConfigService(dataPath);
+
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    // Marker already there -> user's explicit choice is preserved.
+    assert.equal(onDisk.codexTranscriptionModel, 'gpt-4o-transcribe');
+  });
+});

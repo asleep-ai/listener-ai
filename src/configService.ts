@@ -39,6 +39,10 @@ export interface AppConfig {
   lastSeenVersion?: string;
   slackWebhookUrl?: string;
   slackAutoShare?: boolean;
+  // Idempotency marker for `migrateLegacyDefaults` -- once set we never
+  // re-run the migration, so a user who deliberately re-selects the old
+  // model after upgrade keeps their choice.
+  codexTranscriptionMigratedToDiarize?: boolean;
 }
 
 export const DEFAULT_SUMMARY_PROMPT = `Based on this meeting transcript, provide:
@@ -85,6 +89,31 @@ export class ConfigService {
     }
     this.configPath = path.join(userDataPath, 'config.json');
     this.loadConfig();
+    this.migrateLegacyDefaults();
+  }
+
+  // One-shot upgrade hook for keys that older versions auto-persisted from
+  // their then-current default. The settings modal in those versions wrote
+  // back the full payload on save -- including fields the user never
+  // touched -- so the next default change can't reach existing installs.
+  // Today's case: `codexTranscriptionModel: 'gpt-4o-transcribe'` was the
+  // legacy default before gpt-4o-transcribe-diarize shipped; clearing it
+  // here lets `getCodexTranscriptionModel()` return the current default
+  // (diarize) without forcing every user to manually unset it.
+  //
+  // The marker semantics are "we've considered migrating this user" --
+  // it lands on EVERY install on first launch, not just the ones we
+  // actually had to migrate. That way if a user later opts back into
+  // `gpt-4o-transcribe` deliberately (e.g. for glossary support), the
+  // next ConfigService construction sees the marker and skips the
+  // migration entirely instead of clobbering their explicit choice.
+  private migrateLegacyDefaults(): void {
+    if (this.config.codexTranscriptionMigratedToDiarize) return;
+    if (this.config.codexTranscriptionModel === 'gpt-4o-transcribe') {
+      this.setKey('codexTranscriptionModel', undefined);
+    }
+    this.setKey('codexTranscriptionMigratedToDiarize', true);
+    this.saveConfig();
   }
 
   private loadConfig(): void {
