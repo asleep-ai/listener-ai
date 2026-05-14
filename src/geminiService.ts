@@ -242,7 +242,15 @@ export class GeminiService {
       this.provider === 'codex' ? await this.getCodexToken() : this.requireGeminiApiKey();
 
     const model = await getModel(this.provider, modelId);
+    // Force formal Korean register (합니다체). Codex (GPT-5.x) defaults to
+    // mixed/해요체 in Korean output; Gemini tends to 합니다체 already but the
+    // explicit constraint keeps both providers consistent. Applied as a system
+    // prompt so it overrides whatever tone the user's customSummaryPrompt
+    // implies for summary/keyPoints/actionItems bodies.
+    const koreanToneSystem =
+      '모든 한국어 출력은 격식체(합니다/입니다 어미)로 작성하세요. 반말이나 해요체를 쓰지 마세요. summary, keyPoints, actionItems 본문 모두 동일하게 적용합니다.';
     const context: Context = {
+      systemPrompt: koreanToneSystem,
       messages: [
         {
           role: 'user',
@@ -255,6 +263,12 @@ export class GeminiService {
       apiKey,
       temperature: 0.2,
       maxTokens: 32768,
+      // Codex-only knobs; pi-ai's google provider ignores unknown keys.
+      // pi-ai omits `reasoning.effort` by default (server default ~medium); we
+      // force xhigh for deepest analysis -- gpt-5.5's thinkingLevelMap maps
+      // xhigh -> "max". Verbosity stays at pi-ai's "low" default (terse output
+      // is fine; reasoning depth is what was missing).
+      reasoningEffort: 'xhigh',
     });
     return extractFinalText(response);
   }

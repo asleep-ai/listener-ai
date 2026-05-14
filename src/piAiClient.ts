@@ -11,6 +11,7 @@ import type {
   Context,
   Message,
   Model,
+  ProviderStreamOptions,
   StreamOptions,
   Tool,
   ToolCall,
@@ -21,6 +22,7 @@ export type {
   AssistantMessage,
   Context,
   Message,
+  ProviderStreamOptions,
   StreamOptions,
   Tool,
   ToolCall,
@@ -81,7 +83,7 @@ function summarizeContextSize(context: Context): string {
 // callsites free of provider conditionals.
 function adjustOptionsForModel(
   model: PiAiModel,
-  options: StreamOptions | undefined,
+  options: ProviderStreamOptions | undefined,
 ): Record<string, unknown> | undefined {
   if (!options) return undefined;
   const isCodex = model.api === 'openai-codex-responses' || model.provider === 'openai-codex';
@@ -95,7 +97,7 @@ function adjustOptionsForModel(
 export async function complete(
   model: PiAiModel,
   context: Context,
-  options?: StreamOptions,
+  options?: ProviderStreamOptions,
 ): Promise<AssistantMessage> {
   const m = await loadPiAi();
   const tag = `[pi-ai ${model.provider}/${model.id}]`;
