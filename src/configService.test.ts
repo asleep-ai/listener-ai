@@ -162,6 +162,30 @@ describe('ConfigService: saveConfig file mode + concurrent merge', () => {
     assert.equal(mode, 0o600, `expected 0o600 mode, got 0o${mode.toString(8)}`);
   });
 
+  it(
+    'tightens an existing 0o644 config.json down to 0o600 on next save (POSIX)',
+    { skip: process.platform === 'win32' },
+    () => {
+      // Simulates the upgrade path: a user from a prior version has a
+      // world-readable config.json on disk. The new save must explicitly
+      // chmod it -- writeFileSync's `mode` option only applies on create.
+      const dataPath = freshDataPath('mode-upgrade');
+      const configPath = path.join(dataPath, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ geminiApiKey: 'pre-existing' }));
+      fs.chmodSync(configPath, 0o644);
+      assert.equal(fs.statSync(configPath).mode & 0o777, 0o644);
+
+      const cfg = new ConfigService(dataPath);
+      cfg.setCodexOAuth({ access: 'a', refresh: 'r', expires: Date.now() + 60_000 });
+
+      assert.equal(
+        fs.statSync(configPath).mode & 0o777,
+        0o600,
+        'existing file must be tightened to 0o600 after a save',
+      );
+    },
+  );
+
   it('save merges disk-side keys this process never modified', () => {
     const dataPath = freshDataPath('merge-disk-keys');
 

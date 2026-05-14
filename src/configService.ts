@@ -127,8 +127,20 @@ export class ConfigService {
           (merged as Record<string, unknown>)[key as string] = value;
         }
       }
-      // 0o600 keeps API keys + OAuth refresh tokens off other users on shared machines.
+      // 0o600 keeps API keys + OAuth refresh tokens off other users on shared
+      // machines. writeFileSync's `mode` option only applies when the OS
+      // creates the file -- existing config.json from prior versions keeps its
+      // umask-derived mode (typically 0o644). Explicitly chmod after writing
+      // so upgrade paths get tightened too. chmodSync is a no-op for the bits
+      // that matter on Windows but doesn't throw, so the call is unconditional.
       fs.writeFileSync(this.configPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
+      try {
+        fs.chmodSync(this.configPath, 0o600);
+      } catch (chmodError) {
+        // Don't fail the save if chmod fails (e.g. exotic filesystem) -- the
+        // write succeeded and the override above already covers fresh files.
+        console.warn('Could not chmod config.json to 0o600:', chmodError);
+      }
       this.config = merged;
       this.dirtyKeys.clear();
     } catch (error) {
