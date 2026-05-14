@@ -5,8 +5,9 @@
 export type AgentChatMessage = {
   role: 'user' | 'model';
   text: string;
-  turns?: unknown[];
-  codexItems?: unknown[];
+  // Opaque pi-ai message cluster (assistant turn + tool results). Round-trips
+  // through IPC unchanged so the next agent run can replay tool-use history.
+  piaiMessages?: unknown[];
 };
 export type AgentScope = { kind: 'all' } | { kind: 'single'; folderName: string };
 

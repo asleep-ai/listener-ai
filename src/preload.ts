@@ -60,8 +60,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     history?: Array<{
       role: 'user' | 'model';
       text: string;
-      turns?: unknown[];
-      codexItems?: unknown[];
+      piaiMessages?: unknown[];
     }>;
     scope: { kind: 'all' } | { kind: 'single'; folderName: string };
   }) => ipcRenderer.invoke('agent-chat', opts),
