@@ -1,16 +1,18 @@
 import * as path from 'path';
-import {
-  type Content,
-  type FunctionCall,
-  type FunctionDeclaration,
-  GoogleGenAI,
-  type Part,
-  Type,
-} from '@google/genai';
 import { DEFAULT_CODEX_MODEL, type AiProvider } from './aiProvider';
-import type { ConfigService } from './configService';
 import { type CodexOAuthCredentials, requireCodexAccessToken } from './codexOAuth';
-import { createCodexResponse, extractCodexResponseText } from './openaiCodexClient';
+import type { ConfigService } from './configService';
+import {
+  type AssistantMessage,
+  type Context,
+  type Message,
+  type Model,
+  type Tool,
+  type ToolCall,
+  complete,
+  getModel,
+  getTypeBox,
+} from './piAiClient';
 import {
   type ReadTranscriptionResult,
   getTranscriptionsDir,
@@ -34,14 +36,12 @@ export type AgentConfirmHandler = (proposal: ConfigProposal) => Promise<boolean>
 export interface AgentChatMessage {
   role: 'user' | 'model';
   text: string;
-  // Raw Gemini turns belonging to this message (model turns may carry
-  // function_call parts, with the matching tool-response user turns interleaved).
-  // Preserved so the next run sees the full tool-use history, not just text.
-  // Only populated on model messages produced by `run`.
-  turns?: Content[];
-  // Raw Codex Responses items belonging to this message. Kept for the same
-  // tool-memory reason as `turns`, but only populated for the Codex provider.
-  codexItems?: unknown[];
+  // Raw pi-ai messages belonging to this turn. Populated on model messages so
+  // the next run replays the full tool-call cluster (assistant turn + tool
+  // results), not just the final text. Older history entries written before
+  // the pi-ai migration may carry provider-specific `turns`/`codexItems`
+  // fields -- those are ignored and the message replays as plain text.
+  piaiMessages?: Message[];
 }
 
 export interface AgentRunOptions {
@@ -131,95 +131,80 @@ export function coerceConfigValue(
   }
 }
 
-function buildTools(scope: AgentScope, hasConfirm: boolean): FunctionDeclaration[] {
-  const tools: FunctionDeclaration[] = [];
+// Pi-ai validates tool arguments against TypeBox schemas. We build them lazily
+// because TypeBox lives inside the ESM-only pi-ai package; resolving the
+// schemas in module scope would fire a synchronous require() before pi-ai is
+// loaded.
+async function buildTools(scope: AgentScope, hasConfirm: boolean): Promise<Tool[]> {
+  const Type = await getTypeBox();
+  const tools: Tool[] = [];
 
   if (scope.kind === 'all') {
     tools.push({
       name: 'search_transcriptions',
       description:
         'Full-text search across saved meeting transcriptions. Returns top-k hits with title, date, snippet, and folder name. Use this to find meetings relevant to the user question.',
-      parameters: {
-        type: Type.OBJECT,
-        properties: {
-          query: { type: Type.STRING, description: 'Search keywords. Can be Korean or English.' },
-          limit: { type: Type.INTEGER, description: 'Max hits to return (default 5).' },
-          include_transcript: {
-            type: Type.BOOLEAN,
+      parameters: Type.Object({
+        query: Type.String({ description: 'Search keywords. Can be Korean or English.' }),
+        limit: Type.Optional(Type.Integer({ description: 'Max hits to return (default 5).' })),
+        include_transcript: Type.Optional(
+          Type.Boolean({
             description: 'Also search the full transcript body (slower). Default false.',
-          },
-        },
-        required: ['query'],
-      },
+          }),
+        ),
+      }),
     });
 
     tools.push({
       name: 'list_recent_transcriptions',
       description:
         'List the most recent saved transcriptions, newest first. Use when the user asks "what did we talk about recently" or "show me yesterday\'s meetings".',
-      parameters: {
-        type: Type.OBJECT,
-        properties: {
-          limit: { type: Type.INTEGER, description: 'Max entries (default 10).' },
-        },
-      },
+      parameters: Type.Object({
+        limit: Type.Optional(Type.Integer({ description: 'Max entries (default 10).' })),
+      }),
     });
 
     tools.push({
       name: 'get_transcription',
       description:
         'Fetch a saved meeting record (summary, key points, action items) by folder name. Pass include_transcript=true only when you need the verbatim transcript body; omit it for summary-level questions to keep the response compact.',
-      parameters: {
-        type: Type.OBJECT,
-        properties: {
-          folder_name: {
-            type: Type.STRING,
-            description:
-              'The folderName returned by search_transcriptions or list_recent_transcriptions.',
-          },
-          include_transcript: {
-            type: Type.BOOLEAN,
-            description: 'Include the full transcript body. Default false.',
-          },
-        },
-        required: ['folder_name'],
-      },
+      parameters: Type.Object({
+        folder_name: Type.String({
+          description:
+            'The folderName returned by search_transcriptions or list_recent_transcriptions.',
+        }),
+        include_transcript: Type.Optional(
+          Type.Boolean({ description: 'Include the full transcript body. Default false.' }),
+        ),
+      }),
     });
   }
 
   tools.push({
     name: 'get_config',
     description: `Read a single Listener.AI setting value. Allowed keys: ${READABLE_CONFIG_KEYS.join(', ')}. API keys and database IDs are never readable here.`,
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        key: { type: Type.STRING, description: `One of: ${READABLE_CONFIG_KEYS.join(', ')}` },
-      },
-      required: ['key'],
-    },
+    parameters: Type.Object({
+      key: Type.String({ description: `One of: ${READABLE_CONFIG_KEYS.join(', ')}` }),
+    }),
   });
 
   if (hasConfirm) {
     tools.push({
       name: 'set_config',
       description: `Propose a change to a Listener.AI setting. Requires user confirmation before taking effect. Allowed keys: ${WRITABLE_CONFIG_KEYS.join(', ')}. Do NOT try to set API keys, Notion database ID, or other credentials here.`,
-      parameters: {
-        type: Type.OBJECT,
-        properties: {
-          key: { type: Type.STRING, description: `One of: ${WRITABLE_CONFIG_KEYS.join(', ')}` },
-          value: {
-            type: Type.STRING,
-            description:
-              'The new value. For booleans pass "true"/"false"; for numbers pass the digits as a string; for strings pass the string.',
-          },
-          reason: {
-            type: Type.STRING,
+      parameters: Type.Object({
+        key: Type.String({ description: `One of: ${WRITABLE_CONFIG_KEYS.join(', ')}` }),
+        value: Type.String({
+          description:
+            'The new value. For booleans pass "true"/"false"; for numbers pass the digits as a string; for strings pass the string.',
+        }),
+        reason: Type.Optional(
+          Type.String({
             description:
               'Short human-readable reason shown to the user in the confirmation prompt.',
-          },
-        },
-        required: ['key', 'value'],
-      },
+          }),
+        ),
+      }),
     });
   }
 
@@ -267,116 +252,43 @@ function buildSinglePrimer(data: ReadTranscriptionResult): string {
   return lines.join('\n');
 }
 
-function historyToContents(history: AgentChatMessage[]): Content[] {
-  const out: Content[] = [];
+// Replay prior conversation as pi-ai Messages. Model turns are replayed in
+// full (assistant content + tool results) when `piaiMessages` is present so
+// the model can reason about its earlier tool use. Without those, we degrade
+// gracefully to plain text -- this is the path old-format history entries
+// (pre-migration) take, and the path the renderer takes on a fresh session.
+function historyToMessages(history: AgentChatMessage[]): Message[] {
+  const out: Message[] = [];
   for (const m of history) {
-    // Model messages replay their full turn cluster (text + function calls +
-    // tool responses) so the agent can reason about prior tool use.
-    if (m.role === 'model' && m.turns && m.turns.length > 0) {
-      out.push(...m.turns);
+    if (m.role === 'model' && m.piaiMessages && m.piaiMessages.length > 0) {
+      out.push(...m.piaiMessages);
       continue;
     }
-    out.push({ role: m.role, parts: [{ text: m.text }] });
+    if (m.role === 'model') {
+      out.push({
+        role: 'assistant',
+        content: [{ type: 'text', text: m.text }],
+        api: 'openai-codex-responses',
+        provider: 'openai-codex',
+        model: '',
+      } as AssistantMessage);
+      continue;
+    }
+    out.push({ role: 'user', content: m.text, timestamp: Date.now() });
   }
   return out;
 }
 
-function normalizeCodexSchema(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeCodexSchema);
-  if (!value || typeof value !== 'object') return value;
-
-  const out: Record<string, unknown> = {};
-  for (const [key, raw] of Object.entries(value)) {
-    if (key === 'propertyOrdering') continue;
-    if (key === 'type' && typeof raw === 'string') {
-      out[key] = raw.toLowerCase();
-      continue;
-    }
-    out[key] = normalizeCodexSchema(raw);
-  }
-  return out;
-}
-
-function toCodexTool(tool: FunctionDeclaration): Record<string, unknown> | undefined {
-  if (!tool.name) return undefined;
-  return {
-    type: 'function',
-    name: tool.name,
-    description: tool.description ?? '',
-    parameters: normalizeCodexSchema(
-      tool.parameters ?? { type: Type.OBJECT, properties: {}, required: [] },
-    ),
-  };
-}
-
-function codexMessage(role: 'user' | 'assistant', text: string): Record<string, unknown> {
-  return {
-    role,
-    content: [{ type: role === 'user' ? 'input_text' : 'output_text', text }],
-  };
-}
-
-function historyToCodexInput(history: AgentChatMessage[]): unknown[] {
-  const out: unknown[] = [];
-  for (const m of history) {
-    if (m.role === 'model' && m.codexItems && m.codexItems.length > 0) {
-      out.push(...m.codexItems);
-      continue;
-    }
-    out.push(codexMessage(m.role === 'model' ? 'assistant' : 'user', m.text));
-  }
-  return out;
-}
-
-function parseCodexFunctionArgs(raw: unknown): Record<string, unknown> {
-  if (!raw) return {};
-  if (typeof raw === 'object') return raw as Record<string, unknown>;
-  if (typeof raw !== 'string') return {};
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
-}
-
-function extractCodexFunctionCalls(response: unknown): Array<{
-  callId: string;
-  name: string;
-  args: Record<string, unknown>;
-}> {
-  const output = (response as { output?: unknown }).output;
-  if (!Array.isArray(output)) return [];
-
-  const calls: Array<{ callId: string; name: string; args: Record<string, unknown> }> = [];
-  for (const item of output) {
-    if (!item || typeof item !== 'object') continue;
-    const record = item as Record<string, unknown>;
-    if (record.type !== 'function_call') continue;
-    if (typeof record.name !== 'string' || record.name.length === 0) continue;
-    const callId =
-      typeof record.call_id === 'string'
-        ? record.call_id
-        : typeof record.id === 'string'
-          ? record.id
-          : '';
-    if (!callId) continue;
-    calls.push({
-      callId,
-      name: record.name,
-      args: parseCodexFunctionArgs(record.arguments),
-    });
-  }
-  return calls;
-}
-
-function extractFinalText(parts: Part[] | undefined): string {
-  if (!parts) return '';
-  return parts
-    .map((p) => (typeof p.text === 'string' ? p.text : ''))
-    .filter(Boolean)
+function extractFinalText(message: AssistantMessage): string {
+  return message.content
+    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+    .map((b) => b.text)
     .join('\n')
     .trim();
+}
+
+function extractToolCalls(message: AssistantMessage): ToolCall[] {
+  return message.content.filter((b): b is ToolCall => b.type === 'toolCall');
 }
 
 export interface AgentServiceOptions {
@@ -393,7 +305,7 @@ export interface AgentServiceOptions {
 
 export class AgentService {
   private provider: AiProvider;
-  private ai?: GoogleGenAI;
+  private geminiApiKey?: string;
   private dataPath: string;
   private configService: ConfigService;
   private defaultModel: string;
@@ -406,7 +318,7 @@ export class AgentService {
       if (!opts.apiKey) {
         throw new Error('Gemini API key is required for the Gemini provider.');
       }
-      this.ai = new GoogleGenAI({ apiKey: opts.apiKey });
+      this.geminiApiKey = opts.apiKey;
     }
     this.dataPath = opts.dataPath;
     this.configService = opts.configService;
@@ -419,188 +331,116 @@ export class AgentService {
     this.onCodexOAuthUpdate = opts.onCodexOAuthUpdate;
   }
 
-  private gemini(): GoogleGenAI {
-    if (!this.ai) {
-      throw new Error('Gemini client is not configured for the selected AI provider.');
+  // Resolve a per-request API key. For Codex we go through pi-ai's OAuth
+  // refresher (cached credentials in memory, persisted callback for config-
+  // sourced creds only -- env-only creds intentionally stay ephemeral). For
+  // Gemini we just hand back the static key.
+  private async resolveApiKey(): Promise<string> {
+    if (this.provider === 'codex') {
+      return await requireCodexAccessToken({
+        credentials: this.codexOAuth,
+        onCredentialsChanged: async (credentials) => {
+          this.codexOAuth = credentials;
+          await this.onCodexOAuthUpdate?.(credentials);
+        },
+      });
     }
-    return this.ai;
+    if (!this.geminiApiKey) {
+      throw new Error('Gemini API key is not configured.');
+    }
+    return this.geminiApiKey;
   }
 
-  private async getCodexToken(): Promise<string> {
-    return await requireCodexAccessToken({
-      credentials: this.codexOAuth,
-      onCredentialsChanged: async (credentials) => {
-        this.codexOAuth = credentials;
-        await this.onCodexOAuthUpdate?.(credentials);
-      },
-    });
+  private async resolveModel(modelId: string): Promise<Model<never>> {
+    const piProvider = this.provider === 'codex' ? 'openai-codex' : 'google';
+    return await getModel(piProvider, modelId);
   }
 
   async run(opts: AgentRunOptions): Promise<AgentRunResult> {
-    if (this.provider === 'codex') {
-      return await this.runCodex(opts);
-    }
-
-    const model = opts.model ?? this.defaultModel;
+    const modelId = opts.model ?? this.defaultModel;
     const maxSteps = opts.maxSteps ?? 6;
-    const tools = buildTools(opts.scope, !!opts.confirm);
+    const tools = await buildTools(opts.scope, !!opts.confirm);
 
-    // Load the single-meeting record once if needed; title + primer derive from it.
+    // Load the single-meeting record once so the system prompt can name the
+    // meeting and the primer message can carry its body.
     const singleData =
       opts.scope.kind === 'single' && isValidFolderName(opts.scope.folderName)
         ? await readTranscription(
             path.join(getTranscriptionsDir(this.dataPath), opts.scope.folderName),
           )
         : null;
-    const systemInstruction = systemInstructionFor(opts.scope, singleData?.title);
 
     const history = opts.history ? [...opts.history] : [];
+    const context: Context = {
+      systemPrompt: systemInstructionFor(opts.scope, singleData?.title),
+      messages: [],
+      tools: tools.length > 0 ? tools : undefined,
+    };
 
-    // For single-meeting scope the primer must precede all prior turns so the
-    // model sees the meeting context before its own earlier responses about it.
-    const contents: Content[] = [];
+    // Single-meeting primer goes first so the model sees the meeting body
+    // before any of its own prior turns about it.
     if (singleData) {
-      contents.push({ role: 'user', parts: [{ text: buildSinglePrimer(singleData) }] });
+      context.messages.push({
+        role: 'user',
+        content: buildSinglePrimer(singleData),
+        timestamp: Date.now(),
+      });
     }
-    for (const c of historyToContents(history)) contents.push(c);
-
-    contents.push({ role: 'user', parts: [{ text: opts.question }] });
+    for (const m of historyToMessages(history)) context.messages.push(m);
+    context.messages.push({ role: 'user', content: opts.question, timestamp: Date.now() });
     history.push({ role: 'user', text: opts.question });
 
-    // Track turns added from here on so they can be attached to the model
-    // message for multi-turn tool memory.
-    const modelTurnsStart = contents.length;
-
+    // Pi-ai's `Model` discriminator is invariant in TApi so we keep it loose
+    // here; we never read api-specific fields off the model in this service.
+    const model = await this.resolveModel(modelId);
+    const turnsStart = context.messages.length;
     const applied: AppliedAction[] = [];
     let finalAnswer = '';
 
     for (let step = 0; step < maxSteps; step++) {
-      const response = await this.gemini().models.generateContent({
-        model,
-        contents,
-        config: {
-          systemInstruction,
-          temperature: 0.3,
-          tools: tools.length > 0 ? [{ functionDeclarations: tools }] : undefined,
-        },
-      });
+      const apiKey = await this.resolveApiKey();
+      const response = await complete(model, context, { apiKey, temperature: 0.3 });
+      context.messages.push(response);
 
-      const candidate = response.candidates?.[0];
-      const parts: Part[] = candidate?.content?.parts ?? [];
-      const functionCalls: FunctionCall[] = response.functionCalls ?? [];
-
-      // Record model turn verbatim (keeps function call history correct).
-      if (candidate?.content) {
-        contents.push(candidate.content);
-      }
-
-      if (functionCalls.length === 0) {
-        finalAnswer = extractFinalText(parts);
+      const toolCalls = extractToolCalls(response);
+      if (toolCalls.length === 0) {
+        finalAnswer = extractFinalText(response);
         break;
       }
 
-      // Dispatch all tool calls from this turn in parallel. Read-only tools
-      // (search/list/get) benefit directly; set_config awaits a user click but
-      // that still happens concurrently with the reads rather than after them.
+      // Read-only tools (search/list/get) run in parallel; set_config awaits a
+      // user click but that still happens concurrently with the reads rather
+      // than serializing the round-trip.
       const results = await Promise.all(
-        functionCalls.map((call) => this.dispatchTool(call, opts, applied)),
+        toolCalls.map((call) => this.dispatchTool(call, opts, applied)),
       );
-      const toolResponseParts: Part[] = functionCalls.map((call, i) => ({
-        functionResponse: {
-          id: call.id,
-          name: call.name ?? '',
-          response: results[i],
-        },
-      }));
-      contents.push({ role: 'user', parts: toolResponseParts });
+      for (let i = 0; i < toolCalls.length; i++) {
+        context.messages.push({
+          role: 'toolResult',
+          toolCallId: toolCalls[i].id,
+          toolName: toolCalls[i].name,
+          content: [{ type: 'text', text: JSON.stringify(results[i]) }],
+          isError: false,
+          timestamp: Date.now(),
+        });
+      }
     }
 
     if (!finalAnswer) {
       finalAnswer = '(no answer produced within step limit)';
     }
 
-    const modelTurns = contents.slice(modelTurnsStart);
-    history.push({ role: 'model', text: finalAnswer, turns: modelTurns });
-    return { answer: finalAnswer, appliedActions: applied, history };
-  }
-
-  private async runCodex(opts: AgentRunOptions): Promise<AgentRunResult> {
-    const model = opts.model ?? this.defaultModel;
-    const maxSteps = opts.maxSteps ?? 6;
-    const tools = buildTools(opts.scope, !!opts.confirm)
-      .map(toCodexTool)
-      .filter((tool): tool is Record<string, unknown> => !!tool);
-
-    const singleData =
-      opts.scope.kind === 'single' && isValidFolderName(opts.scope.folderName)
-        ? await readTranscription(
-            path.join(getTranscriptionsDir(this.dataPath), opts.scope.folderName),
-          )
-        : null;
-    const systemInstruction = systemInstructionFor(opts.scope, singleData?.title);
-
-    const history = opts.history ? [...opts.history] : [];
-    const input: unknown[] = [];
-    if (singleData) {
-      input.push(codexMessage('user', buildSinglePrimer(singleData)));
-    }
-    input.push(...historyToCodexInput(history));
-    input.push(codexMessage('user', opts.question));
-    history.push({ role: 'user', text: opts.question });
-
-    const applied: AppliedAction[] = [];
-    const codexItems: unknown[] = [];
-    let finalAnswer = '';
-
-    for (let step = 0; step < maxSteps; step++) {
-      const response = await createCodexResponse({
-        getToken: () => this.getCodexToken(),
-        model,
-        instructions: systemInstruction,
-        input,
-        tools,
-      });
-
-      const output = (response as { output?: unknown }).output;
-      if (Array.isArray(output)) {
-        input.push(...output);
-        codexItems.push(...output);
-      }
-
-      const functionCalls = extractCodexFunctionCalls(response);
-      if (functionCalls.length === 0) {
-        finalAnswer = extractCodexResponseText(response);
-        break;
-      }
-
-      const results = await Promise.all(
-        functionCalls.map((call) =>
-          this.dispatchTool({ name: call.name, args: call.args } as FunctionCall, opts, applied),
-        ),
-      );
-      const toolOutputs = functionCalls.map((call, i) => ({
-        type: 'function_call_output',
-        call_id: call.callId,
-        output: JSON.stringify(results[i]),
-      }));
-      input.push(...toolOutputs);
-      codexItems.push(...toolOutputs);
-    }
-
-    if (!finalAnswer) {
-      finalAnswer = '(no answer produced within step limit)';
-    }
-
-    history.push({ role: 'model', text: finalAnswer, codexItems });
+    const piaiMessages = context.messages.slice(turnsStart);
+    history.push({ role: 'model', text: finalAnswer, piaiMessages });
     return { answer: finalAnswer, appliedActions: applied, history };
   }
 
   private async dispatchTool(
-    call: FunctionCall,
+    call: ToolCall,
     opts: AgentRunOptions,
     applied: AppliedAction[],
   ): Promise<Record<string, unknown>> {
-    const args = (call.args ?? {}) as Record<string, unknown>;
+    const args = call.arguments ?? {};
     try {
       switch (call.name) {
         case 'search_transcriptions': {

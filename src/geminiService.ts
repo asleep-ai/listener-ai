@@ -10,12 +10,9 @@ import {
 } from './aiProvider';
 import { mimeTypeForExtension } from './audioFormats';
 import { type CodexOAuthCredentials, requireCodexAccessToken } from './codexOAuth';
-import {
-  OPENAI_TRANSCRIPTION_EXTENSIONS,
-  generateCodexResponseText,
-  transcribeCodexAudio,
-} from './openaiCodexClient';
+import { OPENAI_TRANSCRIPTION_EXTENSIONS, transcribeCodexAudio } from './codexTranscription';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
+import { complete, getModel, type Context } from './piAiClient';
 import { FFmpegManager } from './services/ffmpegManager';
 
 const execFileAsync = promisify(execFile);
@@ -169,6 +166,7 @@ export interface GeminiServiceOptions {
 
 export class GeminiService {
   private ai?: GoogleGenAI;
+  private geminiApiKey?: string;
   private provider: AiProvider;
   private ffmpegManager: FFmpegManager;
   private knownWords: string[];
@@ -197,6 +195,7 @@ export class GeminiService {
         throw new Error('Gemini API key is required for the Gemini provider.');
       }
       this.ai = new GoogleGenAI({ apiKey: options.apiKey });
+      this.geminiApiKey = options.apiKey;
     }
     this.ffmpegManager = new FFmpegManager(options.dataPath);
     this.knownWords = options.knownWords || [];
@@ -224,6 +223,47 @@ export class GeminiService {
         await this.onCodexOAuthUpdate?.(credentials);
       },
     });
+  }
+
+  // Unified provider-agnostic summary generation via pi-ai. Used by both the
+  // Codex Responses path and the Gemini Pro path -- pi-ai handles the protocol
+  // differences (SSE format, streaming events, auth header shape) internally.
+  //
+  // We lost the Gemini-specific `responseMimeType: 'application/json'` knob
+  // here (not exposed by pi-ai's GoogleOptions), so callers must tolerate
+  // models that wrap the JSON in ```json``` fences -- see stripJsonFences()
+  // in transcribeWithTwoSteps.
+  private async generateSummary(promptText: string, transcript: string): Promise<string> {
+    const piProvider = this.provider === 'codex' ? 'openai-codex' : 'google';
+    const modelId = this.provider === 'codex' ? this.codexModel : this.proModel;
+    const apiKey =
+      this.provider === 'codex'
+        ? await this.getCodexToken()
+        : (this.geminiApiKey ??
+          (() => {
+            throw new Error('Gemini API key is not configured.');
+          })());
+
+    const model = await getModel(piProvider, modelId);
+    const context: Context = {
+      messages: [
+        {
+          role: 'user',
+          content: `${promptText}\n\nTranscript:\n${transcript}`,
+          timestamp: Date.now(),
+        },
+      ],
+    };
+    const response = await complete(model, context, {
+      apiKey,
+      temperature: 0.2,
+      maxTokens: 32768,
+    });
+    return response.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
   }
 
   private async prepareAudioForProvider(audioFilePath: string): Promise<{
@@ -571,26 +611,7 @@ Return as JSON:
       const highlightsBlock = buildHighlightsPromptBlock(enrichableNotes);
       const summaryPrompt = highlightsBlock ? `${basePrompt}\n\n${highlightsBlock}` : basePrompt;
 
-      const summaryText =
-        this.provider === 'codex'
-          ? await generateCodexResponseText({
-              getToken: () => this.getCodexToken(),
-              model: this.codexModel,
-              inputText: `${summaryPrompt}\n\nTranscript:\n${fullTranscript}`,
-            })
-          : (
-              await this.gemini().models.generateContent({
-                model: this.proModel,
-                contents: [
-                  { role: 'user', parts: [{ text: summaryPrompt }, { text: fullTranscript }] },
-                ],
-                config: {
-                  temperature: 0.2,
-                  maxOutputTokens: 32768,
-                  responseMimeType: 'application/json',
-                },
-              })
-            ).text || '';
+      const summaryText = await this.generateSummary(summaryPrompt, fullTranscript);
 
       let summaryData = {
         suggestedTitle: '',
@@ -611,8 +632,17 @@ Return as JSON:
       const customFields: Record<string, unknown> = {};
       let rawHighlights: unknown;
 
+      // Pi-ai's unified API doesn't pass through Gemini's responseMimeType
+      // knob, so models can wrap the JSON in ```json``` fences or add leading
+      // chatter. Strip a single fenced block if present, otherwise feed the
+      // raw text to JSON.parse and fall back to a regex extract.
+      const stripJsonFences = (text: string): string => {
+        const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+        return fenced ? fenced[1].trim() : text.trim();
+      };
+
       try {
-        const parsed = JSON.parse(summaryText);
+        const parsed = JSON.parse(stripJsonFences(summaryText));
         summaryData = parsed;
         rawHighlights = (parsed as { highlights?: unknown }).highlights;
 
