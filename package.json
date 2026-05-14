@@ -7,10 +7,17 @@
     "listener": "dist/cli.js"
   },
   "files": [
+    "THIRD_PARTY_NOTICES.md",
     "dist/cli.js",
-    "dist/dataPath.js",
+    "dist/aiProvider.js",
+    "dist/codexOAuth.js",
+    "dist/codexOAuthHolder.js",
+    "dist/codexTranscription.js",
     "dist/configService.js",
+    "dist/dataPath.js",
+    "dist/esmImport.js",
     "dist/geminiService.js",
+    "dist/piAiClient.js",
     "dist/outputService.js",
     "dist/searchService.js",
     "dist/agentService.js",
@@ -59,14 +66,15 @@
     "@types/node": "^24.0.12",
     "dotenv": "^17.2.0",
     "electron": "^39.8.5",
-    "vite": "^6.4.2",
     "electron-builder": "^26.8.1",
     "oxfmt": "^0.48.0",
     "oxlint": "^1.63.0",
     "semver": "^7.7.2",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vite": "^6.4.2"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "0.74.0",
     "@google/genai": "^1.13.0",
     "audiotee": "^0.0.7",
     "buffer-equal-constant-time": "^1.0.1",
@@ -99,6 +107,7 @@
     "files": [
       "dist/**/*",
       "node_modules/**/*",
+      "THIRD_PARTY_NOTICES.md",
       "package.json",
       "assets/icon.png",
       "!node_modules/ffmpeg-static/**/*",

@@ -1,10 +1,28 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_TRANSCRIPTION_MODEL,
+  DEFAULT_GEMINI_FLASH_MODEL,
+  DEFAULT_GEMINI_MODEL,
+  type AiProvider,
+  normalizeAiProvider,
+} from './aiProvider';
+import {
+  type CodexOAuthCredentials,
+  getCodexOAuthEnvCredentials,
+  hasCodexOAuthEnvCredentials,
+} from './codexOAuth';
 
 export interface AppConfig {
+  aiProvider?: AiProvider;
   geminiApiKey?: string;
   geminiModel?: string;
   geminiFlashModel?: string;
+  codexModel?: string;
+  codexTranscriptionModel?: string;
+  codexOAuth?: CodexOAuthCredentials;
+  codexOAuthConfigured?: boolean;
   notionApiKey?: string;
   notionDatabaseId?: string;
   autoMode?: boolean;
@@ -43,6 +61,12 @@ Return as JSON:
 export class ConfigService {
   private configPath: string;
   private config: AppConfig = {};
+  // Keys this process has explicitly modified since the last successful save.
+  // saveConfig() re-reads the file on every write and applies only these keys on
+  // top of disk state, so a concurrent process (Electron app + CLI hitting the
+  // same config.json during OAuth refresh, etc.) cannot clobber unrelated keys.
+  private dirtyKeys = new Set<keyof AppConfig>();
+  private envProviderWarned = false;
 
   getConfigPath(): string {
     return this.configPath;
@@ -75,10 +99,50 @@ export class ConfigService {
     }
   }
 
+  private setKey<K extends keyof AppConfig>(key: K, value: AppConfig[K] | undefined): void {
+    if (value === undefined) {
+      delete this.config[key];
+    } else {
+      this.config[key] = value;
+    }
+    this.dirtyKeys.add(key);
+  }
+
   private saveConfig(): void {
     try {
       fs.mkdirSync(path.dirname(this.configPath), { recursive: true });
-      fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));
+      let merged: AppConfig = {};
+      if (fs.existsSync(this.configPath)) {
+        try {
+          merged = JSON.parse(fs.readFileSync(this.configPath, 'utf-8')) as AppConfig;
+        } catch {
+          // ignore corrupt disk file; treat as empty and let our writes recover it
+        }
+      }
+      for (const key of this.dirtyKeys) {
+        const value = this.config[key];
+        if (value === undefined) {
+          delete merged[key];
+        } else {
+          (merged as Record<string, unknown>)[key as string] = value;
+        }
+      }
+      // 0o600 keeps API keys + OAuth refresh tokens off other users on shared
+      // machines. writeFileSync's `mode` option only applies when the OS
+      // creates the file -- existing config.json from prior versions keeps its
+      // umask-derived mode (typically 0o644). Explicitly chmod after writing
+      // so upgrade paths get tightened too. chmodSync is a no-op for the bits
+      // that matter on Windows but doesn't throw, so the call is unconditional.
+      fs.writeFileSync(this.configPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
+      try {
+        fs.chmodSync(this.configPath, 0o600);
+      } catch (chmodError) {
+        // Don't fail the save if chmod fails (e.g. exotic filesystem) -- the
+        // write succeeded and the override above already covers fresh files.
+        console.warn('Could not chmod config.json to 0o600:', chmodError);
+      }
+      this.config = merged;
+      this.dirtyKeys.clear();
     } catch (error) {
       console.error('Error saving config:', error);
     }
@@ -89,8 +153,68 @@ export class ConfigService {
   }
 
   setGeminiApiKey(apiKey: string): void {
-    this.config.geminiApiKey = apiKey;
+    this.setKey('geminiApiKey', apiKey);
     this.saveConfig();
+  }
+
+  getAiProvider(): AiProvider {
+    const envProvider = normalizeAiProvider(process.env.LISTENER_AI_PROVIDER);
+    if (envProvider) {
+      const configured = normalizeAiProvider(this.config.aiProvider);
+      if (configured && configured !== envProvider && !this.envProviderWarned) {
+        console.warn(
+          `LISTENER_AI_PROVIDER=${envProvider} overrides configured aiProvider=${configured}.`,
+        );
+        this.envProviderWarned = true;
+      }
+      return envProvider;
+    }
+
+    const configured = normalizeAiProvider(this.config.aiProvider);
+    if (configured) return configured;
+
+    if (!this.getGeminiApiKey() && this.hasCodexOAuth()) return 'codex';
+    return 'gemini';
+  }
+
+  setAiProvider(provider: AiProvider): void {
+    this.setKey('aiProvider', provider);
+    this.saveConfig();
+  }
+
+  // Returns the active OAuth credentials whether they came from config or env.
+  // Callers that intend to PERSIST refreshed credentials must additionally check
+  // `hasStoredCodexOAuth()` and skip the persistence callback when source is env --
+  // otherwise a normal token refresh writes env-sourced tokens to plaintext disk.
+  getCodexOAuth(): CodexOAuthCredentials | undefined {
+    return this.config.codexOAuth || getCodexOAuthEnvCredentials();
+  }
+
+  // True only when credentials are stored in config.json. Env-only credentials
+  // return false here. Use this to gate `onCodexOAuthUpdate` persistence callbacks.
+  hasStoredCodexOAuth(): boolean {
+    const c = this.config.codexOAuth;
+    return !!(c?.access && c.refresh && Number.isFinite(c.expires));
+  }
+
+  setCodexOAuth(credentials: CodexOAuthCredentials): void {
+    this.setKey('codexOAuth', credentials);
+    this.saveConfig();
+  }
+
+  clearCodexOAuth(): void {
+    this.setKey('codexOAuth', undefined);
+    this.saveConfig();
+  }
+
+  hasCodexOAuth(): boolean {
+    return hasCodexOAuthEnvCredentials() || this.hasStoredCodexOAuth();
+  }
+
+  hasAiAuth(): boolean {
+    const provider = this.getAiProvider();
+    if (provider === 'codex') return this.hasCodexOAuth();
+    return !!this.getGeminiApiKey();
   }
 
   getNotionApiKey(): string | undefined {
@@ -98,7 +222,7 @@ export class ConfigService {
   }
 
   setNotionApiKey(apiKey: string): void {
-    this.config.notionApiKey = apiKey;
+    this.setKey('notionApiKey', apiKey);
     this.saveConfig();
   }
 
@@ -107,17 +231,19 @@ export class ConfigService {
   }
 
   setNotionDatabaseId(databaseId: string): void {
-    this.config.notionDatabaseId = databaseId;
+    this.setKey('notionDatabaseId', databaseId);
     this.saveConfig();
   }
 
   hasRequiredConfig(): boolean {
-    return !!this.getGeminiApiKey() && !!this.getNotionApiKey() && !!this.getNotionDatabaseId();
+    return this.hasAiAuth() && !!this.getNotionApiKey() && !!this.getNotionDatabaseId();
   }
 
   getMissingConfigs(): string[] {
     const missing: string[] = [];
-    if (!this.getGeminiApiKey()) missing.push('Gemini API Key');
+    if (!this.hasAiAuth()) {
+      missing.push(this.getAiProvider() === 'codex' ? 'Codex OAuth sign-in' : 'Gemini API Key');
+    }
     if (!this.getNotionApiKey()) missing.push('Notion Integration Token');
     if (!this.getNotionDatabaseId()) missing.push('Notion Database ID');
     return missing;
@@ -128,7 +254,7 @@ export class ConfigService {
   }
 
   setAutoMode(enabled: boolean): void {
-    this.config.autoMode = enabled;
+    this.setKey('autoMode', enabled);
     this.saveConfig();
   }
 
@@ -141,7 +267,7 @@ export class ConfigService {
   }
 
   setDisplayDetection(enabled: boolean): void {
-    this.config.displayDetection = enabled;
+    this.setKey('displayDetection', enabled);
     this.saveConfig();
   }
 
@@ -150,7 +276,7 @@ export class ConfigService {
   }
 
   setGlobalShortcut(shortcut: string): void {
-    this.config.globalShortcut = shortcut;
+    this.setKey('globalShortcut', shortcut);
     this.saveConfig();
   }
 
@@ -159,25 +285,43 @@ export class ConfigService {
   }
 
   setKnownWords(words: string[]): void {
-    this.config.knownWords = words;
+    this.setKey('knownWords', words);
     this.saveConfig();
   }
 
   getGeminiModel(): string {
-    return this.config.geminiModel || 'gemini-2.5-pro';
+    return this.config.geminiModel || DEFAULT_GEMINI_MODEL;
   }
 
   setGeminiModel(model: string): void {
-    this.config.geminiModel = model;
+    this.setKey('geminiModel', model);
     this.saveConfig();
   }
 
   getGeminiFlashModel(): string {
-    return this.config.geminiFlashModel || 'gemini-2.5-flash';
+    return this.config.geminiFlashModel || DEFAULT_GEMINI_FLASH_MODEL;
   }
 
   setGeminiFlashModel(model: string): void {
-    this.config.geminiFlashModel = model;
+    this.setKey('geminiFlashModel', model);
+    this.saveConfig();
+  }
+
+  getCodexModel(): string {
+    return this.config.codexModel || DEFAULT_CODEX_MODEL;
+  }
+
+  setCodexModel(model: string): void {
+    this.setKey('codexModel', model);
+    this.saveConfig();
+  }
+
+  getCodexTranscriptionModel(): string {
+    return this.config.codexTranscriptionModel || DEFAULT_CODEX_TRANSCRIPTION_MODEL;
+  }
+
+  setCodexTranscriptionModel(model: string): void {
+    this.setKey('codexTranscriptionModel', model);
     this.saveConfig();
   }
 
@@ -186,7 +330,7 @@ export class ConfigService {
   }
 
   setMaxRecordingMinutes(minutes: number): void {
-    this.config.maxRecordingMinutes = Math.max(0, Math.floor(minutes));
+    this.setKey('maxRecordingMinutes', Math.max(0, Math.floor(minutes)));
     this.saveConfig();
   }
 
@@ -195,7 +339,7 @@ export class ConfigService {
   }
 
   setRecordingReminderMinutes(minutes: number): void {
-    this.config.recordingReminderMinutes = Math.max(0, Math.floor(minutes));
+    this.setKey('recordingReminderMinutes', Math.max(0, Math.floor(minutes)));
     this.saveConfig();
   }
 
@@ -204,7 +348,7 @@ export class ConfigService {
   }
 
   setMinRecordingSeconds(seconds: number): void {
-    this.config.minRecordingSeconds = Math.max(0, Math.floor(seconds));
+    this.setKey('minRecordingSeconds', Math.max(0, Math.floor(seconds)));
     this.saveConfig();
   }
 
@@ -213,7 +357,7 @@ export class ConfigService {
   }
 
   setRecordSystemAudio(enabled: boolean): void {
-    this.config.recordSystemAudio = enabled;
+    this.setKey('recordSystemAudio', enabled);
     this.saveConfig();
   }
 
@@ -226,7 +370,7 @@ export class ConfigService {
   }
 
   setLastSeenVersion(version: string): void {
-    this.config.lastSeenVersion = version;
+    this.setKey('lastSeenVersion', version);
     this.saveConfig();
   }
 
@@ -235,7 +379,7 @@ export class ConfigService {
   }
 
   setSummaryPrompt(prompt: string): void {
-    this.config.summaryPrompt = prompt;
+    this.setKey('summaryPrompt', prompt);
     this.saveConfig();
   }
 
@@ -244,7 +388,7 @@ export class ConfigService {
   }
 
   setSlackWebhookUrl(url: string): void {
-    this.config.slackWebhookUrl = url;
+    this.setKey('slackWebhookUrl', url);
     this.saveConfig();
   }
 
@@ -253,29 +397,33 @@ export class ConfigService {
   }
 
   setSlackAutoShare(enabled: boolean): void {
-    this.config.slackAutoShare = enabled;
+    this.setKey('slackAutoShare', enabled);
     this.saveConfig();
   }
 
   updateConfig(partial: Partial<AppConfig>): void {
     for (const [key, value] of Object.entries(partial)) {
       if (value !== undefined) {
-        (this.config as Record<string, unknown>)[key] = value;
+        this.setKey(key as keyof AppConfig, value as AppConfig[keyof AppConfig]);
       }
     }
     this.saveConfig();
   }
 
   unsetKey(key: keyof AppConfig): void {
-    delete this.config[key];
+    this.setKey(key, undefined);
     this.saveConfig();
   }
 
   getAllConfig(): AppConfig {
     return {
+      aiProvider: this.getAiProvider(),
       geminiApiKey: this.getGeminiApiKey(),
       geminiModel: this.getGeminiModel(),
       geminiFlashModel: this.getGeminiFlashModel(),
+      codexModel: this.getCodexModel(),
+      codexTranscriptionModel: this.getCodexTranscriptionModel(),
+      codexOAuthConfigured: this.hasCodexOAuth(),
       notionApiKey: this.getNotionApiKey(),
       notionDatabaseId: this.getNotionDatabaseId(),
       autoMode: this.getAutoMode(),

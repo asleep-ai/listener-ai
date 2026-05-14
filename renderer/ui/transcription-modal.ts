@@ -161,10 +161,10 @@ export async function handleTranscribe(filePath: string, title: string): Promise
   console.log('handleTranscribe called with:', { filePath, title });
 
   // Check if API key is configured
-  const hasConfig = await window.electronAPI.checkConfig();
-  console.log('Has config:', hasConfig);
+  const configCheck = await window.electronAPI.checkConfig();
+  console.log('Has config:', configCheck);
 
-  if (!hasConfig) {
+  if (!configCheck.hasConfig) {
     const configModal = document.getElementById('configModal');
     if (configModal) {
       configModal.style.display = 'block';

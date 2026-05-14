@@ -2,7 +2,13 @@
 // contextBridge. Keep in sync with that file -- the preload TypeScript
 // definition is the source of truth, this is a renderer-side mirror.
 
-export type AgentChatMessage = { role: 'user' | 'model'; text: string };
+export type AgentChatMessage = {
+  role: 'user' | 'model';
+  text: string;
+  // Opaque pi-ai message cluster (assistant turn + tool results). Round-trips
+  // through IPC unchanged so the next agent run can replay tool-use history.
+  piaiMessages?: unknown[];
+};
 export type AgentScope = { kind: 'all' } | { kind: 'single'; folderName: string };
 
 export type AgentConfirmRequest = {
@@ -17,7 +23,10 @@ export type AgentConfirmRequest = {
 };
 
 export type ConfigPayload = {
+  aiProvider?: 'gemini' | 'codex';
   geminiApiKey?: string;
+  codexModel?: string;
+  codexTranscriptionModel?: string;
   notionApiKey?: string;
   notionDatabaseId?: string;
   autoMode?: boolean;
@@ -62,12 +71,20 @@ export type ElectronAPI = {
   abortRecording: () => Promise<{ success: boolean; error?: string }>;
   onRecordingStatus: (cb: (status: string) => void) => void;
   checkConfig: () => Promise<{
-    hasGeminiKey: boolean;
-    hasNotionConfig: boolean;
-    autoMode: boolean;
+    hasConfig: boolean;
+    hasAiAuth: boolean;
+    aiProvider: 'gemini' | 'codex';
+    codexOAuthConfigured: boolean;
+    missing: string[];
   }>;
   saveConfig: (config: ConfigPayload) => Promise<{ success: boolean; error?: string }>;
   getConfig: () => Promise<Record<string, unknown>>;
+  loginCodexOAuth: () => Promise<
+    { success: true; config: Record<string, unknown> } | { success: false; error: string }
+  >;
+  clearCodexOAuth: () => Promise<
+    { success: true; config: Record<string, unknown> } | { success: false; error: string }
+  >;
   transcribeAudio: (
     filePath: string,
     liveNotes?: Array<{ offsetMs: number; text: string }>,

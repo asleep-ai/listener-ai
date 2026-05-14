@@ -8,9 +8,15 @@ import { DEFAULT_SUMMARY_PROMPT } from '../state';
 let configModal: HTMLElement | null = null;
 let saveConfigBtn: HTMLButtonElement | null = null;
 let cancelConfigBtn: HTMLButtonElement | null = null;
+let aiProviderSelect: HTMLSelectElement | null = null;
 let geminiApiKeyInput: HTMLInputElement | null = null;
 let geminiModelInput: HTMLInputElement | null = null;
 let geminiFlashModelInput: HTMLInputElement | null = null;
+let codexModelInput: HTMLInputElement | null = null;
+let codexTranscriptionModelInput: HTMLInputElement | null = null;
+let loginCodexOAuthBtn: HTMLButtonElement | null = null;
+let clearCodexOAuthBtn: HTMLButtonElement | null = null;
+let codexOAuthStatus: HTMLElement | null = null;
 let notionApiKeyInput: HTMLInputElement | null = null;
 let notionDatabaseIdInput: HTMLInputElement | null = null;
 let slackWebhookUrlInput: HTMLInputElement | null = null;
@@ -20,12 +26,15 @@ let slackWebhookStatus: HTMLElement | null = null;
 let globalShortcutInput: HTMLInputElement | null = null;
 let knownWordsInput: HTMLTextAreaElement | null = null;
 
+function setCodexOAuthStatus(text: string, state: 'idle' | 'success' | 'error' = 'idle'): void {
+  if (!codexOAuthStatus) return;
+  codexOAuthStatus.textContent = text;
+  codexOAuthStatus.className = `slack-webhook-status${state === 'idle' ? '' : ` is-${state}`}`;
+}
+
 // Function to check and prompt for API keys
 export async function checkAndPromptForConfig(): Promise<void> {
   const configCheck = (await window.electronAPI.checkConfig()) as {
-    hasGeminiKey: boolean;
-    hasNotionConfig: boolean;
-    autoMode: boolean;
     hasConfig?: boolean;
     missing?: string[];
   };
@@ -45,9 +54,13 @@ export async function checkAndPromptForConfig(): Promise<void> {
 export async function showConfigModal(): Promise<void> {
   // Load current config
   const config = (await window.electronAPI.getConfig()) as Record<string, unknown> & {
+    aiProvider?: 'gemini' | 'codex';
     geminiApiKey?: string;
     geminiModel?: string;
     geminiFlashModel?: string;
+    codexModel?: string;
+    codexTranscriptionModel?: string;
+    codexOAuthConfigured?: boolean;
     notionApiKey?: string;
     notionDatabaseId?: string;
     slackWebhookUrl?: string;
@@ -61,6 +74,9 @@ export async function showConfigModal(): Promise<void> {
   };
 
   // Pre-fill the form if values exist
+  if (aiProviderSelect) {
+    aiProviderSelect.value = config.aiProvider || 'gemini';
+  }
   if (geminiApiKeyInput && config.geminiApiKey) {
     geminiApiKeyInput.value = config.geminiApiKey;
   }
@@ -70,6 +86,16 @@ export async function showConfigModal(): Promise<void> {
   if (geminiFlashModelInput) {
     geminiFlashModelInput.value = config.geminiFlashModel || '';
   }
+  if (codexModelInput) {
+    codexModelInput.value = config.codexModel || '';
+  }
+  if (codexTranscriptionModelInput) {
+    codexTranscriptionModelInput.value = config.codexTranscriptionModel || '';
+  }
+  setCodexOAuthStatus(
+    config.codexOAuthConfigured ? 'Signed in' : 'Not signed in',
+    config.codexOAuthConfigured ? 'success' : 'idle',
+  );
   if (notionApiKeyInput && config.notionApiKey) {
     notionApiKeyInput.value = config.notionApiKey;
   }
@@ -153,9 +179,17 @@ export function setupConfigModal(): void {
   configModal = document.getElementById('configModal');
   saveConfigBtn = document.getElementById('saveConfig') as HTMLButtonElement | null;
   cancelConfigBtn = document.getElementById('cancelConfig') as HTMLButtonElement | null;
+  aiProviderSelect = document.getElementById('aiProvider') as HTMLSelectElement | null;
   geminiApiKeyInput = document.getElementById('geminiApiKey') as HTMLInputElement | null;
   geminiModelInput = document.getElementById('geminiModel') as HTMLInputElement | null;
   geminiFlashModelInput = document.getElementById('geminiFlashModel') as HTMLInputElement | null;
+  codexModelInput = document.getElementById('codexModel') as HTMLInputElement | null;
+  codexTranscriptionModelInput = document.getElementById(
+    'codexTranscriptionModel',
+  ) as HTMLInputElement | null;
+  loginCodexOAuthBtn = document.getElementById('loginCodexOAuth') as HTMLButtonElement | null;
+  clearCodexOAuthBtn = document.getElementById('clearCodexOAuth') as HTMLButtonElement | null;
+  codexOAuthStatus = document.getElementById('codexOAuthStatus');
   notionApiKeyInput = document.getElementById('notionApiKey') as HTMLInputElement | null;
   notionDatabaseIdInput = document.getElementById('notionDatabaseId') as HTMLInputElement | null;
   slackWebhookUrlInput = document.getElementById('slackWebhookUrl') as HTMLInputElement | null;
@@ -201,11 +235,50 @@ export function setupConfigModal(): void {
     });
   }
 
+  if (loginCodexOAuthBtn) {
+    loginCodexOAuthBtn.addEventListener('click', async () => {
+      setCodexOAuthStatus('Opening browser sign-in...');
+      loginCodexOAuthBtn!.disabled = true;
+      try {
+        const result = await window.electronAPI.loginCodexOAuth();
+        if (result.success) {
+          if (aiProviderSelect) aiProviderSelect.value = 'codex';
+          setCodexOAuthStatus('Signed in', 'success');
+        } else {
+          setCodexOAuthStatus(result.error, 'error');
+        }
+      } finally {
+        loginCodexOAuthBtn!.disabled = false;
+      }
+    });
+  }
+
+  if (clearCodexOAuthBtn) {
+    clearCodexOAuthBtn.addEventListener('click', async () => {
+      clearCodexOAuthBtn!.disabled = true;
+      try {
+        const result = await window.electronAPI.clearCodexOAuth();
+        if (result.success) {
+          setCodexOAuthStatus('Not signed in');
+        } else {
+          setCodexOAuthStatus(result.error, 'error');
+        }
+      } finally {
+        clearCodexOAuthBtn!.disabled = false;
+      }
+    });
+  }
+
   if (saveConfigBtn) {
     saveConfigBtn.addEventListener('click', async () => {
+      const aiProvider = aiProviderSelect?.value === 'codex' ? 'codex' : 'gemini';
       const geminiKey = geminiApiKeyInput?.value.trim() ?? '';
       const geminiModel = geminiModelInput ? geminiModelInput.value.trim() : '';
       const geminiFlashModel = geminiFlashModelInput ? geminiFlashModelInput.value.trim() : '';
+      const codexModel = codexModelInput ? codexModelInput.value.trim() : '';
+      const codexTranscriptionModel = codexTranscriptionModelInput
+        ? codexTranscriptionModelInput.value.trim()
+        : '';
       const notionKey = notionApiKeyInput?.value.trim() ?? '';
       const notionDb = notionDatabaseIdInput?.value.trim() ?? '';
       const slackWebhookUrl = slackWebhookUrlInput?.value.trim() ?? '';
@@ -243,33 +316,37 @@ export function setupConfigModal(): void {
         Math.floor(Number.parseInt(minRecordingSecondsEl?.value || '') || 0),
       );
 
-      if (geminiKey) {
-        // ConfigPayload in electronAPI.d.ts is a subset; the main process
-        // accepts these extra keys (geminiModel, *Recording*Minutes, etc).
-        // Cast through `unknown` to satisfy strict mode without widening the
-        // public type surface used elsewhere.
-        const payload = {
-          geminiApiKey: geminiKey,
-          geminiModel: geminiModel,
-          geminiFlashModel: geminiFlashModel,
-          notionApiKey: notionKey,
-          notionDatabaseId: notionDb,
-          slackWebhookUrl: slackWebhookUrl,
-          slackAutoShare: slackAutoShare,
-          globalShortcut: globalShortcut,
-          knownWords: knownWords,
-          summaryPrompt: summaryPrompt || DEFAULT_SUMMARY_PROMPT,
-          maxRecordingMinutes: maxRecordingMinutes,
-          recordingReminderMinutes: recordingReminderMinutes,
-          minRecordingSeconds: minRecordingSeconds,
-        };
-        await window.electronAPI.saveConfig(
-          payload as unknown as Parameters<typeof window.electronAPI.saveConfig>[0],
-        );
-        if (configModal) configModal.style.display = 'none';
-      } else {
+      if (aiProvider === 'gemini' && !geminiKey) {
         alert('Please enter at least the Gemini API key');
+        return;
       }
+
+      // ConfigPayload in electronAPI.d.ts is a subset; the main process
+      // accepts these extra keys (*Recording*Minutes, etc). Cast through
+      // `unknown` to satisfy strict mode without widening the public type
+      // surface used elsewhere.
+      const payload = {
+        aiProvider,
+        geminiApiKey: geminiKey,
+        geminiModel: geminiModel,
+        geminiFlashModel: geminiFlashModel,
+        codexModel: codexModel,
+        codexTranscriptionModel: codexTranscriptionModel,
+        notionApiKey: notionKey,
+        notionDatabaseId: notionDb,
+        slackWebhookUrl: slackWebhookUrl,
+        slackAutoShare: slackAutoShare,
+        globalShortcut: globalShortcut,
+        knownWords: knownWords,
+        summaryPrompt: summaryPrompt || DEFAULT_SUMMARY_PROMPT,
+        maxRecordingMinutes: maxRecordingMinutes,
+        recordingReminderMinutes: recordingReminderMinutes,
+        minRecordingSeconds: minRecordingSeconds,
+      };
+      await window.electronAPI.saveConfig(
+        payload as unknown as Parameters<typeof window.electronAPI.saveConfig>[0],
+      );
+      if (configModal) configModal.style.display = 'none';
     });
   }
 

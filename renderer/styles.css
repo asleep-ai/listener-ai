@@ -929,7 +929,8 @@ h1 {
   letter-spacing: -0.005em;
 }
 
-.form-group input {
+.form-group input,
+.form-group select {
   width: 100%;
   padding: 9px 12px;
   border: 1px solid #e2e8f0;
@@ -941,11 +942,13 @@ h1 {
   transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;
 }
 
-.form-group input:hover {
+.form-group input:hover,
+.form-group select:hover {
   border-color: #cbd5e1;
 }
 
-.form-group input:focus {
+.form-group input:focus,
+.form-group select:focus {
   outline: none;
   border-color: #3498db;
   box-shadow: var(--focus-ring);
@@ -1020,6 +1023,13 @@ h1 {
   color: #0f172a;
   background-color: #f1f5f9;
   text-decoration: none;
+}
+
+.codex-oauth-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
 }
 
 .modal-buttons {

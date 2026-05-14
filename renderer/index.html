@@ -155,6 +155,13 @@
         </div>
         <div class="config-body">
         <div class="form-group">
+          <label for="aiProvider">AI Provider:</label>
+          <select id="aiProvider">
+            <option value="gemini">Gemini API</option>
+            <option value="codex">Codex OAuth</option>
+          </select>
+        </div>
+        <div class="form-group">
           <label for="geminiApiKey">Gemini API Key:</label>
           <input type="password" id="geminiApiKey" placeholder="Enter your Gemini API key">
           <small>Get your API key from <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI
@@ -175,6 +182,24 @@
           </div>
           <input type="text" id="geminiFlashModel" placeholder="gemini-2.5-flash">
           <small>Model for transcription. Default: gemini-2.5-flash</small>
+        </div>
+        <div class="form-group">
+          <label>Codex OAuth:</label>
+          <div class="codex-oauth-row">
+            <button type="button" id="loginCodexOAuth" class="reset-prompt-button">Sign in</button>
+            <button type="button" id="clearCodexOAuth" class="reset-prompt-button">Sign out</button>
+            <span id="codexOAuthStatus" class="slack-webhook-status"></span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="codexModel">Codex Model:</label>
+          <input type="text" id="codexModel" placeholder="gpt-5.5">
+          <small>Model for summaries and Ask Listener. Default: gpt-5.5</small>
+        </div>
+        <div class="form-group">
+          <label for="codexTranscriptionModel">Codex Transcription Model:</label>
+          <input type="text" id="codexTranscriptionModel" placeholder="gpt-4o-transcribe">
+          <small>Model for audio transcription. Default: gpt-4o-transcribe</small>
         </div>
         <div class="form-group">
           <label for="notionApiKey">Notion Integration Token:</label>

@@ -24,8 +24,9 @@
           ? { success: true, data: { transcript: 'lorem ipsum', summary: 'demo summary' } }
           : { success: true, data: null };
         if (prop === 'searchTranscriptions' || prop === 'listReleases') return asyncList;
-        if (prop === 'checkConfig') return async () => ({ hasConfig: true, hasGeminiKey: true, hasNotionConfig: true, autoMode: false, missing: [] });
+        if (prop === 'checkConfig') return async () => ({ hasConfig: true, hasAiAuth: true, aiProvider: 'gemini', codexOAuthConfigured: false, missing: [] });
         if (prop === 'getConfig') return async () => ({
+          aiProvider: 'gemini',
           globalShortcut: 'CommandOrControl+Shift+R',
           notionApiKey: 'secret_dev_token',
           notionDatabaseId: 'dev_db_id',
