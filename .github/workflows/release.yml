@@ -172,20 +172,32 @@ jobs:
           echo "tag=$PREV" >> "$GITHUB_OUTPUT"
           echo "Previous tag: ${PREV:-<none>}"
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-
       - name: Generate AI release notes
         id: ai_notes
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          PREV: ${{ steps.prev_tag.outputs.tag }}
-          CUR: HEAD
+        uses: asleep-ai/actions/release-notes@release-notes/v1
+        with:
+          current-tag: HEAD
+          previous-tag: ${{ steps.prev_tag.outputs.tag }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          system-prompt: |
+            Generate bilingual release notes for the Electron desktop app (Listener.AI).
+            Output markdown only — no preamble, no trailing explanation.
+            Structure: English block first, then Korean block, separated by a horizontal rule.
+            English block — header '## English' followed by sections
+            '### New Features', '### Improvements', '### Bug Fixes', '### Internal Changes'.
+            Korean block — header '## 한국어' followed by sections
+            '### 신규 기능', '### 개선', '### 버그 수정', '### 내부 변경'.
+            Omit empty sections in each block.
+            Rewrite each commit as a user-facing bullet (not verbatim).
+            The two blocks must describe the same changes — Korean is a translation of the English content,
+            not independent notes.
+
+      - name: Read release notes
+        id: notes_body
         run: |
-          NOTES=$(uv run .github/scripts/generate_release_notes.py)
           {
-            echo "notes<<NOTES_EOF"
-            echo "$NOTES"
+            echo "content<<NOTES_EOF"
+            cat "${{ steps.ai_notes.outputs.path }}"
             echo "NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -205,7 +217,7 @@ jobs:
 
             ---
 
-            ${{ steps.ai_notes.outputs.notes }}
+            ${{ steps.notes_body.outputs.content }}
           draft: false
           artifacts: |
             release-artifacts/mac-build/*.dmg
