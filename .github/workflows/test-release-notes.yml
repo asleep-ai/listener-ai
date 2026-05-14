@@ -1,0 +1,51 @@
+name: Test release-notes action (temp)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve recent tags
+        id: tags
+        run: |
+          CUR=$(git describe --tags --abbrev=0 HEAD)
+          PREV=$(git describe --tags --abbrev=0 "$CUR^")
+          echo "cur=$CUR" >> "$GITHUB_OUTPUT"
+          echo "prev=$PREV" >> "$GITHUB_OUTPUT"
+          echo "CUR=$CUR, PREV=$PREV"
+
+      - name: Generate release notes
+        id: notes
+        uses: asleep-ai/actions/release-notes@release-notes/v1
+        with:
+          current-tag: ${{ steps.tags.outputs.cur }}
+          previous-tag: ${{ steps.tags.outputs.prev }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          system-prompt: |
+            Generate bilingual release notes for the Electron desktop app (Listener.AI).
+            Output markdown only — no preamble, no trailing explanation.
+            Structure: English block first, then Korean block, separated by a horizontal rule.
+            English block — header '## English' followed by sections
+            '### New Features', '### Improvements', '### Bug Fixes', '### Internal Changes'.
+            Korean block — header '## 한국어' followed by sections
+            '### 신규 기능', '### 개선', '### 버그 수정', '### 내부 변경'.
+            Omit empty sections in each block.
+            Rewrite each commit as a user-facing bullet (not verbatim).
+            The two blocks must describe the same changes — Korean is a translation of the English content,
+            not independent notes.
+
+      - name: Print result
+        run: |
+          echo "::group::outputs"
+          echo "path=${{ steps.notes.outputs.path }}"
+          echo "previous-tag=${{ steps.notes.outputs.previous-tag }}"
+          echo "::endgroup::"
+          echo "::group::generated markdown"
+          cat "${{ steps.notes.outputs.path }}"
+          echo "::endgroup::"
