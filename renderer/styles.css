@@ -6,6 +6,7 @@
 
 :root {
   --focus-ring: 0 0 0 3px rgba(52, 152, 219, 0.18);
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 @keyframes slideIn {
@@ -927,7 +928,7 @@ h1 {
   border-radius: 4px;
   background-color: #f8fafc;
   color: #334155;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.4;
 }
@@ -947,50 +948,88 @@ h1 {
 }
 
 .transcription-content {
-  max-width: 860px;
+  max-width: 920px;
   width: 92%;
   max-height: 88vh;
   padding: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background-color: #fbfcfd;
+}
+
+.transcription-content .modal-header {
+  background-color: #ffffff;
+  padding: 16px 24px;
+  border-bottom: 1px solid #eef2f6;
+}
+
+.transcription-content .modal-header h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #0f172a;
+  letter-spacing: -0.01em;
 }
 
 .transcription-content .transcription-header {
-  padding: 10px 24px 0;
+  padding: 10px 20px;
   margin-bottom: 0;
-  border-bottom: 2px solid #ecf0f1;
+  border-bottom: 1px solid #eef2f6;
+  background-color: #ffffff;
   flex: 0 0 auto;
   gap: 12px;
   flex-wrap: wrap;
+  align-items: center;
 }
 
 .transcription-content .transcription-tabs {
   border-bottom: none;
   margin-bottom: 0;
   flex-wrap: wrap;
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background-color: #f1f5f9;
+  border-radius: 8px;
 }
 
 .transcription-content .tab-button {
-  padding: 8px 14px;
-  margin-bottom: -2px;
+  background: none;
+  border: none;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #64748b;
+  cursor: pointer;
+  border-radius: 6px;
+  border-bottom: none;
+  transition: background-color 0.15s, color 0.15s, box-shadow 0.15s;
+  margin-bottom: 0;
+  letter-spacing: -0.005em;
 }
 
-.transcription-content .notion-button {
-  align-self: center;
-  padding: 8px 14px;
-  font-size: 13px;
-  margin-bottom: 4px;
+.transcription-content .tab-button:hover {
+  color: #0f172a;
+  background-color: rgba(255, 255, 255, 0.6);
+}
+
+.transcription-content .tab-button.active {
+  color: #0f172a;
+  background-color: #ffffff;
+  border-bottom-color: transparent;
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.04),
+    0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
 .transcription-body {
   overflow-y: auto;
   flex: 1 1 auto;
-  padding: 4px 24px 16px;
+  padding: 6px 20px 18px;
 }
 
 .transcription-content #transcriptionProgress {
-  margin: 0 24px;
+  margin: 12px 24px 0;
 }
 
 .release-notes-body {
@@ -1021,7 +1060,7 @@ h1 {
   background-color: #eef0f3;
   padding: 1px 4px;
   border-radius: 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 0.9em;
 }
 
@@ -1072,7 +1111,7 @@ h1 {
 }
 
 .release-history-item .release-tag {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   color: #111827;
 }
 
@@ -1171,7 +1210,7 @@ h1 {
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   font-size: 13px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: var(--font-mono);
   line-height: 1.6;
   resize: vertical;
   background-color: #fafbfc;
@@ -1281,7 +1320,7 @@ h1 {
 /* Transcription tabs */
 .transcription-tabs {
   display: flex;
-  border-bottom: 2px solid #ecf0f1;
+  border-bottom: 1px solid #eef2f6;
   margin-bottom: 20px;
 }
 
@@ -1289,21 +1328,22 @@ h1 {
   background: none;
   border: none;
   padding: 10px 20px;
-  font-size: 14px;
-  font-weight: 600;
-  color: #7f8c8d;
+  font-size: 13px;
+  font-weight: 500;
+  color: #64748b;
   cursor: pointer;
-  transition: all 0.3s;
-  border-bottom: 3px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  border-bottom: 2px solid transparent;
+  letter-spacing: -0.005em;
 }
 
 .tab-button:hover {
-  color: #2c3e50;
+  color: #0f172a;
 }
 
 .tab-button.active {
-  color: #3498db;
-  border-bottom-color: #3498db;
+  color: #0f172a;
+  border-bottom-color: #0f172a;
 }
 
 .tab-content {
@@ -1316,6 +1356,10 @@ h1 {
   user-select: text;
   -webkit-user-select: text;
   padding: 20px;
+}
+
+.transcription-content .tab-pane {
+  padding: 16px 4px 20px;
 }
 
 .tab-pane.active {
@@ -1334,19 +1378,22 @@ h1 {
 /* Markdown rendered content */
 .markdown-body {
   font-size: 14px;
-  line-height: 1.6;
-  color: #2c3e50;
+  line-height: 1.65;
+  color: #0f172a;
   user-select: text;
   -webkit-user-select: text;
+  letter-spacing: -0.003em;
 }
 
 .markdown-body h2 {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
-  margin-top: 20px;
-  margin-bottom: 8px;
-  padding-bottom: 4px;
-  border-bottom: 1px solid #ecf0f1;
+  margin-top: 22px;
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #eef2f6;
+  color: #0f172a;
+  letter-spacing: -0.01em;
 }
 
 .markdown-body h2:first-child {
@@ -1355,6 +1402,7 @@ h1 {
 
 .markdown-body p {
   margin-bottom: 10px;
+  color: #1f2937;
 }
 
 .markdown-body ul,
@@ -1365,20 +1413,24 @@ h1 {
 
 .markdown-body li {
   margin-bottom: 6px;
+  color: #1f2937;
 }
 
 .markdown-body pre {
-  background: #f8f9fa;
+  background: #f8fafc;
   padding: 12px;
-  border-radius: 6px;
+  border-radius: 8px;
   overflow-x: auto;
+  border: 1px solid #eef2f6;
 }
 
 .markdown-body code {
-  background: #f0f0f0;
-  padding: 2px 5px;
-  border-radius: 3px;
-  font-size: 13px;
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  font-family: var(--font-mono);
+  color: #0f172a;
 }
 
 @keyframes fadeIn {
@@ -1392,38 +1444,44 @@ h1 {
 }
 
 .loading {
-  color: #95a5a6;
+  color: #94a3b8;
   font-style: italic;
   text-align: center;
   padding: 40px;
+  font-size: 13px;
 }
 
 /* Transcript formatting */
 .transcript-content {
-  font-family: 'Courier New', Courier, monospace;
-  font-size: 14px;
-  line-height: 1.8;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.7;
   white-space: pre-wrap;
   word-wrap: break-word;
   user-select: text;
   -webkit-user-select: text;
-  max-height: 400px;
+  max-height: 460px;
   overflow-y: auto;
+  color: #1f2937;
+  padding: 14px 16px;
+  background-color: #ffffff;
+  border: 1px solid #eef2f6;
+  border-radius: 10px;
 }
 
 /* Summary formatting */
 .summary-content {
   font-size: 14px;
-  line-height: 1.6;
-  color: #2c3e50;
+  line-height: 1.65;
+  color: #1f2937;
 }
 
 /* Lists formatting */
 .keypoints-content,
 .actions-content {
   font-size: 14px;
-  line-height: 1.8;
-  color: #2c3e50;
+  line-height: 1.75;
+  color: #1f2937;
   padding-left: 20px;
 }
 
@@ -1437,12 +1495,12 @@ h1 {
 }
 
 .transcript-speaker {
-  color: #3498db;
-  font-weight: bold;
+  color: #2563eb;
+  font-weight: 600;
 }
 
 .transcript-timestamp {
-  color: #7f8c8d;
+  color: #94a3b8;
 }
 
 .transcribe-button {
@@ -1466,7 +1524,7 @@ h1 {
   cursor: not-allowed;
 }
 
-/* Transcription header and Notion button */
+/* Transcription header and brand action buttons (Notion / Slack) */
 .transcription-header {
   display: flex;
   justify-content: space-between;
@@ -1474,75 +1532,69 @@ h1 {
   margin-bottom: 20px;
 }
 
-.notion-button {
-  background-color: #000000;
-  color: white;
-  border: none;
-  padding: 10px 20px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 14px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  transition: background-color 0.3s;
-}
-
-.notion-button:hover {
-  background-color: #333333;
-}
-
-.notion-button:disabled {
-  background-color: #95a5a6;
-  cursor: not-allowed;
-}
-
-.notion-icon {
-  font-size: 18px;
-}
-
 .transcription-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 
-.slack-button {
-  background-color: #4a154b;
-  color: white;
-  border: none;
-  padding: 10px 20px;
-  border-radius: 6px;
+/* Brand action buttons: ghost-pill style shared by Notion / Slack.
+   `.is-resend` is the only variant (used when Slack has already sent once). */
+.brand-button {
+  background-color: #ffffff;
+  color: #0f172a;
+  border: 1px solid #e2e8f0;
+  padding: 6px 12px;
+  border-radius: 7px;
   cursor: pointer;
-  font-size: 14px;
-  font-weight: 600;
-  display: flex;
+  font-size: 12px;
+  font-weight: 500;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  transition: background-color 0.3s;
+  gap: 6px;
+  transition: background-color 0.15s, border-color 0.15s, box-shadow 0.15s, transform 0.05s;
+  letter-spacing: -0.005em;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.02), 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
-.slack-button:hover {
-  background-color: #611f64;
+.brand-button:hover {
+  background-color: #f8fafc;
+  border-color: #cbd5e1;
 }
 
-.slack-button:disabled {
-  background-color: #95a5a6;
+.brand-button:active {
+  transform: translateY(1px);
+}
+
+.brand-button:disabled {
+  opacity: 0.55;
   cursor: not-allowed;
+  box-shadow: none;
 }
 
-.slack-button.is-resend {
-  background-color: #2f7a64;
+.brand-button.is-resend {
+  background-color: #ecfdf5;
+  color: #065f46;
+  border-color: #a7f3d0;
 }
 
-.slack-button.is-resend:hover {
-  background-color: #36927a;
+.brand-button.is-resend:hover {
+  background-color: #d1fae5;
+  border-color: #6ee7b7;
 }
 
-.slack-icon {
-  font-size: 16px;
+.brand-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.brand-icon svg {
+  display: block;
+  width: 14px;
+  height: 14px;
 }
 
 .slack-webhook-row {
@@ -1983,31 +2035,37 @@ h1 {
 
 .copy-button {
   position: absolute;
-  top: 20px;
-  right: 20px;
+  top: 12px;
+  right: 8px;
   opacity: 0;
-  transition: opacity 0.2s;
-  background: #3498db;
-  color: white;
-  border: none;
-  padding: 5px 12px;
-  border-radius: 4px;
-  font-size: 12px;
+  transition: opacity 0.15s, background-color 0.15s, border-color 0.15s;
+  background-color: #ffffff;
+  color: #475569;
+  border: 1px solid #e2e8f0;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
   cursor: pointer;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
+  letter-spacing: -0.005em;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.02);
 }
 
 .copy-button:hover {
-  background: #2980b9;
+  background-color: #f8fafc;
+  color: #0f172a;
+  border-color: #cbd5e1;
 }
 
 .tab-pane {
   position: relative;
 }
 
-.tab-pane:hover .copy-button {
+.tab-pane:hover .copy-button,
+.tab-pane:focus-within .copy-button {
   opacity: 1;
 }
 
