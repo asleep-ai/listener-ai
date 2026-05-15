@@ -27,7 +27,7 @@ let currentTranscriptionPath: string | null = null;
 let currentNotionUrl: string | null = null;
 let currentSlackSentAt: string | null = null;
 
-let transcriptionModal: HTMLElement | null = null;
+let transcriptionModal: HTMLDialogElement | null = null;
 let closeTranscriptionBtn: Element | null = null;
 let uploadToNotionBtn: HTMLButtonElement | null = null;
 let sendToSlackBtn: HTMLButtonElement | null = null;
@@ -51,9 +51,9 @@ function refreshNotionButtonLabel(): void {
     : '<span class="notion-icon">📝</span> Upload to Notion';
 }
 
-function ensureTranscriptionModal(): HTMLElement | null {
+function ensureTranscriptionModal(): HTMLDialogElement | null {
   if (!transcriptionModal) {
-    transcriptionModal = document.getElementById('transcriptionModal');
+    transcriptionModal = document.getElementById('transcriptionModal') as HTMLDialogElement | null;
   }
   return transcriptionModal;
 }
@@ -110,7 +110,7 @@ export function showSavedTranscript(
 
   // Show transcription modal
   if (modal) {
-    modal.style.display = 'block';
+    if (!modal.open) modal.showModal();
     const titleEl = document.getElementById('transcriptionTitle');
     if (titleEl) titleEl.textContent = `Transcription - ${title}`;
 
@@ -274,7 +274,7 @@ export function prepareTranscriptionModal(
     console.error('Transcription modal not found');
     return false;
   }
-  modal.style.display = 'block';
+  if (!modal.open) modal.showModal();
   const titleEl = document.getElementById('transcriptionTitle');
   if (titleEl) titleEl.textContent = modalTitle;
   const { progressContainer, progressFill, progressText } = getDom();
@@ -331,7 +331,7 @@ export function setupCopyButtons(transcriptionData: TranscriptionData): void {
 }
 
 export function setupTranscriptionModal(): void {
-  transcriptionModal = document.getElementById('transcriptionModal');
+  transcriptionModal = document.getElementById('transcriptionModal') as HTMLDialogElement | null;
   closeTranscriptionBtn = document.querySelector('#transcriptionModal .close');
   uploadToNotionBtn = document.getElementById('uploadToNotion') as HTMLButtonElement | null;
   sendToSlackBtn = document.getElementById('sendToSlack') as HTMLButtonElement | null;
@@ -339,7 +339,7 @@ export function setupTranscriptionModal(): void {
 
   if (closeTranscriptionBtn) {
     closeTranscriptionBtn.addEventListener('click', () => {
-      if (transcriptionModal) transcriptionModal.style.display = 'none';
+      transcriptionModal?.close();
     });
   }
 

@@ -6,7 +6,7 @@ import { escapeHtml, renderMarkdown } from './markdown-utils';
 type ReleaseNotes = { version: string; body: string; url: string };
 
 async function openReleaseHistory(): Promise<void> {
-  const modal = document.getElementById('releaseHistoryModal') as HTMLElement | null;
+  const modal = document.getElementById('releaseHistoryModal') as HTMLDialogElement | null;
   const list = document.getElementById('releaseHistoryList') as HTMLElement | null;
   const closeBtn = document.getElementById('releaseHistoryClose') as HTMLElement | null;
   const dismissBtn = document.getElementById('releaseHistoryDismiss') as HTMLElement | null;
@@ -14,7 +14,7 @@ async function openReleaseHistory(): Promise<void> {
   if (!modal || !list) return;
 
   const hide = () => {
-    modal.style.display = 'none';
+    modal.close();
   };
   if (closeBtn) (closeBtn as HTMLElement).onclick = hide;
   if (dismissBtn) (dismissBtn as HTMLElement).onclick = hide;
@@ -25,7 +25,7 @@ async function openReleaseHistory(): Promise<void> {
   }
 
   list.innerHTML = '<p class="loading">Loading releases...</p>';
-  modal.style.display = 'block';
+  if (!modal.open) modal.showModal();
 
   try {
     const releases = await window.electronAPI.getAllReleases();
@@ -58,7 +58,7 @@ async function openReleaseHistory(): Promise<void> {
 }
 
 function showReleaseNotes(notes: ReleaseNotes): void {
-  const modal = document.getElementById('releaseNotesModal') as HTMLElement | null;
+  const modal = document.getElementById('releaseNotesModal') as HTMLDialogElement | null;
   const title = document.getElementById('releaseNotesTitle') as HTMLElement | null;
   const body = document.getElementById('releaseNotesBody') as HTMLElement | null;
   const closeBtn = document.getElementById('releaseNotesClose') as HTMLElement | null;
@@ -71,7 +71,7 @@ function showReleaseNotes(notes: ReleaseNotes): void {
   body.innerHTML = renderMarkdown(md);
 
   const hide = () => {
-    modal.style.display = 'none';
+    modal.close();
   };
   if (closeBtn) (closeBtn as HTMLElement).onclick = hide;
   if (dismissBtn) (dismissBtn as HTMLElement).onclick = hide;
@@ -82,7 +82,7 @@ function showReleaseNotes(notes: ReleaseNotes): void {
     };
   }
 
-  modal.style.display = 'block';
+  if (!modal.open) modal.showModal();
 }
 
 export function setupReleaseNotes(): void {

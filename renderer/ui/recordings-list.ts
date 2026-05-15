@@ -259,7 +259,7 @@ async function handleExportM4A(srcPath: string, button: HTMLButtonElement): Prom
 // --- Merge Recordings dialog ----------------------------------------------
 
 async function openMergeDialog(initialFilePath: string): Promise<void> {
-  const modal = document.getElementById('mergeModal');
+  const modal = document.getElementById('mergeModal') as HTMLDialogElement | null;
   const list = document.getElementById('mergeList');
   const status = document.getElementById('mergeStatus');
   const titleInput = document.getElementById('mergeTitleInput') as HTMLInputElement | null;
@@ -275,7 +275,7 @@ async function openMergeDialog(initialFilePath: string): Promise<void> {
   status.classList.remove('error');
   titleInput.value = '';
   list.innerHTML = '<p class="merge-list-empty">Loading recordings...</p>';
-  modal.style.display = 'block';
+  if (!modal.open) modal.showModal();
 
   let recordings: Recording[] = [];
   try {
@@ -285,6 +285,12 @@ async function openMergeDialog(initialFilePath: string): Promise<void> {
     list.innerHTML = '<p class="merge-list-empty">Failed to load recordings.</p>';
     return;
   }
+
+  // ESC during the recordings-load await would default-close the dialog
+  // (cancel listener is only attached at the end of this function). Bail so we
+  // don't attach button/cancel listeners to an already-dismissed dialog and
+  // leak them across reopens.
+  if (!modal.open) return;
 
   if (recordings.length < 2) {
     list.innerHTML = '<p class="merge-list-empty">Need at least 2 recordings to merge.</p>';
@@ -384,14 +390,22 @@ async function openMergeDialog(initialFilePath: string): Promise<void> {
   updateDefaultTitle();
 
   const cleanup = (): void => {
-    modal.style.display = 'none';
+    modal.close();
     titleInput.dataset.userEdited = '';
     titleInput.removeEventListener('input', onTitleInput);
     cancelBtn.removeEventListener('click', onCancel);
     closeBtn.removeEventListener('click', onCancel);
     confirmBtn.removeEventListener('click', onConfirm);
+    modal.removeEventListener('cancel', onEscape);
   };
   const onCancel = (): void => cleanup();
+  // Route ESC through the same cleanup path so listeners get removed; the
+  // default `cancel` action would just close the dialog and leak this run's
+  // handlers.
+  const onEscape = (e: Event): void => {
+    e.preventDefault();
+    cleanup();
+  };
   const onConfirm = async (): Promise<void> => {
     if (selection.length < 2) return;
     const title = titleInput.value.trim() || titleInput.placeholder || 'Merged Meeting';
@@ -401,6 +415,7 @@ async function openMergeDialog(initialFilePath: string): Promise<void> {
   cancelBtn.addEventListener('click', onCancel);
   closeBtn.addEventListener('click', onCancel);
   confirmBtn.addEventListener('click', onConfirm);
+  modal.addEventListener('cancel', onEscape);
 }
 
 // Longest shared prefix across titles, trimmed of trailing whitespace and
@@ -431,7 +446,9 @@ async function performMerge(paths: string[], title: string): Promise<void> {
   }
 
   const progressContainer = document.getElementById('transcriptionProgress');
-  const transcriptionModal = document.getElementById('transcriptionModal');
+  const transcriptionModal = document.getElementById(
+    'transcriptionModal',
+  ) as HTMLDialogElement | null;
 
   try {
     const result = (await window.electronAPI.mergeRecordings({
@@ -448,7 +465,7 @@ async function performMerge(paths: string[], title: string): Promise<void> {
         alert(`Failed to merge recordings: ${message}`);
       }
       if (progressContainer) progressContainer.style.display = 'none';
-      if (transcriptionModal) transcriptionModal.style.display = 'none';
+      transcriptionModal?.close();
       return;
     }
 
