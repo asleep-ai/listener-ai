@@ -19,13 +19,13 @@ export type FFmpegDialogResult =
 
 export function showFFmpegDownloadDialog(): Promise<FFmpegDialogResult> {
   return new Promise((resolve) => {
-    const overlay = document.getElementById('ffmpegDownloadOverlay');
+    const overlay = document.getElementById('ffmpegDownloadOverlay') as HTMLDialogElement | null;
     if (!overlay) {
       resolve({ success: false, reason: 'error', error: 'FFmpeg dialog overlay not found' });
       return;
     }
 
-    overlay.style.display = 'block';
+    if (!overlay.open) overlay.showModal();
 
     const progressFillEl = document.getElementById('ffmpegProgressFill');
     const progressPercentEl = document.getElementById('ffmpegProgressPercent');
@@ -45,17 +45,27 @@ export function showFFmpegDownloadDialog(): Promise<FFmpegDialogResult> {
     }
     if (cancelBtn) cancelBtn.textContent = 'Cancel';
 
+    // Route ESC through the cancel button so it cancels the in-flight download
+    // and settles the promise, instead of the dialog's default close-only
+    // behavior (which would leave the caller awaiting forever).
+    const onEscape = (e: Event): void => {
+      e.preventDefault();
+      cancelBtn?.click();
+    };
+    overlay.addEventListener('cancel', onEscape);
+
     let settled = false;
     const settle = (result: FFmpegDialogResult) => {
       if (settled) return;
       settled = true;
+      overlay.removeEventListener('cancel', onEscape);
+      overlay.close();
       resolve(result);
     };
 
     if (cancelBtn) {
       cancelBtn.onclick = async () => {
         await window.electronAPI.cancelFFmpegDownload();
-        overlay.style.display = 'none';
         settle({ success: false, reason: 'cancelled' });
       };
     }
@@ -86,10 +96,11 @@ export function showFFmpegDownloadDialog(): Promise<FFmpegDialogResult> {
           if (downloadStatusEl) downloadStatusEl.textContent = 'FFmpeg installed successfully!';
           if (progressFillEl) (progressFillEl as HTMLElement).style.width = '100%';
           if (progressPercentEl) progressPercentEl.textContent = '100%';
-          setTimeout(() => {
-            overlay.style.display = 'none';
-            settle({ success: true });
-          }, 1000);
+          // Drop ESC routing now -- during the 1s success-display window an
+          // ESC would otherwise race the setTimeout below and settle as
+          // `cancelled` for a download that actually succeeded.
+          overlay.removeEventListener('cancel', onEscape);
+          setTimeout(() => settle({ success: true }), 1000);
           break;
         case 'error':
           if (downloadStatusEl) {
@@ -100,10 +111,7 @@ export function showFFmpegDownloadDialog(): Promise<FFmpegDialogResult> {
           // settle on error too -- but only after the user dismisses, so caller
           // can show a toast and the user can retry without the dialog stuck.
           if (cancelBtn) {
-            cancelBtn.onclick = () => {
-              overlay.style.display = 'none';
-              settle({ success: false, reason: 'error' });
-            };
+            cancelBtn.onclick = () => settle({ success: false, reason: 'error' });
           }
           break;
       }
@@ -124,12 +132,9 @@ export function showFFmpegDownloadDialog(): Promise<FFmpegDialogResult> {
           }
           if (cancelBtn) {
             cancelBtn.textContent = 'Close';
-            cancelBtn.onclick = () => {
-              overlay.style.display = 'none';
+            cancelBtn.onclick = () =>
               settle({ success: false, reason: 'error', error: result.error });
-            };
           } else {
-            overlay.style.display = 'none';
             settle({ success: false, reason: 'error', error: result.error });
           }
         }
@@ -141,12 +146,8 @@ export function showFFmpegDownloadDialog(): Promise<FFmpegDialogResult> {
         }
         if (cancelBtn) {
           cancelBtn.textContent = 'Close';
-          cancelBtn.onclick = () => {
-            overlay.style.display = 'none';
-            settle({ success: false, reason: 'error', error: message });
-          };
+          cancelBtn.onclick = () => settle({ success: false, reason: 'error', error: message });
         } else {
-          overlay.style.display = 'none';
           settle({ success: false, reason: 'error', error: message });
         }
       }

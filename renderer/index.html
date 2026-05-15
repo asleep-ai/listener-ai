@@ -147,7 +147,7 @@
       </div>
     </div>
 
-    <div id="configModal" class="modal">
+    <dialog id="configModal" class="modal">
       <div class="modal-content config-modal">
         <div class="modal-header">
           <h2>Settings</h2>
@@ -323,9 +323,9 @@
           <button id="saveConfig" class="save-button">Save</button>
         </div>
       </div>
-    </div>
+    </dialog>
 
-    <div id="transcriptionModal" class="modal">
+    <dialog id="transcriptionModal" class="modal">
       <div class="modal-content transcription-content">
         <div class="modal-header">
           <h2 id="transcriptionTitle">Transcription</h2>
@@ -378,11 +378,11 @@
           </div>
         </div>
       </div>
-    </div>
+    </dialog>
   </div>
 
   <!-- Release History (browse all past releases) -->
-  <div id="releaseHistoryModal" class="modal" style="display: none;">
+  <dialog id="releaseHistoryModal" class="modal">
     <div class="modal-content release-history-content">
       <span class="close" id="releaseHistoryClose">&times;</span>
       <h2>Release History</h2>
@@ -394,10 +394,10 @@
         <button id="releaseHistoryDismiss" class="save-button">Close</button>
       </div>
     </div>
-  </div>
+  </dialog>
 
   <!-- What's New (release notes after update) -->
-  <div id="releaseNotesModal" class="modal" style="display: none;">
+  <dialog id="releaseNotesModal" class="modal">
     <div class="modal-content">
       <span class="close" id="releaseNotesClose">&times;</span>
       <h2 id="releaseNotesTitle">What's New</h2>
@@ -407,10 +407,10 @@
         <button id="releaseNotesDismiss" class="save-button">Got it</button>
       </div>
     </div>
-  </div>
+  </dialog>
 
   <!-- Merge Recordings Dialog -->
-  <div id="mergeModal" class="modal" style="display: none;">
+  <dialog id="mergeModal" class="modal">
     <div class="modal-content merge-modal-content">
       <div class="modal-header">
         <h2>Merge Recordings</h2>
@@ -428,10 +428,10 @@
         <button id="mergeConfirmBtn" class="save-button" disabled>Merge &amp; Transcribe</button>
       </div>
     </div>
-  </div>
+  </dialog>
 
   <!-- FFmpeg Download Progress Overlay -->
-  <div id="ffmpegDownloadOverlay" class="modal" style="display: none;">
+  <dialog id="ffmpegDownloadOverlay" class="modal">
     <div class="ffmpeg-download-card">
       <h3>Setting up audio recording...</h3>
       <p class="download-status" id="downloadStatus">Downloading FFmpeg for audio recording...</p>
@@ -452,7 +452,7 @@
 
       <button id="cancelDownload" class="cancel-button">Cancel</button>
     </div>
-  </div>
+  </dialog>
 
   <script type="module" src="./main.ts"></script>
 </body>

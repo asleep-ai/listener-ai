@@ -5,7 +5,7 @@
 
 import { DEFAULT_SUMMARY_PROMPT } from '../state';
 
-let configModal: HTMLElement | null = null;
+let configModal: HTMLDialogElement | null = null;
 let saveConfigBtn: HTMLButtonElement | null = null;
 let cancelConfigBtn: HTMLButtonElement | null = null;
 let aiProviderSelect: HTMLSelectElement | null = null;
@@ -59,7 +59,7 @@ export async function checkAndPromptForConfig(): Promise<void> {
 export async function showConfigModal(): Promise<void> {
   // Cmd+, while the modal is already open should be a no-op rather than
   // discarding the user's in-progress edits by re-fetching config.
-  if (configModal && configModal.style.display === 'block') return;
+  if (configModal && configModal.open) return;
 
   // Load current config
   const config = (await window.electronAPI.getConfig()) as Record<string, unknown> & {
@@ -185,7 +185,7 @@ export async function showConfigModal(): Promise<void> {
   // AI Provider tab carries the required-credentials state; open there so the
   // user sees setup status first.
   activateConfigTab('ai');
-  if (configModal) configModal.style.display = 'block';
+  if (configModal && !configModal.open) configModal.showModal();
 }
 
 function renderKnownWordsChips(): void {
@@ -275,7 +275,7 @@ function setupConfigTabs(modal: HTMLElement): void {
 }
 
 export function setupConfigModal(): void {
-  configModal = document.getElementById('configModal');
+  configModal = document.getElementById('configModal') as HTMLDialogElement | null;
   if (configModal) {
     setupConfigTabs(configModal);
     aiPane = configModal.querySelector<HTMLElement>('.config-pane[data-pane="ai"]');
@@ -440,7 +440,7 @@ export function setupConfigModal(): void {
   }
 
   const hideConfig = () => {
-    if (configModal) configModal.style.display = 'none';
+    configModal?.close();
     // Bumping the token drops any stale result from an in-flight Codex login
     // promise that resolves after the modal is gone.
     codexLoginToken++;
@@ -448,6 +448,17 @@ export function setupConfigModal(): void {
     // can bind a fresh loopback.
     window.electronAPI.cancelCodexOAuth().catch(() => {});
   };
+
+  // Native <dialog> emits `close` for any dismissal -- click on the X button,
+  // Cancel/Save button, AND the ESC key. Route ESC through hideConfig so it
+  // also drops in-flight Codex login state, instead of the browser's default
+  // close-only behavior.
+  if (configModal) {
+    configModal.addEventListener('cancel', (e) => {
+      e.preventDefault();
+      hideConfig();
+    });
+  }
 
   if (saveConfigBtn) {
     saveConfigBtn.addEventListener('click', async () => {
