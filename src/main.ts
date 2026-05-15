@@ -1357,7 +1357,10 @@ ipcMain.handle('codex-oauth-login', async () => {
       return { success: false as const, error: 'Sign-in cancelled.', cancelled: true as const };
     }
     console.error('Codex OAuth login failed:', error);
-    return { success: false as const, error: error instanceof Error ? error.message : String(error) };
+    return {
+      success: false as const,
+      error: error instanceof Error ? error.message : String(error),
+    };
   } finally {
     // Hold the slot until the port is presumed free, so the next attempt --
     // queued behind `done` -- can bind without racing.

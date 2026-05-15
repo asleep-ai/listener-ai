@@ -34,10 +34,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loginCodexOAuth: () => ipcRenderer.invoke('codex-oauth-login'),
   cancelCodexOAuth: () => ipcRenderer.invoke('codex-oauth-cancel'),
   onCodexOAuthProgress: (
-    callback: (status: {
-      phase: 'browser-opened' | 'progress';
-      message?: string;
-    }) => void,
+    callback: (status: { phase: 'browser-opened' | 'progress'; message?: string }) => void,
   ) => {
     ipcRenderer.on('codex-oauth-progress', (_, status) => callback(status));
   },

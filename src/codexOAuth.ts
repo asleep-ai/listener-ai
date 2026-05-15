@@ -114,6 +114,7 @@ export async function loginCodexOAuth(params: {
   // waitForCode() resolves null), records the error, and rethrows it inside
   // the loginOpenAICodex finally block -- which then closes the loopback
   // server and frees port 1455. We translate AbortSignal into that surface.
+  let abortListener: (() => void) | undefined;
   const onManualCodeInput = params.signal
     ? () =>
         new Promise<string>((_resolve, reject) => {
@@ -122,20 +123,27 @@ export async function loginCodexOAuth(params: {
             reject(new CodexLoginCancelledError());
             return;
           }
-          signal.addEventListener('abort', () => reject(new CodexLoginCancelledError()), {
-            once: true,
-          });
+          abortListener = () => reject(new CodexLoginCancelledError());
+          signal.addEventListener('abort', abortListener, { once: true });
         })
     : undefined;
 
-  const credentials = await loginOpenAICodex({
-    originator: 'listener-ai',
-    onAuth: (info) => {
-      void params.openUrl(info.url);
-    },
-    onPrompt: params.onPrompt,
-    onProgress: params.onProgress,
-    onManualCodeInput,
-  });
-  return credentials as CodexOAuthCredentials;
+  try {
+    const credentials = await loginOpenAICodex({
+      originator: 'listener-ai',
+      onAuth: (info) => {
+        void params.openUrl(info.url);
+      },
+      onPrompt: params.onPrompt,
+      onProgress: params.onProgress,
+      onManualCodeInput,
+    });
+    return credentials as CodexOAuthCredentials;
+  } finally {
+    // The manualPromise is left pending in pi-ai's success path; remove the
+    // listener so it doesn't outlive the AbortController.
+    if (abortListener && params.signal) {
+      params.signal.removeEventListener('abort', abortListener);
+    }
+  }
 }

@@ -43,16 +43,13 @@ function setCodexOAuthStatus(text: string, state: 'idle' | 'success' | 'error' =
 // Function to check and prompt for API keys
 export async function checkAndPromptForConfig(): Promise<void> {
   const configCheck = (await window.electronAPI.checkConfig()) as {
-    hasConfig?: boolean;
-    missing?: string[];
+    hasAiAuth?: boolean;
   };
 
-  if (!configCheck.hasConfig) {
-    const missing = configCheck.missing || [];
-    const message = `The following API keys are missing:\n${missing.join('\n')}\n\nWould you like to configure them now?`;
-
-    if (confirm(message)) {
-      // Show the config modal instead of using prompts
+  // Only prompt when the AI provider isn't set up. Notion / Slack are optional
+  // integrations and shouldn't trigger a startup nag.
+  if (!configCheck.hasAiAuth) {
+    if (confirm('Listener.AI needs an AI provider configured. Open settings now?')) {
       showConfigModal();
     }
   }
@@ -328,7 +325,11 @@ export function setupConfigModal(): void {
         return;
       }
 
-      if (e.key === 'Backspace' && knownWordsField!.value.length === 0 && knownWordsValues.length > 0) {
+      if (
+        e.key === 'Backspace' &&
+        knownWordsField!.value.length === 0 &&
+        knownWordsValues.length > 0
+      ) {
         e.preventDefault();
         removeKnownWord(knownWordsValues[knownWordsValues.length - 1]!);
       }
