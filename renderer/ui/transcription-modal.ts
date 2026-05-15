@@ -30,6 +30,7 @@ let currentSlackSentAt: string | null = null;
 let transcriptionModal: HTMLElement | null = null;
 let closeTranscriptionBtn: Element | null = null;
 let uploadToNotionBtn: HTMLButtonElement | null = null;
+let notionButtonLabel: HTMLElement | null = null;
 let sendToSlackBtn: HTMLButtonElement | null = null;
 let slackButtonLabel: HTMLElement | null = null;
 
@@ -45,10 +46,8 @@ function refreshSlackButtonLabel(): void {
 }
 
 function refreshNotionButtonLabel(): void {
-  if (!uploadToNotionBtn) return;
-  uploadToNotionBtn.innerHTML = currentNotionUrl
-    ? '<span class="notion-icon">📝</span> View in Notion'
-    : '<span class="notion-icon">📝</span> Upload to Notion';
+  if (!notionButtonLabel) return;
+  notionButtonLabel.textContent = currentNotionUrl ? 'View in Notion' : 'Upload to Notion';
 }
 
 function ensureTranscriptionModal(): HTMLElement | null {
@@ -334,6 +333,7 @@ export function setupTranscriptionModal(): void {
   transcriptionModal = document.getElementById('transcriptionModal');
   closeTranscriptionBtn = document.querySelector('#transcriptionModal .close');
   uploadToNotionBtn = document.getElementById('uploadToNotion') as HTMLButtonElement | null;
+  notionButtonLabel = document.getElementById('notionButtonLabel');
   sendToSlackBtn = document.getElementById('sendToSlack') as HTMLButtonElement | null;
   slackButtonLabel = document.getElementById('slackButtonLabel');
 
@@ -372,7 +372,7 @@ export function setupTranscriptionModal(): void {
       if (!uploadToNotionBtn || uploadToNotionBtn.disabled) return;
 
       uploadToNotionBtn.disabled = true;
-      uploadToNotionBtn.textContent = 'Uploading...';
+      if (notionButtonLabel) notionButtonLabel.textContent = 'Uploading...';
 
       try {
         const result = await window.electronAPI.uploadToNotion({
