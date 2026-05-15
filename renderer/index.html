@@ -150,128 +150,173 @@
     <div id="configModal" class="modal">
       <div class="modal-content config-modal">
         <div class="modal-header">
-          <h2>API Configuration</h2>
+          <h2>Settings</h2>
           <button type="button" class="close" id="configClose" aria-label="Close">&times;</button>
         </div>
+        <div class="config-tabs" role="tablist" aria-label="Settings sections">
+          <button type="button" class="config-tab is-active" data-tab="ai" role="tab" id="config-tab-ai" aria-controls="config-pane-ai" aria-selected="true">
+            AI Provider
+            <span class="config-tab-badge">Required</span>
+          </button>
+          <button type="button" class="config-tab" data-tab="integrations" role="tab" id="config-tab-integrations" aria-controls="config-pane-integrations" aria-selected="false">
+            Integrations
+          </button>
+          <button type="button" class="config-tab" data-tab="recording" role="tab" id="config-tab-recording" aria-controls="config-pane-recording" aria-selected="false">
+            Recording
+          </button>
+          <button type="button" class="config-tab" data-tab="advanced" role="tab" id="config-tab-advanced" aria-controls="config-pane-advanced" aria-selected="false">
+            Advanced
+          </button>
+        </div>
         <div class="config-body">
-        <div class="form-group">
-          <label for="aiProvider">AI Provider:</label>
-          <select id="aiProvider">
-            <option value="gemini">Gemini API</option>
-            <option value="codex">Codex OAuth</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="geminiApiKey">Gemini API Key:</label>
-          <input type="password" id="geminiApiKey" placeholder="Enter your Gemini API key">
-          <small>Get your API key from <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI
-              Studio</a></small>
-        </div>
-        <div class="form-group">
-          <div class="prompt-label-row">
-            <label for="geminiModel">Gemini Pro Model (summarization):</label>
-            <button type="button" id="resetGeminiModel" class="reset-prompt-button">Reset to Default</button>
-          </div>
-          <input type="text" id="geminiModel" placeholder="gemini-2.5-pro">
-          <small>Model for summarization. Default: gemini-2.5-pro</small>
-        </div>
-        <div class="form-group">
-          <div class="prompt-label-row">
-            <label for="geminiFlashModel">Gemini Flash Model (transcription):</label>
-            <button type="button" id="resetGeminiFlashModel" class="reset-prompt-button">Reset to Default</button>
-          </div>
-          <input type="text" id="geminiFlashModel" placeholder="gemini-2.5-flash">
-          <small>Model for transcription. Default: gemini-2.5-flash</small>
-        </div>
-        <div class="form-group">
-          <label>Codex OAuth:</label>
-          <div class="codex-oauth-row">
-            <button type="button" id="loginCodexOAuth" class="reset-prompt-button">Sign in</button>
-            <button type="button" id="clearCodexOAuth" class="reset-prompt-button">Sign out</button>
-            <span id="codexOAuthStatus" class="slack-webhook-status"></span>
-          </div>
-        </div>
-        <div class="form-group">
-          <label for="codexModel">Codex Model:</label>
-          <input type="text" id="codexModel" placeholder="gpt-5.5">
-          <small>Model for summaries and Ask Listener. Default: gpt-5.5</small>
-        </div>
-        <div class="form-group">
-          <label for="codexTranscriptionModel">Codex Transcription Model:</label>
-          <input type="text" id="codexTranscriptionModel" placeholder="gpt-4o-transcribe">
-          <small>Model for audio transcription. Default: gpt-4o-transcribe</small>
-        </div>
-        <div class="form-group">
-          <label for="notionApiKey">Notion Integration Token:</label>
-          <input type="password" id="notionApiKey" placeholder="Enter your Notion integration token">
-          <small>Create an integration at <a href="https://www.notion.so/my-integrations" target="_blank">Notion
-              Integrations</a></small>
-        </div>
-        <div class="form-group">
-          <label for="notionDatabaseId">Notion Database ID:</label>
-          <input type="text" id="notionDatabaseId" placeholder="Enter your Notion database ID">
-          <small>Copy from your database URL: notion.so/[workspace]/[database-id]?v=...</small>
-        </div>
-        <div class="form-group">
-          <label for="slackWebhookUrl">Slack Incoming Webhook URL:</label>
-          <input type="password" id="slackWebhookUrl" placeholder="https://hooks.slack.com/services/...">
-          <div class="slack-webhook-row">
-            <button type="button" id="openSlackAppCreator" class="reset-prompt-button">Get Webhook URL</button>
-            <button type="button" id="testSlackWebhook" class="reset-prompt-button">Send Test Message</button>
-            <span id="slackWebhookStatus" class="slack-webhook-status"></span>
-          </div>
-          <details class="slack-help">
-            <summary>How do I get this URL?</summary>
-            <ol class="slack-help-steps">
-              <li>Click <strong>Get Webhook URL</strong> above (opens api.slack.com/apps).</li>
-              <li><strong>Create New App</strong> &rarr; <strong>From scratch</strong>. Name it anything (e.g. "Listener AI") and pick your workspace.</li>
-              <li>Sidebar &rarr; <strong>Features &rarr; Incoming Webhooks</strong>. Toggle <strong>Activate Incoming Webhooks</strong> on.</li>
-              <li>Scroll down &rarr; <strong>Add New Webhook to Workspace</strong>, pick the channel, and Allow.</li>
-              <li>Copy the URL (starts with <code>https://hooks.slack.com/services/</code>) and paste it above.</li>
-              <li>Click <strong>Send Test Message</strong> to confirm.</li>
-            </ol>
-            <small>If your workspace blocks app installs, ask an admin to do steps 1&ndash;4 for you.</small>
-          </details>
-          <small>Stored locally; never logged.</small>
-        </div>
-        <div class="form-group">
-          <label class="inline-label">
-            <input type="checkbox" id="slackAutoShare">
-            Automatically share completed meetings to Slack
-          </label>
-          <small>When auto mode is on, post the summary + Notion link to the configured webhook after each meeting.</small>
-        </div>
-        <div class="form-group">
-          <label for="globalShortcut">Global Shortcut:</label>
-          <input type="text" id="globalShortcut" placeholder="Press shortcut keys" readonly>
-          <small>Click the input and press your desired shortcut combination</small>
-        </div>
-        <div class="form-group">
-          <label for="maxRecordingMinutes">Max Recording Length (minutes)</label>
-          <input type="number" id="maxRecordingMinutes" min="0" max="1440" step="1" placeholder="0 = disabled">
-        </div>
-        <div class="form-group">
-          <label for="recordingReminderMinutes">Recording Reminder Interval (minutes)</label>
-          <input type="number" id="recordingReminderMinutes" min="0" max="1440" step="1" placeholder="0 = disabled">
-        </div>
-        <div class="form-group">
-          <label for="minRecordingSeconds">Minimum Recording Duration (seconds)</label>
-          <input type="number" id="minRecordingSeconds" min="0" max="3600" step="1" placeholder="0 = disabled">
-          <small>Auto mode will skip transcription/upload for recordings shorter than this (0 disables)</small>
-        </div>
-        <div class="form-group">
-          <label for="knownWords">Known Words:</label>
-          <textarea id="knownWords" rows="4" placeholder="Enter words or phrases, one per line&#10;e.g. Listener.AI&#10;GPT-4o"></textarea>
-          <small>Proper nouns, names, and terms to improve transcription accuracy (one per line)</small>
-        </div>
-        <div class="form-group">
-          <div class="prompt-label-row">
-            <label for="summaryPrompt">Summary Prompt:</label>
-            <button type="button" id="resetPrompt" class="reset-prompt-button">Reset to Default</button>
-          </div>
-          <textarea id="summaryPrompt" rows="10" placeholder="Enter your custom summary prompt..."></textarea>
-          <small>Customize the prompt sent to Gemini for generating summaries. The JSON response format (suggestedTitle, summary, keyPoints, actionItems, emoji) should be preserved.</small>
-        </div>
+          <section class="config-pane is-active" id="config-pane-ai" data-pane="ai" role="tabpanel" aria-labelledby="config-tab-ai">
+            <p class="config-pane-hint">Choose the provider you want to use. Switching is safe -- credentials for the other provider stay saved.</p>
+            <div class="form-group">
+              <label for="aiProvider">Active Provider</label>
+              <select id="aiProvider">
+                <option value="gemini">Gemini API</option>
+                <option value="codex">Codex (ChatGPT Plus/Pro)</option>
+              </select>
+            </div>
+            <fieldset class="config-subgroup" data-provider="gemini">
+              <legend>Gemini</legend>
+              <div class="form-group">
+                <label for="geminiApiKey">API Key</label>
+                <input type="password" id="geminiApiKey" placeholder="Enter your Gemini API key">
+                <small>Get your API key from <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI Studio</a></small>
+              </div>
+              <div class="form-group">
+                <div class="prompt-label-row">
+                  <label for="geminiModel">Pro Model (summarization) <span class="config-optional">optional</span></label>
+                  <button type="button" id="resetGeminiModel" class="reset-prompt-button">Reset to Default</button>
+                </div>
+                <input type="text" id="geminiModel" placeholder="gemini-2.5-pro">
+                <small>Default: gemini-2.5-pro</small>
+              </div>
+              <div class="form-group">
+                <div class="prompt-label-row">
+                  <label for="geminiFlashModel">Flash Model (transcription) <span class="config-optional">optional</span></label>
+                  <button type="button" id="resetGeminiFlashModel" class="reset-prompt-button">Reset to Default</button>
+                </div>
+                <input type="text" id="geminiFlashModel" placeholder="gemini-2.5-flash">
+                <small>Default: gemini-2.5-flash</small>
+              </div>
+            </fieldset>
+            <fieldset class="config-subgroup" data-provider="codex">
+              <legend>Codex</legend>
+              <div class="form-group">
+                <label>Sign-in</label>
+                <div class="codex-oauth-row">
+                  <button type="button" id="loginCodexOAuth" class="reset-prompt-button">Sign in</button>
+                  <button type="button" id="clearCodexOAuth" class="reset-prompt-button">Sign out</button>
+                  <span id="codexOAuthStatus" class="slack-webhook-status"></span>
+                </div>
+                <small>Uses your ChatGPT Plus/Pro account via browser sign-in. If the browser tab closes before sign-in completes, just click Sign in again.</small>
+              </div>
+              <div class="form-group">
+                <label for="codexModel">Model <span class="config-optional">optional</span></label>
+                <input type="text" id="codexModel" placeholder="gpt-5.5">
+                <small>Used for summaries and Ask Listener. Default: gpt-5.5</small>
+              </div>
+              <div class="form-group">
+                <label for="codexTranscriptionModel">Transcription Model <span class="config-optional">optional</span></label>
+                <input type="text" id="codexTranscriptionModel" placeholder="gpt-4o-transcribe">
+                <small>Default: gpt-4o-transcribe</small>
+              </div>
+            </fieldset>
+          </section>
+
+          <section class="config-pane" id="config-pane-integrations" data-pane="integrations" role="tabpanel" aria-labelledby="config-tab-integrations">
+            <p class="config-pane-hint">All optional. Export summaries to Notion or share them to Slack.</p>
+            <fieldset class="config-subgroup">
+              <legend>Notion</legend>
+              <div class="form-group">
+                <label for="notionApiKey">Integration Token</label>
+                <input type="password" id="notionApiKey" placeholder="Enter your Notion integration token">
+                <small>Create an integration at <a href="https://www.notion.so/my-integrations" target="_blank">Notion Integrations</a></small>
+              </div>
+              <div class="form-group">
+                <label for="notionDatabaseId">Database ID</label>
+                <input type="text" id="notionDatabaseId" placeholder="Enter your Notion database ID">
+                <small>Copy from your database URL: notion.so/[workspace]/[database-id]?v=...</small>
+              </div>
+            </fieldset>
+            <fieldset class="config-subgroup">
+              <legend>Slack</legend>
+              <div class="form-group">
+                <label for="slackWebhookUrl">Incoming Webhook URL</label>
+                <input type="password" id="slackWebhookUrl" placeholder="https://hooks.slack.com/services/...">
+                <div class="slack-webhook-row">
+                  <button type="button" id="openSlackAppCreator" class="reset-prompt-button">Get Webhook URL</button>
+                  <button type="button" id="testSlackWebhook" class="reset-prompt-button">Send Test Message</button>
+                  <span id="slackWebhookStatus" class="slack-webhook-status"></span>
+                </div>
+                <details class="slack-help">
+                  <summary>How do I get this URL?</summary>
+                  <ol class="slack-help-steps">
+                    <li>Click <strong>Get Webhook URL</strong> above (opens api.slack.com/apps).</li>
+                    <li><strong>Create New App</strong> &rarr; <strong>From scratch</strong>. Name it anything (e.g. "Listener AI") and pick your workspace.</li>
+                    <li>Sidebar &rarr; <strong>Features &rarr; Incoming Webhooks</strong>. Toggle <strong>Activate Incoming Webhooks</strong> on.</li>
+                    <li>Scroll down &rarr; <strong>Add New Webhook to Workspace</strong>, pick the channel, and Allow.</li>
+                    <li>Copy the URL (starts with <code>https://hooks.slack.com/services/</code>) and paste it above.</li>
+                    <li>Click <strong>Send Test Message</strong> to confirm.</li>
+                  </ol>
+                  <small>If your workspace blocks app installs, ask an admin to do steps 1&ndash;4 for you.</small>
+                </details>
+                <small>Stored locally; never logged.</small>
+              </div>
+              <div class="form-group">
+                <label class="inline-label">
+                  <input type="checkbox" id="slackAutoShare">
+                  Automatically share completed meetings to Slack
+                </label>
+                <small>When auto mode is on, post the summary + Notion link to the configured webhook after each meeting.</small>
+              </div>
+            </fieldset>
+          </section>
+
+          <section class="config-pane" id="config-pane-recording" data-pane="recording" role="tabpanel" aria-labelledby="config-tab-recording">
+            <p class="config-pane-hint">All optional. Default behaviour records indefinitely with no shortcut.</p>
+            <div class="form-group">
+              <label for="globalShortcut">Global Start/Stop Shortcut</label>
+              <input type="text" id="globalShortcut" placeholder="Press shortcut keys" readonly>
+              <small>Click the input and press your desired shortcut combination</small>
+            </div>
+            <div class="form-group">
+              <label for="maxRecordingMinutes">Max Recording Length (minutes)</label>
+              <input type="number" id="maxRecordingMinutes" min="0" max="1440" step="1" placeholder="0 = disabled">
+            </div>
+            <div class="form-group">
+              <label for="recordingReminderMinutes">Recording Reminder Interval (minutes)</label>
+              <input type="number" id="recordingReminderMinutes" min="0" max="1440" step="1" placeholder="0 = disabled">
+            </div>
+            <div class="form-group">
+              <label for="minRecordingSeconds">Minimum Recording Duration (seconds)</label>
+              <input type="number" id="minRecordingSeconds" min="0" max="3600" step="1" placeholder="0 = disabled">
+              <small>Auto mode will skip transcription/upload for recordings shorter than this (0 disables)</small>
+            </div>
+          </section>
+
+          <section class="config-pane" id="config-pane-advanced" data-pane="advanced" role="tabpanel" aria-labelledby="config-tab-advanced">
+            <p class="config-pane-hint">All optional. Tune transcription accuracy and summary style.</p>
+            <div class="form-group">
+              <label for="knownWordsField">Known Words</label>
+              <div class="chip-input" id="knownWordsChips">
+                <input type="text" id="knownWordsField" class="chip-input-field"
+                       placeholder="Type a term, press comma or Enter"
+                       autocomplete="off" spellcheck="false">
+              </div>
+              <small>Proper nouns, names, and terms to improve transcription accuracy. Press <kbd>,</kbd> or <kbd>Enter</kbd> to add; backspace removes the last one.</small>
+            </div>
+            <div class="form-group">
+              <div class="prompt-label-row">
+                <label for="summaryPrompt">Summary Prompt</label>
+                <button type="button" id="resetPrompt" class="reset-prompt-button">Reset to Default</button>
+              </div>
+              <textarea id="summaryPrompt" rows="10" placeholder="Enter your custom summary prompt..."></textarea>
+              <small>Customize the prompt sent to the AI for generating summaries. The JSON response format (suggestedTitle, summary, keyPoints, actionItems, emoji) should be preserved.</small>
+            </div>
+          </section>
         </div>
         <div class="config-footer">
           <button id="cancelConfig" class="cancel-button">Cancel</button>

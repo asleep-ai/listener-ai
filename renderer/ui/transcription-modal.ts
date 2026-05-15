@@ -5,6 +5,7 @@
 
 import { getDom } from '../state';
 import { resetModalChatFor } from './chat-panel';
+import { showConfigModal } from './config-modal';
 import {
   type TranscriptionData,
   camelToLabel,
@@ -160,16 +161,16 @@ export function showSavedTranscript(
 export async function handleTranscribe(filePath: string, title: string): Promise<void> {
   console.log('handleTranscribe called with:', { filePath, title });
 
-  // Check if API key is configured
+  // Transcription only needs the AI provider auth; Notion is for the optional
+  // upload step and shouldn't gate the recording -> transcript flow.
   const configCheck = await window.electronAPI.checkConfig();
   console.log('Has config:', configCheck);
 
-  if (!configCheck.hasConfig) {
-    const configModal = document.getElementById('configModal');
-    if (configModal) {
-      configModal.style.display = 'block';
+  if (!configCheck.hasAiAuth) {
+    if (document.getElementById('configModal')) {
+      void showConfigModal();
     } else {
-      alert('Please configure your API keys first');
+      alert('Please configure your AI provider first');
     }
     return;
   }

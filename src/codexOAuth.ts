@@ -20,8 +20,16 @@ type CodexOAuthRuntime = {
     onAuth: (info: { url: string }) => void;
     onPrompt: (prompt: OAuthPrompt) => Promise<string>;
     onProgress?: (message: string) => void;
+    onManualCodeInput?: () => Promise<string>;
   }) => Promise<CodexOAuthCredentials>;
 };
+
+class CodexLoginCancelledError extends Error {
+  constructor() {
+    super('Codex sign-in cancelled.');
+    this.name = 'CodexLoginCancelledError';
+  }
+}
 
 export type CodexOAuthCredentials = OAuthCredentials & {
   accountId?: string;
@@ -97,15 +105,45 @@ export async function loginCodexOAuth(params: {
   openUrl: (url: string) => void | Promise<void>;
   onPrompt: (prompt: OAuthPrompt) => Promise<string>;
   onProgress?: (message: string) => void;
+  signal?: AbortSignal;
 }): Promise<CodexOAuthCredentials> {
   const { loginOpenAICodex } = await loadCodexOAuthRuntime();
-  const credentials = await loginOpenAICodex({
-    originator: 'listener-ai',
-    onAuth: (info) => {
-      void params.openUrl(info.url);
-    },
-    onPrompt: params.onPrompt,
-    onProgress: params.onProgress,
-  });
-  return credentials as CodexOAuthCredentials;
+
+  // pi-ai exposes cancellation only via its `onManualCodeInput` race: when that
+  // promise rejects, pi-ai calls the loopback server's cancelWait() (so
+  // waitForCode() resolves null), records the error, and rethrows it inside
+  // the loginOpenAICodex finally block -- which then closes the loopback
+  // server and frees port 1455. We translate AbortSignal into that surface.
+  let abortListener: (() => void) | undefined;
+  const onManualCodeInput = params.signal
+    ? () =>
+        new Promise<string>((_resolve, reject) => {
+          const signal = params.signal!;
+          if (signal.aborted) {
+            reject(new CodexLoginCancelledError());
+            return;
+          }
+          abortListener = () => reject(new CodexLoginCancelledError());
+          signal.addEventListener('abort', abortListener, { once: true });
+        })
+    : undefined;
+
+  try {
+    const credentials = await loginOpenAICodex({
+      originator: 'listener-ai',
+      onAuth: (info) => {
+        void params.openUrl(info.url);
+      },
+      onPrompt: params.onPrompt,
+      onProgress: params.onProgress,
+      onManualCodeInput,
+    });
+    return credentials as CodexOAuthCredentials;
+  } finally {
+    // The manualPromise is left pending in pi-ai's success path; remove the
+    // listener so it doesn't outlive the AbortController.
+    if (abortListener && params.signal) {
+      params.signal.removeEventListener('abort', abortListener);
+    }
+  }
 }

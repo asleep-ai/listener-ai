@@ -487,6 +487,18 @@ app.whenReady().then(() => {
         { role: 'about' } as any,
         { type: 'separator' } as any,
         {
+          label: 'Settings...',
+          accelerator: 'Cmd+,',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              if (!mainWindow.isVisible()) mainWindow.show();
+              mainWindow.focus();
+              mainWindow.webContents.send('open-config');
+            }
+          },
+        },
+        { type: 'separator' } as any,
+        {
           label: autoUpdaterService.getManualUpdateLabel(),
           click: () => {
             autoUpdaterService.checkForUpdatesManually();
@@ -1277,26 +1289,96 @@ ipcMain.handle('get-config', async () => {
   return configService.getAllConfig();
 });
 
+// pi-ai's Codex OAuth helper binds a loopback HTTP server to a fixed port
+// (1455) and only resolves when the browser redirects back to it. If the user
+// closes the browser before completing sign-in, the IPC awaits forever and the
+// renderer button stays disabled. We track the in-flight attempt so a second
+// login click can abort the previous one (releasing the port) and start fresh.
+//
+// The slot stays occupied until pi-ai's `finally{server.close()}` has run AND
+// a short timer has elapsed -- only then is port 1455 actually free. `done`
+// resolves at that point, so any waiter blocking on it is safe to bind.
+type PendingCodexLogin = {
+  controller: AbortController;
+  done: Promise<void>;
+};
+let pendingCodexLogin: PendingCodexLogin | null = null;
+// server.close() in Node releases the listening socket via libuv on the next
+// tick, but `loginOpenAICodex` doesn't await its callback. Hold the slot for a
+// short cushion so a re-bind cannot race the kernel.
+const PORT_RELEASE_CUSHION_MS = 250;
+
 ipcMain.handle('codex-oauth-login', async () => {
+  // Drain every prior attempt -- a third click while a second is still tearing
+  // down should still find an empty slot.
+  while (pendingCodexLogin) {
+    const prior = pendingCodexLogin;
+    prior.controller.abort();
+    await prior.done;
+  }
+
+  const controller = new AbortController();
+  let resolveDone: () => void = () => {};
+  const done = new Promise<void>((resolve) => {
+    resolveDone = resolve;
+  });
+  pendingCodexLogin = { controller, done };
+
+  const sendProgress = (phase: 'browser-opened' | 'progress', message?: string) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('codex-oauth-progress', { phase, message });
+    }
+  };
+
   try {
     const credentials = await loginCodexOAuth({
-      openUrl: (url) => shell.openExternal(url),
+      openUrl: async (url) => {
+        await shell.openExternal(url);
+        sendProgress('browser-opened');
+      },
       onPrompt: async (_prompt) => {
         throw new Error(
           'Codex OAuth manual callback is only supported from the CLI. Run `listener codex login` if browser sign-in does not complete.',
         );
       },
-      onProgress: (message) => console.log(`Codex OAuth: ${message}`),
+      onProgress: (message) => {
+        console.log(`Codex OAuth: ${message}`);
+        sendProgress('progress', message);
+      },
+      signal: controller.signal,
     });
     configService.setCodexOAuth(credentials);
     configService.setAiProvider('codex');
     applyConfigSideEffects({ aiProvider: 'codex', codexOAuth: credentials });
     broadcastConfigChanged();
-    return { success: true, config: configService.getAllConfig() };
+    return { success: true as const, config: configService.getAllConfig() };
   } catch (error) {
+    if (controller.signal.aborted) {
+      return { success: false as const, error: 'Sign-in cancelled.', cancelled: true as const };
+    }
     console.error('Codex OAuth login failed:', error);
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
+    return {
+      success: false as const,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    // Hold the slot until the port is presumed free, so the next attempt --
+    // queued behind `done` -- can bind without racing.
+    await new Promise((resolve) => setTimeout(resolve, PORT_RELEASE_CUSHION_MS));
+    if (pendingCodexLogin?.controller === controller) {
+      pendingCodexLogin = null;
+    }
+    resolveDone();
   }
+});
+
+ipcMain.handle('codex-oauth-cancel', async () => {
+  const prior = pendingCodexLogin;
+  if (prior) {
+    prior.controller.abort();
+    await prior.done;
+  }
+  return { success: true };
 });
 
 ipcMain.handle('codex-oauth-clear', async () => {
