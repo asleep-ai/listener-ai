@@ -6,6 +6,7 @@
 
 :root {
   --focus-ring: 0 0 0 3px rgba(52, 152, 219, 0.18);
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 @keyframes slideIn {
@@ -919,7 +920,7 @@ h1 {
   border-radius: 4px;
   background-color: #f8fafc;
   color: #334155;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.4;
 }
@@ -1051,7 +1052,7 @@ h1 {
   background-color: #eef0f3;
   padding: 1px 4px;
   border-radius: 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 0.9em;
 }
 
@@ -1102,7 +1103,7 @@ h1 {
 }
 
 .release-history-item .release-tag {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   color: #111827;
 }
 
@@ -1201,7 +1202,7 @@ h1 {
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   font-size: 13px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: var(--font-mono);
   line-height: 1.6;
   resize: vertical;
   background-color: #fafbfc;
@@ -1420,7 +1421,7 @@ h1 {
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 12.5px;
-  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   color: #0f172a;
 }
 
@@ -1444,7 +1445,7 @@ h1 {
 
 /* Transcript formatting */
 .transcript-content {
-  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.7;
   white-space: pre-wrap;
