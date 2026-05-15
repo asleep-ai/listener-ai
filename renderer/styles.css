@@ -723,7 +723,7 @@ h1 {
 }
 
 .config-modal {
-  max-width: 640px;
+  max-width: 720px;
   width: 92%;
   max-height: 88vh;
   padding: 0;
@@ -732,10 +732,196 @@ h1 {
   overflow: hidden;
 }
 
+.config-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 16px;
+  border-bottom: 1px solid #eef2f6;
+  background-color: #fafbfc;
+  flex: 0 0 auto;
+  overflow-x: auto;
+}
+
+.config-tab {
+  background: none;
+  border: none;
+  padding: 12px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #64748b;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.config-tab:hover {
+  color: #0f172a;
+}
+
+.config-tab.is-active {
+  color: #0f172a;
+  border-bottom-color: #0f172a;
+}
+
+.config-tab-badge {
+  background-color: #fee2e2;
+  color: #b91c1c;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .config-body {
   padding: 20px 24px 8px;
   overflow-y: auto;
   flex: 1 1 auto;
+}
+
+.config-pane {
+  display: none;
+}
+
+.config-pane.is-active {
+  display: block;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.config-pane-hint {
+  margin: 0 0 18px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background-color: #f1f5f9;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.config-subgroup {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 14px 16px 6px;
+  margin: 0 0 18px;
+}
+
+.config-subgroup legend {
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.config-optional {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background-color: #f1f5f9;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+
+.chip-input {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background-color: #ffffff;
+  min-height: 44px;
+  align-items: center;
+  cursor: text;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.chip-input:hover {
+  border-color: #cbd5e1;
+}
+
+.chip-input:focus-within {
+  border-color: #3498db;
+  box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.12);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 10px;
+  background-color: #eef2ff;
+  color: #3730a3;
+  border-radius: 14px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  max-width: 100%;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: rgba(55, 48, 163, 0.12);
+  color: #3730a3;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0;
+  transition: background-color 0.15s;
+}
+
+.chip-remove:hover {
+  background-color: rgba(55, 48, 163, 0.22);
+}
+
+.chip-input-field {
+  flex: 1 1 120px;
+  min-width: 120px;
+  border: none;
+  outline: none;
+  background: none;
+  padding: 4px 6px;
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.config-body kbd {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid #cbd5e1;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background-color: #f8fafc;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .config-body .form-group {

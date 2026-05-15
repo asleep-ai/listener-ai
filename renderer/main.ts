@@ -6,7 +6,7 @@ import { setupRecorder } from './audio/recorder';
 import { setupFileHandler } from './services/file-handler';
 import { getDom, initDom } from './state';
 import { setupAgentConfirmHandler, setupHomeChat, setupModalChat } from './ui/chat-panel';
-import { checkAndPromptForConfig, setupConfigModal } from './ui/config-modal';
+import { checkAndPromptForConfig, setupConfigModal, showConfigModal } from './ui/config-modal';
 import { setupDragAndDrop, setupPasteListener } from './ui/drag-drop';
 import { setupHomeToggles } from './ui/home-toggles';
 import { setupLiveNotes } from './ui/live-notes';
@@ -107,8 +107,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
 
     window.electronAPI.onOpenConfig(() => {
-      const configModal = document.getElementById('configModal');
-      if (configModal) configModal.style.display = 'block';
+      void showConfigModal();
     });
 
     // Open recordings folder button (header).

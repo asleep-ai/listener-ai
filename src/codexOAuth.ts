@@ -20,8 +20,16 @@ type CodexOAuthRuntime = {
     onAuth: (info: { url: string }) => void;
     onPrompt: (prompt: OAuthPrompt) => Promise<string>;
     onProgress?: (message: string) => void;
+    onManualCodeInput?: () => Promise<string>;
   }) => Promise<CodexOAuthCredentials>;
 };
+
+class CodexLoginCancelledError extends Error {
+  constructor() {
+    super('Codex sign-in cancelled.');
+    this.name = 'CodexLoginCancelledError';
+  }
+}
 
 export type CodexOAuthCredentials = OAuthCredentials & {
   accountId?: string;
@@ -97,8 +105,29 @@ export async function loginCodexOAuth(params: {
   openUrl: (url: string) => void | Promise<void>;
   onPrompt: (prompt: OAuthPrompt) => Promise<string>;
   onProgress?: (message: string) => void;
+  signal?: AbortSignal;
 }): Promise<CodexOAuthCredentials> {
   const { loginOpenAICodex } = await loadCodexOAuthRuntime();
+
+  // pi-ai exposes cancellation only via its `onManualCodeInput` race: when that
+  // promise rejects, pi-ai calls the loopback server's cancelWait() (so
+  // waitForCode() resolves null), records the error, and rethrows it inside
+  // the loginOpenAICodex finally block -- which then closes the loopback
+  // server and frees port 1455. We translate AbortSignal into that surface.
+  const onManualCodeInput = params.signal
+    ? () =>
+        new Promise<string>((_resolve, reject) => {
+          const signal = params.signal!;
+          if (signal.aborted) {
+            reject(new CodexLoginCancelledError());
+            return;
+          }
+          signal.addEventListener('abort', () => reject(new CodexLoginCancelledError()), {
+            once: true,
+          });
+        })
+    : undefined;
+
   const credentials = await loginOpenAICodex({
     originator: 'listener-ai',
     onAuth: (info) => {
@@ -106,6 +135,7 @@ export async function loginCodexOAuth(params: {
     },
     onPrompt: params.onPrompt,
     onProgress: params.onProgress,
+    onManualCodeInput,
   });
   return credentials as CodexOAuthCredentials;
 }

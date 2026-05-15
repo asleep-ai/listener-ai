@@ -32,6 +32,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   }) => ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   loginCodexOAuth: () => ipcRenderer.invoke('codex-oauth-login'),
+  cancelCodexOAuth: () => ipcRenderer.invoke('codex-oauth-cancel'),
+  onCodexOAuthProgress: (
+    callback: (status: {
+      phase: 'browser-opened' | 'progress';
+      message?: string;
+    }) => void,
+  ) => {
+    ipcRenderer.on('codex-oauth-progress', (_, status) => callback(status));
+  },
   clearCodexOAuth: () => ipcRenderer.invoke('codex-oauth-clear'),
   transcribeAudio: (filePath: string, liveNotes?: LiveNote[]) =>
     ipcRenderer.invoke('transcribe-audio', filePath, liveNotes),

@@ -24,7 +24,15 @@ let slackAutoShareInput: HTMLInputElement | null = null;
 let testSlackWebhookBtn: HTMLButtonElement | null = null;
 let slackWebhookStatus: HTMLElement | null = null;
 let globalShortcutInput: HTMLInputElement | null = null;
-let knownWordsInput: HTMLTextAreaElement | null = null;
+let knownWordsContainer: HTMLElement | null = null;
+let knownWordsField: HTMLInputElement | null = null;
+let knownWordsValues: string[] = [];
+let aiPane: HTMLElement | null = null;
+
+// Each Codex sign-in click bumps this; the in-flight click checks its captured
+// token against the current one after `await`, discarding stale results from
+// prior attempts that were aborted by a newer click.
+let codexLoginToken = 0;
 
 function setCodexOAuthStatus(text: string, state: 'idle' | 'success' | 'error' = 'idle'): void {
   if (!codexOAuthStatus) return;
@@ -52,6 +60,10 @@ export async function checkAndPromptForConfig(): Promise<void> {
 
 // Function to show the config modal
 export async function showConfigModal(): Promise<void> {
+  // Cmd+, while the modal is already open should be a no-op rather than
+  // discarding the user's in-progress edits by re-fetching config.
+  if (configModal && configModal.style.display === 'block') return;
+
   // Load current config
   const config = (await window.electronAPI.getConfig()) as Record<string, unknown> & {
     aiProvider?: 'gemini' | 'codex';
@@ -115,9 +127,11 @@ export async function showConfigModal(): Promise<void> {
   if (globalShortcutInput && config.globalShortcut) {
     globalShortcutInput.value = config.globalShortcut;
   }
-  if (knownWordsInput) {
-    knownWordsInput.value = (config.knownWords || []).join('\n');
-  }
+  knownWordsValues = (config.knownWords || []).filter(
+    (w): w is string => typeof w === 'string' && w.trim().length > 0,
+  );
+  if (knownWordsField) knownWordsField.value = '';
+  renderKnownWordsChips();
   const maxRecordingMinutesInput = document.getElementById(
     'maxRecordingMinutes',
   ) as HTMLInputElement | null;
@@ -169,14 +183,106 @@ export async function showConfigModal(): Promise<void> {
     };
   }
 
-  // Show the modal
-  if (configModal) {
-    configModal.style.display = 'block';
+  applyAiProviderVisibility();
+
+  // AI Provider tab carries the required-credentials state; open there so the
+  // user sees setup status first.
+  activateConfigTab('ai');
+  if (configModal) configModal.style.display = 'block';
+}
+
+function renderKnownWordsChips(): void {
+  if (!knownWordsContainer || !knownWordsField) return;
+  // Remove existing chip nodes but keep the input field in place.
+  knownWordsContainer.querySelectorAll('.chip').forEach((node) => node.remove());
+  for (const value of knownWordsValues) {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+
+    const text = document.createElement('span');
+    text.className = 'chip-text';
+    text.textContent = value;
+    chip.appendChild(text);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'chip-remove';
+    remove.textContent = '×';
+    remove.setAttribute('aria-label', `Remove ${value}`);
+    remove.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      removeKnownWord(value);
+    });
+    chip.appendChild(remove);
+
+    knownWordsContainer.insertBefore(chip, knownWordsField);
   }
+}
+
+function addKnownWords(raw: string): void {
+  // Case-insensitive dedupe so "GPT-4o" and "gpt-4o" don't both stick. Build
+  // the lookup set once so a large paste stays O(n) rather than O(n^2).
+  const seen = new Set(knownWordsValues.map((w) => w.toLowerCase()));
+  let changed = false;
+  for (const word of raw.split(/[,\n]/)) {
+    const trimmed = word.trim();
+    if (trimmed.length === 0) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    knownWordsValues.push(trimmed);
+    changed = true;
+  }
+  if (changed) renderKnownWordsChips();
+}
+
+function removeKnownWord(value: string): void {
+  const before = knownWordsValues.length;
+  knownWordsValues = knownWordsValues.filter((w) => w !== value);
+  if (knownWordsValues.length !== before) renderKnownWordsChips();
+  knownWordsField?.focus();
+}
+
+function applyAiProviderVisibility(): void {
+  if (!aiPane || !aiProviderSelect) return;
+  const active = aiProviderSelect.value;
+  aiPane.querySelectorAll<HTMLElement>('.config-subgroup[data-provider]').forEach((sg) => {
+    sg.hidden = sg.dataset.provider !== active;
+  });
+}
+
+function activateConfigTab(target: string): void {
+  if (!configModal) return;
+  const tabs = configModal.querySelectorAll<HTMLButtonElement>('.config-tab');
+  const panes = configModal.querySelectorAll<HTMLElement>('.config-pane');
+  tabs.forEach((t) => {
+    const active = t.dataset.tab === target;
+    t.classList.toggle('is-active', active);
+    t.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  panes.forEach((p) => {
+    p.classList.toggle('is-active', p.dataset.pane === target);
+  });
+}
+
+function setupConfigTabs(modal: HTMLElement): void {
+  const tabs = modal.querySelectorAll<HTMLButtonElement>('.config-tab');
+  if (tabs.length === 0) return;
+  tabs.forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const target = tab.dataset.tab;
+      if (target) activateConfigTab(target);
+    });
+  });
 }
 
 export function setupConfigModal(): void {
   configModal = document.getElementById('configModal');
+  if (configModal) {
+    setupConfigTabs(configModal);
+    aiPane = configModal.querySelector<HTMLElement>('.config-pane[data-pane="ai"]');
+  }
   saveConfigBtn = document.getElementById('saveConfig') as HTMLButtonElement | null;
   cancelConfigBtn = document.getElementById('cancelConfig') as HTMLButtonElement | null;
   aiProviderSelect = document.getElementById('aiProvider') as HTMLSelectElement | null;
@@ -197,7 +303,60 @@ export function setupConfigModal(): void {
   testSlackWebhookBtn = document.getElementById('testSlackWebhook') as HTMLButtonElement | null;
   slackWebhookStatus = document.getElementById('slackWebhookStatus');
   globalShortcutInput = document.getElementById('globalShortcut') as HTMLInputElement | null;
-  knownWordsInput = document.getElementById('knownWords') as HTMLTextAreaElement | null;
+  knownWordsContainer = document.getElementById('knownWordsChips');
+  knownWordsField = document.getElementById('knownWordsField') as HTMLInputElement | null;
+
+  if (knownWordsContainer && knownWordsField) {
+    // Clicking anywhere in the chip container should focus the input (matches
+    // iOS Mail / Apple's tokenized address fields).
+    knownWordsContainer.addEventListener('click', (e) => {
+      if (e.target === knownWordsContainer) knownWordsField?.focus();
+    });
+
+    knownWordsField.addEventListener('keydown', (e) => {
+      // Guard against Korean (and other IME) composition: pressing Enter to
+      // commit a Hangul syllable would otherwise also commit a chip mid-word.
+      if (e.isComposing) return;
+
+      if (e.key === 'Enter' || e.key === ',') {
+        e.preventDefault();
+        const value = knownWordsField!.value;
+        if (value.trim().length > 0) {
+          addKnownWords(value);
+          knownWordsField!.value = '';
+        }
+        return;
+      }
+
+      if (e.key === 'Backspace' && knownWordsField!.value.length === 0 && knownWordsValues.length > 0) {
+        e.preventDefault();
+        removeKnownWord(knownWordsValues[knownWordsValues.length - 1]!);
+      }
+    });
+
+    // Commit whatever's typed when the user clicks Save or moves focus away,
+    // so trailing text doesn't get silently dropped.
+    knownWordsField.addEventListener('blur', () => {
+      const value = knownWordsField!.value;
+      if (value.trim().length > 0) {
+        addKnownWords(value);
+        knownWordsField!.value = '';
+      }
+    });
+
+    // Pasted comma- or newline-separated lists become multiple chips at once.
+    knownWordsField.addEventListener('paste', (e) => {
+      const text = e.clipboardData?.getData('text') ?? '';
+      if (!/[,\n]/.test(text)) return;
+      e.preventDefault();
+      addKnownWords(text);
+      knownWordsField!.value = '';
+    });
+  }
+
+  if (aiProviderSelect) {
+    aiProviderSelect.addEventListener('change', applyAiProviderVisibility);
+  }
 
   const openSlackAppCreatorBtn = document.getElementById(
     'openSlackAppCreator',
@@ -235,20 +394,30 @@ export function setupConfigModal(): void {
     });
   }
 
+  window.electronAPI.onCodexOAuthProgress((status) => {
+    if (status.phase === 'browser-opened') {
+      setCodexOAuthStatus('Waiting for browser sign-in — click Sign in again to retry.');
+    } else if (status.phase === 'progress' && status.message) {
+      setCodexOAuthStatus(status.message);
+    }
+  });
+
   if (loginCodexOAuthBtn) {
     loginCodexOAuthBtn.addEventListener('click', async () => {
+      // Reentrant: each click aborts any prior in-flight attempt on main;
+      // the token guard drops the aborted attempt's stale result.
+      const myToken = ++codexLoginToken;
       setCodexOAuthStatus('Opening browser sign-in...');
-      loginCodexOAuthBtn!.disabled = true;
-      try {
-        const result = await window.electronAPI.loginCodexOAuth();
-        if (result.success) {
-          if (aiProviderSelect) aiProviderSelect.value = 'codex';
-          setCodexOAuthStatus('Signed in', 'success');
-        } else {
-          setCodexOAuthStatus(result.error, 'error');
-        }
-      } finally {
-        loginCodexOAuthBtn!.disabled = false;
+      const result = await window.electronAPI.loginCodexOAuth();
+      if (myToken !== codexLoginToken) return;
+      if (result.success) {
+        if (aiProviderSelect) aiProviderSelect.value = 'codex';
+        applyAiProviderVisibility();
+        setCodexOAuthStatus('Signed in', 'success');
+      } else if (result.cancelled) {
+        return;
+      } else {
+        setCodexOAuthStatus(result.error, 'error');
       }
     });
   }
@@ -269,6 +438,16 @@ export function setupConfigModal(): void {
     });
   }
 
+  const hideConfig = () => {
+    if (configModal) configModal.style.display = 'none';
+    // Bumping the token drops any stale result from an in-flight Codex login
+    // promise that resolves after the modal is gone.
+    codexLoginToken++;
+    // Free port 1455 if a Codex sign-in is still pending so the next attempt
+    // can bind a fresh loopback.
+    window.electronAPI.cancelCodexOAuth().catch(() => {});
+  };
+
   if (saveConfigBtn) {
     saveConfigBtn.addEventListener('click', async () => {
       const aiProvider = aiProviderSelect?.value === 'codex' ? 'codex' : 'gemini';
@@ -284,12 +463,13 @@ export function setupConfigModal(): void {
       const slackWebhookUrl = slackWebhookUrlInput?.value.trim() ?? '';
       const slackAutoShare = !!slackAutoShareInput?.checked;
       const globalShortcut = globalShortcutInput?.value.trim() ?? '';
-      const knownWords = knownWordsInput
-        ? knownWordsInput.value
-            .split('\n')
-            .map((w) => w.trim())
-            .filter((w) => w.length > 0)
-        : [];
+      // Flush any uncommitted typing in the chip field before saving so the
+      // user doesn't lose what they typed but never pressed comma/Enter on.
+      if (knownWordsField && knownWordsField.value.trim().length > 0) {
+        addKnownWords(knownWordsField.value);
+        knownWordsField.value = '';
+      }
+      const knownWords = [...knownWordsValues];
       const summaryPromptInput = document.getElementById(
         'summaryPrompt',
       ) as HTMLTextAreaElement | null;
@@ -346,13 +526,10 @@ export function setupConfigModal(): void {
       await window.electronAPI.saveConfig(
         payload as unknown as Parameters<typeof window.electronAPI.saveConfig>[0],
       );
-      if (configModal) configModal.style.display = 'none';
+      hideConfig();
     });
   }
 
-  const hideConfig = () => {
-    if (configModal) configModal.style.display = 'none';
-  };
   if (cancelConfigBtn) cancelConfigBtn.addEventListener('click', hideConfig);
   const configCloseBtn = document.getElementById('configClose');
   if (configCloseBtn) configCloseBtn.addEventListener('click', hideConfig);

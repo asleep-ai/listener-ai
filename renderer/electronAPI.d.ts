@@ -80,8 +80,13 @@ export type ElectronAPI = {
   saveConfig: (config: ConfigPayload) => Promise<{ success: boolean; error?: string }>;
   getConfig: () => Promise<Record<string, unknown>>;
   loginCodexOAuth: () => Promise<
-    { success: true; config: Record<string, unknown> } | { success: false; error: string }
+    | { success: true; config: Record<string, unknown> }
+    | { success: false; error: string; cancelled?: boolean }
   >;
+  cancelCodexOAuth: () => Promise<{ success: boolean }>;
+  onCodexOAuthProgress: (
+    cb: (status: { phase: 'browser-opened' | 'progress'; message?: string }) => void,
+  ) => void;
   clearCodexOAuth: () => Promise<
     { success: true; config: Record<string, unknown> } | { success: false; error: string }
   >;
