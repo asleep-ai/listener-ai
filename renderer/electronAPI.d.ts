@@ -113,9 +113,7 @@ export type ElectronAPI = {
     errorDetails?: TranscriptionErrorPayload;
     cancelled?: boolean;
   }>;
-  cancelTranscription: (
-    filePath: string,
-  ) => Promise<{ success: boolean; reason?: 'not-running' }>;
+  cancelTranscription: (filePath: string) => Promise<{ success: boolean; reason?: 'not-running' }>;
   uploadToNotion: (data: {
     title: string;
     transcriptionData: any;

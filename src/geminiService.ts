@@ -550,11 +550,9 @@ export class GeminiService {
       // This will output file info to stderr which we can parse
       console.error('Running ffmpeg for duration:', ffmpegPath, audioFilePath);
 
-      const { stderr } = await execFileAsync(
-        ffmpegPath,
-        ['-i', audioFilePath, '-f', 'null', '-'],
-        { signal },
-      ).catch((error: unknown) => {
+      const { stderr } = await execFileAsync(ffmpegPath, ['-i', audioFilePath, '-f', 'null', '-'], {
+        signal,
+      }).catch((error: unknown) => {
         // Re-throw aborts so the surrounding transcribeAudio catch sees a
         // proper AbortError instead of swallowing it into "duration=0".
         if (signal?.aborted) throw error;
@@ -611,9 +609,7 @@ export class GeminiService {
     const outputDir = path.dirname(audioFilePath);
     const baseName = path.basename(audioFilePath, path.extname(audioFilePath));
     const escaped = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const extPattern = ext
-      ? ext.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      : '\\.[A-Za-z0-9]+';
+    const extPattern = ext ? ext.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '\\.[A-Za-z0-9]+';
     const pattern = new RegExp(`^${escaped}_segment_\\d{3}${extPattern}$`);
     try {
       return fs
@@ -1238,9 +1234,7 @@ Return as JSON:
       // via AbortSignal.any so a user-driven cancel also fans out to every
       // in-flight segment.
       const aborter = new AbortController();
-      const combinedSignal = signal
-        ? AbortSignal.any([signal, aborter.signal])
-        : aborter.signal;
+      const combinedSignal = signal ? AbortSignal.any([signal, aborter.signal]) : aborter.signal;
 
       const transcriptionPromises = segmentFiles.map((segmentFile, i) => {
         const segmentStartTime = i * segmentDuration;

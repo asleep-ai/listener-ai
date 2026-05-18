@@ -41,8 +41,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   clearCodexOAuth: () => ipcRenderer.invoke('codex-oauth-clear'),
   transcribeAudio: (filePath: string, liveNotes?: LiveNote[]) =>
     ipcRenderer.invoke('transcribe-audio', filePath, liveNotes),
-  cancelTranscription: (filePath: string) =>
-    ipcRenderer.invoke('cancel-transcription', filePath),
+  cancelTranscription: (filePath: string) => ipcRenderer.invoke('cancel-transcription', filePath),
   uploadToNotion: (data: {
     title: string;
     transcriptionData: any;

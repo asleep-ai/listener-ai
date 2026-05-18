@@ -11,11 +11,7 @@ import * as os from 'os';
 import * as path from 'path';
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import {
-  formatDiarizedSegments,
-  isDiarizeModel,
-  transcribeCodexAudio,
-} from './codexTranscription';
+import { formatDiarizedSegments, isDiarizeModel, transcribeCodexAudio } from './codexTranscription';
 
 describe('isDiarizeModel', () => {
   it('matches the diarize model id', () => {
@@ -129,11 +125,9 @@ describe('transcribeCodexAudio signal propagation', () => {
           reject(new DOMException('Aborted', 'AbortError'));
           return;
         }
-        sig.addEventListener(
-          'abort',
-          () => reject(new DOMException('Aborted', 'AbortError')),
-          { once: true },
-        );
+        sig.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), {
+          once: true,
+        });
       })) as unknown as typeof fetch;
 
     const controller = new AbortController();
