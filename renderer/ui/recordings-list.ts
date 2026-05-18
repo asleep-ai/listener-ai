@@ -10,10 +10,11 @@ import { getDom } from '../state';
 import { showToast } from './notifications';
 import {
   _setCurrentTranscription,
-  handleTranscribe,
   populateTranscriptionUI,
   prepareTranscriptionModal,
+  requireAiAuth,
   showSavedTranscript,
+  transcribeWithFfmpegRetry,
 } from './transcription-modal';
 
 type Recording = {
@@ -87,6 +88,10 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   );
 
   item.dataset.hasTranscript = hasTranscript ? 'true' : 'false';
+  // Identifier so external callers (drag-drop, file-import) can locate a row
+  // by audio path after a list refresh and trigger the inline progress flow
+  // on it instead of falling back to the modal.
+  item.dataset.filepath = recording.path;
   if (hasTranscript) {
     item.setAttribute('role', 'button');
     item.setAttribute('tabindex', '0');
@@ -111,17 +116,9 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   const actions = document.createElement('div');
   actions.className = 'recording-actions';
 
-  if (hasTranscript) {
-    actions.appendChild(
-      createActionButton('regenerate-btn', '↻', {
-        title: 'Regenerate transcript',
-        ariaLabel: 'Regenerate transcript',
-      }),
-    );
-  } else {
-    actions.appendChild(createActionButton('transcribe-btn', 'Transcribe'));
-  }
-
+  // Hide-on-hover utility buttons go FIRST so hover-reveal grows the actions
+  // block to the left. The primary CTA (Transcribe / chevron entry) sits last
+  // at the right edge and doesn't shift when the row is hovered.
   actions.appendChild(
     createActionButton('merge-btn', 'Merge', {
       title: 'Merge this with other recordings into a single note',
@@ -136,11 +133,19 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   );
 
   if (hasTranscript) {
+    actions.appendChild(
+      createActionButton('regenerate-btn', '↻', {
+        title: 'Regenerate transcript',
+        ariaLabel: 'Regenerate transcript',
+      }),
+    );
     const chevron = document.createElement('span');
     chevron.className = 'recording-chevron';
     chevron.setAttribute('aria-hidden', 'true');
     chevron.textContent = '›';
     actions.appendChild(chevron);
+  } else {
+    actions.appendChild(createActionButton('transcribe-btn', 'Transcribe'));
   }
 
   item.appendChild(actions);
@@ -151,7 +156,13 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
     item.querySelectorAll<HTMLButtonElement>('.action-button').forEach((btn) => {
       btn.addEventListener('click', (e) => e.stopPropagation());
     });
-    const open = () => showSavedTranscript(recording.path, recording.title, metadataResult.data);
+    const open = () => {
+      // Suspend whole-row entry while the row is showing an inline transcribe.
+      // Otherwise a stray click on the progress area opens the stale (pre-
+      // regenerate) transcript while a regenerate is mid-flight.
+      if (item.dataset.transcribing) return;
+      showSavedTranscript(recording.path, recording.title, metadataResult.data);
+    };
     item.addEventListener('click', open);
     item.addEventListener('keydown', (e) => {
       // Only act on key presses targeting the row itself; ignore bubbling
@@ -171,13 +182,13 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
           'Are you sure you want to regenerate the transcript? This will overwrite the existing one.',
         )
       ) {
-        void handleTranscribe(recording.path, recording.title);
+        void runInlineTranscription(item, recording.path);
       }
     });
   } else {
     const transcribeBtn = item.querySelector('.transcribe-btn') as HTMLButtonElement | null;
     transcribeBtn?.addEventListener('click', () => {
-      void handleTranscribe(recording.path, recording.title);
+      void runInlineTranscription(item, recording.path);
     });
   }
 
@@ -541,10 +552,199 @@ export async function refreshRecordingsList(): Promise<void> {
   await loadRecordings();
 }
 
+// --- Inline transcription progress ----------------------------------------
+//
+// Per-row progress UI: replaces the item's action buttons and meta line while
+// a transcribe-audio call is in flight, with a Cancel control. No modal opens
+// during transcription; on success the list refreshes so the row gains its
+// "View Transcript" affordance. The user then clicks the row to open the
+// modal viewer.
+
+type ProgressListener = (progress: { percent: number; message: string }) => void;
+const inlineProgressListeners = new Map<string, ProgressListener>();
+
+function mountInlineProgressUI(item: HTMLElement): {
+  setProgress: ProgressListener;
+  restore: () => void;
+} {
+  // Snapshot the existing children so we can put them back when transcription
+  // ends, regardless of outcome. The row keeps its grid layout: status |
+  // info (title + progress) | actions (just Cancel).
+  const info = item.querySelector('.recording-info') as HTMLElement | null;
+  const actions = item.querySelector('.recording-actions') as HTMLElement | null;
+  const originalActions = actions ? Array.from(actions.children) : [];
+  const meta = info?.querySelector('.recording-meta') as HTMLElement | null;
+  const savedHasTranscript = item.dataset.hasTranscript;
+  const savedRole = item.getAttribute('role');
+  const savedTabindex = item.getAttribute('tabindex');
+  const savedAriaLabel = item.getAttribute('aria-label');
+
+  // Suspend whole-row click-to-open while transcribing so misclicks don't open
+  // an older transcript mid-regenerate. role/tabindex restoration on `restore`
+  // brings the keyboard affordances back.
+  if (savedHasTranscript === 'true') {
+    item.removeAttribute('role');
+    item.removeAttribute('tabindex');
+    item.removeAttribute('aria-label');
+  }
+  item.dataset.transcribing = 'true';
+
+  const progressLine = document.createElement('p');
+  progressLine.className = 'recording-progress';
+  const messageSpan = document.createElement('span');
+  messageSpan.className = 'recording-progress-message';
+  messageSpan.textContent = 'Starting transcription…';
+  const percentSpan = document.createElement('span');
+  percentSpan.className = 'recording-progress-percent';
+  percentSpan.textContent = '';
+  progressLine.append(messageSpan, percentSpan);
+  if (meta) meta.insertAdjacentElement('afterend', progressLine);
+  else info?.appendChild(progressLine);
+
+  const bar = document.createElement('div');
+  bar.className = 'recording-progress-bar';
+  const fill = document.createElement('div');
+  fill.className = 'recording-progress-fill';
+  bar.appendChild(fill);
+  item.appendChild(bar);
+
+  let cancelBtn: HTMLButtonElement | null = null;
+  if (actions) {
+    cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'cancel-transcribe-btn';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.setAttribute('aria-label', 'Cancel transcription');
+    // Stop the click from bubbling to the row -- transcript-bearing rows have
+    // a click handler that opens the modal viewer, which would race against
+    // our cancel/restore flow and show a stale transcript while the row
+    // reverts. Mirrors the stopPropagation wired onto `.action-button`.
+    cancelBtn.addEventListener('click', (e) => e.stopPropagation());
+    actions.appendChild(cancelBtn);
+  }
+
+  const setProgress: ProgressListener = ({ percent, message }) => {
+    const clamped = Math.max(0, Math.min(100, percent));
+    fill.style.width = `${clamped}%`;
+    if (message) messageSpan.textContent = message;
+    percentSpan.textContent = clamped > 0 ? `${Math.round(clamped)}%` : '';
+  };
+
+  const restore = (): void => {
+    item.removeAttribute('data-transcribing');
+    progressLine.remove();
+    bar.remove();
+    if (actions) {
+      // Strip whatever the inline flow appended, restore the original children
+      // in their original order so hover-reveal CSS keeps working.
+      while (actions.firstChild) actions.removeChild(actions.firstChild);
+      for (const child of originalActions) actions.appendChild(child);
+    }
+    if (savedHasTranscript === 'true') {
+      if (savedRole) item.setAttribute('role', savedRole);
+      if (savedTabindex) item.setAttribute('tabindex', savedTabindex);
+      if (savedAriaLabel) item.setAttribute('aria-label', savedAriaLabel);
+    }
+  };
+
+  return {
+    setProgress,
+    restore: () => {
+      restore();
+      cancelBtn = null;
+    },
+  };
+}
+
+async function runInlineTranscription(item: HTMLElement, filePath: string): Promise<void> {
+  // Synchronous double-fire guard. The `data-transcribing` attribute is set
+  // inside `mountInlineProgressUI` *after* awaits, so a rapid double-click on
+  // Transcribe/Regenerate would have both invocations pass that check and then
+  // mount twice. Slam the marker on now, before any await; the renderer's
+  // event loop guarantees a second click in the same tick is the only race
+  // window, and DOM dataset writes are synchronous.
+  if (item.dataset.transcribing) return;
+  item.dataset.transcribing = 'pending';
+
+  if (!(await requireAiAuth())) {
+    item.removeAttribute('data-transcribing');
+    return;
+  }
+
+  const { setProgress, restore } = mountInlineProgressUI(item);
+  inlineProgressListeners.set(filePath, setProgress);
+
+  const cancelBtn = item.querySelector('.cancel-transcribe-btn') as HTMLButtonElement | null;
+  let cancelled = false;
+  cancelBtn?.addEventListener('click', () => {
+    if (cancelled) return;
+    cancelled = true;
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = 'Cancelling…';
+    void window.electronAPI.cancelTranscription(filePath);
+  });
+
+  try {
+    // `transcribeWithFfmpegRetry` issues the IPC immediately on the first
+    // line, so by the time the user could click Cancel the abort controller
+    // is already registered in main.
+    const result = await transcribeWithFfmpegRetry(filePath);
+    if (result.cancelled) {
+      // Row goes back to its pre-transcribe state; no toast — user chose this.
+      return;
+    }
+    if (!result.success) {
+      const message = (result as { error?: string }).error || 'Unknown error';
+      showToast(`Failed to transcribe: ${message}`, 'error');
+      return;
+    }
+    // Success: refresh so the row picks up its renamed filePath (if any) and
+    // the "View Transcript" / chevron affordance. The renderer's row entry no
+    // longer auto-opens the modal — the user clicks to view.
+    await refreshRecordingsList();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    showToast(`Error transcribing: ${message}`, 'error');
+  } finally {
+    inlineProgressListeners.delete(filePath);
+    // If we refreshed the list on success the original `item` is detached;
+    // calling restore on a detached node is a no-op but harmless.
+    restore();
+  }
+}
+
+// Public entry point for callers that have a file path but no row reference
+// (drag-drop, file-import, paste). Locates the row by `data-filepath` and
+// drives it through the inline transcribe flow so every user-initiated
+// transcription looks the same. Falls back to the modal flow when the row
+// isn't in the DOM (e.g. caller didn't refresh the list, the file isn't in
+// the recordings dir).
+export async function transcribeByPath(filePath: string, fallbackTitle: string): Promise<void> {
+  const selector = `.recording-item[data-filepath="${CSS.escape(filePath)}"]`;
+  const row = document.querySelector(selector) as HTMLElement | null;
+  if (row) {
+    await runInlineTranscription(row, filePath);
+    return;
+  }
+  // Lazy import keeps the static dep graph free of the modal flow for callers
+  // that only ever go through `runInlineTranscription`.
+  const { handleTranscribe } = await import('./transcription-modal');
+  await handleTranscribe(filePath, fallbackTitle);
+}
+
 export function setupRecordingsList(): void {
   if (window.electronAPI.onRecordingsChanged) {
     window.electronAPI.onRecordingsChanged(() => {
       void refreshRecordingsList();
     });
   }
+
+  // Single subscription, dispatched per-filePath to the right row. Events
+  // without a filePath (legacy callers like merge) or without a registered
+  // listener are dropped silently.
+  window.electronAPI.onTranscriptionProgress((progress) => {
+    if (!progress.filePath) return;
+    const listener = inlineProgressListeners.get(progress.filePath);
+    listener?.(progress);
+  });
 }

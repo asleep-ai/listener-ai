@@ -120,6 +120,15 @@ export async function complete(
       `Pi-ai ${model.provider}/${model.id} failed: ${response.errorMessage ?? 'no errorMessage'}`,
     );
   }
+  // 'aborted' is the cooperative-cancel terminal state when the caller's
+  // signal fired. Returning the partial message would let downstream consumers
+  // (geminiService.generateSummary) parse an empty/truncated JSON body and
+  // persist a corrupt summary. Re-throw as an AbortError so the surrounding
+  // catch (which already classifies aborts) drops the result.
+  if (response.stopReason === 'aborted') {
+    if (options?.signal) options.signal.throwIfAborted();
+    throw new DOMException('Pi-ai request aborted', 'AbortError');
+  }
   return response;
 }
 

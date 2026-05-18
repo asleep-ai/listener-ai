@@ -608,6 +608,98 @@ h1 {
   transform: translateX(2px);
 }
 
+/* Inline transcription progress: replaces the meta line + actions while a
+   transcribe-audio call is in flight. The row keeps the same height so the
+   list doesn't reflow. The thin progress strip sits along the bottom edge. */
+.recording-item[data-transcribing="true"] {
+  background-color: #f8fafc;
+  border-color: #e2e8f0;
+  cursor: default;
+}
+
+.recording-item[data-transcribing="true"] .recording-meta {
+  display: none;
+}
+
+.recording-item[data-transcribing="true"] .recording-chevron {
+  display: none;
+}
+
+.recording-item[data-transcribing="true"] .recording-status {
+  background-color: #3498db;
+  border-color: #3498db;
+  animation: recording-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes recording-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.recording-progress {
+  font-size: 12px;
+  color: #475569;
+  line-height: 1.35;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recording-progress-percent {
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}
+
+.recording-progress-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background-color: #e2e8f0;
+  border-bottom-left-radius: 10px;
+  border-bottom-right-radius: 10px;
+  overflow: hidden;
+}
+
+.recording-progress-fill {
+  height: 100%;
+  width: 0%;
+  background-color: #3498db;
+  transition: width 0.25s ease;
+}
+
+/* Cancel-only action while transcribing: hide every other action, keep the
+   cancel button visible without hover. */
+.recording-item[data-transcribing="true"] .recording-actions > *:not(.cancel-transcribe-btn) {
+  display: none;
+}
+
+.cancel-transcribe-btn {
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #b91c1c;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background-color: transparent;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.cancel-transcribe-btn:hover {
+  background-color: #fee2e2;
+  color: #991b1b;
+}
+
+.cancel-transcribe-btn:disabled {
+  color: #cbd5e1;
+  cursor: not-allowed;
+  background-color: transparent;
+}
+
 .no-recordings {
   text-align: center;
   color: #94a3b8;
@@ -1675,40 +1767,27 @@ h1 {
   flex-shrink: 0;
 }
 
-/* Reveal-on-hover for utility actions: keep rows quiet by default, surface
-   secondary actions only when the user shows intent. The chevron and
-   primary CTA (Transcribe) stay visible. */
+/* Secondary actions (Merge / Show / M4A / Regenerate) are visible at all
+   times but visually de-emphasized -- lighter text, slightly muted -- so the
+   primary CTA (Transcribe pill, or chevron on transcribed rows) reads as the
+   main anchor without the row needing to "wake up" on hover. Hovering the
+   button itself brightens it; hovering the row alone does NOT change layout
+   so there is no shifting motion. */
 .recording-item .merge-btn,
 .recording-item .reveal-btn,
 .recording-item .export-m4a-btn,
 .recording-item .regenerate-btn {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
-  /* Reserve no space when hidden so the title can grow. */
-  width: 0;
-  padding-inline: 0;
-  overflow: hidden;
+  color: #94a3b8;
+  font-weight: 400;
+  transition: color 0.12s ease, background-color 0.12s ease;
 }
 
-.recording-item:hover .merge-btn,
-.recording-item:hover .reveal-btn,
-.recording-item:hover .export-m4a-btn,
-.recording-item:hover .regenerate-btn,
-.recording-item:focus-within .merge-btn,
-.recording-item:focus-within .reveal-btn,
-.recording-item:focus-within .export-m4a-btn,
-.recording-item:focus-within .regenerate-btn {
-  opacity: 1;
-  pointer-events: auto;
-  width: auto;
-  padding-inline: 9px;
-  overflow: visible;
-}
-
-.recording-item:hover .regenerate-btn,
-.recording-item:focus-within .regenerate-btn {
-  padding-inline: 8px;
+.recording-item .merge-btn:hover,
+.recording-item .reveal-btn:hover,
+.recording-item .export-m4a-btn:hover,
+.recording-item .regenerate-btn:hover {
+  color: #0f172a;
+  background-color: #eef2f6;
 }
 
 /* Default: subtle ghost style. Utility actions (Merge/Show/M4A/regenerate)

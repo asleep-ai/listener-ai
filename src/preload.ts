@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   clearCodexOAuth: () => ipcRenderer.invoke('codex-oauth-clear'),
   transcribeAudio: (filePath: string, liveNotes?: LiveNote[]) =>
     ipcRenderer.invoke('transcribe-audio', filePath, liveNotes),
+  cancelTranscription: (filePath: string) => ipcRenderer.invoke('cancel-transcription', filePath),
   uploadToNotion: (data: {
     title: string;
     transcriptionData: any;
@@ -90,7 +91,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onConfigChanged: (callback: (config: unknown) => void) => {
     ipcRenderer.on('config-changed', (_, config) => callback(config));
   },
-  onTranscriptionProgress: (callback: (progress: { percent: number; message: string }) => void) => {
+  onTranscriptionProgress: (
+    callback: (progress: { percent: number; message: string; filePath?: string }) => void,
+  ) => {
     ipcRenderer.on('transcription-progress', (_, progress) => callback(progress));
   },
   // FFmpeg management

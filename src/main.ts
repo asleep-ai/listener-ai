@@ -22,7 +22,11 @@ import {
   AgentService,
   type ConfigProposal,
 } from './agentService';
-import { extensionForMimeType, isSupportedAudioExtension } from './audioFormats';
+import {
+  extensionForMimeType,
+  isSupportedAudioExtension,
+  isTranscriptionTempFile,
+} from './audioFormats';
 import { type AppConfig, ConfigService } from './configService';
 import { loginCodexOAuth } from './codexOAuth';
 import { getDataPath } from './dataPath';
@@ -298,7 +302,13 @@ function startRecordingsWatcher(): void {
   const dir = path.join(app.getPath('userData'), 'recordings');
   fs.mkdirSync(dir, { recursive: true });
   try {
-    recordingsWatcher = fs.watch(dir, () => {
+    recordingsWatcher = fs.watch(dir, (_eventType, filename) => {
+      // Skip transient files created during transcription (ffmpeg segments and
+      // codex pre-conversion temps). Without this, every temp write fires
+      // `recordings-changed`, the renderer re-renders the list, and the
+      // transcribing row's inline progress UI is wiped from the DOM mid-run.
+      // Falsy filename (which some platforms emit) falls through to emit.
+      if (typeof filename === 'string' && isTranscriptionTempFile(filename)) return;
       if (recordingsWatcherTimer) clearTimeout(recordingsWatcherTimer);
       recordingsWatcherTimer = setTimeout(() => {
         recordingsWatcherTimer = null;
@@ -1458,8 +1468,28 @@ ipcMain.handle('get-meeting-status', async () => {
   };
 });
 
+// In-flight transcriptions keyed by audio filePath. Each entry holds an
+// AbortController whose signal is plumbed through geminiService and the
+// underlying provider SDKs. `cancel-transcription` aborts the controller; the
+// transcribe-audio handler catches the abort and resolves with
+// `{ cancelled: true }` so the renderer can clean up without an alert.
+const activeTranscriptions = new Map<string, AbortController>();
+
 // Transcription handler
 ipcMain.handle('transcribe-audio', async (_, filePath: string, liveNotesRaw?: unknown) => {
+  // Replace any prior controller for the same file so a re-trigger (e.g.
+  // Regenerate) supersedes the previous run.
+  activeTranscriptions.get(filePath)?.abort();
+  const controller = new AbortController();
+  activeTranscriptions.set(filePath, controller);
+  const signal = controller.signal;
+
+  const sendProgress = (percent: number, message: string) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('transcription-progress', { percent, message, filePath });
+    }
+  };
+
   try {
     console.log('Transcription requested for:', filePath);
     let liveNotes = sanitizeLiveNotes(liveNotesRaw);
@@ -1477,13 +1507,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string, liveNotesRaw?: un
       }
     }
 
-    // Send progress update
-    if (mainWindow) {
-      mainWindow.webContents.send('transcription-progress', {
-        percent: 0,
-        message: 'Initializing AI service...',
-      });
-    }
+    sendProgress(0, 'Initializing AI service...');
 
     // Initialize AI service if not already initialized
     if (!geminiService) {
@@ -1495,29 +1519,17 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string, liveNotesRaw?: un
       geminiService = createGeminiService()!;
     }
 
-    // Send progress update
-    if (mainWindow) {
-      mainWindow.webContents.send('transcription-progress', {
-        percent: 10,
-        message: 'Starting transcription...',
-      });
-    }
+    sendProgress(10, 'Starting transcription...');
 
     console.log('Starting transcription...');
-
-    // Set up progress callback
-    const progressCallback = (percent: number, message: string) => {
-      if (mainWindow) {
-        mainWindow.webContents.send('transcription-progress', { percent, message });
-      }
-    };
 
     const summaryPrompt = configService.getSummaryPrompt();
     const result = await geminiService.transcribeAudio(
       filePath,
-      progressCallback,
+      sendProgress,
       summaryPrompt,
       liveNotes,
+      { signal },
     );
     console.log('Transcription completed successfully');
     console.log('Saving metadata for:', filePath);
@@ -1593,6 +1605,16 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string, liveNotesRaw?: un
 
     return { success: true, data: result, transcriptionPath };
   } catch (error) {
+    // Cancellation is a normal outcome -- skip the failure notification and
+    // signal it cleanly so the renderer collapses the inline progress without
+    // an error toast. Since every cancellation originates from `controller
+    // .abort()` in this file, `signal.aborted` is the canonical check; matching
+    // on error name/message would risk mis-classifying legitimate provider
+    // failures whose body happens to contain "aborted".
+    if (signal.aborted) {
+      console.log('Transcription cancelled for:', filePath);
+      return { success: false, cancelled: true as const };
+    }
     console.error('Error transcribing audio:', error);
     notificationService.notifyTranscriptionFailed(
       'Transcription failed. Check the app for details.',
@@ -1602,7 +1624,20 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string, liveNotesRaw?: un
       error: error instanceof Error ? error.message : String(error),
       errorDetails: serializeTranscriptionError(error),
     };
+  } finally {
+    // Only clear if we're still the live controller for this file; a
+    // superseding run will have replaced us already.
+    if (activeTranscriptions.get(filePath) === controller) {
+      activeTranscriptions.delete(filePath);
+    }
   }
+});
+
+ipcMain.handle('cancel-transcription', async (_, filePath: string) => {
+  const controller = activeTranscriptions.get(filePath);
+  if (!controller) return { success: false, reason: 'not-running' as const };
+  controller.abort();
+  return { success: true };
 });
 
 // Notion upload handler
@@ -1899,7 +1934,7 @@ ipcMain.handle('get-recordings', async () => {
       modifiedAt: Date;
     }> = [];
     for (const file of files) {
-      if (file.includes('_segment_')) continue;
+      if (isTranscriptionTempFile(file)) continue;
       if (!isSupportedAudioExtension(path.extname(file))) continue;
 
       const filePath = path.join(recordingsDir, file);

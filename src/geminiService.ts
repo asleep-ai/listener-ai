@@ -22,6 +22,24 @@ import { FFmpegManager } from './services/ffmpegManager';
 
 const execFileAsync = promisify(execFile);
 
+// Promise-based sleep that rejects with AbortError if the signal fires during
+// the wait. Without this, polling loops swallow the cancel for up to one full
+// interval before the next signal check runs.
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 // Append a section to the summary prompt instructing Gemini to enrich each
 // user-flagged moment with a subtitle + categorized bullets, returned as a
 // `highlights` array on the JSON response. Returns '' when there's nothing to
@@ -121,6 +139,13 @@ export interface TranscriptionOptions {
    * per-segment positional prefix are still applied automatically.
    */
   transcriptionPrompt?: string;
+  /**
+   * Cancellation signal. The pipeline checks `signal.aborted` at every stage
+   * boundary and forwards it to the underlying provider SDKs (pi-ai, Gemini
+   * files/generateContent, OpenAI transcription fetch). On abort the in-flight
+   * call rejects with the signal's reason and the surrounding wrapper rethrows.
+   */
+  signal?: AbortSignal;
 }
 
 function transcriptOnlyResult(transcript: string): TranscriptionResult {
@@ -363,7 +388,11 @@ export class GeminiService {
   // knob, so models may wrap the JSON in ```json``` fences. The summary-text
   // consumer strips fences before parsing (see stripJsonFences in
   // transcribeWithTwoSteps).
-  private async generateSummary(promptText: string, transcript: string): Promise<string> {
+  private async generateSummary(
+    promptText: string,
+    transcript: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
     const modelId = this.provider === 'codex' ? this.codexModel : this.proModel;
     const apiKey =
       this.provider === 'codex' ? await this.getCodexToken() : this.requireGeminiApiKey();
@@ -396,11 +425,15 @@ export class GeminiService {
       // xhigh -> "max". Verbosity stays at pi-ai's "low" default (terse output
       // is fine; reasoning depth is what was missing).
       reasoningEffort: 'xhigh',
+      signal,
     });
     return extractFinalText(response);
   }
 
-  private async prepareAudioForProvider(audioFilePath: string): Promise<{
+  private async prepareAudioForProvider(
+    audioFilePath: string,
+    signal?: AbortSignal,
+  ): Promise<{
     audioFilePath: string;
     cleanup?: () => void;
   }> {
@@ -414,16 +447,26 @@ export class GeminiService {
       `${path.basename(audioFilePath, ext)}_codex_${Date.now()}.webm`,
     );
     const ffmpegPath = await this.getFFmpegPath();
-    await execFileAsync(ffmpegPath, [
-      '-i',
-      audioFilePath,
-      '-vn',
-      '-c:a',
-      'libopus',
-      '-b:a',
-      '48k',
-      outputPath,
-    ]);
+    try {
+      await execFileAsync(
+        ffmpegPath,
+        ['-i', audioFilePath, '-vn', '-c:a', 'libopus', '-b:a', '48k', outputPath],
+        { signal },
+      );
+    } catch (err) {
+      // Abort or ffmpeg failure can leave a partial `_codex_<ts>.webm` on
+      // disk. Because we threw before returning the `cleanup` closure, the
+      // outer `transcribeAudio` finally never sees this path -- the new
+      // watcher filter only HIDES it from the list, it does not delete it.
+      // Unlink best-effort so the file doesn't accumulate, then rethrow so
+      // cancellation/error semantics are unchanged.
+      try {
+        fs.unlinkSync(outputPath);
+      } catch {
+        /* probably ENOENT -- ffmpeg failed before writing anything */
+      }
+      throw err;
+    }
     return {
       audioFilePath: outputPath,
       cleanup: () => {
@@ -449,6 +492,9 @@ export class GeminiService {
     liveNotes?: LiveNote[],
     options: TranscriptionOptions = {},
   ): Promise<TranscriptionResult> {
+    const signal = options.signal;
+    signal?.throwIfAborted();
+
     // Integration-test escape hatch: avoid the real Gemini call so tests can
     // exercise the surrounding pipeline (CLI parsing, IPC, ffmpeg, save) for
     // free and offline. Gated on NODE_ENV=test so a stray LISTENER_TEST_MODE
@@ -468,8 +514,9 @@ export class GeminiService {
       };
     }
 
-    const prepared = await this.prepareAudioForProvider(audioFilePath);
+    const prepared = await this.prepareAudioForProvider(audioFilePath, signal);
     try {
+      signal?.throwIfAborted();
       // Check file size
       const stats = fs.statSync(prepared.audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
@@ -480,7 +527,7 @@ export class GeminiService {
       }
 
       // Get audio duration using ffmpeg
-      const duration = await this.getAudioDuration(prepared.audioFilePath);
+      const duration = await this.getAudioDuration(prepared.audioFilePath, signal);
       console.error(`Audio duration: ${duration} seconds`);
 
       // If duration is 0, log a warning but continue processing
@@ -490,6 +537,7 @@ export class GeminiService {
         );
       }
 
+      signal?.throwIfAborted();
       // Always use the two-step approach for consistency
       console.error('Using two-step transcription approach...');
       return await this.transcribeWithTwoSteps(
@@ -509,7 +557,7 @@ export class GeminiService {
   }
 
   // Get audio duration using ffmpeg
-  private async getAudioDuration(audioFilePath: string): Promise<number> {
+  private async getAudioDuration(audioFilePath: string, signal?: AbortSignal): Promise<number> {
     try {
       const ffmpegPath = await this.getFFmpegPath();
 
@@ -517,13 +565,12 @@ export class GeminiService {
       // This will output file info to stderr which we can parse
       console.error('Running ffmpeg for duration:', ffmpegPath, audioFilePath);
 
-      const { stderr } = await execFileAsync(ffmpegPath, [
-        '-i',
-        audioFilePath,
-        '-f',
-        'null',
-        '-',
-      ]).catch((error: unknown) => {
+      const { stderr } = await execFileAsync(ffmpegPath, ['-i', audioFilePath, '-f', 'null', '-'], {
+        signal,
+      }).catch((error: unknown) => {
+        // Re-throw aborts so the surrounding transcribeAudio catch sees a
+        // proper AbortError instead of swallowing it into "duration=0".
+        if (signal?.aborted) throw error;
         const execError = error as { stdout?: string; stderr?: string };
         // FFmpeg exits with non-zero code when output is null, but still provides info in stderr
         // This is expected behavior, so we return the error object which contains stdout/stderr
@@ -556,9 +603,37 @@ export class GeminiService {
       console.warn('Could not determine audio duration from stderr:', stderr);
       return 0;
     } catch (error) {
+      // Don't swallow aborts -- let them propagate so the caller can short-
+      // circuit the rest of the transcription pipeline.
+      if (signal?.aborted) throw error;
       console.error('Error getting audio duration:', error);
       // Return 0 as fallback to continue processing
       return 0;
+    }
+  }
+
+  // List existing `<base>_segment_NNN.<ext>` files for an audio path. Used by
+  // both the split step (collecting newly written segments) and the cleanup
+  // step (sweeping leftovers when ffmpeg was killed mid-split). Optional
+  // extension filter -- omit to match any segment file regardless of ext.
+  //
+  // Pattern is strict on purpose: ffmpeg's `%03d` formatter emits exactly
+  // three digits, and a loose prefix match would let user-named recordings
+  // like `Meeting_segment_notes.webm` get caught by cleanup and deleted.
+  private findSegmentFiles(audioFilePath: string, ext?: string): string[] {
+    const outputDir = path.dirname(audioFilePath);
+    const baseName = path.basename(audioFilePath, path.extname(audioFilePath));
+    const escaped = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const extPattern = ext ? ext.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '\\.[A-Za-z0-9]+';
+    const pattern = new RegExp(`^${escaped}_segment_\\d{3}${extPattern}$`);
+    try {
+      return fs
+        .readdirSync(outputDir)
+        .filter((file) => pattern.test(file))
+        .map((file) => path.join(outputDir, file))
+        .sort();
+    } catch {
+      return [];
     }
   }
 
@@ -574,6 +649,7 @@ export class GeminiService {
     // the Codex transcription path; Gemini's API is tolerant of long
     // inputs and stays on the faster `-c copy` path.
     reencode = false,
+    signal?: AbortSignal,
   ): Promise<string[]> {
     const outputDir = path.dirname(audioFilePath);
     const baseName = path.basename(audioFilePath, path.extname(audioFilePath));
@@ -598,27 +674,27 @@ export class GeminiService {
       // and OpenAI rejects the request based on the header value even when
       // the actual encoded audio is short (`audio duration N seconds is
       // longer than 1400` errors on small last-segment files).
-      await execFileAsync(ffmpegPath, [
-        '-i',
-        audioFilePath,
-        '-f',
-        'segment',
-        '-segment_time',
-        String(segmentDuration),
-        '-reset_timestamps',
-        '1',
-        ...codecArgs,
-        segmentPath,
-      ]);
+      await execFileAsync(
+        ffmpegPath,
+        [
+          '-i',
+          audioFilePath,
+          '-f',
+          'segment',
+          '-segment_time',
+          String(segmentDuration),
+          '-reset_timestamps',
+          '1',
+          ...codecArgs,
+          segmentPath,
+        ],
+        { signal },
+      );
 
       // Find all created segment files. Match on the EXTENSION WE TOLD
       // FFMPEG TO WRITE -- when re-encoding, that's `.webm` regardless of
       // the source's original extension.
-      const segmentFiles = fs
-        .readdirSync(outputDir)
-        .filter((file) => file.startsWith(`${baseName}_segment_`) && file.endsWith(segmentExt))
-        .map((file) => path.join(outputDir, file))
-        .sort();
+      const segmentFiles = this.findSegmentFiles(audioFilePath, segmentExt);
 
       console.error(`Split audio into ${segmentFiles.length} segments`);
       return segmentFiles;
@@ -684,6 +760,7 @@ export class GeminiService {
     liveNotes?: LiveNote[],
     options: TranscriptionOptions = {},
   ): Promise<TranscriptionResult> {
+    const signal = options.signal;
     try {
       let fullTranscript = '';
       const stats = fs.statSync(audioFilePath);
@@ -711,6 +788,7 @@ export class GeminiService {
           progressCallback,
           options.transcriptionPrompt,
           segmentDuration,
+          signal,
         );
       } else {
         // Get transcript for short audio
@@ -719,8 +797,11 @@ export class GeminiService {
           audioFilePath,
           progressCallback,
           options.transcriptionPrompt,
+          signal,
         );
       }
+
+      signal?.throwIfAborted();
 
       if (options.transcriptOnly) {
         if (progressCallback) {
@@ -757,7 +838,7 @@ Return as JSON:
       const highlightsBlock = buildHighlightsPromptBlock(enrichableNotes);
       const summaryPrompt = highlightsBlock ? `${basePrompt}\n\n${highlightsBlock}` : basePrompt;
 
-      const summaryText = await this.generateSummary(summaryPrompt, fullTranscript);
+      const summaryText = await this.generateSummary(summaryPrompt, fullTranscript, signal);
 
       let summaryData = {
         suggestedTitle: '',
@@ -834,6 +915,7 @@ Return as JSON:
     audioFilePath: string,
     progressCallback?: (percent: number, message: string) => void,
     customPrompt?: string,
+    signal?: AbortSignal,
   ): Promise<string> {
     try {
       const stats = fs.statSync(audioFilePath);
@@ -857,6 +939,7 @@ Return as JSON:
           // transcription auto-detects from the first ~30s, which handles
           // bilingual/code-switched meetings (Korean primary, English
           // acronyms/quotes) better than forcing a single language.
+          signal,
         });
       }
 
@@ -876,17 +959,25 @@ Return as JSON:
         const fileData = fs.readFileSync(audioFilePath);
         const uploadResult = await ai.files.upload({
           file: new Blob([fileData], { type: mimeType }),
+          config: { abortSignal: signal },
         });
 
         fileUri = uploadResult.uri || '';
 
         // Wait for file to be active
-        let file = await ai.files.get({ name: uploadResult.name || '' });
+        let file = await ai.files.get({
+          name: uploadResult.name || '',
+          config: { abortSignal: signal },
+        });
         let retries = 0;
         while (file.state === 'PROCESSING' && retries < 30) {
+          signal?.throwIfAborted();
           console.error(`Waiting for file to be processed... (attempt ${retries + 1}/30)`);
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          file = await ai.files.get({ name: uploadResult.name || '' });
+          await abortableDelay(2000, signal);
+          file = await ai.files.get({
+            name: uploadResult.name || '',
+            config: { abortSignal: signal },
+          });
           retries++;
         }
 
@@ -922,6 +1013,7 @@ Return as JSON:
           config: {
             temperature: 0.2,
             maxOutputTokens: 32768,
+            abortSignal: signal,
           },
         });
       } else {
@@ -948,6 +1040,7 @@ Return as JSON:
           config: {
             temperature: 0.2,
             maxOutputTokens: 32768,
+            abortSignal: signal,
           },
         });
       }
@@ -1004,6 +1097,7 @@ Return as JSON:
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       attemptsMade = attempt;
+      signal?.throwIfAborted();
       try {
         console.error(
           `Starting transcription for segment ${segmentIndex + 1}/${totalSegments} (attempt ${attempt}/${maxRetries})...`,
@@ -1048,6 +1142,7 @@ Return as JSON:
           config: {
             temperature: 0.2,
             maxOutputTokens: 32768,
+            abortSignal: signal,
           },
         });
 
@@ -1067,6 +1162,10 @@ Return as JSON:
           content: segmentHeader + transcript,
         };
       } catch (segmentError) {
+        // Abort surfaces here too; don't burn through retries when the caller
+        // cancelled. Re-throw so getSegmentedTranscript's Promise.all rejects
+        // immediately.
+        if (signal?.aborted) throw segmentError;
         lastError = segmentError;
         console.error(
           `Error transcribing segment ${segmentIndex + 1} (attempt ${attempt}/${maxRetries}):`,
@@ -1119,17 +1218,26 @@ Return as JSON:
     progressCallback?: (percent: number, message: string) => void,
     customPrompt?: string,
     segmentDuration = 300,
+    signal?: AbortSignal,
   ): Promise<string> {
+    // Track segments outside the try so the finally can clean them up on
+    // abort / mid-pipeline failure too. Without this, cancelled transcribes
+    // leave `<base>_segment_NNN.<ext>` files piling up in recordings/.
+    let segmentFiles: string[] = [];
     try {
+      signal?.throwIfAborted();
       // Split audio into 5-minute segments. Codex transcription requires
       // accurate cut times (gpt-4o-transcribe rejects >1400s/segment), so
       // force re-encode there; Gemini's API tolerates long inputs and we
       // keep the cheaper `-c copy` path for it.
-      const segmentFiles = await this.splitAudioIntoSegments(
+      segmentFiles = await this.splitAudioIntoSegments(
         audioFilePath,
         segmentDuration,
         this.provider === 'codex',
+        signal,
       );
+
+      signal?.throwIfAborted();
 
       if (progressCallback) {
         progressCallback(20, `Processing ${segmentFiles.length} segments...`);
@@ -1137,8 +1245,11 @@ Return as JSON:
 
       // Shared abort: when one segment fails fast (e.g. 4xx on segment 0),
       // cancel the sibling fetches so we don't burn the user's quota on
-      // results that will be thrown away.
+      // results that will be thrown away. Combined with the caller's signal
+      // via AbortSignal.any so a user-driven cancel also fans out to every
+      // in-flight segment.
       const aborter = new AbortController();
+      const combinedSignal = signal ? AbortSignal.any([signal, aborter.signal]) : aborter.signal;
 
       const transcriptionPromises = segmentFiles.map((segmentFile, i) => {
         const segmentStartTime = i * segmentDuration;
@@ -1150,7 +1261,7 @@ Return as JSON:
           segmentStartTime,
           segmentEndTime,
           customPrompt,
-          aborter.signal,
+          combinedSignal,
         ).catch((err) => {
           aborter.abort();
           throw err;
@@ -1210,6 +1321,24 @@ Return as JSON:
     } catch (error) {
       console.error('Error in segmented transcription:', error);
       throw error;
+    } finally {
+      // Clean up segment files regardless of outcome (success, error, abort).
+      // On the happy path `segmentFiles` is authoritative; on abort/error
+      // before split returned we re-scan because ffmpeg may have written
+      // partial segments that never made it into the array. Best-effort:
+      // missing/locked files shouldn't crash the pipeline.
+      const toDelete =
+        segmentFiles.length > 0 ? segmentFiles : this.findSegmentFiles(audioFilePath);
+      for (const segmentFile of toDelete) {
+        try {
+          fs.unlinkSync(segmentFile);
+        } catch (e) {
+          const code = (e as NodeJS.ErrnoException | null)?.code;
+          if (code !== 'ENOENT') {
+            console.error(`Failed to delete segment file: ${segmentFile}`, e);
+          }
+        }
+      }
     }
   }
 }
