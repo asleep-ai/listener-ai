@@ -1078,7 +1078,10 @@ Return as JSON:
         // wrong model id and won't change on retry. Burning two more API
         // calls just to fail the same way wastes the user's quota and
         // delays the error dialog. 5xx and network errors keep the retry.
-        if (segmentError instanceof TranscriptionApiError && !isRetryableStatus(segmentError.status)) {
+        if (
+          segmentError instanceof TranscriptionApiError &&
+          !isRetryableStatus(segmentError.status)
+        ) {
           console.error(
             `Segment ${segmentIndex + 1} hit non-retryable status ${segmentError.status}; aborting retries.`,
           );

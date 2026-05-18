@@ -27,11 +27,7 @@ import { type AppConfig, ConfigService } from './configService';
 import { loginCodexOAuth } from './codexOAuth';
 import { getDataPath } from './dataPath';
 import { DisplayDetectorService } from './displayDetectorService';
-import {
-  GeminiService,
-  TranscriptionError,
-  type TranscriptionErrorPayload,
-} from './geminiService';
+import { GeminiService, TranscriptionError, type TranscriptionErrorPayload } from './geminiService';
 import { MeetingDetectorService } from './meetingDetectorService';
 import { MenuBarManager } from './menuBarManager';
 import { NotionService } from './notionService';

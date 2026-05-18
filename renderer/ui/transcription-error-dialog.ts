@@ -11,15 +11,15 @@ export function showTranscriptionErrorDialog(
   fallbackMessage: string,
 ): Promise<void> {
   return new Promise((resolve) => {
-    const dialog = document.getElementById(
-      'transcriptionErrorDialog',
-    ) as HTMLDialogElement | null;
+    const dialog = document.getElementById('transcriptionErrorDialog') as HTMLDialogElement | null;
     const messageEl = document.getElementById('transcriptionErrorMessage');
     const detailsBlock = document.getElementById(
       'transcriptionErrorDetailsBlock',
     ) as HTMLDetailsElement | null;
     const detailTextEl = document.getElementById('transcriptionErrorDetailText');
-    const copyBtn = document.getElementById('transcriptionErrorCopyBtn') as HTMLButtonElement | null;
+    const copyBtn = document.getElementById(
+      'transcriptionErrorCopyBtn',
+    ) as HTMLButtonElement | null;
     const okBtn = document.getElementById('transcriptionErrorOkBtn') as HTMLButtonElement | null;
 
     // Defensive fallback: if the markup is missing for any reason, surface the
