@@ -22,7 +22,11 @@ import {
   AgentService,
   type ConfigProposal,
 } from './agentService';
-import { extensionForMimeType, isSupportedAudioExtension } from './audioFormats';
+import {
+  extensionForMimeType,
+  isSupportedAudioExtension,
+  isTranscriptionTempFile,
+} from './audioFormats';
 import { type AppConfig, ConfigService } from './configService';
 import { loginCodexOAuth } from './codexOAuth';
 import { getDataPath } from './dataPath';
@@ -299,14 +303,12 @@ function startRecordingsWatcher(): void {
   fs.mkdirSync(dir, { recursive: true });
   try {
     recordingsWatcher = fs.watch(dir, (_eventType, filename) => {
-      // Skip transient ffmpeg segments created/cleaned up during transcription
-      // (`<base>_segment_NNN.<ext>`). Without this, every segment write fires
+      // Skip transient files created during transcription (ffmpeg segments and
+      // codex pre-conversion temps). Without this, every temp write fires
       // `recordings-changed`, the renderer re-renders the list, and the
       // transcribing row's inline progress UI is wiped from the DOM mid-run.
-      // Match ffmpeg's exact `%03d` format so a user-named recording like
-      // `Meeting_segment_notes.webm` (legal filename) doesn't get suppressed.
       // Falsy filename (which some platforms emit) falls through to emit.
-      if (typeof filename === 'string' && /_segment_\d{3}\.[A-Za-z0-9]+$/.test(filename)) return;
+      if (typeof filename === 'string' && isTranscriptionTempFile(filename)) return;
       if (recordingsWatcherTimer) clearTimeout(recordingsWatcherTimer);
       recordingsWatcherTimer = setTimeout(() => {
         recordingsWatcherTimer = null;
@@ -1932,7 +1934,7 @@ ipcMain.handle('get-recordings', async () => {
       modifiedAt: Date;
     }> = [];
     for (const file of files) {
-      if (file.includes('_segment_')) continue;
+      if (isTranscriptionTempFile(file)) continue;
       if (!isSupportedAudioExtension(path.extname(file))) continue;
 
       const filePath = path.join(recordingsDir, file);
