@@ -456,6 +456,25 @@
     </div>
   </dialog>
 
+  <dialog id="transcriptionErrorDialog" class="modal">
+    <div class="transcription-error-card">
+      <h3 id="transcriptionErrorTitle">Transcription failed</h3>
+      <p class="transcription-error-message" id="transcriptionErrorMessage"></p>
+
+      <details class="transcription-error-details" id="transcriptionErrorDetailsBlock">
+        <summary>Show details</summary>
+        <pre class="transcription-error-detail-text" id="transcriptionErrorDetailText"></pre>
+        <button id="transcriptionErrorCopyBtn" class="transcription-error-copy" type="button">
+          Copy details
+        </button>
+      </details>
+
+      <div class="transcription-error-actions">
+        <button id="transcriptionErrorOkBtn" class="primary-button" type="button">OK</button>
+      </div>
+    </div>
+  </dialog>
+
   <script type="module" src="./main.ts"></script>
 </body>
 

@@ -2584,3 +2584,97 @@ h1 {
   background-color: #bdc3c7;
   cursor: not-allowed;
 }
+
+.transcription-error-card {
+  background: white;
+  padding: 24px 28px;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 500px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+  margin: 20px auto;
+}
+
+.transcription-error-card h3 {
+  margin: 0 0 12px 0;
+  color: #2c3e50;
+  font-size: 18px;
+}
+
+.transcription-error-message {
+  color: #34495e;
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0 0 16px 0;
+  white-space: pre-wrap;
+}
+
+.transcription-error-details {
+  margin: 0 0 16px 0;
+  border-top: 1px solid #ecf0f1;
+  padding-top: 12px;
+}
+
+.transcription-error-details > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: #7f8c8d;
+  user-select: none;
+  outline: none;
+}
+
+.transcription-error-details > summary:hover {
+  color: #34495e;
+}
+
+.transcription-error-detail-text {
+  background: #f8f9fa;
+  border: 1px solid #ecf0f1;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 10px 0 8px 0;
+  font-family: ui-monospace, Menlo, Monaco, "SF Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #2c3e50;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.transcription-error-copy {
+  background: #ecf0f1;
+  color: #2c3e50;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.transcription-error-copy:hover {
+  background: #d5dbdb;
+}
+
+.transcription-error-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.transcription-error-actions .primary-button {
+  background: #3498db;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 22px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.transcription-error-actions .primary-button:hover {
+  background: #2980b9;
+}

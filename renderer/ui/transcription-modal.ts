@@ -16,6 +16,7 @@ import {
 } from './markdown-utils';
 import { showToast } from './notifications';
 import { refreshRecordingsList } from './recordings-list';
+import { showTranscriptionErrorDialog } from './transcription-error-dialog';
 
 // Modal-level mutable state. These were top-level `let`s in legacy.ts; keeping
 // them module-private mirrors the original visibility (handleTranscribe,
@@ -247,11 +248,14 @@ export async function handleTranscribe(filePath: string, title: string): Promise
         sendToSlackBtn.style.display = cfg.slackWebhookUrl ? 'flex' : 'none';
       }
     } else {
-      alert(`Failed to transcribe audio: ${result.error}`);
+      await showTranscriptionErrorDialog(
+        result.errorDetails,
+        `Failed to transcribe audio: ${result.error ?? 'unknown error'}`,
+      );
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    alert(`Error transcribing audio: ${message}`);
+    await showTranscriptionErrorDialog(undefined, `Error transcribing audio: ${message}`);
   } finally {
     // Re-enable the button
     if (button) {

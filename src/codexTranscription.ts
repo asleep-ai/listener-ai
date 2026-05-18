@@ -38,6 +38,46 @@ export const OPENAI_TRANSCRIPTION_EXTENSIONS = new Set([
 
 export type CodexTokenProvider = () => Promise<string>;
 
+export interface TranscriptionApiErrorDetails {
+  status: number;
+  statusText: string;
+  requestId?: string;
+  errorType?: string;
+  errorCode?: string;
+  rawBody?: string;
+}
+
+export class TranscriptionApiError extends Error {
+  readonly status: number;
+  readonly statusText: string;
+  readonly requestId?: string;
+  readonly errorType?: string;
+  readonly errorCode?: string;
+  readonly rawBody?: string;
+  constructor(message: string, details: TranscriptionApiErrorDetails) {
+    super(message);
+    this.name = 'TranscriptionApiError';
+    this.status = details.status;
+    this.statusText = details.statusText;
+    this.requestId = details.requestId;
+    this.errorType = details.errorType;
+    this.errorCode = details.errorCode;
+    this.rawBody = details.rawBody;
+  }
+  toJSON(): TranscriptionApiErrorDetails & { message: string; name: string } {
+    return {
+      name: this.name,
+      message: this.message,
+      status: this.status,
+      statusText: this.statusText,
+      requestId: this.requestId,
+      errorType: this.errorType,
+      errorCode: this.errorCode,
+      rawBody: this.rawBody,
+    };
+  }
+}
+
 export interface DiarizedSegment {
   speaker?: string;
   text?: string;
@@ -53,6 +93,9 @@ export interface TranscribeCodexAudioParams {
   prompt?: string;
   /** ISO 639-1 language code (e.g. "ko"). Improves accuracy when set. */
   language?: string;
+  /** Aborts the in-flight fetch -- used to cancel sibling concurrent segments
+   *  when one fails fast and the whole transcription is doomed anyway. */
+  signal?: AbortSignal;
 }
 
 export function isDiarizeModel(model: string): boolean {
@@ -98,6 +141,7 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
     method: 'POST',
     headers: { Authorization: `Bearer ${await params.getToken()}` },
     body: form,
+    signal: params.signal,
   });
   const elapsed = Date.now() - startedAt;
   console.log(
@@ -105,13 +149,29 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
   );
 
   if (!response.ok) {
-    // Truncate the error body so a verbose upstream response doesn't leak
-    // headers/debug payload into logs and IPC error strings.
     const body = await response.text().catch(() => '');
-    const trimmed = body.length > 500 ? `${body.slice(0, 500)}...` : body;
-    throw new Error(
-      `OpenAI transcription failed (${response.status} ${response.statusText})${trimmed ? `: ${trimmed}` : ''}`,
+    let parsed: { error?: { message?: string; type?: string; code?: string } } | undefined;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      // body wasn't JSON -- fall through and treat as opaque text
+    }
+    const apiMessage = parsed?.error?.message;
+    const err = new TranscriptionApiError(
+      apiMessage || `OpenAI transcription failed (${response.status} ${response.statusText})`,
+      {
+        status: response.status,
+        statusText: response.statusText,
+        requestId: response.headers.get('x-request-id') ?? undefined,
+        errorType: parsed?.error?.type,
+        errorCode: parsed?.error?.code,
+        // Cap at 1500 chars so a verbose upstream response doesn't bloat logs,
+        // but keep enough that a parsed JSON error is readable when the user
+        // opens "Show details".
+        rawBody: body.length > 1500 ? `${body.slice(0, 1500)}...` : body,
+      },
     );
+    throw err;
   }
 
   if (diarize) {
