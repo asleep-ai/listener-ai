@@ -97,13 +97,18 @@ window.addEventListener('DOMContentLoaded', async () => {
     setupDragAndDrop();
     setupPasteListener();
 
-    // Cross-cutting IPC listeners that aren't owned by a single feature module.
+    // Modal progress bar. Drag-drop transcribe (handleTranscribe) and merge
+    // both drive their progress through this listener. Gate on the modal's
+    // progress container being VISIBLE -- inline row transcribes never show
+    // the modal, so updates land while hidden and waste DOM mutations; worse,
+    // they'd leak the inline message into the modal next time it opens.
+    // recordings-list.ts owns the inline dispatch via its own subscription.
     window.electronAPI.onTranscriptionProgress((progress) => {
       const dom = getDom();
-      if (dom.progressContainer && dom.progressFill && dom.progressText) {
-        dom.progressFill.style.width = `${progress.percent}%`;
-        dom.progressText.textContent = progress.message;
-      }
+      if (!dom.progressContainer || !dom.progressFill || !dom.progressText) return;
+      if (dom.progressContainer.style.display === 'none') return;
+      dom.progressFill.style.width = `${progress.percent}%`;
+      dom.progressText.textContent = progress.message;
     });
 
     window.electronAPI.onOpenConfig(() => {

@@ -111,7 +111,11 @@ export type ElectronAPI = {
     transcriptionPath?: string;
     error?: string;
     errorDetails?: TranscriptionErrorPayload;
+    cancelled?: boolean;
   }>;
+  cancelTranscription: (
+    filePath: string,
+  ) => Promise<{ success: boolean; reason?: 'not-running' }>;
   uploadToNotion: (data: {
     title: string;
     transcriptionData: any;
@@ -144,7 +148,9 @@ export type ElectronAPI = {
   sendAgentConfirmResponse: (payload: { id: string; approved: boolean }) => Promise<void>;
   cancelAgentPending: () => Promise<void>;
   onConfigChanged: (cb: (config: unknown) => void) => void;
-  onTranscriptionProgress: (cb: (progress: { percent: number; message: string }) => void) => void;
+  onTranscriptionProgress: (
+    cb: (progress: { percent: number; message: string; filePath?: string }) => void,
+  ) => void;
   checkFFmpeg: () => Promise<{ available: boolean; path?: string }>;
   downloadFFmpeg: () => Promise<{ success: boolean; error?: string }>;
   cancelFFmpegDownload: () => Promise<void>;

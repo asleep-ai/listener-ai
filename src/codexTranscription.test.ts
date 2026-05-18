@@ -6,9 +6,16 @@
 //   - No segments / no usable text throws (so the renderer sees an error,
 //     not a blank transcript that gets quietly saved)
 
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
-import { formatDiarizedSegments, isDiarizeModel } from './codexTranscription';
+import { afterEach, beforeEach, describe, it } from 'node:test';
+import {
+  formatDiarizedSegments,
+  isDiarizeModel,
+  transcribeCodexAudio,
+} from './codexTranscription';
 
 describe('isDiarizeModel', () => {
   it('matches the diarize model id', () => {
@@ -87,6 +94,58 @@ describe('formatDiarizedSegments', () => {
           { speaker: 'Speaker 1', text: '   ' },
         ]),
       /no usable text/,
+    );
+  });
+});
+
+// Signal forwarding: the inline Cancel button only feels responsive when the
+// OpenAI multipart POST aborts on the same signal. Without this propagation,
+// the upload completes in the background after the user cancelled.
+describe('transcribeCodexAudio signal propagation', () => {
+  const originalFetch = globalThis.fetch;
+  let audioPath = '';
+
+  beforeEach(() => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-signal-'));
+    audioPath = path.join(dir, 'clip.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (audioPath) fs.rmSync(path.dirname(audioPath), { recursive: true, force: true });
+  });
+
+  it('aborts the in-flight fetch when the caller signal fires', async () => {
+    // Fake fetch that resolves only when the signal aborts.
+    globalThis.fetch = ((_url: string, init?: RequestInit) =>
+      new Promise((_, reject) => {
+        const sig = init?.signal as AbortSignal | undefined;
+        if (!sig) {
+          reject(new Error('expected signal to be forwarded into fetch init'));
+          return;
+        }
+        if (sig.aborted) {
+          reject(new DOMException('Aborted', 'AbortError'));
+          return;
+        }
+        sig.addEventListener(
+          'abort',
+          () => reject(new DOMException('Aborted', 'AbortError')),
+          { once: true },
+        );
+      })) as unknown as typeof fetch;
+
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 20);
+    await assert.rejects(
+      transcribeCodexAudio({
+        getToken: async () => 'fake-token',
+        audioFilePath: audioPath,
+        model: 'gpt-4o-transcribe',
+        signal: controller.signal,
+      }),
+      (err: unknown) => (err as { name?: unknown } | null)?.name === 'AbortError',
     );
   });
 });

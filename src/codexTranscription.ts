@@ -93,8 +93,10 @@ export interface TranscribeCodexAudioParams {
   prompt?: string;
   /** ISO 639-1 language code (e.g. "ko"). Improves accuracy when set. */
   language?: string;
-  /** Aborts the in-flight fetch -- used to cancel sibling concurrent segments
-   *  when one fails fast and the whole transcription is doomed anyway. */
+  /** Cancellation signal. Forwarded into the fetch so the in-flight upload
+   *  aborts immediately. Two callers fire this: the user-driven cancel button
+   *  in the renderer, and the segment-loop's sibling controller that fails
+   *  fast when one segment hits a 4xx (no point burning quota on the rest). */
   signal?: AbortSignal;
 }
 

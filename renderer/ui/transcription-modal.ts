@@ -158,22 +158,44 @@ export function showSavedTranscript(
   }
 }
 
+// Gate transcription on AI provider auth being configured. Returns true when
+// the caller can proceed; false when the user needs to configure first (and
+// the appropriate UI has already been surfaced). Shared by the modal and the
+// inline-row transcribe flows.
+export async function requireAiAuth(): Promise<boolean> {
+  const configCheck = await window.electronAPI.checkConfig();
+  if (configCheck.hasAiAuth) return true;
+  if (document.getElementById('configModal')) {
+    void showConfigModal();
+  } else {
+    alert('Please configure your AI provider first');
+  }
+  return false;
+}
+
+// Retry `transcribeAudio` once after the ffmpeg-missing download dialog if the
+// first call surfaced that specific failure. Returns the (possibly retried)
+// result so callers don't need to know about the recovery path.
+export async function transcribeWithFfmpegRetry(
+  filePath: string,
+): Promise<Awaited<ReturnType<typeof window.electronAPI.transcribeAudio>>> {
+  let result = await window.electronAPI.transcribeAudio(filePath);
+  if (!result.success && (result as { code?: string }).code === 'ffmpeg-missing') {
+    const { showFFmpegDownloadDialog } = await import('./ffmpeg-dialog');
+    const dlResult = await showFFmpegDownloadDialog();
+    if (dlResult.success) {
+      result = await window.electronAPI.transcribeAudio(filePath);
+    }
+  }
+  return result;
+}
+
 export async function handleTranscribe(filePath: string, title: string): Promise<void> {
   console.log('handleTranscribe called with:', { filePath, title });
 
   // Transcription only needs the AI provider auth; Notion is for the optional
   // upload step and shouldn't gate the recording -> transcript flow.
-  const configCheck = await window.electronAPI.checkConfig();
-  console.log('Has config:', configCheck);
-
-  if (!configCheck.hasAiAuth) {
-    if (document.getElementById('configModal')) {
-      void showConfigModal();
-    } else {
-      alert('Please configure your AI provider first');
-    }
-    return;
-  }
+  if (!(await requireAiAuth())) return;
 
   if (!prepareTranscriptionModal(`Transcription - ${title}`, 'Initializing transcription...')) {
     return;
@@ -188,19 +210,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
   }
 
   try {
-    // Call the transcription API
-    let result = await window.electronAPI.transcribeAudio(filePath);
-
-    // FFmpeg is required for transcription. If it's missing, prompt the user
-    // to download it via the dialog and then retry once. The dialog handles
-    // its own progress UI; we just await its outcome.
-    if (!result.success && (result as { code?: string }).code === 'ffmpeg-missing') {
-      const { showFFmpegDownloadDialog } = await import('./ffmpeg-dialog');
-      const dlResult = await showFFmpegDownloadDialog();
-      if (dlResult.success) {
-        result = await window.electronAPI.transcribeAudio(filePath);
-      }
-    }
+    const result = await transcribeWithFfmpegRetry(filePath);
 
     if (result.success) {
       // Hide progress bar
