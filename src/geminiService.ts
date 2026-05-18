@@ -447,11 +447,26 @@ export class GeminiService {
       `${path.basename(audioFilePath, ext)}_codex_${Date.now()}.webm`,
     );
     const ffmpegPath = await this.getFFmpegPath();
-    await execFileAsync(
-      ffmpegPath,
-      ['-i', audioFilePath, '-vn', '-c:a', 'libopus', '-b:a', '48k', outputPath],
-      { signal },
-    );
+    try {
+      await execFileAsync(
+        ffmpegPath,
+        ['-i', audioFilePath, '-vn', '-c:a', 'libopus', '-b:a', '48k', outputPath],
+        { signal },
+      );
+    } catch (err) {
+      // Abort or ffmpeg failure can leave a partial `_codex_<ts>.webm` on
+      // disk. Because we threw before returning the `cleanup` closure, the
+      // outer `transcribeAudio` finally never sees this path -- the new
+      // watcher filter only HIDES it from the list, it does not delete it.
+      // Unlink best-effort so the file doesn't accumulate, then rethrow so
+      // cancellation/error semantics are unchanged.
+      try {
+        fs.unlinkSync(outputPath);
+      } catch {
+        /* probably ENOENT -- ffmpeg failed before writing anything */
+      }
+      throw err;
+    }
     return {
       audioFilePath: outputPath,
       cleanup: () => {
