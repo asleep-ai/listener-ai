@@ -88,6 +88,10 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   );
 
   item.dataset.hasTranscript = hasTranscript ? 'true' : 'false';
+  // Identifier so external callers (drag-drop, file-import) can locate a row
+  // by audio path after a list refresh and trigger the inline progress flow
+  // on it instead of falling back to the modal.
+  item.dataset.filepath = recording.path;
   if (hasTranscript) {
     item.setAttribute('role', 'button');
     item.setAttribute('tabindex', '0');
@@ -112,17 +116,9 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   const actions = document.createElement('div');
   actions.className = 'recording-actions';
 
-  if (hasTranscript) {
-    actions.appendChild(
-      createActionButton('regenerate-btn', '↻', {
-        title: 'Regenerate transcript',
-        ariaLabel: 'Regenerate transcript',
-      }),
-    );
-  } else {
-    actions.appendChild(createActionButton('transcribe-btn', 'Transcribe'));
-  }
-
+  // Hide-on-hover utility buttons go FIRST so hover-reveal grows the actions
+  // block to the left. The primary CTA (Transcribe / chevron entry) sits last
+  // at the right edge and doesn't shift when the row is hovered.
   actions.appendChild(
     createActionButton('merge-btn', 'Merge', {
       title: 'Merge this with other recordings into a single note',
@@ -137,11 +133,19 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   );
 
   if (hasTranscript) {
+    actions.appendChild(
+      createActionButton('regenerate-btn', '↻', {
+        title: 'Regenerate transcript',
+        ariaLabel: 'Regenerate transcript',
+      }),
+    );
     const chevron = document.createElement('span');
     chevron.className = 'recording-chevron';
     chevron.setAttribute('aria-hidden', 'true');
     chevron.textContent = '›';
     actions.appendChild(chevron);
+  } else {
+    actions.appendChild(createActionButton('transcribe-btn', 'Transcribe'));
   }
 
   item.appendChild(actions);
@@ -707,6 +711,25 @@ async function runInlineTranscription(item: HTMLElement, filePath: string): Prom
     // calling restore on a detached node is a no-op but harmless.
     restore();
   }
+}
+
+// Public entry point for callers that have a file path but no row reference
+// (drag-drop, file-import, paste). Locates the row by `data-filepath` and
+// drives it through the inline transcribe flow so every user-initiated
+// transcription looks the same. Falls back to the modal flow when the row
+// isn't in the DOM (e.g. caller didn't refresh the list, the file isn't in
+// the recordings dir).
+export async function transcribeByPath(filePath: string, fallbackTitle: string): Promise<void> {
+  const selector = `.recording-item[data-filepath="${CSS.escape(filePath)}"]`;
+  const row = document.querySelector(selector) as HTMLElement | null;
+  if (row) {
+    await runInlineTranscription(row, filePath);
+    return;
+  }
+  // Lazy import keeps the static dep graph free of the modal flow for callers
+  // that only ever go through `runInlineTranscription`.
+  const { handleTranscribe } = await import('./transcription-modal');
+  await handleTranscribe(filePath, fallbackTitle);
 }
 
 export function setupRecordingsList(): void {

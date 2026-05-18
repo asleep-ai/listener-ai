@@ -1767,40 +1767,27 @@ h1 {
   flex-shrink: 0;
 }
 
-/* Reveal-on-hover for utility actions: keep rows quiet by default, surface
-   secondary actions only when the user shows intent. The chevron and
-   primary CTA (Transcribe) stay visible. */
+/* Secondary actions (Merge / Show / M4A / Regenerate) are visible at all
+   times but visually de-emphasized -- lighter text, slightly muted -- so the
+   primary CTA (Transcribe pill, or chevron on transcribed rows) reads as the
+   main anchor without the row needing to "wake up" on hover. Hovering the
+   button itself brightens it; hovering the row alone does NOT change layout
+   so there is no shifting motion. */
 .recording-item .merge-btn,
 .recording-item .reveal-btn,
 .recording-item .export-m4a-btn,
 .recording-item .regenerate-btn {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
-  /* Reserve no space when hidden so the title can grow. */
-  width: 0;
-  padding-inline: 0;
-  overflow: hidden;
+  color: #94a3b8;
+  font-weight: 400;
+  transition: color 0.12s ease, background-color 0.12s ease;
 }
 
-.recording-item:hover .merge-btn,
-.recording-item:hover .reveal-btn,
-.recording-item:hover .export-m4a-btn,
-.recording-item:hover .regenerate-btn,
-.recording-item:focus-within .merge-btn,
-.recording-item:focus-within .reveal-btn,
-.recording-item:focus-within .export-m4a-btn,
-.recording-item:focus-within .regenerate-btn {
-  opacity: 1;
-  pointer-events: auto;
-  width: auto;
-  padding-inline: 9px;
-  overflow: visible;
-}
-
-.recording-item:hover .regenerate-btn,
-.recording-item:focus-within .regenerate-btn {
-  padding-inline: 8px;
+.recording-item .merge-btn:hover,
+.recording-item .reveal-btn:hover,
+.recording-item .export-m4a-btn:hover,
+.recording-item .regenerate-btn:hover {
+  color: #0f172a;
+  background-color: #eef2f6;
 }
 
 /* Default: subtle ghost style. Utility actions (Merge/Show/M4A/regenerate)

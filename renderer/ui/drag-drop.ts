@@ -9,8 +9,7 @@
 import { getFileHandler } from '../services/file-handler';
 import { getDom } from '../state';
 import { showToast } from './notifications';
-import { refreshRecordingsList } from './recordings-list';
-import { handleTranscribe } from './transcription-modal';
+import { refreshRecordingsList, transcribeByPath } from './recordings-list';
 
 let dragDropZone: HTMLElement | null = null;
 
@@ -54,7 +53,11 @@ async function handleFileSuccess(filePath: string, fileName: string): Promise<vo
   // Ask if user wants to transcribe immediately
   if (confirm(`Audio file "${title}" has been added. Would you like to transcribe it now?`)) {
     try {
-      await handleTranscribe(filePath, title);
+      // refreshRecordingsList just ran above, so the newly imported row is in
+      // the DOM and `transcribeByPath` can drive the same inline progress UI
+      // that the list buttons use. Modal fallback handles the rare case where
+      // the row didn't make it in.
+      await transcribeByPath(filePath, title);
     } catch (transcribeError) {
       console.error('Error starting transcription:', transcribeError);
       showToast('Failed to start transcription', 'error');
