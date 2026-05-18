@@ -2,6 +2,17 @@
 // contextBridge. Keep in sync with that file -- the preload TypeScript
 // definition is the source of truth, this is a renderer-side mirror.
 
+export interface TranscriptionErrorPayload {
+  userMessage: string;
+  rawMessage: string;
+  status?: number;
+  statusText?: string;
+  requestId?: string;
+  errorType?: string;
+  errorCode?: string;
+  rawBody?: string;
+}
+
 export type AgentChatMessage = {
   role: 'user' | 'model';
   text: string;
@@ -99,6 +110,7 @@ export type ElectronAPI = {
     newFilePath?: string;
     transcriptionPath?: string;
     error?: string;
+    errorDetails?: TranscriptionErrorPayload;
   }>;
   uploadToNotion: (data: {
     title: string;

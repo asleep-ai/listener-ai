@@ -11,7 +11,11 @@ import {
 import { mimeTypeForExtension } from './audioFormats';
 import { type CodexOAuthCredentials } from './codexOAuth';
 import { CodexOAuthHolder } from './codexOAuthHolder';
-import { OPENAI_TRANSCRIPTION_EXTENSIONS, transcribeCodexAudio } from './codexTranscription';
+import {
+  OPENAI_TRANSCRIPTION_EXTENSIONS,
+  TranscriptionApiError,
+  transcribeCodexAudio,
+} from './codexTranscription';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
 import { type Context, complete, extractFinalText, getModel } from './piAiClient';
 import { FFmpegManager } from './services/ffmpegManager';
@@ -127,6 +131,129 @@ function transcriptOnlyResult(transcript: string): TranscriptionResult {
     actionItems: [],
     emoji: '',
   };
+}
+
+export interface TranscriptionErrorPayload {
+  userMessage: string;
+  rawMessage: string;
+  status?: number;
+  statusText?: string;
+  requestId?: string;
+  errorType?: string;
+  errorCode?: string;
+  rawBody?: string;
+}
+
+export class TranscriptionError extends Error {
+  readonly userMessage: string;
+  readonly rawMessage: string;
+  readonly status?: number;
+  readonly statusText?: string;
+  readonly requestId?: string;
+  readonly errorType?: string;
+  readonly errorCode?: string;
+  readonly rawBody?: string;
+  constructor(payload: TranscriptionErrorPayload, options?: { cause?: unknown }) {
+    super(payload.userMessage, options);
+    this.name = 'TranscriptionError';
+    this.userMessage = payload.userMessage;
+    this.rawMessage = payload.rawMessage;
+    this.status = payload.status;
+    this.statusText = payload.statusText;
+    this.requestId = payload.requestId;
+    this.errorType = payload.errorType;
+    this.errorCode = payload.errorCode;
+    this.rawBody = payload.rawBody;
+  }
+  toPayload(): TranscriptionErrorPayload {
+    return {
+      userMessage: this.userMessage,
+      rawMessage: this.rawMessage,
+      status: this.status,
+      statusText: this.statusText,
+      requestId: this.requestId,
+      errorType: this.errorType,
+      errorCode: this.errorCode,
+      rawBody: this.rawBody,
+    };
+  }
+}
+
+export function annotateTranscriptionError(
+  error: unknown,
+  provider: AiProvider,
+): TranscriptionError {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  // Structured upstream error from `transcribeCodexAudio` -- prefer the
+  // `errorCode` / `status` fields over substring matching on `rawMessage`.
+  if (error instanceof TranscriptionApiError) {
+    const userMessage = friendlyMessageForApiError(error, provider);
+    return new TranscriptionError(
+      {
+        userMessage,
+        rawMessage,
+        status: error.status,
+        statusText: error.statusText,
+        requestId: error.requestId,
+        errorType: error.errorType,
+        errorCode: error.errorCode,
+        rawBody: error.rawBody,
+      },
+      { cause: error },
+    );
+  }
+  // Fallback for non-API errors (Gemini SDK, file IO, ffmpeg) -- keep the
+  // legacy substring heuristic so callers still get a friendlier message when
+  // possible, but preserve the raw text in `rawMessage` for "Show details".
+  const lower = rawMessage.toLowerCase();
+  let userMessage: string;
+  if (lower.includes('api key')) {
+    userMessage =
+      provider === 'codex'
+        ? 'Invalid Codex OAuth token. Please sign in again.'
+        : 'Invalid API key. Please check your Gemini API key configuration.';
+  } else if (lower.includes('quota')) {
+    userMessage = 'API quota exceeded. Please try again later.';
+  } else if (lower.includes('model')) {
+    userMessage = 'Model not available. Please check your API access.';
+  } else {
+    userMessage = `Failed to transcribe audio: ${rawMessage}`;
+  }
+  return new TranscriptionError({ userMessage, rawMessage }, { cause: error });
+}
+
+function isRetryableStatus(status: number): boolean {
+  // Worth retrying: server errors (5xx), rate-limit (429), and the rare
+  // 408 request-timeout. Everything else in 4xx is a non-transient client
+  // / config issue (invalid model id, bad request shape, auth, billing).
+  if (status >= 500) return true;
+  if (status === 429 || status === 408) return true;
+  return false;
+}
+
+function friendlyMessageForApiError(error: TranscriptionApiError, provider: AiProvider): string {
+  const code = error.errorCode;
+  const status = error.status;
+  if (code === 'insufficient_quota' || code === 'billing_hard_limit_reached') {
+    return provider === 'codex'
+      ? 'OpenAI returned an insufficient-quota error for this account. Your ChatGPT/Codex usage limit may be reached, or this account is not entitled to use the transcription model.'
+      : 'API quota exceeded. Please try again later.';
+  }
+  if (code === 'rate_limit_exceeded' || status === 429) {
+    return 'Rate limit hit. Please retry in a minute.';
+  }
+  if (code === 'invalid_api_key' || status === 401) {
+    return provider === 'codex'
+      ? 'Codex OAuth token rejected. Sign out and sign in again from Settings.'
+      : 'Invalid API key. Please check your Gemini API key configuration.';
+  }
+  if (code === 'model_not_found' || status === 404) {
+    return 'Transcription model not available for this account. Try a different model.';
+  }
+  if (status === 403) {
+    return 'OpenAI refused the request (403). This account may not be entitled to the requested model.';
+  }
+  return `Failed to transcribe audio (HTTP ${status}).`;
 }
 
 const DEFAULT_TRANSCRIPT_PROMPT = `Please transcribe this audio recording with proper speaker identification.
@@ -375,25 +502,7 @@ export class GeminiService {
       );
     } catch (error) {
       console.error('Error transcribing audio:', error);
-
-      // Provide more specific error messages
-      if (error instanceof Error) {
-        if (error.message.includes('API key')) {
-          throw new Error(
-            this.provider === 'codex'
-              ? 'Invalid Codex OAuth token. Please sign in again.'
-              : 'Invalid API key. Please check your Gemini API key configuration.',
-          );
-        } else if (error.message.includes('quota')) {
-          throw new Error('API quota exceeded. Please try again later.');
-        } else if (error.message.includes('model')) {
-          throw new Error('Model not available. Please check your API access.');
-        }
-      }
-
-      throw new Error(
-        `Failed to transcribe audio: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      throw annotateTranscriptionError(error, this.provider);
     } finally {
       prepared.cleanup?.();
     }
@@ -886,12 +995,15 @@ Return as JSON:
     segmentStartTime: number,
     segmentEndTime: number,
     customPrompt?: string,
+    signal?: AbortSignal,
   ): Promise<{ index: number; content: string }> {
     const maxRetries = 3;
     let lastError: any = null;
+    let attemptsMade = 0;
     const segmentPrompt = this.createSegmentPrompt(segmentIndex, totalSegments, customPrompt);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      attemptsMade = attempt;
       try {
         console.error(
           `Starting transcription for segment ${segmentIndex + 1}/${totalSegments} (attempt ${attempt}/${maxRetries})...`,
@@ -903,6 +1015,7 @@ Return as JSON:
             audioFilePath: segmentFile,
             model: this.codexTranscriptionModel,
             prompt: segmentPrompt,
+            signal,
           });
           console.error(`Completed transcription for segment ${segmentIndex + 1}/${totalSegments}`);
           return {
@@ -960,6 +1073,18 @@ Return as JSON:
           segmentError,
         );
 
+        // Non-retryable upstream errors: 4xx (except 429 rate-limit and 408
+        // request-timeout) come from invalid input / auth / billing /
+        // wrong model id and won't change on retry. Burning two more API
+        // calls just to fail the same way wastes the user's quota and
+        // delays the error dialog. 5xx and network errors keep the retry.
+        if (segmentError instanceof TranscriptionApiError && !isRetryableStatus(segmentError.status)) {
+          console.error(
+            `Segment ${segmentIndex + 1} hit non-retryable status ${segmentError.status}; aborting retries.`,
+          );
+          break;
+        }
+
         if (attempt < maxRetries) {
           // Wait before retry with exponential backoff
           const retryDelay = Math.min(1000 * 2 ** (attempt - 1), 10000); // Max 10 seconds
@@ -969,15 +1094,19 @@ Return as JSON:
       }
     }
 
-    // All retries failed
+    // Throw on retry exhaustion. Returning a `[Segment N transcription
+    // failed]` placeholder here would let an entirely-failed run look
+    // like a success to the renderer.
     console.error(
-      `Failed to transcribe segment ${segmentIndex + 1} after ${maxRetries} attempts:`,
+      `Failed to transcribe segment ${segmentIndex + 1} after ${attemptsMade} attempt${attemptsMade === 1 ? '' : 's'}:`,
       lastError,
     );
-    return {
-      index: segmentIndex,
-      content: `[Segment ${segmentIndex + 1} transcription failed after ${maxRetries} attempts]`,
-    };
+    if (lastError instanceof Error) throw lastError;
+    throw new Error(
+      lastError !== null && lastError !== undefined
+        ? `Segment ${segmentIndex + 1} transcription failed: ${String(lastError)}`
+        : `Segment ${segmentIndex + 1} transcription failed after ${attemptsMade} attempt${attemptsMade === 1 ? '' : 's'}`,
+    );
   }
 
   // Get segmented transcript (renamed from transcribeAudioSegmented)
@@ -1003,11 +1132,14 @@ Return as JSON:
         progressCallback(20, `Processing ${segmentFiles.length} segments...`);
       }
 
-      // Create promises for all segment transcriptions
-      const transcriptionPromises = segmentFiles.map(async (segmentFile, i) => {
+      // Shared abort: when one segment fails fast (e.g. 4xx on segment 0),
+      // cancel the sibling fetches so we don't burn the user's quota on
+      // results that will be thrown away.
+      const aborter = new AbortController();
+
+      const transcriptionPromises = segmentFiles.map((segmentFile, i) => {
         const segmentStartTime = i * segmentDuration;
         const segmentEndTime = Math.min(segmentStartTime + segmentDuration, duration);
-
         return this.transcribeSingleSegment(
           segmentFile,
           i,
@@ -1015,7 +1147,11 @@ Return as JSON:
           segmentStartTime,
           segmentEndTime,
           customPrompt,
-        );
+          aborter.signal,
+        ).catch((err) => {
+          aborter.abort();
+          throw err;
+        });
       });
 
       // Track progress of concurrent transcriptions
@@ -1034,8 +1170,26 @@ Return as JSON:
         }),
       );
 
-      // Wait for all transcriptions to complete
-      const segmentResults = await Promise.all(progressTrackedPromises);
+      // Wait for all transcriptions to complete. Any segment that exhausts
+      // retries (or hits a non-retryable status) throws from
+      // transcribeSingleSegment, which rejects Promise.all -- so if we
+      // reach the next line, every segment succeeded.
+      let segmentResults: { index: number; content: string }[];
+      try {
+        segmentResults = await Promise.all(progressTrackedPromises);
+      } finally {
+        // Always clean up segment temp files, even when a segment failed
+        // and the function is about to throw.
+        await Promise.all(
+          segmentFiles.map(async (segmentFile) => {
+            try {
+              fs.unlinkSync(segmentFile);
+            } catch (e) {
+              console.error(`Failed to delete segment file: ${segmentFile}`, e);
+            }
+          }),
+        );
+      }
 
       // Sort by index to maintain order
       segmentResults.sort((a, b) => a.index - b.index);
@@ -1047,17 +1201,6 @@ Return as JSON:
 
       // Extract transcripts in order
       const segmentTranscripts = segmentResults.map((result) => result.content);
-
-      // Clean up segment files
-      await Promise.all(
-        segmentFiles.map(async (segmentFile) => {
-          try {
-            fs.unlinkSync(segmentFile);
-          } catch (e) {
-            console.error(`Failed to delete segment file: ${segmentFile}`, e);
-          }
-        }),
-      );
 
       // Merge all transcripts with clear segment breaks
       return segmentTranscripts.join('\n\n---\n\n');

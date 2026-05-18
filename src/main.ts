@@ -27,7 +27,11 @@ import { type AppConfig, ConfigService } from './configService';
 import { loginCodexOAuth } from './codexOAuth';
 import { getDataPath } from './dataPath';
 import { DisplayDetectorService } from './displayDetectorService';
-import { GeminiService } from './geminiService';
+import {
+  GeminiService,
+  TranscriptionError,
+  type TranscriptionErrorPayload,
+} from './geminiService';
 import { MeetingDetectorService } from './meetingDetectorService';
 import { MenuBarManager } from './menuBarManager';
 import { NotionService } from './notionService';
@@ -87,6 +91,12 @@ let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
 let slackService: SlackService | null = null;
 let agentService: AgentService | null = null;
+
+function serializeTranscriptionError(error: unknown): TranscriptionErrorPayload {
+  if (error instanceof TranscriptionError) return error.toPayload();
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  return { userMessage: `Failed to transcribe audio: ${rawMessage}`, rawMessage };
+}
 
 function formatAiCredentialsError(): string {
   return configService.getAiProvider() === 'codex'
@@ -1591,7 +1601,11 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string, liveNotesRaw?: un
     notificationService.notifyTranscriptionFailed(
       'Transcription failed. Check the app for details.',
     );
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      errorDetails: serializeTranscriptionError(error),
+    };
   }
 });
 
