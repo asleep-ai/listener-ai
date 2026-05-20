@@ -94,6 +94,7 @@ listener ask <question> [--ref <ref>]
 listener codex login|logout|status   Manage Codex OAuth sign-in
 listener google login|logout|status  Manage Google Drive OAuth sign-in
 listener google upload <ref>         Upload a meeting folder to Google Drive
+listener google sync                 Sync all meetings to Google Drive (upload changes only)
 listener config list|get|set|unset|path
                                      Manage configuration
 listener --version                   Print CLI version
@@ -142,6 +143,13 @@ Build-time env vars (required for Google Drive OAuth sign-in to work): `LISTENER
   - `transcript.md` — full transcript
   - Optional original audio file
 - `src/outputService.ts` is the only read/write surface: `saveTranscription`, `listTranscriptions`, `readTranscription`, `parseFrontmatter`, `getTranscriptionsDir`.
+
+## Google Drive Sync
+
+- **State file:** `getDataPath()/sync-state.json`, mode 0600. Schema is versioned (`version: 1`) -- unknown version means start fresh (treat as a hint to re-upload, not an error). Atomic writes via temp + `fs.renameSync` so concurrent readers (Electron app + CLI both running) never see a partial write.
+- **Idempotency invariants.** `GoogleDriveClient.uploadFile` PATCHes on name collision in the target Drive folder, and `drive.file` scope means we only collide with our own previous uploads. The sync engine tracks per-file `localMtimeMs + driveFileId` so it skips unchanged files; the engine + Drive client together guarantee re-runs never duplicate content, even if `sync-state.json` gets wiped.
+- **Persist after each meeting.** `SyncEngine.syncOnce()` writes state after every meeting (not just at end-of-sync) so a mid-cycle crash doesn't lose the upload tracking that already succeeded. One bad meeting records an error but doesn't abort the rest.
+- **Upload-only today (Phase 3A).** No download path, no conflict resolution, no two-way sync yet. The state schema is designed to grow (Phase 3B adds download + conflict log; bump `version` and the loader will reset cleanly on older clients).
 
 ## Architecture Overview
 
@@ -267,7 +275,7 @@ Recording starts silently — never bring the window to foreground (no `show()`/
 - Package name: `listener-ai`. Only the CLI portion is published to npm (Electron app ships via GitHub Releases).
 - `THIRD_PARTY_NOTICES.md` is shipped in npm and Electron artifacts for direct third-party notices.
 - Electron-only runtime deps (`electron-updater`, `@notionhq/client`) live in `optionalDependencies` — honest semantics for a package serving both Electron and CLI users. `build.files` includes `node_modules/**/*`, so they are still bundled in Electron builds.
-- `package.json.files` whitelists the exact compiled JS shipped to npm plus `THIRD_PARTY_NOTICES.md`: `dist/cli.js`, `aiProvider.js`, `codexOAuth.js`, `dataPath.js`, `configService.js`, `geminiService.js`, `googleOAuth.js`, `openaiCodexClient.js`, `outputService.js`, `searchService.js`, `agentService.js`, `audioFormats.js`, `services/ffmpegManager.js`, `services/audioConcatService.js`, `services/googleDriveService.js`. When adding a new module imported by any of these, append it to the whitelist or `npm install -g listener-ai` will fail with `Cannot find module`.
+- `package.json.files` whitelists the exact compiled JS shipped to npm plus `THIRD_PARTY_NOTICES.md`: `dist/cli.js`, `aiProvider.js`, `codexOAuth.js`, `dataPath.js`, `configService.js`, `geminiService.js`, `googleOAuth.js`, `openaiCodexClient.js`, `outputService.js`, `searchService.js`, `agentService.js`, `audioFormats.js`, `services/ffmpegManager.js`, `services/audioConcatService.js`, `services/googleDriveService.js`, `services/syncEngine.js`. When adding a new module imported by any of these, append it to the whitelist or `npm install -g listener-ai` will fail with `Cannot find module`.
 
 ## Future Enhancements (Optional)
 - Cloud sync of transcriptions, settings, and agent chat history across devices

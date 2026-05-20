@@ -13,6 +13,7 @@ import { getDataPath } from './dataPath';
 import { GeminiService } from './geminiService';
 import { loginGoogleOAuth, resolveGoogleAccessToken } from './googleOAuth';
 import { GoogleDriveClient, uploadMeetingFolder } from './services/googleDriveService';
+import { SyncEngine } from './services/syncEngine';
 import { mimeTypeForExtension } from './audioFormats';
 import {
   formatTimestamp,
@@ -69,6 +70,7 @@ const USAGE_TEXT =
   '       listener codex login|logout|status  Manage OpenAI Codex OAuth sign-in\n' +
   '       listener google login|logout|status Manage Google Drive OAuth sign-in\n' +
   '       listener google upload <ref>        Upload a meeting folder to Google Drive\n' +
+  '       listener google sync                Sync all meetings to Google Drive (upload changes only)\n' +
   '       listener config list|get|set|unset|path\n' +
   '                                           Manage configuration\n' +
   '\n' +
@@ -369,9 +371,14 @@ async function handleGoogle(args: string[]): Promise<void> {
     return;
   }
 
+  if (sub === 'sync') {
+    await handleGoogleSync(config, dataPath);
+    return;
+  }
+
   if (sub !== 'login') {
     process.stderr.write(
-      'Error: Unknown google command. Usage: listener google login|logout|status|upload\n',
+      'Error: Unknown google command. Usage: listener google login|logout|status|upload|sync\n',
     );
     process.exit(1);
   }
@@ -456,6 +463,51 @@ async function handleGoogleUpload(
   process.stderr.write(`Uploaded to Listener.AI/${folderName}/:\n`);
   for (const f of result.uploaded) {
     process.stderr.write(`  - ${f.name} (${f.id})\n`);
+  }
+}
+
+async function handleGoogleSync(config: ConfigService, dataPath: string): Promise<void> {
+  const credentials = config.getGoogleOAuth();
+  if (!credentials) {
+    process.stderr.write(
+      'Error: Not signed in to Google Drive. Run `listener google login` first.\n',
+    );
+    process.exit(1);
+  }
+
+  const client = new GoogleDriveClient({
+    getAccessToken: async () => {
+      const token = await resolveGoogleAccessToken({
+        credentials,
+        onCredentialsChanged: (next) => {
+          if (config.hasStoredGoogleOAuth()) config.setGoogleOAuth(next);
+        },
+      });
+      if (!token) throw new Error('Failed to resolve Google access token.');
+      return token;
+    },
+  });
+
+  const engine = new SyncEngine({
+    driveClient: client,
+    transcriptionsDir: getTranscriptionsDir(dataPath),
+    syncStatePath: path.join(dataPath, 'sync-state.json'),
+    logger: (msg) => process.stderr.write(`${msg}\n`),
+  });
+
+  process.stderr.write('Syncing meetings to Google Drive...\n');
+  const result = await engine.syncOnce();
+
+  process.stderr.write(
+    `Done. Uploaded ${result.uploaded.length}, skipped ${result.skipped.length}, errors ${result.errors.length}.\n`,
+  );
+  for (const u of result.uploaded) process.stderr.write(`  + ${u}\n`);
+  if (result.errors.length > 0) {
+    process.stderr.write('\nErrors:\n');
+    for (const e of result.errors) {
+      process.stderr.write(`  ! ${e.meeting}${e.file ? `/${e.file}` : ''}: ${e.error}\n`);
+    }
+    process.exit(1);
   }
 }
 

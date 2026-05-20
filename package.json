@@ -25,7 +25,8 @@
     "dist/audioFormats.js",
     "dist/services/ffmpegManager.js",
     "dist/services/audioConcatService.js",
-    "dist/services/googleDriveService.js"
+    "dist/services/googleDriveService.js",
+    "dist/services/syncEngine.js"
   ],
   "scripts": {
     "start": "pnpm run build && electron .",
