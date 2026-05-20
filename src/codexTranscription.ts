@@ -105,7 +105,7 @@ export function isDiarizeModel(model: string): boolean {
 }
 
 export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): Promise<string> {
-  const audioData = fs.readFileSync(params.audioFilePath);
+  const audioData = await fs.promises.readFile(params.audioFilePath);
   const ext = path.extname(params.audioFilePath);
   const model = params.model.trim();
   const diarize = isDiarizeModel(model);
