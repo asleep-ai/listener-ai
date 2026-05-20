@@ -101,19 +101,19 @@ export class GoogleDriveClient {
     // only requests `files(...)`, Drive omits the token and the loop exits
     // after one page even when more pages exist.
     const q = `'${this.escapeQueryString(folderId)}' in parents and trashed = false`;
+    const url = new URL(`${DRIVE_API_BASE}/files`);
+    url.searchParams.set('q', q);
+    url.searchParams.set(
+      'fields',
+      'nextPageToken,files(id,name,mimeType,modifiedTime,size,parents)',
+    );
+    url.searchParams.set('pageSize', '100');
+    url.searchParams.set('spaces', 'drive');
+
     const all: DriveFile[] = [];
     let pageToken: string | undefined;
     do {
-      const url = new URL(`${DRIVE_API_BASE}/files`);
-      url.searchParams.set('q', q);
-      url.searchParams.set(
-        'fields',
-        'nextPageToken,files(id,name,mimeType,modifiedTime,size,parents)',
-      );
-      url.searchParams.set('pageSize', '100');
-      url.searchParams.set('spaces', 'drive');
       if (pageToken) url.searchParams.set('pageToken', pageToken);
-
       const res = await this.authedFetch(url.toString());
       await this.ensureOk(res, `Drive listFolder ${folderId}`);
       const json = (await res.json()) as { files?: DriveFile[]; nextPageToken?: string };
