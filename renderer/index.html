@@ -187,18 +187,20 @@
               </div>
               <div class="form-group">
                 <div class="prompt-label-row">
-                  <label for="geminiModel">Pro Model (summarization) <span class="config-optional">optional</span></label>
+                  <label for="geminiModelSelect">Pro Model (summarization) <span class="config-optional">optional</span></label>
                   <button type="button" id="resetGeminiModel" class="reset-prompt-button">Reset to Default</button>
                 </div>
-                <input type="text" id="geminiModel" placeholder="gemini-2.5-pro">
+                <select id="geminiModelSelect"></select>
+                <input type="text" id="geminiModel" placeholder="gemini-2.5-pro" hidden>
                 <small>Default: gemini-2.5-pro</small>
               </div>
               <div class="form-group">
                 <div class="prompt-label-row">
-                  <label for="geminiFlashModel">Flash Model (transcription) <span class="config-optional">optional</span></label>
+                  <label for="geminiFlashModelSelect">Flash Model (transcription) <span class="config-optional">optional</span></label>
                   <button type="button" id="resetGeminiFlashModel" class="reset-prompt-button">Reset to Default</button>
                 </div>
-                <input type="text" id="geminiFlashModel" placeholder="gemini-2.5-flash">
+                <select id="geminiFlashModelSelect"></select>
+                <input type="text" id="geminiFlashModel" placeholder="gemini-2.5-flash" hidden>
                 <small>Default: gemini-2.5-flash</small>
               </div>
             </fieldset>
@@ -214,14 +216,22 @@
                 <small>Uses your ChatGPT Plus/Pro account via browser sign-in. If the browser tab closes before sign-in completes, just click Sign in again.</small>
               </div>
               <div class="form-group">
-                <label for="codexModel">Model <span class="config-optional">optional</span></label>
-                <input type="text" id="codexModel" placeholder="gpt-5.5">
+                <div class="prompt-label-row">
+                  <label for="codexModelSelect">Model <span class="config-optional">optional</span></label>
+                  <button type="button" id="resetCodexModel" class="reset-prompt-button">Reset to Default</button>
+                </div>
+                <select id="codexModelSelect"></select>
+                <input type="text" id="codexModel" placeholder="gpt-5.5" hidden>
                 <small>Used for summaries and Ask Listener. Default: gpt-5.5</small>
               </div>
               <div class="form-group">
-                <label for="codexTranscriptionModel">Transcription Model <span class="config-optional">optional</span></label>
-                <input type="text" id="codexTranscriptionModel" placeholder="gpt-4o-transcribe">
-                <small>Default: gpt-4o-transcribe</small>
+                <div class="prompt-label-row">
+                  <label for="codexTranscriptionModelSelect">Transcription Model <span class="config-optional">optional</span></label>
+                  <button type="button" id="resetCodexTranscriptionModel" class="reset-prompt-button">Reset to Default</button>
+                </div>
+                <select id="codexTranscriptionModelSelect"></select>
+                <input type="text" id="codexTranscriptionModel" placeholder="gpt-4o-transcribe-diarize" hidden>
+                <small>Default: gpt-4o-transcribe-diarize</small>
               </div>
             </fieldset>
           </section>

@@ -3,6 +3,13 @@
 // settingsButton handler in setupEventListeners).
 // Behavior preserved verbatim.
 
+import {
+  BACKEND_DEFAULTS,
+  CURATED_MODELS,
+  CUSTOM_MODEL_SENTINEL,
+  type ModelField,
+  chooseInitial,
+} from '../services/model-options';
 import { DEFAULT_SUMMARY_PROMPT } from '../state';
 
 let configModal: HTMLDialogElement | null = null;
@@ -10,10 +17,6 @@ let saveConfigBtn: HTMLButtonElement | null = null;
 let cancelConfigBtn: HTMLButtonElement | null = null;
 let aiProviderSelect: HTMLSelectElement | null = null;
 let geminiApiKeyInput: HTMLInputElement | null = null;
-let geminiModelInput: HTMLInputElement | null = null;
-let geminiFlashModelInput: HTMLInputElement | null = null;
-let codexModelInput: HTMLInputElement | null = null;
-let codexTranscriptionModelInput: HTMLInputElement | null = null;
 let loginCodexOAuthBtn: HTMLButtonElement | null = null;
 let clearCodexOAuthBtn: HTMLButtonElement | null = null;
 let codexOAuthStatus: HTMLElement | null = null;
@@ -33,6 +36,90 @@ let aiPane: HTMLElement | null = null;
 // token against the current one after `await`, discarding stale results from
 // prior attempts that were aborted by a newer click.
 let codexLoginToken = 0;
+
+const MODEL_FIELDS: readonly ModelField[] = [
+  'geminiModel',
+  'geminiFlashModel',
+  'codexModel',
+  'codexTranscriptionModel',
+];
+
+const RESET_BUTTON_IDS: Record<ModelField, string> = {
+  geminiModel: 'resetGeminiModel',
+  geminiFlashModel: 'resetGeminiFlashModel',
+  codexModel: 'resetCodexModel',
+  codexTranscriptionModel: 'resetCodexTranscriptionModel',
+};
+
+function getModelEls(
+  field: ModelField,
+): { select: HTMLSelectElement; input: HTMLInputElement } | null {
+  const select = document.getElementById(`${field}Select`) as HTMLSelectElement | null;
+  const input = document.getElementById(field) as HTMLInputElement | null;
+  return select && input ? { select, input } : null;
+}
+
+function buildModelOptions(field: ModelField, select: HTMLSelectElement): void {
+  select.innerHTML = '';
+  // First entry uses an empty value as the "no override" sentinel. Save
+  // persists empty, the backend falls through to DEFAULT_*_MODEL. Without
+  // this entry, Reset to Default would snap to a real curated id and Save
+  // would persist that as an explicit override.
+  const defaultOpt = document.createElement('option');
+  defaultOpt.value = '';
+  defaultOpt.textContent = `Default (${BACKEND_DEFAULTS[field]})`;
+  select.appendChild(defaultOpt);
+
+  for (const id of CURATED_MODELS[field]) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = id;
+    select.appendChild(opt);
+  }
+
+  const customOpt = document.createElement('option');
+  customOpt.value = CUSTOM_MODEL_SENTINEL;
+  customOpt.textContent = 'Custom...';
+  select.appendChild(customOpt);
+}
+
+function applyModelValue(field: ModelField, savedValue: string | undefined): void {
+  const els = getModelEls(field);
+  if (!els) return;
+  const choice = chooseInitial(field, savedValue);
+  if (choice.kind === 'custom') {
+    els.select.value = CUSTOM_MODEL_SENTINEL;
+    els.input.value = choice.value;
+    els.input.hidden = false;
+  } else {
+    els.select.value = choice.value;
+    els.input.value = '';
+    els.input.hidden = true;
+  }
+}
+
+function readModelValue(field: ModelField): string {
+  const els = getModelEls(field);
+  if (!els) return '';
+  if (els.select.value === CUSTOM_MODEL_SENTINEL) return els.input.value.trim();
+  return els.select.value;
+}
+
+function setupModelControls(): void {
+  for (const field of MODEL_FIELDS) {
+    const els = getModelEls(field);
+    if (!els) continue;
+    buildModelOptions(field, els.select);
+    els.select.addEventListener('change', () => {
+      const isCustom = els.select.value === CUSTOM_MODEL_SENTINEL;
+      els.input.hidden = !isCustom;
+      if (isCustom) els.input.focus();
+    });
+
+    const resetBtn = document.getElementById(RESET_BUTTON_IDS[field]) as HTMLButtonElement | null;
+    if (resetBtn) resetBtn.onclick = () => applyModelValue(field, '');
+  }
+}
 
 function setCodexOAuthStatus(text: string, state: 'idle' | 'success' | 'error' = 'idle'): void {
   if (!codexOAuthStatus) return;
@@ -89,18 +176,10 @@ export async function showConfigModal(): Promise<void> {
   if (geminiApiKeyInput && config.geminiApiKey) {
     geminiApiKeyInput.value = config.geminiApiKey;
   }
-  if (geminiModelInput) {
-    geminiModelInput.value = config.geminiModel || '';
-  }
-  if (geminiFlashModelInput) {
-    geminiFlashModelInput.value = config.geminiFlashModel || '';
-  }
-  if (codexModelInput) {
-    codexModelInput.value = config.codexModel || '';
-  }
-  if (codexTranscriptionModelInput) {
-    codexTranscriptionModelInput.value = config.codexTranscriptionModel || '';
-  }
+  applyModelValue('geminiModel', config.geminiModel);
+  applyModelValue('geminiFlashModel', config.geminiFlashModel);
+  applyModelValue('codexModel', config.codexModel);
+  applyModelValue('codexTranscriptionModel', config.codexTranscriptionModel);
   setCodexOAuthStatus(
     config.codexOAuthConfigured ? 'Signed in' : 'Not signed in',
     config.codexOAuthConfigured ? 'success' : 'idle',
@@ -154,23 +233,6 @@ export async function showConfigModal(): Promise<void> {
     summaryPromptInput.value = config.summaryPrompt || DEFAULT_SUMMARY_PROMPT;
   }
 
-  // Reset to default buttons
-  const resetGeminiModelBtn = document.getElementById(
-    'resetGeminiModel',
-  ) as HTMLButtonElement | null;
-  if (resetGeminiModelBtn) {
-    resetGeminiModelBtn.onclick = () => {
-      if (geminiModelInput) geminiModelInput.value = '';
-    };
-  }
-  const resetGeminiFlashModelBtn = document.getElementById(
-    'resetGeminiFlashModel',
-  ) as HTMLButtonElement | null;
-  if (resetGeminiFlashModelBtn) {
-    resetGeminiFlashModelBtn.onclick = () => {
-      if (geminiFlashModelInput) geminiFlashModelInput.value = '';
-    };
-  }
   const resetPromptBtn = document.getElementById('resetPrompt') as HTMLButtonElement | null;
   if (resetPromptBtn) {
     resetPromptBtn.onclick = () => {
@@ -284,12 +346,7 @@ export function setupConfigModal(): void {
   cancelConfigBtn = document.getElementById('cancelConfig') as HTMLButtonElement | null;
   aiProviderSelect = document.getElementById('aiProvider') as HTMLSelectElement | null;
   geminiApiKeyInput = document.getElementById('geminiApiKey') as HTMLInputElement | null;
-  geminiModelInput = document.getElementById('geminiModel') as HTMLInputElement | null;
-  geminiFlashModelInput = document.getElementById('geminiFlashModel') as HTMLInputElement | null;
-  codexModelInput = document.getElementById('codexModel') as HTMLInputElement | null;
-  codexTranscriptionModelInput = document.getElementById(
-    'codexTranscriptionModel',
-  ) as HTMLInputElement | null;
+  setupModelControls();
   loginCodexOAuthBtn = document.getElementById('loginCodexOAuth') as HTMLButtonElement | null;
   clearCodexOAuthBtn = document.getElementById('clearCodexOAuth') as HTMLButtonElement | null;
   codexOAuthStatus = document.getElementById('codexOAuthStatus');
@@ -464,12 +521,10 @@ export function setupConfigModal(): void {
     saveConfigBtn.addEventListener('click', async () => {
       const aiProvider = aiProviderSelect?.value === 'codex' ? 'codex' : 'gemini';
       const geminiKey = geminiApiKeyInput?.value.trim() ?? '';
-      const geminiModel = geminiModelInput ? geminiModelInput.value.trim() : '';
-      const geminiFlashModel = geminiFlashModelInput ? geminiFlashModelInput.value.trim() : '';
-      const codexModel = codexModelInput ? codexModelInput.value.trim() : '';
-      const codexTranscriptionModel = codexTranscriptionModelInput
-        ? codexTranscriptionModelInput.value.trim()
-        : '';
+      const geminiModel = readModelValue('geminiModel');
+      const geminiFlashModel = readModelValue('geminiFlashModel');
+      const codexModel = readModelValue('codexModel');
+      const codexTranscriptionModel = readModelValue('codexTranscriptionModel');
       const notionKey = notionApiKeyInput?.value.trim() ?? '';
       const notionDb = notionDatabaseIdInput?.value.trim() ?? '';
       const slackWebhookUrl = slackWebhookUrlInput?.value.trim() ?? '';
