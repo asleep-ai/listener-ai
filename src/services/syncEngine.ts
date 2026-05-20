@@ -49,11 +49,26 @@ export type MeetingSyncState = {
   lastSyncedAt: string;
 };
 
+// Tombstone marks a deletion that needs to propagate. Created when we detect
+// a local deletion (meeting in state but not on disk), uploaded to Drive's
+// `.listener-tombstones/` folder so other devices see + apply it. Tracked
+// locally so we don't re-upload the meeting on the next sync.
+export type TombstoneState = {
+  // Drive file ID of the tombstone JSON in .listener-tombstones/, so we can
+  // GC it after the retention window. Optional because a tombstone we
+  // discover from a remote write may not need a local-side Drive ID until
+  // we GC it.
+  driveTombstoneId?: string;
+  deletedAt: string;
+};
+
 export type SyncState = {
   version: SyncStateVersion;
   appFolderId?: string;
+  tombstonesFolderId?: string;
   appFolderName: string;
   meetings: Record<string, MeetingSyncState>;
+  tombstones?: Record<string, TombstoneState>;
   lastSyncedAt?: string;
 };
 
@@ -62,6 +77,8 @@ export type SyncResult = {
   downloaded: string[];
   skipped: string[];
   conflicts: string[];
+  deleted: string[];
+  tombstoned: string[];
   errors: Array<{ meeting: string; file?: string; error: string }>;
 };
 
@@ -79,6 +96,8 @@ export type SyncEngineOptions = {
 };
 
 const DEFAULT_EXCLUDES: RegExp[] = [/^\./];
+const TOMBSTONES_FOLDER_NAME = '.listener-tombstones';
+const TOMBSTONE_RETENTION_DAYS = 30;
 const AUDIO_EXTENSIONS = new Set([
   '.webm',
   '.mp3',
@@ -123,8 +142,10 @@ export class SyncEngine {
       return {
         version: 1,
         appFolderId: parsed.appFolderId,
+        tombstonesFolderId: parsed.tombstonesFolderId,
         appFolderName: parsed.appFolderName ?? this.appFolderName,
         meetings: parsed.meetings ?? {},
+        tombstones: parsed.tombstones ?? {},
         lastSyncedAt: parsed.lastSyncedAt,
       };
     } catch (err) {
@@ -138,6 +159,7 @@ export class SyncEngine {
       version: 1,
       appFolderName: this.appFolderName,
       meetings: {},
+      tombstones: {},
     };
   }
 
@@ -154,9 +176,12 @@ export class SyncEngine {
       downloaded: [],
       skipped: [],
       conflicts: [],
+      deleted: [],
+      tombstoned: [],
       errors: [],
     };
     const state = this.loadState();
+    state.tombstones = state.tombstones ?? {};
 
     if (!state.appFolderId) {
       const folder = await this.driveClient.ensureFolder(this.appFolderName);
@@ -164,23 +189,75 @@ export class SyncEngine {
       this.saveState(state);
       this.logger(`Created Drive app folder: ${this.appFolderName} (${folder.id})`);
     }
+    if (!state.tombstonesFolderId) {
+      const folder = await this.driveClient.ensureFolder(
+        TOMBSTONES_FOLDER_NAME,
+        state.appFolderId,
+      );
+      state.tombstonesFolderId = folder.id;
+      this.saveState(state);
+      this.logger(`Created tombstones folder: ${folder.id}`);
+    }
 
     fs.mkdirSync(this.transcriptionsDir, { recursive: true });
 
-    // Enumerate the join: union of local meeting folders + remote subfolders.
-    // drive.file scope means listFolder only sees folders this app created
-    // (i.e. Listener.AI/* that we uploaded), so there's no cross-contamination
-    // with the user's other Drive content.
+    // 1. Process remote tombstones first -- delete local meetings that were
+    //    deleted on another device. Must come BEFORE the upload pass so we
+    //    don't immediately re-upload a meeting we're about to delete.
+    await this.processRemoteTombstones(state, result);
+
+    // Capture the local + remote snapshot once. We need both for the
+    // deletion detection pass and the upload/download pass that follows.
     const localMeetingNames = this.scanLocalMeetingNames();
     const remoteMeetingEntries = await this.scanRemoteMeetingFolders(state.appFolderId);
+    const remoteByName = new Map(remoteMeetingEntries.map((m) => [m.name, m]));
+
+    // 2. Detect locally-deleted meetings: anything tracked in state.meetings
+    //    that's no longer on disk AND not already tombstoned. Must come
+    //    BEFORE the main upload/download loop, or the remote folder would
+    //    look like "first download from another device" and we'd re-create
+    //    the local folder instead of propagating the deletion.
+    for (const name of Object.keys(state.meetings)) {
+      if (state.tombstones[name]) continue;
+      if (localMeetingNames.includes(name)) continue;
+      const remoteEntry = remoteByName.get(name);
+      if (remoteEntry) {
+        await this.tombstoneLocalDeletion(name, state, result);
+      } else {
+        // Both sides gone (e.g. another device deleted + GC'd its tombstone
+        // while we were offline). Clean up the orphan state entry.
+        delete state.meetings[name];
+      }
+      this.saveState(state);
+    }
+
+    // 3. Enumerate the join: union of local meeting folders + remote subfolders.
+    //    Tombstoned meetings are skipped (their state entry was removed in 2
+    //    or 1 already; the tombstones map keeps us from resurrecting).
     const allNames = new Set<string>([
       ...localMeetingNames,
       ...remoteMeetingEntries.map((m) => m.name),
     ]);
 
     for (const name of [...allNames].sort()) {
+      if (state.tombstones[name]) {
+        // Local file resurrected after deletion (manual restore, backup
+        // tool, etc.) -- re-delete to honor the user's prior deletion.
+        if (localMeetingNames.includes(name)) {
+          const localPath = path.join(this.transcriptionsDir, name);
+          try {
+            fs.rmSync(localPath, { recursive: true, force: true });
+            result.deleted.push(name);
+            this.logger(`Deleted resurrected local meeting "${name}" (tombstoned).`);
+          } catch (err) {
+            result.errors.push({ meeting: name, error: (err as Error).message });
+          }
+        }
+        continue;
+      }
+
       const localExists = localMeetingNames.includes(name);
-      const remoteEntry = remoteMeetingEntries.find((m) => m.name === name);
+      const remoteEntry = remoteByName.get(name);
       try {
         if (localExists && remoteEntry) {
           await this.syncMeetingBidirectional(name, remoteEntry, state, result);
@@ -196,9 +273,131 @@ export class SyncEngine {
       }
     }
 
+    // 4. GC tombstones older than the retention window.
+    await this.gcOldTombstones(state, result);
+
     state.lastSyncedAt = new Date().toISOString();
     this.saveState(state);
     return result;
+  }
+
+  // Reads .listener-tombstones/ on Drive, marks any new tombstones in our
+  // local state, and deletes the corresponding local meeting folders. A
+  // tombstone we created ourselves (driveTombstoneId already in state) is
+  // skipped here -- we already handled the local deletion at creation time.
+  private async processRemoteTombstones(
+    state: SyncState,
+    result: SyncResult,
+  ): Promise<void> {
+    if (!state.tombstonesFolderId) return;
+    const remoteTombstones = await this.driveClient.listFolder(state.tombstonesFolderId);
+    for (const entry of remoteTombstones) {
+      if (!entry.name.endsWith('.json')) continue;
+      const meetingName = entry.name.slice(0, -'.json'.length);
+      if (state.tombstones?.[meetingName]) {
+        // Already processed locally; refresh the driveTombstoneId in case
+        // another device rewrote the tombstone (e.g. echo).
+        state.tombstones[meetingName].driveTombstoneId = entry.id;
+        continue;
+      }
+      try {
+        const content = await this.driveClient.downloadFile(entry.id);
+        const parsed = JSON.parse(content.toString('utf-8')) as { deletedAt?: string };
+        const deletedAt = parsed.deletedAt ?? new Date().toISOString();
+        state.tombstones![meetingName] = {
+          driveTombstoneId: entry.id,
+          deletedAt,
+        };
+
+        // Remove from meetings map and from disk if present.
+        delete state.meetings[meetingName];
+        const localPath = path.join(this.transcriptionsDir, meetingName);
+        if (fs.existsSync(localPath)) {
+          fs.rmSync(localPath, { recursive: true, force: true });
+          result.deleted.push(meetingName);
+          this.logger(`Applied remote tombstone for "${meetingName}".`);
+        }
+      } catch (err) {
+        result.errors.push({
+          meeting: meetingName,
+          error: `tombstone apply: ${(err as Error).message}`,
+        });
+      }
+    }
+  }
+
+  // Single-meeting deletion: trash the Drive folder (soft delete, Drive
+  // auto-purges trash after ~30 days), upload a tombstone JSON to
+  // .listener-tombstones/, and remove the meeting from state. Called from
+  // syncOnce when a tracked meeting is no longer on disk.
+  private async tombstoneLocalDeletion(
+    name: string,
+    state: SyncState,
+    result: SyncResult,
+  ): Promise<void> {
+    if (!state.tombstonesFolderId) return;
+    const meetingState = state.meetings[name];
+    if (!meetingState) return;
+
+    try {
+      // Trash the Drive folder. Failure is non-fatal -- the tombstone is the
+      // durable signal; folder may already be gone (404).
+      if (meetingState.driveFolderId) {
+        try {
+          await this.driveClient.trashFile(meetingState.driveFolderId);
+        } catch (trashErr) {
+          this.logger(
+            `trashFile failed for "${name}" (continuing): ${(trashErr as Error).message}`,
+          );
+        }
+      }
+
+      const tombstonePayload = {
+        meetingName: name,
+        deletedAt: new Date().toISOString(),
+        driveFolderId: meetingState.driveFolderId,
+      };
+      const uploaded = await this.driveClient.uploadFile({
+        name: `${name}.json`,
+        parentId: state.tombstonesFolderId,
+        content: JSON.stringify(tombstonePayload, null, 2),
+        mimeType: 'application/json',
+      });
+
+      state.tombstones![name] = {
+        driveTombstoneId: uploaded.id,
+        deletedAt: tombstonePayload.deletedAt,
+      };
+      delete state.meetings[name];
+      result.tombstoned.push(name);
+      this.logger(`Uploaded tombstone for locally-deleted "${name}".`);
+    } catch (err) {
+      result.errors.push({ meeting: name, error: (err as Error).message });
+    }
+  }
+
+  // Remove tombstones older than TOMBSTONE_RETENTION_DAYS from both Drive
+  // and local state. After GC, an offline device that comes back online
+  // beyond the retention window won't see the deletion signal and could
+  // re-upload the meeting -- acceptable edge case for a rare scenario.
+  private async gcOldTombstones(state: SyncState, result: SyncResult): Promise<void> {
+    if (!state.tombstones) return;
+    const cutoff = Date.now() - TOMBSTONE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    const names = Object.keys(state.tombstones);
+    for (const name of names) {
+      const tombstone = state.tombstones[name];
+      const deletedAtMs = Date.parse(tombstone.deletedAt);
+      if (!Number.isFinite(deletedAtMs) || deletedAtMs >= cutoff) continue;
+      try {
+        if (tombstone.driveTombstoneId) {
+          await this.driveClient.deleteFile(tombstone.driveTombstoneId);
+        }
+        delete state.tombstones[name];
+        this.logger(`GC'd tombstone for "${name}" (older than ${TOMBSTONE_RETENTION_DAYS}d).`);
+      } catch (err) {
+        result.errors.push({ meeting: name, error: `tombstone GC: ${(err as Error).message}` });
+      }
+    }
   }
 
   private scanLocalMeetingNames(): string[] {

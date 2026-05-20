@@ -202,6 +202,21 @@ export class GoogleDriveClient {
     await this.ensureOk(res, `Drive deleteFile ${fileId}`);
   }
 
+  // Soft-delete: moves the file/folder to Drive trash. Recoverable via
+  // drive.google.com/trash for ~30 days (Google's default retention). Use
+  // for user-facing deletions; reserve permanent deleteFile for internal
+  // cleanup (e.g. GC of tombstones).
+  async trashFile(fileId: string): Promise<void> {
+    const url = new URL(`${DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}`);
+    url.searchParams.set('fields', 'id,trashed');
+    const res = await this.authedFetch(url.toString(), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trashed: true }),
+    });
+    await this.ensureOk(res, `Drive trashFile ${fileId}`);
+  }
+
   // Downloads file content as a Buffer. Drive returns the raw bytes when
   // `alt=media` is set; without it the response would be the file metadata.
   async downloadFile(fileId: string): Promise<Buffer> {

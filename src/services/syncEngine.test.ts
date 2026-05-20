@@ -24,6 +24,8 @@ class MockDriveClient {
   uploads: UploadCall[] = [];
   ensureFolderCalls: Array<{ name: string; parentId?: string }> = [];
   downloadCalls: string[] = [];
+  trashCalls: string[] = [];
+  deleteCalls: string[] = [];
   // Simulated Drive content keyed by folder id.
   // Top-level "app folder" id is "app-1" by default; meeting folders are
   // children of that. Tests pre-seed this map to simulate remote-only data.
@@ -130,6 +132,25 @@ class MockDriveClient {
     const content = this.fileContents.get(fileId);
     if (!content) throw new Error(`MockDriveClient: no content for ${fileId}`);
     return content;
+  }
+
+  async trashFile(fileId: string): Promise<void> {
+    this.trashCalls.push(fileId);
+    // Remove from any parent's listing so subsequent listFolder calls don't
+    // see it (Drive's default filter excludes trashed entries).
+    for (const [folderId, files] of this.folderContents) {
+      const filtered = files.filter((f) => f.id !== fileId);
+      if (filtered.length !== files.length) this.folderContents.set(folderId, filtered);
+    }
+  }
+
+  async deleteFile(fileId: string): Promise<void> {
+    this.deleteCalls.push(fileId);
+    this.fileContents.delete(fileId);
+    for (const [folderId, files] of this.folderContents) {
+      const filtered = files.filter((f) => f.id !== fileId);
+      if (filtered.length !== files.length) this.folderContents.set(folderId, filtered);
+    }
   }
 
   // Test helper: pre-seed a remote meeting folder with files (as if another
@@ -431,10 +452,11 @@ describe('SyncEngine: state persistence', () => {
 
     mockClient.ensureFolderCalls = [];
     await makeEngine().syncOnce();
-    // No new ensureFolder calls needed -- app folder + meeting folder both
-    // cached in sync state.
+    // No new ensureFolder calls needed -- app folder + tombstones folder +
+    // meeting folder all cached in sync state.
     assert.equal(mockClient.ensureFolderCalls.length, 0);
-    assert.equal(firstEnsureCount, 2);
+    // First sync ensures: Listener.AI, .listener-tombstones, m1
+    assert.equal(firstEnsureCount, 3);
   });
 
   it('starts fresh when state file is corrupt', async () => {
@@ -471,10 +493,15 @@ describe('SyncEngine: error recovery', () => {
     makeMeeting('bad', { 'summary.md': 's' });
     makeMeeting('good', { 'summary.md': 's' });
 
-    let failCount = 0;
+    // Fail the first upload to the "bad" meeting folder. Folder ids are
+    // assigned sequentially: Listener.AI=folder-1, .listener-tombstones=
+    // folder-2, then meeting folders in sort order: bad=folder-3, good=
+    // folder-4. We can't predict ids cleanly across engine refactors, so
+    // match by filename + first-call instead.
+    let failed = false;
     mockClient.failNextUpload = (call) => {
-      if (call.parentId.includes('folder-2') && failCount === 0) {
-        failCount++;
+      if (call.name === 'summary.md' && !failed) {
+        failed = true;
         return new Error('drive 500');
       }
       return undefined;
@@ -482,6 +509,7 @@ describe('SyncEngine: error recovery', () => {
 
     const result = await makeEngine().syncOnce();
     assert.ok(result.errors.length >= 1);
+    // good's upload should still succeed
     assert.ok(result.uploaded.some((u) => u.startsWith('good/')));
   });
 
@@ -494,6 +522,126 @@ describe('SyncEngine: error recovery', () => {
 
     const second = await makeEngine().syncOnce();
     assert.deepEqual(second.uploaded, ['m1/summary.md']);
+  });
+});
+
+describe('SyncEngine: deletions and tombstones (Phase 3C)', () => {
+  it('local deletion uploads a tombstone and trashes the Drive folder', async () => {
+    // First sync: meeting exists on both sides.
+    makeMeeting('m1', { 'summary.md': 's' });
+    await makeEngine().syncOnce();
+    const state1 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    const driveFolderId = state1.meetings['m1'].driveFolderId;
+
+    // User deletes the meeting locally between syncs.
+    rmDir(path.join(transcriptionsDir, 'm1'));
+
+    const result = await makeEngine().syncOnce();
+
+    assert.deepEqual(result.tombstoned, ['m1']);
+    assert.ok(mockClient.trashCalls.includes(driveFolderId), 'expected trashFile on meeting folder');
+
+    // Tombstone JSON uploaded under .listener-tombstones/
+    const tombstoneUpload = mockClient.uploads.find((u) => u.name === 'm1.json');
+    assert.ok(tombstoneUpload, 'expected tombstone JSON upload');
+    const payload = JSON.parse((tombstoneUpload!.content as string).toString());
+    assert.equal(payload.meetingName, 'm1');
+    assert.ok(payload.deletedAt);
+
+    // State: meeting moved from meetings to tombstones
+    const state2 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    assert.ok(!state2.meetings['m1'], 'meeting removed from state.meetings');
+    assert.ok(state2.tombstones!['m1'], 'tombstone recorded in state.tombstones');
+  });
+
+  it('does not re-upload a tombstoned meeting on subsequent syncs', async () => {
+    makeMeeting('m1', { 'summary.md': 's' });
+    await makeEngine().syncOnce();
+    rmDir(path.join(transcriptionsDir, 'm1'));
+    await makeEngine().syncOnce(); // first sync after delete: tombstones
+
+    mockClient.uploads = [];
+    mockClient.trashCalls = [];
+
+    // Third sync: should be a no-op for m1 (tombstoned + no local + remote trashed).
+    const result = await makeEngine().syncOnce();
+    assert.deepEqual(result.uploaded, []);
+    assert.deepEqual(result.tombstoned, []);
+    assert.deepEqual(result.deleted, []);
+  });
+
+  it('remote tombstone deletes local meeting on next sync', async () => {
+    // Device A's perspective: sync up m1 normally so state knows about it.
+    makeMeeting('m1', { 'summary.md': 's' });
+    await makeEngine().syncOnce();
+
+    // Simulate Device B deleting m1: insert a tombstone JSON in the
+    // .listener-tombstones folder on Drive (the folder id was created
+    // during the first sync).
+    const state1 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    const tombstonesFolderId = state1.tombstonesFolderId!;
+    // Simulate "another device" by uploading the tombstone through the same
+    // mock client so it lands in the seeded folderContents.
+    await mockClient.uploadFile({
+      name: 'm1.json',
+      parentId: tombstonesFolderId,
+      content: JSON.stringify({
+        meetingName: 'm1',
+        deletedAt: new Date().toISOString(),
+      }),
+      mimeType: 'application/json',
+    });
+
+    // Device A re-syncs and should pick up the tombstone.
+    const result = await makeEngine().syncOnce();
+
+    assert.deepEqual(result.deleted, ['m1']);
+    assert.equal(
+      fs.existsSync(path.join(transcriptionsDir, 'm1')),
+      false,
+      'local meeting folder should be removed',
+    );
+    const state2 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    assert.ok(!state2.meetings['m1']);
+    assert.ok(state2.tombstones!['m1']);
+  });
+
+  it('re-deletes a meeting whose folder was resurrected locally after tombstoning', async () => {
+    makeMeeting('m1', { 'summary.md': 's' });
+    await makeEngine().syncOnce();
+    rmDir(path.join(transcriptionsDir, 'm1'));
+    await makeEngine().syncOnce(); // tombstone uploaded
+
+    // User accidentally recreates the local folder (or restores from
+    // backup) -- tombstone is still in state, so engine should re-delete.
+    makeMeeting('m1', { 'summary.md': 'resurrected' });
+
+    const result = await makeEngine().syncOnce();
+    assert.deepEqual(result.deleted, ['m1']);
+    assert.equal(fs.existsSync(path.join(transcriptionsDir, 'm1')), false);
+  });
+
+  it('GC removes tombstones older than the retention window', async () => {
+    makeMeeting('m1', { 'summary.md': 's' });
+    await makeEngine().syncOnce();
+    rmDir(path.join(transcriptionsDir, 'm1'));
+    await makeEngine().syncOnce();
+
+    // Backdate the tombstone to 31 days ago.
+    const stateRaw = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    stateRaw.tombstones!['m1'].deletedAt = oldDate;
+    fs.writeFileSync(syncStatePath, JSON.stringify(stateRaw));
+    const tombstoneFileId = stateRaw.tombstones!['m1'].driveTombstoneId!;
+
+    mockClient.deleteCalls = [];
+    const result = await makeEngine().syncOnce();
+
+    assert.ok(mockClient.deleteCalls.includes(tombstoneFileId), 'tombstone file deleted');
+    const state3 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    assert.ok(!state3.tombstones!['m1'], 'tombstone removed from state');
+    // No errors from GC
+    assert.deepEqual(result.errors, []);
   });
 });
 

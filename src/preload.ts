@@ -59,6 +59,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         downloaded: string[];
         skipped: string[];
         conflicts: string[];
+        deleted: string[];
+        tombstoned: string[];
         errors: Array<{ meeting: string; file?: string; error: string }>;
       };
       error?: string;

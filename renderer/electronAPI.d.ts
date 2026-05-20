@@ -58,6 +58,8 @@ export type GoogleSyncResult = {
   downloaded: string[];
   skipped: string[];
   conflicts: string[];
+  deleted: string[];
+  tombstoned: string[];
   errors: Array<{ meeting: string; file?: string; error: string }>;
 };
 

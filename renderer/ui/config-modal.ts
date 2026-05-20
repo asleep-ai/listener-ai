@@ -579,13 +579,16 @@ export function setupConfigModal(): void {
     if (status.phase === 'syncing') {
       setGoogleSyncStatus('Syncing...', 'idle');
     } else if (status.phase === 'success' && status.result) {
-      const { uploaded, downloaded, skipped, conflicts } = status.result;
+      const { uploaded, downloaded, skipped, conflicts, deleted, tombstoned } =
+        status.result;
       const parts = [
         `${uploaded.length} uploaded`,
         `${downloaded.length} downloaded`,
         `${skipped.length} skipped`,
       ];
       if (conflicts.length > 0) parts.push(`${conflicts.length} conflict(s) backed up`);
+      if (deleted.length > 0) parts.push(`${deleted.length} deleted`);
+      if (tombstoned.length > 0) parts.push(`${tombstoned.length} marked for deletion`);
       setGoogleSyncStatus(`Synced just now (${parts.join(', ')})`, 'success');
     } else if (status.phase === 'error') {
       const errCount = status.result?.errors.length ?? 0;

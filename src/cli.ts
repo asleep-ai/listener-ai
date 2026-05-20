@@ -500,11 +500,14 @@ async function handleGoogleSync(config: ConfigService, dataPath: string): Promis
 
   process.stderr.write(
     `Done. Uploaded ${result.uploaded.length}, downloaded ${result.downloaded.length}, ` +
-      `skipped ${result.skipped.length}, conflicts ${result.conflicts.length}, errors ${result.errors.length}.\n`,
+      `skipped ${result.skipped.length}, conflicts ${result.conflicts.length}, ` +
+      `deleted ${result.deleted.length}, tombstoned ${result.tombstoned.length}, errors ${result.errors.length}.\n`,
   );
   for (const u of result.uploaded) process.stderr.write(`  + ${u}\n`);
   for (const d of result.downloaded) process.stderr.write(`  v ${d}\n`);
   for (const c of result.conflicts) process.stderr.write(`  ! conflict (LWW + backup): ${c}\n`);
+  for (const t of result.tombstoned) process.stderr.write(`  - tombstoned: ${t}\n`);
+  for (const d of result.deleted) process.stderr.write(`  - applied deletion: ${d}\n`);
   if (result.errors.length > 0) {
     process.stderr.write('\nErrors:\n');
     for (const e of result.errors) {
