@@ -59,12 +59,10 @@ function getClientCredentials(): { clientId: string; clientSecret: string } {
 }
 
 export function hasGoogleOAuthClientConfigured(): boolean {
-  try {
-    getClientCredentials();
-    return true;
-  } catch {
-    return false;
-  }
+  return (
+    !!process.env.LISTENER_GOOGLE_OAUTH_CLIENT_ID?.trim() &&
+    !!process.env.LISTENER_GOOGLE_OAUTH_CLIENT_SECRET?.trim()
+  );
 }
 
 export function getGoogleOAuthEnvCredentials(): GoogleOAuthCredentials | undefined {

@@ -283,7 +283,7 @@ export class ConfigService {
   }
 
   getGoogleDriveEnabled(): boolean {
-    return this.config.googleDriveEnabled || false;
+    return this.config.googleDriveEnabled ?? false;
   }
 
   setGoogleDriveEnabled(enabled: boolean): void {

@@ -99,6 +99,9 @@ export class GoogleDriveClient {
     const url = new URL(`${DRIVE_API_BASE}/files`);
     url.searchParams.set('q', q);
     url.searchParams.set('fields', 'files(id,name,mimeType,modifiedTime,size,parents)');
+    // TODO(#137): paginate via nextPageToken. A meeting folder with >100 files
+    // silently drops the rest -- audio + summary + transcript per meeting fits
+    // easily, but conflict backups or future attachments could push it over.
     url.searchParams.set('pageSize', '100');
     url.searchParams.set('spaces', 'drive');
 

@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { mimeTypeForExtension } from '../audioFormats';
+import { isSupportedAudioExtension, mimeTypeForFile } from '../audioFormats';
 import {
   type DriveFile,
   type GoogleDriveClient,
@@ -98,17 +98,6 @@ export type SyncEngineOptions = {
 const DEFAULT_EXCLUDES: RegExp[] = [/^\./];
 const TOMBSTONES_FOLDER_NAME = '.listener-tombstones';
 const TOMBSTONE_RETENTION_DAYS = 30;
-const AUDIO_EXTENSIONS = new Set([
-  '.webm',
-  '.mp3',
-  '.m4a',
-  '.wav',
-  '.ogg',
-  '.flac',
-  '.aac',
-  '.wma',
-  '.opus',
-]);
 
 export class SyncEngine {
   private readonly driveClient: GoogleDriveClient;
@@ -301,9 +290,12 @@ export class SyncEngine {
         continue;
       }
       try {
-        const content = await this.driveClient.downloadFile(entry.id);
-        const parsed = JSON.parse(content.toString('utf-8')) as { deletedAt?: string };
-        const deletedAt = parsed.deletedAt ?? new Date().toISOString();
+        // Drive's modifiedTime is set on tombstone create and never updated
+        // (we don't PATCH tombstone files), so we can use it as deletedAt
+        // without downloading the JSON body. Saves one API call per
+        // tombstone, which matters during back-to-back sync recovery when
+        // many tombstones accumulate before GC.
+        const deletedAt = entry.modifiedTime ?? new Date().toISOString();
         state.tombstones![meetingName] = {
           driveTombstoneId: entry.id,
           deletedAt,
@@ -475,14 +467,7 @@ export class SyncEngine {
       if (this.isAudioFile(remote.name)) {
         // Track but don't download. Phase 3D will surface a "Download for
         // playback" affordance per file.
-        meetingState.files[remote.name] = {
-          driveFileId: remote.id,
-          localMtimeMs: 0,
-          driveModifiedTime: remote.modifiedTime,
-          mimeType: remote.mimeType,
-          lastUploadedAt: new Date().toISOString(),
-          cloudOnly: true,
-        };
+        this.trackCloudOnly(meetingState, remote.name, remote);
         this.logger(`Cloud-only audio tracked: ${meetingName}/${remote.name}`);
         continue;
       }
@@ -565,14 +550,7 @@ export class SyncEngine {
         } else if (remoteEntry) {
           // Remote-only: download (new file from another device), unless audio.
           if (this.isAudioFile(filename)) {
-            meetingState.files[filename] = {
-              driveFileId: remoteEntry.id,
-              localMtimeMs: 0,
-              driveModifiedTime: remoteEntry.modifiedTime,
-              mimeType: remoteEntry.mimeType,
-              lastUploadedAt: new Date().toISOString(),
-              cloudOnly: true,
-            };
+            this.trackCloudOnly(meetingState, filename, remoteEntry);
             this.logger(`Cloud-only audio tracked: ${meetingName}/${filename}`);
             continue;
           }
@@ -802,16 +780,24 @@ export class SyncEngine {
   }
 
   private isAudioFile(filename: string): boolean {
-    return AUDIO_EXTENSIONS.has(path.extname(filename).toLowerCase());
+    return isSupportedAudioExtension(path.extname(filename));
   }
-}
 
-// Centralized mime detection for sync uploads. Mirrors the CLI helper but
-// lives here so the engine doesn't depend on the CLI module.
-export function mimeTypeForFile(fileName: string): string {
-  const ext = path.extname(fileName).toLowerCase();
-  if (ext === '.md') return 'text/markdown';
-  if (ext === '.json') return 'application/json';
-  if (ext === '.txt') return 'text/plain';
-  return mimeTypeForExtension(ext) ?? 'application/octet-stream';
+  // Records a remote-only audio file in the sync state without downloading
+  // it. Used by both download-only and bidirectional paths to keep the
+  // cloud-only entry shape in one place.
+  private trackCloudOnly(
+    meetingState: MeetingSyncState,
+    filename: string,
+    remote: DriveFile,
+  ): void {
+    meetingState.files[filename] = {
+      driveFileId: remote.id,
+      localMtimeMs: 0,
+      driveModifiedTime: remote.modifiedTime,
+      mimeType: remote.mimeType,
+      lastUploadedAt: new Date().toISOString(),
+      cloudOnly: true,
+    };
+  }
 }

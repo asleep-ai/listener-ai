@@ -1436,6 +1436,10 @@ let googleSyncInFlight = false;
 let googleLastSyncedAt: string | null = null;
 let googleLastSyncResult: SyncResult | null = null;
 const GOOGLE_SYNC_INTERVAL_MS = 60_000;
+// Delay before the first sync after enable/sign-in. Short enough that users
+// see activity quickly, long enough that batched config saves (multi-key
+// settings modal commits) don't trigger multiple bursts in flight.
+const GOOGLE_SYNC_INITIAL_DELAY_MS = 5_000;
 
 function broadcastGoogleSyncStatus(
   phase: 'idle' | 'syncing' | 'success' | 'error',
@@ -1507,11 +1511,11 @@ function refreshGoogleSyncTimer(): void {
   const shouldRun =
     configService.getGoogleDriveEnabled() && configService.hasGoogleOAuth();
   if (shouldRun && !googleSyncTimer) {
-    // Run one cycle ~5s after toggle so the user sees activity quickly, then
-    // continue on the regular interval.
+    // Run one cycle shortly after toggle so the user sees activity quickly,
+    // then continue on the regular interval.
     setTimeout(() => {
       void runGoogleSync();
-    }, 5_000);
+    }, GOOGLE_SYNC_INITIAL_DELAY_MS);
     googleSyncTimer = setInterval(() => {
       void runGoogleSync();
     }, GOOGLE_SYNC_INTERVAL_MS);

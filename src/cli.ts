@@ -6,7 +6,7 @@ import * as readline from 'readline';
 import * as path from 'path';
 import { type AgentScope, AgentService, type ConfigProposal } from './agentService';
 import { GEMINI_THINKING_LEVELS, isAiProvider, normalizeGeminiThinkingLevel } from './aiProvider';
-import { extensionForMimeType } from './audioFormats';
+import { extensionForMimeType, mimeTypeForFile } from './audioFormats';
 import { type AppConfig, ConfigService } from './configService';
 import { loginCodexOAuth } from './codexOAuth';
 import { getDataPath } from './dataPath';
@@ -14,7 +14,6 @@ import { GeminiService } from './geminiService';
 import { loginGoogleOAuth, resolveGoogleAccessToken } from './googleOAuth';
 import { GoogleDriveClient, uploadMeetingFolder } from './services/googleDriveService';
 import { SyncEngine } from './services/syncEngine';
-import { mimeTypeForExtension } from './audioFormats';
 import {
   formatTimestamp,
   getTranscriptionsDir,
@@ -428,7 +427,7 @@ async function handleGoogleUpload(
       return {
         name: e.name,
         content,
-        mimeType: mimeTypeForUploadFile(e.name),
+        mimeType: mimeTypeForFile(e.name),
       };
     });
 
@@ -503,11 +502,11 @@ async function handleGoogleSync(config: ConfigService, dataPath: string): Promis
       `skipped ${result.skipped.length}, conflicts ${result.conflicts.length}, ` +
       `deleted ${result.deleted.length}, tombstoned ${result.tombstoned.length}, errors ${result.errors.length}.\n`,
   );
-  for (const u of result.uploaded) process.stderr.write(`  + ${u}\n`);
-  for (const d of result.downloaded) process.stderr.write(`  v ${d}\n`);
-  for (const c of result.conflicts) process.stderr.write(`  ! conflict (LWW + backup): ${c}\n`);
-  for (const t of result.tombstoned) process.stderr.write(`  - tombstoned: ${t}\n`);
-  for (const d of result.deleted) process.stderr.write(`  - applied deletion: ${d}\n`);
+  for (const item of result.uploaded) process.stderr.write(`  + ${item}\n`);
+  for (const item of result.downloaded) process.stderr.write(`  v ${item}\n`);
+  for (const item of result.conflicts) process.stderr.write(`  ! conflict (LWW + backup): ${item}\n`);
+  for (const item of result.tombstoned) process.stderr.write(`  - tombstoned: ${item}\n`);
+  for (const item of result.deleted) process.stderr.write(`  x applied deletion: ${item}\n`);
   if (result.errors.length > 0) {
     process.stderr.write('\nErrors:\n');
     for (const e of result.errors) {
@@ -517,13 +516,6 @@ async function handleGoogleSync(config: ConfigService, dataPath: string): Promis
   }
 }
 
-function mimeTypeForUploadFile(fileName: string): string {
-  const ext = path.extname(fileName).toLowerCase();
-  if (ext === '.md') return 'text/markdown';
-  if (ext === '.json') return 'application/json';
-  if (ext === '.txt') return 'text/plain';
-  return mimeTypeForExtension(ext) ?? 'application/octet-stream';
-}
 
 function handleConfig(subArgs: string[]): void {
   const dataPath = getDataPath();

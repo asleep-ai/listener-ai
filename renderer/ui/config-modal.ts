@@ -129,22 +129,29 @@ function setupModelControls(): void {
   }
 }
 
+// Apply the project's status-pill styling to a target element. Reused by the
+// Codex sign-in, Google sign-in, and Google sync status indicators -- all
+// three pills share the same CSS surface, only the target element differs.
+function setStatusEl(
+  el: HTMLElement | null,
+  text: string,
+  state: 'idle' | 'success' | 'error' = 'idle',
+): void {
+  if (!el) return;
+  el.textContent = text;
+  el.className = `slack-webhook-status${state === 'idle' ? '' : ` is-${state}`}`;
+}
+
 function setCodexOAuthStatus(text: string, state: 'idle' | 'success' | 'error' = 'idle'): void {
-  if (!codexOAuthStatus) return;
-  codexOAuthStatus.textContent = text;
-  codexOAuthStatus.className = `slack-webhook-status${state === 'idle' ? '' : ` is-${state}`}`;
+  setStatusEl(codexOAuthStatus, text, state);
 }
 
 function setGoogleOAuthStatus(text: string, state: 'idle' | 'success' | 'error' = 'idle'): void {
-  if (!googleOAuthStatus) return;
-  googleOAuthStatus.textContent = text;
-  googleOAuthStatus.className = `slack-webhook-status${state === 'idle' ? '' : ` is-${state}`}`;
+  setStatusEl(googleOAuthStatus, text, state);
 }
 
 function setGoogleSyncStatus(text: string, state: 'idle' | 'success' | 'error' = 'idle'): void {
-  if (!googleDriveSyncStatusEl) return;
-  googleDriveSyncStatusEl.textContent = text;
-  googleDriveSyncStatusEl.className = `slack-webhook-status${state === 'idle' ? '' : ` is-${state}`}`;
+  setStatusEl(googleDriveSyncStatusEl, text, state);
 }
 
 function formatLastSynced(iso: string | null | undefined): string {
