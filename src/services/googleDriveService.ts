@@ -95,20 +95,32 @@ export class GoogleDriveClient {
   }
 
   async listFolder(folderId: string): Promise<DriveFile[]> {
+    // Drive v3 caps pageSize at 100 (higher values are silently coerced down),
+    // so the only way to read a folder with >100 entries is to follow
+    // nextPageToken. `fields` must explicitly name `nextPageToken` -- if it
+    // only requests `files(...)`, Drive omits the token and the loop exits
+    // after one page even when more pages exist.
     const q = `'${this.escapeQueryString(folderId)}' in parents and trashed = false`;
     const url = new URL(`${DRIVE_API_BASE}/files`);
     url.searchParams.set('q', q);
-    url.searchParams.set('fields', 'files(id,name,mimeType,modifiedTime,size,parents)');
-    // TODO(#137): paginate via nextPageToken. A meeting folder with >100 files
-    // silently drops the rest -- audio + summary + transcript per meeting fits
-    // easily, but conflict backups or future attachments could push it over.
+    url.searchParams.set(
+      'fields',
+      'nextPageToken,files(id,name,mimeType,modifiedTime,size,parents)',
+    );
     url.searchParams.set('pageSize', '100');
     url.searchParams.set('spaces', 'drive');
 
-    const res = await this.authedFetch(url.toString());
-    await this.ensureOk(res, `Drive listFolder ${folderId}`);
-    const json = (await res.json()) as { files?: DriveFile[] };
-    return json.files ?? [];
+    const all: DriveFile[] = [];
+    let pageToken: string | undefined;
+    do {
+      if (pageToken) url.searchParams.set('pageToken', pageToken);
+      const res = await this.authedFetch(url.toString());
+      await this.ensureOk(res, `Drive listFolder ${folderId}`);
+      const json = (await res.json()) as { files?: DriveFile[]; nextPageToken?: string };
+      if (json.files) all.push(...json.files);
+      pageToken = json.nextPageToken || undefined;
+    } while (pageToken);
+    return all;
   }
 
   async ensureFolder(name: string, parentId?: string): Promise<DriveFile> {
