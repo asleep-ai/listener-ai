@@ -59,6 +59,12 @@ import { FileHandlerService } from './services/fileHandlerService';
 import { metadataService } from './services/metadataService';
 import { notificationService } from './services/notificationService';
 import { fetchAllReleases, fetchReleaseNotes } from './services/releaseNotesService';
+import {
+  currentMonthString,
+  monthRange,
+  summarizeUsage,
+  type UsageSummaryResult,
+} from './services/usageTracker';
 import { SYSTEM_AUDIO_FORMAT, SystemAudioService } from './services/systemAudioService';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
 import { SLACK_WEBHOOK_PREFIX, SlackService, isLikelySlackWebhookUrl } from './slackService';
@@ -2109,6 +2115,7 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
             notionPageUrl: transcription.notionPageUrl,
             slackSentAt: transcription.slackSentAt,
             slackError: transcription.slackError,
+            cost: transcription.cost,
           },
         };
       }
@@ -2117,6 +2124,17 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
 
     // Old format or missing folder fallback: inline data in metadata
     return { success: true, data: metadata };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('get-usage-summary', async (_, opts?: { month?: string }) => {
+  try {
+    const month = opts?.month?.trim() || currentMonthString();
+    const range = monthRange(month);
+    const summary: UsageSummaryResult = summarizeUsage(range);
+    return { success: true, month, summary };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }

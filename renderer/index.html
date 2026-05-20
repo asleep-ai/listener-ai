@@ -345,6 +345,14 @@
 
           <section class="config-pane" id="config-pane-advanced" data-pane="advanced" role="tabpanel" aria-labelledby="config-tab-advanced">
             <p class="config-pane-hint">All optional. Tune transcription accuracy and summary style.</p>
+            <fieldset class="config-subgroup" id="usageSummaryCard">
+              <legend>Usage this month</legend>
+              <div class="usage-summary" role="status" aria-live="polite" aria-atomic="true">
+                <div class="usage-summary-total" id="usageSummaryTotal">$0.00</div>
+                <ul class="usage-summary-breakdown" id="usageSummaryBreakdown"></ul>
+                <small id="usageSummaryFootnote">Best-effort estimate from logged API calls. Your provider invoice is the source of truth.</small>
+              </div>
+            </fieldset>
             <div class="form-group">
               <label for="knownWordsField">Known Words</label>
               <div class="chip-input" id="knownWordsChips">

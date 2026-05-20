@@ -7,6 +7,7 @@
 // overwrite a fresher snapshot.
 
 import { getDom } from '../state';
+import { formatUsd } from '../../src/usageFormat';
 import { showToast } from './notifications';
 import {
   _setCurrentTranscription,
@@ -24,11 +25,18 @@ type Recording = {
   size: number;
 };
 
+type CostSnapshotShape = { usd: number; modelUnknown?: boolean };
+
 type GetRecordingsResult = { success: boolean; recordings: Recording[] };
 type GetMetadataResult = {
   success: boolean;
-  data?: Record<string, unknown> & { transcript?: unknown };
+  data?: Record<string, unknown> & { transcript?: unknown; cost?: CostSnapshotShape };
 };
+
+function formatCostBadge(cost: CostSnapshotShape | undefined): string {
+  if (!cost || typeof cost.usd !== 'number' || cost.usd <= 0) return '';
+  return formatUsd(cost.usd, 'omit');
+}
 type ExportM4AResult = { success?: boolean; canceled?: boolean; code?: string; error?: string };
 type MergeRecordingsResult = {
   success?: boolean;
@@ -110,6 +118,18 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   const meta = document.createElement('p');
   meta.className = 'recording-meta';
   meta.textContent = metaStr;
+  const costBadge = formatCostBadge(metadataResult?.data?.cost as CostSnapshotShape | undefined);
+  if (costBadge) {
+    const sep = document.createTextNode(' · ');
+    const costSpan = document.createElement('span');
+    costSpan.className = 'recording-cost';
+    costSpan.textContent = costBadge;
+    costSpan.title = 'Estimated API cost (best-effort; actual invoice may differ)';
+    // title alone doesn't surface to keyboard / touch / screen-reader users.
+    // aria-label gives all of them the same context without changing layout.
+    costSpan.setAttribute('aria-label', `Estimated API cost ${costBadge}`);
+    meta.append(sep, costSpan);
+  }
   info.append(title, meta);
   item.appendChild(info);
 

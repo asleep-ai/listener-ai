@@ -21,6 +21,7 @@ import {
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
 import { type Context, completeSimple, extractFinalText, getModel } from './piAiClient';
 import { FFmpegManager } from './services/ffmpegManager';
+import { type CostSession, type CostSnapshot, createCostSession } from './services/usageTracker';
 
 const execFileAsync = promisify(execFile);
 
@@ -124,6 +125,10 @@ export interface TranscriptionResult {
   // Pure flag-only notes (empty text) round-trip as `userText: ""` with no
   // subtitle/bullets -- they remain bare timestamp markers.
   highlights?: HighlightEntry[];
+  // Best-effort USD estimate for the API calls that produced this transcription.
+  // Aggregated from per-step usage telemetry via usageTracker. Absent when
+  // every sub-call returned no usage (e.g. test stubs).
+  cost?: CostSnapshot;
 }
 
 export interface HighlightEntry {
@@ -158,6 +163,52 @@ function transcriptOnlyResult(transcript: string): TranscriptionResult {
     actionItems: [],
     emoji: '',
   };
+}
+
+// Attach the session's aggregate cost snapshot to a TranscriptionResult, but
+// drop empty snapshots (no recorded calls -- e.g. test stubs) so we don't
+// pollute the frontmatter with `cost: { usd: 0, breakdown: [] }`.
+function attachCost(result: TranscriptionResult, session: CostSession): TranscriptionResult {
+  const cost = session.snapshot();
+  if (cost.breakdown.length === 0) return result;
+  return { ...result, cost };
+}
+
+// OpenAI's /v1/audio/transcriptions doesn't return token counts, so we record
+// by audio duration alone (per-minute billing on the codex side).
+function recordCodexSttUsage(
+  session: CostSession | undefined,
+  modelId: string,
+  audioSeconds: number,
+): void {
+  session?.record({ modelId, kind: 'transcription', usage: { audioSeconds } });
+}
+
+// Map Gemini's usageMetadata into our UsageTokens. promptTokenCount includes
+// cached tokens, so subtract cachedContentTokenCount before recording so the
+// cached portion isn't billed twice. thoughts billed as output on 2.5 Flash.
+function recordGeminiUsage(
+  session: CostSession | undefined,
+  modelId: string,
+  metadata: unknown,
+): void {
+  if (!session) return;
+  const meta = (metadata ?? {}) as {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    thoughtsTokenCount?: number;
+    cachedContentTokenCount?: number;
+  };
+  const cached = meta.cachedContentTokenCount ?? 0;
+  session.record({
+    modelId,
+    kind: 'transcription',
+    usage: {
+      input: Math.max(0, (meta.promptTokenCount ?? 0) - cached) || undefined,
+      output: (meta.candidatesTokenCount ?? 0) + (meta.thoughtsTokenCount ?? 0) || undefined,
+      cacheRead: cached || undefined,
+    },
+  });
 }
 
 export interface TranscriptionErrorPayload {
@@ -399,6 +450,7 @@ export class GeminiService {
     promptText: string,
     transcript: string,
     signal?: AbortSignal,
+    session?: CostSession,
   ): Promise<string> {
     const modelId = this.provider === 'codex' ? this.codexModel : this.proModel;
     const apiKey =
@@ -427,13 +479,18 @@ export class GeminiService {
     // unifies both: pi-ai translates `reasoning` to reasoningEffort (codex) or
     // thinkingConfig.thinkingLevel (gemini).
     const reasoning = this.provider === 'codex' ? 'xhigh' : this.thinkingLevel;
-    const response = await completeSimple(model, context, {
-      apiKey,
-      temperature: 0.2,
-      maxTokens: 32768,
-      reasoning,
-      signal,
-    });
+    const response = await completeSimple(
+      model,
+      context,
+      {
+        apiKey,
+        temperature: 0.2,
+        maxTokens: 32768,
+        reasoning,
+        signal,
+      },
+      { kind: 'summary', session },
+    );
     return extractFinalText(response);
   }
 
@@ -768,6 +825,7 @@ export class GeminiService {
     options: TranscriptionOptions = {},
   ): Promise<TranscriptionResult> {
     const signal = options.signal;
+    const costSession = createCostSession();
     try {
       let fullTranscript = '';
       const stats = fs.statSync(audioFilePath);
@@ -796,15 +854,18 @@ export class GeminiService {
           options.transcriptionPrompt,
           segmentDuration,
           signal,
+          costSession,
         );
       } else {
         // Get transcript for short audio
         console.error('Transcribing short audio...');
         fullTranscript = await this.getShortAudioTranscript(
           audioFilePath,
+          duration,
           progressCallback,
           options.transcriptionPrompt,
           signal,
+          costSession,
         );
       }
 
@@ -814,7 +875,7 @@ export class GeminiService {
         if (progressCallback) {
           progressCallback(100, 'Transcript ready');
         }
-        return transcriptOnlyResult(fullTranscript);
+        return attachCost(transcriptOnlyResult(fullTranscript), costSession);
       }
 
       // Step 2: Generate summary, key points, action items from transcript
@@ -845,7 +906,12 @@ Return as JSON:
       const highlightsBlock = buildHighlightsPromptBlock(enrichableNotes);
       const summaryPrompt = highlightsBlock ? `${basePrompt}\n\n${highlightsBlock}` : basePrompt;
 
-      const summaryText = await this.generateSummary(summaryPrompt, fullTranscript, signal);
+      const summaryText = await this.generateSummary(
+        summaryPrompt,
+        fullTranscript,
+        signal,
+        costSession,
+      );
 
       let summaryData = {
         suggestedTitle: '',
@@ -901,16 +967,19 @@ Return as JSON:
         progressCallback(95, 'Finalizing results...');
       }
 
-      return {
-        transcript: fullTranscript,
-        summary: summaryData.summary,
-        keyPoints: summaryData.keyPoints,
-        actionItems: summaryData.actionItems,
-        emoji: summaryData.emoji,
-        suggestedTitle: summaryData.suggestedTitle,
-        customFields: Object.keys(customFields).length > 0 ? customFields : undefined,
-        highlights,
-      };
+      return attachCost(
+        {
+          transcript: fullTranscript,
+          summary: summaryData.summary,
+          keyPoints: summaryData.keyPoints,
+          actionItems: summaryData.actionItems,
+          emoji: summaryData.emoji,
+          suggestedTitle: summaryData.suggestedTitle,
+          customFields: Object.keys(customFields).length > 0 ? customFields : undefined,
+          highlights,
+        },
+        costSession,
+      );
     } catch (error) {
       console.error('Error in two-step transcription:', error);
       throw error;
@@ -920,9 +989,11 @@ Return as JSON:
   // Get transcript for short audio files
   private async getShortAudioTranscript(
     audioFilePath: string,
+    audioSeconds: number,
     progressCallback?: (percent: number, message: string) => void,
     customPrompt?: string,
     signal?: AbortSignal,
+    session?: CostSession,
   ): Promise<string> {
     try {
       const stats = fs.statSync(audioFilePath);
@@ -934,7 +1005,7 @@ Return as JSON:
 
       const transcriptPrompt = `${this.buildGlossaryBlock()}${customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT}`;
       if (this.provider === 'codex') {
-        return await transcribeCodexAudio({
+        const text = await transcribeCodexAudio({
           getToken: () => this.getCodexToken(),
           audioFilePath,
           model: this.codexTranscriptionModel,
@@ -948,6 +1019,8 @@ Return as JSON:
           // acronyms/quotes) better than forcing a single language.
           signal,
         });
+        recordCodexSttUsage(session, this.codexTranscriptionModel, audioSeconds);
+        return text;
       }
 
       const ai = this.gemini();
@@ -1052,6 +1125,7 @@ Return as JSON:
         });
       }
 
+      recordGeminiUsage(session, this.flashModel, result.usageMetadata);
       return result.text || '';
     } catch (error) {
       console.error('Error transcribing short audio:', error);
@@ -1096,11 +1170,13 @@ Return as JSON:
     segmentEndTime: number,
     customPrompt?: string,
     signal?: AbortSignal,
+    session?: CostSession,
   ): Promise<{ index: number; content: string }> {
     const maxRetries = 3;
     let lastError: any = null;
     let attemptsMade = 0;
     const segmentPrompt = this.createSegmentPrompt(segmentIndex, totalSegments, customPrompt);
+    const segmentSeconds = Math.max(0, segmentEndTime - segmentStartTime);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       attemptsMade = attempt;
@@ -1118,6 +1194,7 @@ Return as JSON:
             prompt: segmentPrompt,
             signal,
           });
+          recordCodexSttUsage(session, this.codexTranscriptionModel, segmentSeconds);
           console.error(`Completed transcription for segment ${segmentIndex + 1}/${totalSegments}`);
           return {
             index: segmentIndex,
@@ -1153,6 +1230,7 @@ Return as JSON:
           },
         });
 
+        recordGeminiUsage(session, this.flashModel, result.usageMetadata);
         const transcript = result.text || '';
 
         console.error(`Completed transcription for segment ${segmentIndex + 1}/${totalSegments}`);
@@ -1226,6 +1304,7 @@ Return as JSON:
     customPrompt?: string,
     segmentDuration = 300,
     signal?: AbortSignal,
+    session?: CostSession,
   ): Promise<string> {
     // Track segments outside the try so the finally can clean them up on
     // abort / mid-pipeline failure too. Without this, cancelled transcribes
@@ -1269,6 +1348,7 @@ Return as JSON:
           segmentEndTime,
           customPrompt,
           combinedSignal,
+          session,
         ).catch((err) => {
           aborter.abort();
           throw err;

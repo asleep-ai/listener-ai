@@ -237,6 +237,31 @@ export type ElectronAPI = {
   getFileInfo: (filePath: string) => Promise<{ exists: boolean; size?: number; name?: string }>;
   getMetadata: (filePath: string) => Promise<Record<string, any> | null>;
   saveMetadata: (filePath: string, metadata: any) => Promise<{ success: boolean }>;
+  getUsageSummary: (opts?: { month?: string }) => Promise<
+    | {
+        success: true;
+        month: string;
+        summary: {
+          totalUsd: number;
+          count: number;
+          modelUnknownCount: number;
+          byModel: Array<{
+            modelId: string;
+            kind: 'summary' | 'transcription' | 'agent';
+            usd: number;
+            count: number;
+            tokens: {
+              input?: number;
+              output?: number;
+              cacheRead?: number;
+              cacheWrite?: number;
+              audioSeconds?: number;
+            };
+          }>;
+        };
+      }
+    | { success: false; error: string }
+  >;
   onUpdateStatus: (cb: (updateInfo: { event: string; data?: any }) => void) => void;
   getUpdateState: () => Promise<{ type: string; version?: string; percent?: number }>;
   downloadUpdate: () => Promise<{ success: boolean; error?: string }>;

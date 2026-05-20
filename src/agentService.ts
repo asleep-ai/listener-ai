@@ -388,7 +388,12 @@ export class AgentService {
 
     for (let step = 0; step < maxSteps; step++) {
       const apiKey = await this.resolveApiKey();
-      const response = await complete(model, context, { apiKey, temperature: 0.3 });
+      const response = await complete(
+        model,
+        context,
+        { apiKey, temperature: 0.3 },
+        { kind: 'agent' },
+      );
       context.messages.push(response);
 
       const toolCalls = extractToolCalls(response);

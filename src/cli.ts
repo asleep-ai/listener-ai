@@ -28,6 +28,7 @@ import {
 import { ALL_FIELDS, type SearchField, resolveFields, searchTranscriptions } from './searchService';
 import { concatAudioFiles } from './services/audioConcatService';
 import { FFmpegManager } from './services/ffmpegManager';
+import { currentMonthString, formatUsd, monthRange, summarizeUsage } from './services/usageTracker';
 
 const SUPPORTED_EXTENSIONS = new Set([
   '.mp3',
@@ -72,6 +73,8 @@ const USAGE_TEXT =
   '       listener google sync                Sync all meetings to Google Drive (upload changes only)\n' +
   '       listener config list|get|set|unset|path\n' +
   '                                           Manage configuration\n' +
+  '       listener usage [--month YYYY-MM] [--json]\n' +
+  '                                           Show estimated API spend (best-effort, default: current month)\n' +
   '\n' +
   '<ref> is a number from `listener list` or a folder name.\n' +
   '\n' +
@@ -1028,6 +1031,62 @@ async function handleAsk(args: string[]): Promise<void> {
   }
 }
 
+async function handleUsage(args: string[]): Promise<void> {
+  let month: string | undefined;
+  let asJson = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--month' && i + 1 < args.length) {
+      month = args[++i];
+      continue;
+    }
+    if (a === '--json') {
+      asJson = true;
+      continue;
+    }
+    process.stderr.write(`Error: Unknown option: ${a}\n`);
+    process.exit(1);
+  }
+
+  const resolvedMonth = month?.trim() || currentMonthString();
+  let range: { since: string; until: string };
+  try {
+    range = monthRange(resolvedMonth);
+  } catch (err) {
+    process.stderr.write(`Error: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  }
+
+  const summary = summarizeUsage(range);
+
+  if (asJson) {
+    process.stdout.write(`${JSON.stringify({ month: resolvedMonth, ...summary }, null, 2)}\n`);
+    return;
+  }
+
+  process.stdout.write(`Usage for ${resolvedMonth}\n`);
+  process.stdout.write(`Total: ${formatUsd(summary.totalUsd)}  (${summary.count} call(s))\n`);
+  if (summary.byModel.length === 0) {
+    process.stdout.write('No API calls recorded.\n');
+    return;
+  }
+  process.stdout.write('\n');
+  for (const row of summary.byModel) {
+    process.stdout.write(
+      `  ${row.modelId.padEnd(28)} ${row.kind.padEnd(14)} ${String(row.count).padStart(4)}  ${formatUsd(row.usd)}\n`,
+    );
+  }
+  if (summary.modelUnknownCount > 0) {
+    process.stdout.write(
+      `\nNote: ${summary.modelUnknownCount} call(s) used a model not in the price table (counted as $0).\n`,
+    );
+  }
+  process.stdout.write(
+    '\nBest-effort estimate. Your Google Cloud / OpenAI invoice is the source of truth.\n',
+  );
+}
+
 async function handleTranscript(args: string[]): Promise<void> {
   let filePath: string | undefined;
   let outputArg: string | undefined;
@@ -1195,6 +1254,11 @@ async function main(): Promise<void> {
 
   if (args[0] === 'transcript') {
     await handleTranscript(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'usage') {
+    await handleUsage(args.slice(1));
     return;
   }
 

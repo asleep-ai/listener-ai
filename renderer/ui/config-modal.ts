@@ -11,6 +11,7 @@ import {
   chooseInitial,
 } from '../services/model-options';
 import { DEFAULT_SUMMARY_PROMPT } from '../state';
+import { formatUsd } from '../../src/usageFormat';
 
 let configModal: HTMLDialogElement | null = null;
 let saveConfigBtn: HTMLButtonElement | null = null;
@@ -308,10 +309,65 @@ export async function showConfigModal(): Promise<void> {
 
   applyAiProviderVisibility();
 
+  // Refresh "Usage this month" card on each open so the totals stay current
+  // even if the user has been recording in the same session. Fire-and-forget;
+  // missing data renders as zeros.
+  void refreshUsageSummaryCard();
+
   // AI Provider tab carries the required-credentials state; open there so the
   // user sees setup status first.
   activateConfigTab('ai');
   if (configModal && !configModal.open) configModal.showModal();
+}
+
+async function refreshUsageSummaryCard(): Promise<void> {
+  const totalEl = document.getElementById('usageSummaryTotal');
+  const listEl = document.getElementById('usageSummaryBreakdown');
+  if (!totalEl || !listEl) return;
+  totalEl.textContent = '…';
+  listEl.innerHTML = '';
+  try {
+    const res = await window.electronAPI.getUsageSummary();
+    if (!res.success) {
+      totalEl.textContent = '$0.00';
+      const li = document.createElement('li');
+      li.textContent = `Couldn't load: ${res.error}`;
+      li.className = 'usage-summary-error';
+      listEl.appendChild(li);
+      return;
+    }
+    totalEl.textContent = formatUsd(res.summary.totalUsd, 'long');
+    if (res.summary.byModel.length === 0) {
+      const li = document.createElement('li');
+      li.className = 'usage-summary-empty';
+      li.textContent = 'No API calls recorded yet this month.';
+      listEl.appendChild(li);
+      return;
+    }
+    for (const row of res.summary.byModel) {
+      const li = document.createElement('li');
+      const label = document.createElement('span');
+      label.className = 'usage-summary-model';
+      label.textContent = `${row.modelId} · ${row.kind} (${row.count})`;
+      const amount = document.createElement('span');
+      amount.className = 'usage-summary-amount';
+      amount.textContent = formatUsd(row.usd, 'long');
+      li.append(label, amount);
+      listEl.appendChild(li);
+    }
+    if (res.summary.modelUnknownCount > 0) {
+      const note = document.createElement('li');
+      note.className = 'usage-summary-empty';
+      note.textContent = `${res.summary.modelUnknownCount} call(s) used a model not in the price table (counted as $0).`;
+      listEl.appendChild(note);
+    }
+  } catch (e) {
+    totalEl.textContent = '$0.00';
+    const li = document.createElement('li');
+    li.className = 'usage-summary-error';
+    li.textContent = `Couldn't load usage: ${e instanceof Error ? e.message : String(e)}`;
+    listEl.appendChild(li);
+  }
 }
 
 function renderKnownWordsChips(): void {

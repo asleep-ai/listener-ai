@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { HighlightEntry, TranscriptionResult } from './geminiService';
+import type { CostSnapshot } from './services/usageTracker';
 
 /** One timestamped note captured while recording. Empty `text` = bare flag. */
 export interface LiveNote {
@@ -167,6 +168,7 @@ interface SummaryFrontmatter {
   notionPageUrl?: string;
   slackSentAt?: string;
   slackError?: string;
+  cost?: CostSnapshot;
 }
 
 function buildFrontmatter(meta: SummaryFrontmatter): string {
@@ -213,6 +215,9 @@ function buildFrontmatter(meta: SummaryFrontmatter): string {
   }
   if (meta.slackError) {
     lines.push(`slackError: ${yamlQuote(meta.slackError)}`);
+  }
+  if (meta.cost && meta.cost.breakdown.length > 0) {
+    lines.push(`cost: ${yamlQuote(JSON.stringify(meta.cost))}`);
   }
   lines.push('---');
   return lines.join('\n');
@@ -387,6 +392,7 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
     mergedFrom: opts.mergedFrom,
     liveNotes: opts.liveNotes,
     highlights,
+    cost: opts.result.cost,
   });
   const summaryBody = formatSummary(
     opts.result,
@@ -505,6 +511,7 @@ export interface ReadTranscriptionResult {
   notionPageUrl?: string;
   slackSentAt?: string;
   slackError?: string;
+  cost?: CostSnapshot;
 }
 
 /**
@@ -535,6 +542,7 @@ export async function readTranscription(
 
     const liveNotes = parseLiveNotesField(meta.liveNotes);
     const highlights = parseHighlightsField(meta.highlights);
+    const cost = parseCostField(meta.cost);
 
     return {
       title: (meta.title as string) || path.basename(folderPath),
@@ -553,9 +561,29 @@ export async function readTranscription(
       notionPageUrl: meta.notionPageUrl as string | undefined,
       slackSentAt: meta.slackSentAt as string | undefined,
       slackError: meta.slackError as string | undefined,
+      cost,
     };
   } catch {
     return null;
+  }
+}
+
+function parseCostField(raw: unknown): CostSnapshot | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!parsed || typeof parsed !== 'object') return undefined;
+    const usd = Number((parsed as { usd?: unknown }).usd);
+    if (!Number.isFinite(usd)) return undefined;
+    const breakdownRaw = (parsed as { breakdown?: unknown }).breakdown;
+    const breakdown = Array.isArray(breakdownRaw)
+      ? (breakdownRaw as CostSnapshot['breakdown'])
+      : [];
+    const modelUnknown = Boolean((parsed as { modelUnknown?: unknown }).modelUnknown);
+    return modelUnknown ? { usd, breakdown, modelUnknown } : { usd, breakdown };
+  } catch (e) {
+    console.warn('Failed to parse cost from frontmatter:', e);
+    return undefined;
   }
 }
 
@@ -592,6 +620,7 @@ export async function updateTranscriptionStatus(
 
   const liveNotes = parseLiveNotesField(meta.liveNotes);
   const highlights = parseHighlightsField(meta.highlights);
+  const cost = parseCostField(meta.cost);
 
   // Spread first so any unknown frontmatter keys (added by future writers, or
   // by hand-edits) survive the round-trip; named fields override with proper
@@ -605,6 +634,7 @@ export async function updateTranscriptionStatus(
     customFields,
     liveNotes,
     highlights,
+    cost,
   };
 
   applyStatusUpdate(merged, 'notionPageUrl', updates.notionPageUrl);
