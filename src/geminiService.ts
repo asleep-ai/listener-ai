@@ -582,7 +582,7 @@ export class GeminiService {
     try {
       signal?.throwIfAborted();
       // Check file size
-      const stats = fs.statSync(prepared.audioFilePath);
+      const stats = await fs.promises.stat(prepared.audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
       console.error(`Audio file size: ${fileSizeInMB.toFixed(2)} MB`);
 
@@ -828,7 +828,7 @@ export class GeminiService {
     const costSession = createCostSession();
     try {
       let fullTranscript = '';
-      const stats = fs.statSync(audioFilePath);
+      const stats = await fs.promises.stat(audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
       // Segment intentionally for parallelism: even when the API would
       // accept the whole file (Gemini long-context, gpt-4o-transcribe-diarize
@@ -996,7 +996,7 @@ Return as JSON:
     session?: CostSession,
   ): Promise<string> {
     try {
-      const stats = fs.statSync(audioFilePath);
+      const stats = await fs.promises.stat(audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
 
       if (progressCallback) {
@@ -1036,7 +1036,7 @@ Return as JSON:
 
         const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
 
-        const fileData = fs.readFileSync(audioFilePath);
+        const fileData = await fs.promises.readFile(audioFilePath);
         const uploadResult = await ai.files.upload({
           file: new Blob([fileData], { type: mimeType }),
           config: { abortSignal: signal },
@@ -1097,7 +1097,7 @@ Return as JSON:
           },
         });
       } else {
-        const audioData = fs.readFileSync(audioFilePath);
+        const audioData = await fs.promises.readFile(audioFilePath);
         const base64Audio = audioData.toString('base64');
         const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
 
@@ -1203,7 +1203,7 @@ Return as JSON:
           };
         }
 
-        const audioData = fs.readFileSync(segmentFile);
+        const audioData = await fs.promises.readFile(segmentFile);
         const base64Audio = audioData.toString('base64');
         const mimeType = mimeTypeForExtension(path.extname(segmentFile));
 
