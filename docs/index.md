@@ -6,7 +6,7 @@ title: Listener.AI
 
 Local-first meeting recorder with AI transcription.
 
-- [Privacy Policy](./privacy.html)
-- [Terms of Service](./terms.html)
+- [Privacy Policy](./privacy/)
+- [Terms of Service](./terms/)
 
 App and source code: [github.com/asleep-ai/listener-ai](https://github.com/asleep-ai/listener-ai).
