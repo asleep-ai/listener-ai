@@ -639,6 +639,83 @@ describe('SyncEngine: deletions and tombstones (Phase 3C)', () => {
   });
 });
 
+describe('SyncEngine: path traversal defense', () => {
+  it('skips a remote tombstone with `..json` (post-slice produces "..")', async () => {
+    // Make sure the transcriptions directory has a sibling file we'd notice
+    // if it disappeared -- guards against a regression where ".." escapes
+    // upward and removes the parent.
+    makeMeeting('legit', { 'summary.md': 's' });
+    await makeEngine().syncOnce(); // bootstrap state.tombstonesFolderId
+    const state1 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    const tombstonesFolderId = state1.tombstonesFolderId!;
+
+    // Adversarial tombstone: filename is `..json`, which after stripping the
+    // `.json` extension becomes `..`. path.join(transcriptionsDir, "..")
+    // would point at the worktree, and fs.rmSync would wipe everything.
+    await mockClient.uploadFile({
+      name: '..json',
+      parentId: tombstonesFolderId,
+      content: JSON.stringify({ deletedAt: new Date().toISOString() }),
+      mimeType: 'application/json',
+    });
+
+    const result = await makeEngine().syncOnce();
+
+    // Tombstone is rejected; legit meeting still on disk; transcriptions
+    // dir intact.
+    assert.deepEqual(result.deleted, []);
+    assert.equal(fs.existsSync(transcriptionsDir), true);
+    assert.equal(fs.existsSync(path.join(transcriptionsDir, 'legit')), true);
+  });
+
+  it('skips a remote tombstone with a path-traversal name', async () => {
+    makeMeeting('legit', { 'summary.md': 's' });
+    await makeEngine().syncOnce();
+    const state1 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    const tombstonesFolderId = state1.tombstonesFolderId!;
+
+    await mockClient.uploadFile({
+      name: '../escape.json',
+      parentId: tombstonesFolderId,
+      content: JSON.stringify({ deletedAt: new Date().toISOString() }),
+      mimeType: 'application/json',
+    });
+
+    const result = await makeEngine().syncOnce();
+    assert.deepEqual(result.deleted, []);
+    assert.equal(fs.existsSync(path.join(transcriptionsDir, 'legit')), true);
+  });
+
+  it('skips a remote meeting folder whose name has path components', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    // Seed a folder with a malicious name.
+    mockClient.seedRemoteMeeting('../escape', appFolder.id, [
+      { name: 'summary.md', content: 'evil' },
+    ]);
+
+    const result = await makeEngine().syncOnce();
+    // Nothing downloaded, no traversal occurred.
+    assert.deepEqual(result.downloaded, []);
+    // Parent of transcriptionsDir was not written to.
+    const parentDir = path.dirname(transcriptionsDir);
+    assert.equal(fs.existsSync(path.join(parentDir, 'escape')), false);
+  });
+
+  it('skips a remote file whose name has path components', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    mockClient.seedRemoteMeeting('m1', appFolder.id, [
+      { name: '../oops.md', content: 'malicious' },
+      { name: 'summary.md', content: 'good' },
+    ]);
+
+    const result = await makeEngine().syncOnce();
+    // The good file downloads; the malicious one is skipped.
+    assert.ok(result.downloaded.includes('m1/summary.md'));
+    assert.ok(!result.downloaded.some((d) => d.includes('oops')));
+    assert.equal(fs.existsSync(path.join(transcriptionsDir, '..', 'oops.md')), false);
+  });
+});
+
 describe('SyncEngine: empty cases', () => {
   it('returns empty result when no meetings exist', async () => {
     const result = await makeEngine().syncOnce();

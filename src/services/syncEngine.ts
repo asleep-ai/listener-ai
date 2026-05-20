@@ -99,6 +99,19 @@ const DEFAULT_EXCLUDES: RegExp[] = [/^\./];
 const TOMBSTONES_FOLDER_NAME = '.listener-tombstones';
 const TOMBSTONE_RETENTION_DAYS = 30;
 
+// Defense against path traversal via remote-controlled names. Drive returns
+// file/folder names verbatim, so a malicious or buggy peer could push an
+// entry named "..json" (-> ".." after stripping the extension) or
+// "../escape/meeting" and we'd `fs.rmSync` the wrong directory. Strip path
+// components via path.basename, then reject the special "." / ".." cases
+// (basename doesn't normalize those) and any name containing a null byte.
+// Returns null if the name is unsafe; callers should skip the entry.
+function safeBasename(name: string): string | null {
+  const base = path.basename(name);
+  if (!base || base === '.' || base === '..' || base.includes('\0')) return null;
+  return base;
+}
+
 export class SyncEngine {
   private readonly driveClient: GoogleDriveClient;
   private readonly transcriptionsDir: string;
@@ -275,8 +288,13 @@ export class SyncEngine {
     if (!state.tombstonesFolderId) return;
     const remoteTombstones = await this.driveClient.listFolder(state.tombstonesFolderId);
     for (const entry of remoteTombstones) {
-      if (!entry.name.endsWith('.json')) continue;
-      const meetingName = entry.name.slice(0, -'.json'.length);
+      const safeEntryName = safeBasename(entry.name);
+      if (!safeEntryName || !safeEntryName.endsWith('.json')) continue;
+      const candidate = safeEntryName.slice(0, -'.json'.length);
+      // Re-check after stripping the extension: ".json" -> "" and "...json" ->
+      // ".." both produce names we must reject before they hit fs.rmSync.
+      const meetingName = safeBasename(candidate);
+      if (!meetingName) continue;
       if (state.tombstones?.[meetingName]) {
         // Already processed locally; refresh the driveTombstoneId in case
         // another device rewrote the tombstone (e.g. echo).
@@ -397,9 +415,36 @@ export class SyncEngine {
 
   private async scanRemoteMeetingFolders(appFolderId: string): Promise<DriveFile[]> {
     const contents = await this.driveClient.listFolder(appFolderId);
-    return contents.filter(
-      (f) => f.mimeType === 'application/vnd.google-apps.folder' && !this.shouldExcludeName(f.name),
-    );
+    const out: DriveFile[] = [];
+    for (const f of contents) {
+      if (f.mimeType !== 'application/vnd.google-apps.folder') continue;
+      if (this.shouldExcludeName(f.name)) continue;
+      // Reject (don't sanitize) any meeting folder name with path components
+      // or special segments. safeBasename returning a different string means
+      // Drive returned `../escape` or similar -- treat as adversarial.
+      const safe = safeBasename(f.name);
+      if (!safe || safe !== f.name) {
+        this.logger(`Skipped unsafe remote meeting folder name: ${JSON.stringify(f.name)}`);
+        continue;
+      }
+      out.push(f);
+    }
+    return out;
+  }
+
+  // Filter a Drive folder listing to entries with safe names. Use at every
+  // boundary where a remote name will hit the local filesystem.
+  private filterSafeRemoteEntries(entries: DriveFile[], context: string): DriveFile[] {
+    const out: DriveFile[] = [];
+    for (const f of entries) {
+      const safe = safeBasename(f.name);
+      if (!safe || safe !== f.name) {
+        this.logger(`Skipped unsafe remote name in ${context}: ${JSON.stringify(f.name)}`);
+        continue;
+      }
+      out.push(f);
+    }
+    return out;
   }
 
   // Path A: local-only meeting (no Drive folder yet, or remote folder existed
@@ -454,7 +499,10 @@ export class SyncEngine {
     const folderPath = path.join(this.transcriptionsDir, meetingName);
     fs.mkdirSync(folderPath, { recursive: true });
 
-    const remoteFiles = await this.driveClient.listFolder(remoteFolder.id);
+    const remoteFiles = this.filterSafeRemoteEntries(
+      await this.driveClient.listFolder(remoteFolder.id),
+      `syncMeetingDownloadOnly("${meetingName}")`,
+    );
     for (const remote of remoteFiles) {
       if (this.shouldExcludeName(remote.name)) continue;
       if (this.isAudioFile(remote.name)) {
@@ -513,7 +561,10 @@ export class SyncEngine {
 
     const folderPath = path.join(this.transcriptionsDir, meetingName);
     const localFiles = this.scanLocalFiles(folderPath);
-    const remoteFiles = await this.driveClient.listFolder(remoteFolder.id);
+    const remoteFiles = this.filterSafeRemoteEntries(
+      await this.driveClient.listFolder(remoteFolder.id),
+      `syncMeetingBidirectional("${meetingName}")`,
+    );
 
     const localByName = new Map(localFiles.map((e) => [e.name, e]));
     const remoteByName = new Map(remoteFiles.map((f) => [f.name, f]));
