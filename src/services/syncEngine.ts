@@ -179,10 +179,7 @@ export class SyncEngine {
       this.logger(`Created Drive app folder: ${this.appFolderName} (${folder.id})`);
     }
     if (!state.tombstonesFolderId) {
-      const folder = await this.driveClient.ensureFolder(
-        TOMBSTONES_FOLDER_NAME,
-        state.appFolderId,
-      );
+      const folder = await this.driveClient.ensureFolder(TOMBSTONES_FOLDER_NAME, state.appFolderId);
       state.tombstonesFolderId = folder.id;
       this.saveState(state);
       this.logger(`Created tombstones folder: ${folder.id}`);
@@ -274,10 +271,7 @@ export class SyncEngine {
   // local state, and deletes the corresponding local meeting folders. A
   // tombstone we created ourselves (driveTombstoneId already in state) is
   // skipped here -- we already handled the local deletion at creation time.
-  private async processRemoteTombstones(
-    state: SyncState,
-    result: SyncResult,
-  ): Promise<void> {
+  private async processRemoteTombstones(state: SyncState, result: SyncResult): Promise<void> {
     if (!state.tombstonesFolderId) return;
     const remoteTombstones = await this.driveClient.listFolder(state.tombstonesFolderId);
     for (const entry of remoteTombstones) {
@@ -404,8 +398,7 @@ export class SyncEngine {
   private async scanRemoteMeetingFolders(appFolderId: string): Promise<DriveFile[]> {
     const contents = await this.driveClient.listFolder(appFolderId);
     return contents.filter(
-      (f) =>
-        f.mimeType === 'application/vnd.google-apps.folder' && !this.shouldExcludeName(f.name),
+      (f) => f.mimeType === 'application/vnd.google-apps.folder' && !this.shouldExcludeName(f.name),
     );
   }
 
@@ -668,9 +661,7 @@ export class SyncEngine {
     meetingState: MeetingSyncState,
     result: SyncResult,
   ): Promise<void> {
-    const remoteMtime = remoteEntry.modifiedTime
-      ? Date.parse(remoteEntry.modifiedTime)
-      : 0;
+    const remoteMtime = remoteEntry.modifiedTime ? Date.parse(remoteEntry.modifiedTime) : 0;
     const localWins = localMtimeMs >= remoteMtime;
     const label = `${meetingName}/${filename}`;
     result.conflicts.push(label);

@@ -1492,10 +1492,7 @@ async function runGoogleSync(): Promise<SyncResult | undefined> {
     const result = await engine.syncOnce();
     googleLastSyncedAt = new Date().toISOString();
     googleLastSyncResult = result;
-    broadcastGoogleSyncStatus(
-      result.errors.length > 0 ? 'error' : 'success',
-      { result },
-    );
+    broadcastGoogleSyncStatus(result.errors.length > 0 ? 'error' : 'success', { result });
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1508,8 +1505,7 @@ async function runGoogleSync(): Promise<SyncResult | undefined> {
 }
 
 function refreshGoogleSyncTimer(): void {
-  const shouldRun =
-    configService.getGoogleDriveEnabled() && configService.hasGoogleOAuth();
+  const shouldRun = configService.getGoogleDriveEnabled() && configService.hasGoogleOAuth();
   if (shouldRun && !googleSyncTimer) {
     // Run one cycle shortly after toggle so the user sees activity quickly,
     // then continue on the regular interval.

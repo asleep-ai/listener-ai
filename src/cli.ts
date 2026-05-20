@@ -504,7 +504,8 @@ async function handleGoogleSync(config: ConfigService, dataPath: string): Promis
   );
   for (const item of result.uploaded) process.stderr.write(`  + ${item}\n`);
   for (const item of result.downloaded) process.stderr.write(`  v ${item}\n`);
-  for (const item of result.conflicts) process.stderr.write(`  ! conflict (LWW + backup): ${item}\n`);
+  for (const item of result.conflicts)
+    process.stderr.write(`  ! conflict (LWW + backup): ${item}\n`);
   for (const item of result.tombstoned) process.stderr.write(`  - tombstoned: ${item}\n`);
   for (const item of result.deleted) process.stderr.write(`  x applied deletion: ${item}\n`);
   if (result.errors.length > 0) {
@@ -515,7 +516,6 @@ async function handleGoogleSync(config: ConfigService, dataPath: string): Promis
     process.exit(1);
   }
 }
-
 
 function handleConfig(subArgs: string[]): void {
   const dataPath = getDataPath();

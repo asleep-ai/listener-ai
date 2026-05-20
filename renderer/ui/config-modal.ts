@@ -423,9 +423,7 @@ export function setupConfigModal(): void {
   googleDriveEnabledInput = document.getElementById(
     'googleDriveEnabled',
   ) as HTMLInputElement | null;
-  googleDriveSyncNowBtn = document.getElementById(
-    'googleDriveSyncNow',
-  ) as HTMLButtonElement | null;
+  googleDriveSyncNowBtn = document.getElementById('googleDriveSyncNow') as HTMLButtonElement | null;
   googleDriveSyncStatusEl = document.getElementById('googleDriveSyncStatus');
   notionApiKeyInput = document.getElementById('notionApiKey') as HTMLInputElement | null;
   notionDatabaseIdInput = document.getElementById('notionDatabaseId') as HTMLInputElement | null;
@@ -586,8 +584,7 @@ export function setupConfigModal(): void {
     if (status.phase === 'syncing') {
       setGoogleSyncStatus('Syncing...', 'idle');
     } else if (status.phase === 'success' && status.result) {
-      const { uploaded, downloaded, skipped, conflicts, deleted, tombstoned } =
-        status.result;
+      const { uploaded, downloaded, skipped, conflicts, deleted, tombstoned } = status.result;
       const parts = [
         `${uploaded.length} uploaded`,
         `${downloaded.length} downloaded`,
@@ -599,10 +596,7 @@ export function setupConfigModal(): void {
       setGoogleSyncStatus(`Synced just now (${parts.join(', ')})`, 'success');
     } else if (status.phase === 'error') {
       const errCount = status.result?.errors.length ?? 0;
-      setGoogleSyncStatus(
-        status.error ?? `Sync finished with ${errCount} error(s)`,
-        'error',
-      );
+      setGoogleSyncStatus(status.error ?? `Sync finished with ${errCount} error(s)`, 'error');
     }
   });
 

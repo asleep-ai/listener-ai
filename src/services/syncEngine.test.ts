@@ -253,10 +253,7 @@ describe('SyncEngine: upload-only (Phase 3A)', () => {
 
     const result = await makeEngine().syncOnce();
 
-    assert.deepEqual(result.uploaded.sort(), [
-      'meeting-1/summary.md',
-      'meeting-1/transcript.md',
-    ]);
+    assert.deepEqual(result.uploaded.sort(), ['meeting-1/summary.md', 'meeting-1/transcript.md']);
     assert.deepEqual(result.skipped, []);
     assert.deepEqual(result.downloaded, []);
     assert.deepEqual(result.conflicts, []);
@@ -403,10 +400,7 @@ describe('SyncEngine: conflict resolution (Phase 3B)', () => {
     const backups = fs.readdirSync(conflictDir);
     const remoteBackup = backups.find((n) => n.startsWith('summary.md.remote.'));
     assert.ok(remoteBackup, 'expected remote conflict backup');
-    assert.equal(
-      fs.readFileSync(path.join(conflictDir, remoteBackup!), 'utf-8'),
-      'remote edit',
-    );
+    assert.equal(fs.readFileSync(path.join(conflictDir, remoteBackup!), 'utf-8'), 'remote edit');
   });
 
   it('LWW: remote newer wins, local backed up', async () => {
@@ -427,10 +421,7 @@ describe('SyncEngine: conflict resolution (Phase 3B)', () => {
     assert.deepEqual(result.conflicts, ['m1/summary.md']);
     // Remote wins -> downloaded locally
     assert.ok(result.downloaded.includes('m1/summary.md'));
-    assert.equal(
-      fs.readFileSync(localPath, 'utf-8'),
-      'remote edit (newer)',
-    );
+    assert.equal(fs.readFileSync(localPath, 'utf-8'), 'remote edit (newer)');
 
     // Conflict backup exists for the losing local version
     const conflictDir = path.join(workDir, '.listener-conflicts', 'm1');
@@ -539,7 +530,10 @@ describe('SyncEngine: deletions and tombstones (Phase 3C)', () => {
     const result = await makeEngine().syncOnce();
 
     assert.deepEqual(result.tombstoned, ['m1']);
-    assert.ok(mockClient.trashCalls.includes(driveFolderId), 'expected trashFile on meeting folder');
+    assert.ok(
+      mockClient.trashCalls.includes(driveFolderId),
+      'expected trashFile on meeting folder',
+    );
 
     // Tombstone JSON uploaded under .listener-tombstones/
     const tombstoneUpload = mockClient.uploads.find((u) => u.name === 'm1.json');
