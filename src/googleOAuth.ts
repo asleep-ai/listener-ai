@@ -38,16 +38,48 @@ const SCOPES = ['https://www.googleapis.com/auth/drive.file', 'openid', 'email',
 
 const USERINFO_ENDPOINT = 'https://openidconnect.googleapis.com/v1/userinfo';
 
-// OAuth client credentials come from env vars so production builds can inject
-// them at build time without committing the values to the repo. Register a
-// Desktop application OAuth client at
-// https://console.cloud.google.com/apis/credentials and set both env vars
-// before running login. Desktop clients still require the client_secret on
-// token exchange even though it is embedded in the binary -- see
-// https://developers.google.com/identity/protocols/oauth2/native-app.
+// OAuth client credentials come from env vars at build time. The build pipeline
+// (scripts/write-build-constants.js) bakes them into dist/buildConstants.js so
+// the packaged Electron app and the npm CLI can read them at runtime even when
+// the end-user has no env var set. Env vars still win at runtime so developers
+// can override locally without rebuilding. Register a Desktop application OAuth
+// client at https://console.cloud.google.com/apis/credentials. Desktop clients
+// require the client_secret on token exchange even though it is embedded in the
+// binary -- per Google's native-app guide, "secrets in installed apps aren't
+// considered secrets". PKCE + the loopback redirect protect the flow.
+type BuildConstants = {
+  googleOAuthClientId?: string;
+  googleOAuthClientSecret?: string;
+};
+
+let cachedBuildConstants: BuildConstants | null | undefined;
+
+function loadBuildConstants(): BuildConstants | null {
+  // Bypass the bundled file in test mode so unit tests are deterministic
+  // regardless of whether the dev's last build baked real credentials. Tests
+  // that want to exercise the fallback can temporarily unset NODE_ENV.
+  if (process.env.NODE_ENV === 'test') return null;
+  if (cachedBuildConstants !== undefined) return cachedBuildConstants;
+  try {
+    // Compiled-output sibling: dist/googleOAuth.js -> dist/buildConstants.js.
+    // Missing file (fresh checkout without the build script) -> null and the
+    // env-var path provides the actionable error.
+    const mod: unknown = require('./buildConstants');
+    cachedBuildConstants = (mod || null) as BuildConstants | null;
+  } catch {
+    cachedBuildConstants = null;
+  }
+  return cachedBuildConstants;
+}
+
 function getClientCredentials(): { clientId: string; clientSecret: string } {
-  const clientId = process.env.LISTENER_GOOGLE_OAUTH_CLIENT_ID?.trim();
-  const clientSecret = process.env.LISTENER_GOOGLE_OAUTH_CLIENT_SECRET?.trim();
+  let clientId = process.env.LISTENER_GOOGLE_OAUTH_CLIENT_ID?.trim();
+  let clientSecret = process.env.LISTENER_GOOGLE_OAUTH_CLIENT_SECRET?.trim();
+  if (!clientId || !clientSecret) {
+    const bundled = loadBuildConstants();
+    if (!clientId) clientId = bundled?.googleOAuthClientId?.trim();
+    if (!clientSecret) clientSecret = bundled?.googleOAuthClientSecret?.trim();
+  }
   if (!clientId || !clientSecret) {
     throw new Error(
       'Google OAuth client not configured. Set LISTENER_GOOGLE_OAUTH_CLIENT_ID and ' +
@@ -59,10 +91,11 @@ function getClientCredentials(): { clientId: string; clientSecret: string } {
 }
 
 export function hasGoogleOAuthClientConfigured(): boolean {
-  return (
-    !!process.env.LISTENER_GOOGLE_OAUTH_CLIENT_ID?.trim() &&
-    !!process.env.LISTENER_GOOGLE_OAUTH_CLIENT_SECRET?.trim()
-  );
+  const envId = process.env.LISTENER_GOOGLE_OAUTH_CLIENT_ID?.trim();
+  const envSecret = process.env.LISTENER_GOOGLE_OAUTH_CLIENT_SECRET?.trim();
+  if (envId && envSecret) return true;
+  const bundled = loadBuildConstants();
+  return !!bundled?.googleOAuthClientId?.trim() && !!bundled?.googleOAuthClientSecret?.trim();
 }
 
 export function getGoogleOAuthEnvCredentials(): GoogleOAuthCredentials | undefined {
