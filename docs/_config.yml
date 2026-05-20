@@ -1,0 +1,22 @@
+title: Listener.AI
+description: Legal pages for the Listener.AI desktop app.
+theme: jekyll-theme-minimal
+show_downloads: false
+# `pretty` permalinks produce extension-less URLs (e.g. /privacy/ instead
+# of /privacy.html). Cleaner for legal pages we paste into the Google
+# OAuth consent screen and reference from the app.
+permalink: pretty
+plugins:
+  - jekyll-relative-links
+relative_links:
+  enabled: true
+  collections: true
+
+# Strip "edit on GitHub" footer that the minimal theme adds. The pages are
+# legal docs, not project documentation -- a contributor-style edit link is
+# misleading on a published privacy policy.
+include:
+  - privacy.md
+  - terms.md
+exclude:
+  - vendor/
