@@ -25,7 +25,8 @@ Listener.AI is an Electron desktop application for recording meetings and produc
 - Renderer is TypeScript with plain DOM (no React/framework), bundled by Vite; talks to main only via IPC
 
 ### 3. AI Transcription and Summarization
-- Provider is selected by `aiProvider`: `gemini` uses Google Gemini 2.5 (Flash/Pro, configurable via `geminiModel` and `geminiFlashModel`); `codex` uses Codex OAuth tokens plus OpenAI transcription/Responses endpoints (configurable via `codexTranscriptionModel` and `codexModel`)
+- Provider is selected by `aiProvider`: `gemini` uses Google Gemini for summary (default `gemini-3.5-flash`, configurable via `geminiModel`) and transcription (default `gemini-2.5-flash`, configurable via `geminiFlashModel`); `codex` uses Codex OAuth tokens plus OpenAI transcription/Responses endpoints (configurable via `codexTranscriptionModel` and `codexModel`)
+- Gemini summary depth is controlled by `geminiThinkingLevel` (`low` | `medium` | `high`, default `medium`). Forwarded to pi-ai's `reasoning` option, which the google provider maps to `generationConfig.thinkingConfig.thinkingLevel`. Only the summary path uses it; transcription stays on `gemini-2.5-flash` with no reasoning
 - Gemini uploads large audio through the Gemini files API; Codex converts unsupported audio formats to WebM/Opus first; both providers segment long or over-limit recordings
 - Korean-focused output: full transcript with speaker identification, summary, key points, action items, auto-generated title, and emoji icon
 - User-supplied `summaryPrompt` and `knownWords` (proper-noun hints) are injected into the prompt
@@ -45,7 +46,7 @@ Listener.AI is an Electron desktop application for recording meetings and produc
 ### 6. AI Agent Chat
 - Conversational access to saved meetings and settings (`src/agentService.ts`), backed by the selected AI provider with a fixed tool set
 - Tools: `search_transcriptions`, `list_recent_transcriptions`, `get_transcription`, `get_config`, `set_config`
-- `set_config` write whitelist (non-secret keys only): `autoMode`, `meetingDetection`, `displayDetection`, `globalShortcut`, `maxRecordingMinutes`, `recordingReminderMinutes`, `minRecordingSeconds`, `geminiModel`, `geminiFlashModel`. API keys and Notion database ID can neither be read nor written by the agent.
+- `set_config` write whitelist (non-secret keys only) lives in `agentService.ts:WRITABLE_CONFIG_KEYS`: `autoMode`, `meetingDetection`, `displayDetection`, `globalShortcut`, `maxRecordingMinutes`, `recordingReminderMinutes`, `minRecordingSeconds`, `recordSystemAudio`. Model strings (`geminiModel`, `geminiFlashModel`, `geminiThinkingLevel`, `codexModel`, `codexTranscriptionModel`) are intentionally NOT agent-writable -- they change the model selection and reasoning depth, which we want to keep to the settings UI / CLI `config set`. API keys and Notion database ID can neither be read nor written by the agent.
 - Every `set_config` call requires explicit user confirmation through an IPC approval flow
 - Folder-name arguments are validated (NUL / path-separator rejection) to block traversal
 - Chat history lives only in renderer memory — lost on reload, not synced across devices or restarts
@@ -110,8 +111,9 @@ All values are stored in plaintext JSON at `getDataPath()/config.json`.
 |---|---|
 | `aiProvider` | `gemini` or `codex` |
 | `geminiApiKey` | Gemini API key (required when `aiProvider=gemini`) |
-| `geminiModel` | Gemini model for summary/agent |
-| `geminiFlashModel` | Flash model for cheaper/faster calls |
+| `geminiModel` | Gemini model for summary/agent (default `gemini-3.5-flash`) |
+| `geminiFlashModel` | Flash model for transcription (default `gemini-2.5-flash`) |
+| `geminiThinkingLevel` | Gemini 3.x summary thinking depth: `low` \| `medium` \| `high` (default `medium`) |
 | `codexModel` | Codex model for summary/agent |
 | `codexTranscriptionModel` | OpenAI transcription model used with Codex OAuth |
 | `notionApiKey`, `notionDatabaseId` | Optional Notion integration (BYOK) |
@@ -228,6 +230,7 @@ This pattern caught two issues during issue #95 verification: a hard-to-see Merg
 - **pi-ai (`@earendil-works/pi-ai`) is the chat/agent backbone.** Both providers (Gemini and Codex) go through pi-ai's unified `getModel` + `complete` API. No more hand-rolled SSE clients, no more provider branching inside `geminiService.ts` / `agentService.ts` -- pi-ai owns transport, streaming, tool-call formatting, and (for Codex) the internal `chatgpt.com/backend-api/codex/responses` endpoint. Tool schemas use TypeBox (`Type.Object({...})`); pi-ai validates them at the provider boundary.
 - **OAuth is also pi-ai's job.** `src/codexOAuth.ts` is a thin facade over `@earendil-works/pi-ai/oauth` -- PKCE, loopback bind, state verification, and refresh-token rotation all live upstream. Do NOT reimplement these primitives in-house.
 - **The wrapper at `src/piAiClient.ts` exists only to bridge ESM-only pi-ai into our CJS build.** It uses `new Function('return import(...)')` to bypass tsc's CJS-emit rewriting of `import()`. Don't reach around it with a static `import` -- that'll compile to `require()` and crash at runtime with ERR_REQUIRE_ESM. Same pattern in `src/codexOAuth.ts` for the OAuth subpath.
+- **Custom Gemini model overrides in `piAiClient.CUSTOM_GOOGLE_MODELS`.** pi-ai's bundled model registry trails Google's release cadence (e.g. `gemini-3.5-flash` GA'd 2026-05-19 but isn't in pi-ai 0.74.x). For ids pi-ai hasn't published yet we mirror upstream's main-branch `Model<'google-generative-ai'>` entry into a static map; `getModel` checks the map after the registry lookup fails. When pi-ai's next publish ships the same id, the registered entry shadows our override automatically and our entry becomes dead code (remove on the next pi-ai bump). Codex deliberately has no equivalent override map -- its OAuth scope and token plumbing live inside pi-ai's provider glue and can't be re-derived from an id alone. Pattern matches pi-ai's documented "Custom Models" section in its README.
 - **Transcription stays bespoke.** pi-ai is chat/tool-call-only; it has no audio surface. Codex transcription goes through `src/codexTranscription.ts` (minimal multipart POST to `/v1/audio/transcriptions` with an OAuth bearer). Gemini transcription stays on `@google/genai`'s files API (kept as a direct dep so 20MB+ uploads work). The provider branch left in `geminiService.ts` is narrower now: audio routing only.
 - **Why this direction.** Hand-rolling against undocumented endpoints (ChatGPT Codex Responses, OAuth flow) is a moving target. Concentrating the protocol layer in pi-ai means upstream contract changes hit one pinnable dep; we audit/upgrade it as a unit instead of reverse-engineering each break ourselves. The `chatgpt.com/backend-api/codex/responses` endpoint is still OpenAI-internal -- when it breaks, file against pi-ai/upstream and surface a graceful renderer error suggesting Gemini fallback.
 - **Upgrade checklist for `@earendil-works/pi-ai`.** Before bumping the version: (1) OAuth loopback bind stays on 127.0.0.1, (2) PKCE + state are enforced on the callback, (3) the API surface (`getModel`, `complete`, `Type`, `loginOpenAICodex`, `getOAuthApiKey`) is unchanged or the wrappers in `piAiClient.ts` / `codexOAuth.ts` are updated to match, (4) refresh-token rotation behavior is documented in the changelog (we cache the rotated creds via `onCredentialsChanged`).

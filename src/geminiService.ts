@@ -7,6 +7,8 @@ import {
   type AiProvider,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_TRANSCRIPTION_MODEL,
+  DEFAULT_GEMINI_THINKING_LEVEL,
+  type GeminiThinkingLevel,
 } from './aiProvider';
 import { mimeTypeForExtension } from './audioFormats';
 import { type CodexOAuthCredentials } from './codexOAuth';
@@ -17,7 +19,7 @@ import {
   transcribeCodexAudio,
 } from './codexTranscription';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
-import { type Context, complete, extractFinalText, getModel } from './piAiClient';
+import { type Context, completeSimple, extractFinalText, getModel } from './piAiClient';
 import { FFmpegManager } from './services/ffmpegManager';
 
 const execFileAsync = promisify(execFile);
@@ -315,6 +317,9 @@ export interface GeminiServiceOptions {
   flashModel: string;
   codexModel?: string;
   codexTranscriptionModel?: string;
+  // Gemini summary-path thinking depth. Ignored for the Codex provider and
+  // for all transcription paths. Defaults to medium (Gemini 3.x GA default).
+  thinkingLevel?: GeminiThinkingLevel;
 }
 
 export class GeminiService {
@@ -328,6 +333,7 @@ export class GeminiService {
   private flashModel: string;
   private codexModel: string;
   private codexTranscriptionModel: string;
+  private thinkingLevel: GeminiThinkingLevel;
 
   // Get FFmpeg path for this service
   private async getFFmpegPath(): Promise<string> {
@@ -361,6 +367,7 @@ export class GeminiService {
     this.codexModel = options.codexModel || DEFAULT_CODEX_MODEL;
     this.codexTranscriptionModel =
       options.codexTranscriptionModel || DEFAULT_CODEX_TRANSCRIPTION_MODEL;
+    this.thinkingLevel = options.thinkingLevel ?? DEFAULT_GEMINI_THINKING_LEVEL;
   }
 
   private gemini(): GoogleGenAI {
@@ -415,16 +422,16 @@ export class GeminiService {
         },
       ],
     };
-    const response = await complete(model, context, {
+    // Codex's xhigh forces deepest analysis (gpt-5.5's thinkingLevelMap maps
+    // xhigh -> "max"). Gemini uses the user-configurable level. completeSimple
+    // unifies both: pi-ai translates `reasoning` to reasoningEffort (codex) or
+    // thinkingConfig.thinkingLevel (gemini).
+    const reasoning = this.provider === 'codex' ? 'xhigh' : this.thinkingLevel;
+    const response = await completeSimple(model, context, {
       apiKey,
       temperature: 0.2,
       maxTokens: 32768,
-      // Codex-only knobs; pi-ai's google provider ignores unknown keys.
-      // pi-ai omits `reasoning.effort` by default (server default ~medium); we
-      // force xhigh for deepest analysis -- gpt-5.5's thinkingLevelMap maps
-      // xhigh -> "max". Verbosity stays at pi-ai's "low" default (terse output
-      // is fine; reasoning depth is what was missing).
-      reasoningEffort: 'xhigh',
+      reasoning,
       signal,
     });
     return extractFinalText(response);

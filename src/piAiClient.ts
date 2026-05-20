@@ -12,6 +12,7 @@ import type {
   Message,
   Model,
   ProviderStreamOptions,
+  SimpleStreamOptions,
   StreamOptions,
   Tool,
   ToolCall,
@@ -23,6 +24,7 @@ export type {
   Context,
   Message,
   ProviderStreamOptions,
+  SimpleStreamOptions,
   StreamOptions,
   Tool,
   ToolCall,
@@ -43,13 +45,40 @@ function loadPiAi(): Promise<PiAiModule> {
 
 import { type AiProvider, toPiAiProvider } from './aiProvider';
 
+// Explicit overrides for model ids pi-ai's bundled registry doesn't carry yet.
+// Mirrors pi-ai's upstream main-branch entry shape so the next published
+// version transparently shadows what we have here (m.getModel() wins).
+// Add entries as Google releases new models ahead of pi-ai's catch-up cycle.
+const CUSTOM_GOOGLE_MODELS: Record<string, PiAiModel> = {
+  'gemini-3.5-flash': {
+    id: 'gemini-3.5-flash',
+    name: 'Gemini 3.5 Flash',
+    api: 'google-generative-ai',
+    provider: 'google',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    reasoning: true,
+    thinkingLevelMap: { off: null },
+    input: ['text', 'image'],
+    cost: { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 },
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  } as unknown as PiAiModel,
+};
+
 export async function getModel(provider: AiProvider, modelId: string): Promise<PiAiModel> {
   const m = await loadPiAi();
   const piId = toPiAiProvider(provider);
   // pi-ai's getModel is typed against literal model ids per provider; our
   // model strings come from user config. Cast is documented as the supported
   // path for non-literal ids ("Custom Models" in pi-ai's README).
-  return m.getModel(piId as never, modelId as never) as unknown as PiAiModel;
+  const registered = m.getModel(piId as never, modelId as never) as unknown as
+    | PiAiModel
+    | undefined;
+  if (registered) return registered;
+  if (provider === 'gemini' && CUSTOM_GOOGLE_MODELS[modelId]) {
+    return CUSTOM_GOOGLE_MODELS[modelId];
+  }
+  throw new Error(`Unknown pi-ai model: ${piId}/${modelId}`);
 }
 
 function summarizeContextSize(context: Context): string {
@@ -94,42 +123,68 @@ function adjustOptionsForModel(
   return { ...options };
 }
 
-export async function complete(
+// Shared instrumentation + error/abort promotion for both `complete()` and
+// `completeSimple()`. pi-ai surfaces upstream failures via stopReason='error'
+// rather than throwing, and 'aborted' returns a partial message; both must be
+// re-thrown here so geminiService.generateSummary and agentService.run don't
+// silently persist empty / truncated content. Factored out so future
+// error-handling tweaks can't drift between the two wrappers.
+async function runPiAiCall(
   model: PiAiModel,
+  signal: AbortSignal | undefined,
   context: Context,
-  options?: ProviderStreamOptions,
+  call: () => Promise<AssistantMessage>,
 ): Promise<AssistantMessage> {
-  const m = await loadPiAi();
   const tag = `[pi-ai ${model.provider}/${model.id}]`;
   const startedAt = Date.now();
   console.log(`${tag} -> ${summarizeContextSize(context)}`);
-  const adjustedOptions = adjustOptionsForModel(model, options);
-  const response = await m.complete(model, context, adjustedOptions);
+  const response = await call();
   const elapsed = Date.now() - startedAt;
   const stop = response.stopReason ?? 'unknown';
   const textChars = extractFinalText(response).length;
   console.log(
     `${tag} <- ${elapsed}ms stop=${stop} textChars=${textChars} usage=in:${response.usage?.input ?? '?'}/out:${response.usage?.output ?? '?'}${response.errorMessage ? ` errorMessage=${response.errorMessage.slice(0, 300)}` : ''}`,
   );
-  // pi-ai surfaces upstream failures via stopReason='error' rather than
-  // throwing. Without this, geminiService.generateSummary returns "" and
-  // agentService.run returns "(no answer)" with no breadcrumb. Promote the
-  // diagnostic into a thrown error so it reaches the renderer / CLI surface.
   if (response.stopReason === 'error') {
     throw new Error(
       `Pi-ai ${model.provider}/${model.id} failed: ${response.errorMessage ?? 'no errorMessage'}`,
     );
   }
-  // 'aborted' is the cooperative-cancel terminal state when the caller's
-  // signal fired. Returning the partial message would let downstream consumers
-  // (geminiService.generateSummary) parse an empty/truncated JSON body and
-  // persist a corrupt summary. Re-throw as an AbortError so the surrounding
-  // catch (which already classifies aborts) drops the result.
   if (response.stopReason === 'aborted') {
-    if (options?.signal) options.signal.throwIfAborted();
+    if (signal) signal.throwIfAborted();
     throw new DOMException('Pi-ai request aborted', 'AbortError');
   }
   return response;
+}
+
+export async function complete(
+  model: PiAiModel,
+  context: Context,
+  options?: ProviderStreamOptions,
+): Promise<AssistantMessage> {
+  const m = await loadPiAi();
+  const adjustedOptions = adjustOptionsForModel(model, options);
+  return runPiAiCall(model, options?.signal, context, () =>
+    m.complete(model, context, adjustedOptions),
+  );
+}
+
+// Use this (not `complete`) when callers pass `reasoning`. pi-ai's
+// `streamSimpleGoogle` translates it to `thinkingConfig.thinkingLevel`; the
+// regular `stream`/`complete` path silently drops it.
+export async function completeSimple(
+  model: PiAiModel,
+  context: Context,
+  options?: SimpleStreamOptions,
+): Promise<AssistantMessage> {
+  const m = await loadPiAi();
+  const adjustedOptions = adjustOptionsForModel(
+    model,
+    options as ProviderStreamOptions | undefined,
+  ) as SimpleStreamOptions | undefined;
+  return runPiAiCall(model, options?.signal, context, () =>
+    m.completeSimple(model, context, adjustedOptions),
+  );
 }
 
 export async function getTypeBox(): Promise<PiAiModule['Type']> {

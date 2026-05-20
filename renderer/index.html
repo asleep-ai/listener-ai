@@ -187,21 +187,30 @@
               </div>
               <div class="form-group">
                 <div class="prompt-label-row">
-                  <label for="geminiModelSelect">Pro Model (summarization) <span class="config-optional">optional</span></label>
+                  <label for="geminiModelSelect">Summary Model <span class="config-optional">optional</span></label>
                   <button type="button" id="resetGeminiModel" class="reset-prompt-button">Reset to Default</button>
                 </div>
                 <select id="geminiModelSelect"></select>
-                <input type="text" id="geminiModel" placeholder="gemini-2.5-pro" hidden>
-                <small>Default: gemini-2.5-pro</small>
+                <input type="text" id="geminiModel" placeholder="gemini-3.5-flash" hidden>
+                <small>Default: gemini-3.5-flash</small>
               </div>
               <div class="form-group">
                 <div class="prompt-label-row">
-                  <label for="geminiFlashModelSelect">Flash Model (transcription) <span class="config-optional">optional</span></label>
+                  <label for="geminiFlashModelSelect">Transcription Model <span class="config-optional">optional</span></label>
                   <button type="button" id="resetGeminiFlashModel" class="reset-prompt-button">Reset to Default</button>
                 </div>
                 <select id="geminiFlashModelSelect"></select>
                 <input type="text" id="geminiFlashModel" placeholder="gemini-2.5-flash" hidden>
                 <small>Default: gemini-2.5-flash</small>
+              </div>
+              <div class="form-group">
+                <label for="geminiThinkingLevel">Summary Thinking Level <span class="config-optional">optional</span></label>
+                <select id="geminiThinkingLevel">
+                  <option value="low">Low (fastest, terser)</option>
+                  <option value="medium">Medium (default)</option>
+                  <option value="high">High (deepest analysis)</option>
+                </select>
+                <small>Applies to Gemini 3.x summary calls only. Default: medium.</small>
               </div>
             </fieldset>
             <fieldset class="config-subgroup" data-provider="codex">

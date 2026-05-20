@@ -2,8 +2,29 @@ export const AI_PROVIDERS = ['gemini', 'codex'] as const;
 
 export type AiProvider = (typeof AI_PROVIDERS)[number];
 
-export const DEFAULT_GEMINI_MODEL = 'gemini-2.5-pro';
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash';
 export const DEFAULT_GEMINI_FLASH_MODEL = 'gemini-2.5-flash';
+// Gemini 3.x replaces the older numeric `thinking_budget` knob with a coarse
+// level. We expose low/medium/high to users; the older Pro-only `minimal` and
+// internal `xhigh` are skipped because Google docs the GA range as
+// minimal/low/medium/high and only the three middle tiers are user-meaningful
+// for summarization (low ~= terse, medium ~= GA default, high ~= deep
+// analysis). pi-ai's `reasoning` option accepts the same strings and forwards
+// them to GoogleGenAI's `thinkingConfig.thinkingLevel`.
+export const GEMINI_THINKING_LEVELS = ['low', 'medium', 'high'] as const;
+export type GeminiThinkingLevel = (typeof GEMINI_THINKING_LEVELS)[number];
+export const DEFAULT_GEMINI_THINKING_LEVEL: GeminiThinkingLevel = 'medium';
+
+export function isGeminiThinkingLevel(value: unknown): value is GeminiThinkingLevel {
+  return typeof value === 'string' && (GEMINI_THINKING_LEVELS as readonly string[]).includes(value);
+}
+
+export function normalizeGeminiThinkingLevel(value: unknown): GeminiThinkingLevel | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  return isGeminiThinkingLevel(normalized) ? normalized : undefined;
+}
+
 export const DEFAULT_CODEX_MODEL = 'gpt-5.5';
 // gpt-4o-transcribe-diarize ships native speaker diarization at the same
 // per-minute price ($0.006/min) as the non-diarize model. Trade-offs vs

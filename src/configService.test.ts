@@ -237,6 +237,74 @@ describe('ConfigService: saveConfig file mode + concurrent merge', () => {
   });
 });
 
+describe('ConfigService: geminiThinkingLevel', () => {
+  it('returns "medium" when not set', () => {
+    const cfg = new ConfigService(freshDataPath('thinking-default'));
+    assert.equal(cfg.getGeminiThinkingLevel(), 'medium');
+  });
+
+  it('persists and retrieves a set value', () => {
+    const cfg = new ConfigService(freshDataPath('thinking-set'));
+    cfg.setGeminiThinkingLevel('high');
+    assert.equal(cfg.getGeminiThinkingLevel(), 'high');
+  });
+
+  it('falls back to default for unrecognized on-disk values', () => {
+    // A future client could write a wider level (e.g. "xhigh") or a legacy
+    // value could survive in config.json -- the getter must not surface
+    // something the rest of the codebase doesn't accept.
+    const dataPath = freshDataPath('thinking-unknown');
+    const configPath = path.join(dataPath, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ geminiThinkingLevel: 'xhigh' }));
+
+    const cfg = new ConfigService(dataPath);
+    assert.equal(cfg.getGeminiThinkingLevel(), 'medium');
+  });
+
+  it('round-trips through disk', () => {
+    const dataPath = freshDataPath('thinking-roundtrip');
+    const a = new ConfigService(dataPath);
+    a.setGeminiThinkingLevel('low');
+
+    const b = new ConfigService(dataPath);
+    assert.equal(b.getGeminiThinkingLevel(), 'low');
+  });
+
+  it('updateConfig drops out-of-domain values instead of persisting them', () => {
+    // The renderer save-config IPC and the agent set_config flow both land in
+    // updateConfig with raw payloads. Without the normalize-or-drop arm there,
+    // an attacker-controlled or buggy caller could persist e.g. 'xhigh' and
+    // surface it back through getAllConfig() (the getter normalizes but disk
+    // would still hold the bogus value).
+    const dataPath = freshDataPath('thinking-update-invalid');
+    const cfg = new ConfigService(dataPath);
+    cfg.updateConfig({ geminiThinkingLevel: 'xhigh' as 'low' });
+
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dataPath, 'config.json'), 'utf-8'));
+    assert.equal(onDisk.geminiThinkingLevel, undefined);
+    assert.equal(cfg.getGeminiThinkingLevel(), 'medium');
+  });
+});
+
+describe('ConfigService: updateConfig validation for aiProvider', () => {
+  it('drops invalid aiProvider values', () => {
+    const dataPath = freshDataPath('provider-update-invalid');
+    const cfg = new ConfigService(dataPath);
+    cfg.setAiProvider('gemini');
+    cfg.updateConfig({ aiProvider: 'openai' as 'gemini' });
+
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dataPath, 'config.json'), 'utf-8'));
+    assert.equal(onDisk.aiProvider, 'gemini', 'invalid update must not overwrite valid value');
+  });
+
+  it('accepts valid aiProvider values', () => {
+    const dataPath = freshDataPath('provider-update-valid');
+    const cfg = new ConfigService(dataPath);
+    cfg.updateConfig({ aiProvider: 'codex' });
+    assert.equal(cfg.getAiProvider(), 'codex');
+  });
+});
+
 describe('ConfigService: codexTranscriptionModel migration to diarize default', () => {
   it('clears the legacy `gpt-4o-transcribe` value and stamps the marker', () => {
     const dataPath = freshDataPath('migrate-legacy');

@@ -17,6 +17,7 @@ let saveConfigBtn: HTMLButtonElement | null = null;
 let cancelConfigBtn: HTMLButtonElement | null = null;
 let aiProviderSelect: HTMLSelectElement | null = null;
 let geminiApiKeyInput: HTMLInputElement | null = null;
+let geminiThinkingLevelSelect: HTMLSelectElement | null = null;
 let loginCodexOAuthBtn: HTMLButtonElement | null = null;
 let clearCodexOAuthBtn: HTMLButtonElement | null = null;
 let codexOAuthStatus: HTMLElement | null = null;
@@ -154,6 +155,7 @@ export async function showConfigModal(): Promise<void> {
     geminiApiKey?: string;
     geminiModel?: string;
     geminiFlashModel?: string;
+    geminiThinkingLevel?: 'low' | 'medium' | 'high';
     codexModel?: string;
     codexTranscriptionModel?: string;
     codexOAuthConfigured?: boolean;
@@ -180,6 +182,10 @@ export async function showConfigModal(): Promise<void> {
   applyModelValue('geminiFlashModel', config.geminiFlashModel);
   applyModelValue('codexModel', config.codexModel);
   applyModelValue('codexTranscriptionModel', config.codexTranscriptionModel);
+  if (geminiThinkingLevelSelect) {
+    // Defensive fallback; backend's getGeminiThinkingLevel normalizes first.
+    geminiThinkingLevelSelect.value = config.geminiThinkingLevel || 'medium';
+  }
   setCodexOAuthStatus(
     config.codexOAuthConfigured ? 'Signed in' : 'Not signed in',
     config.codexOAuthConfigured ? 'success' : 'idle',
@@ -347,6 +353,9 @@ export function setupConfigModal(): void {
   aiProviderSelect = document.getElementById('aiProvider') as HTMLSelectElement | null;
   geminiApiKeyInput = document.getElementById('geminiApiKey') as HTMLInputElement | null;
   setupModelControls();
+  geminiThinkingLevelSelect = document.getElementById(
+    'geminiThinkingLevel',
+  ) as HTMLSelectElement | null;
   loginCodexOAuthBtn = document.getElementById('loginCodexOAuth') as HTMLButtonElement | null;
   clearCodexOAuthBtn = document.getElementById('clearCodexOAuth') as HTMLButtonElement | null;
   codexOAuthStatus = document.getElementById('codexOAuthStatus');
@@ -525,6 +534,15 @@ export function setupConfigModal(): void {
       const geminiFlashModel = readModelValue('geminiFlashModel');
       const codexModel = readModelValue('codexModel');
       const codexTranscriptionModel = readModelValue('codexTranscriptionModel');
+      // Coerce to one of the three valid levels; an out-of-range selection
+      // (e.g. extension-injected DOM, stale form state) becomes the default.
+      // Include 'medium' explicitly so a future change to the default doesn't
+      // silently turn user-selected 'medium' into the new default.
+      const rawThinkingLevel = geminiThinkingLevelSelect?.value;
+      const geminiThinkingLevel =
+        rawThinkingLevel === 'low' || rawThinkingLevel === 'medium' || rawThinkingLevel === 'high'
+          ? rawThinkingLevel
+          : 'medium';
       const notionKey = notionApiKeyInput?.value.trim() ?? '';
       const notionDb = notionDatabaseIdInput?.value.trim() ?? '';
       const slackWebhookUrl = slackWebhookUrlInput?.value.trim() ?? '';
@@ -577,6 +595,7 @@ export function setupConfigModal(): void {
         geminiApiKey: geminiKey,
         geminiModel: geminiModel,
         geminiFlashModel: geminiFlashModel,
+        geminiThinkingLevel: geminiThinkingLevel,
         codexModel: codexModel,
         codexTranscriptionModel: codexTranscriptionModel,
         notionApiKey: notionKey,

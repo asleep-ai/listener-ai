@@ -132,7 +132,7 @@ describe('listener CLI basics', () => {
     assert.equal(unset.code, 0);
     const after = await runCli(['config', 'get', 'geminiModel']);
     // Falls back to the default model returned by ConfigService.getGeminiModel().
-    assert.equal(after.stdout.trim(), 'gemini-2.5-pro');
+    assert.equal(after.stdout.trim(), 'gemini-3.5-flash');
   });
 
   it('config list masks slackWebhookUrl', async () => {
