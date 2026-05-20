@@ -615,18 +615,65 @@ describe('SyncEngine: deletions and tombstones (Phase 3C)', () => {
     assert.equal(fs.existsSync(path.join(transcriptionsDir, 'm1')), false);
   });
 
+  it('refreshes tombstone deletedAt when remote rewrites with a newer modifiedTime', async () => {
+    // First sync: meeting tombstoned, deletedAt set from initial modifiedTime.
+    makeMeeting('m1', { 'summary.md': 's' });
+    await makeEngine().syncOnce();
+    rmDir(path.join(transcriptionsDir, 'm1'));
+    await makeEngine().syncOnce(); // creates tombstone
+
+    const state1 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    const tombstoneId = state1.tombstones!['m1'].driveTombstoneId!;
+    const originalDeletedAt = state1.tombstones!['m1'].deletedAt;
+
+    // Simulate another device re-writing the tombstone (e.g. echo after a
+    // resurrect+redelete) with a later modifiedTime.
+    const newer = new Date(Date.parse(originalDeletedAt) + 60_000).toISOString();
+    mockClient.mutateRemoteFile(tombstoneId, '', newer);
+
+    await makeEngine().syncOnce();
+
+    const state2 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    assert.equal(state2.tombstones!['m1'].deletedAt, newer);
+    // GC window now resets from the newer timestamp; doesn't fire here.
+  });
+
+  it('does not roll deletedAt backwards if remote modifiedTime is older', async () => {
+    makeMeeting('m1', { 'summary.md': 's' });
+    await makeEngine().syncOnce();
+    rmDir(path.join(transcriptionsDir, 'm1'));
+    await makeEngine().syncOnce();
+
+    const state1 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    const tombstoneId = state1.tombstones!['m1'].driveTombstoneId!;
+    const originalDeletedAt = state1.tombstones!['m1'].deletedAt;
+
+    // Pretend the Drive file appears older than what we recorded (clock skew).
+    const older = new Date(Date.parse(originalDeletedAt) - 60_000).toISOString();
+    mockClient.mutateRemoteFile(tombstoneId, '', older);
+
+    await makeEngine().syncOnce();
+
+    const state2 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    assert.equal(state2.tombstones!['m1'].deletedAt, originalDeletedAt);
+  });
+
   it('GC removes tombstones older than the retention window', async () => {
     makeMeeting('m1', { 'summary.md': 's' });
     await makeEngine().syncOnce();
     rmDir(path.join(transcriptionsDir, 'm1'));
     await makeEngine().syncOnce();
 
-    // Backdate the tombstone to 31 days ago.
+    // Backdate the tombstone in BOTH local state and Drive metadata. The
+    // engine refreshes local deletedAt from remote modifiedTime when it
+    // re-sees a tombstone (multi-device re-delete safety), so the GC
+    // assertion requires both sides to look aged.
     const stateRaw = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
     const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
     stateRaw.tombstones!['m1'].deletedAt = oldDate;
     fs.writeFileSync(syncStatePath, JSON.stringify(stateRaw));
     const tombstoneFileId = stateRaw.tombstones!['m1'].driveTombstoneId!;
+    mockClient.mutateRemoteFile(tombstoneFileId, '', oldDate);
 
     mockClient.deleteCalls = [];
     const result = await makeEngine().syncOnce();

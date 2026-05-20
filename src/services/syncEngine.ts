@@ -296,9 +296,21 @@ export class SyncEngine {
       const meetingName = safeBasename(candidate);
       if (!meetingName) continue;
       if (state.tombstones?.[meetingName]) {
-        // Already processed locally; refresh the driveTombstoneId in case
-        // another device rewrote the tombstone (e.g. echo).
-        state.tombstones[meetingName].driveTombstoneId = entry.id;
+        // Already processed locally. Refresh the driveTombstoneId for the
+        // current Drive file (echo / multi-device rewrite), and advance
+        // deletedAt to the newer of the two timestamps so GC doesn't drop
+        // the tombstone too early when another device re-deleted after
+        // ours -- otherwise a node that missed the second delete event
+        // could resurrect the meeting before the full retention window.
+        const existing = state.tombstones[meetingName];
+        existing.driveTombstoneId = entry.id;
+        if (entry.modifiedTime) {
+          const priorMs = Date.parse(existing.deletedAt);
+          const incomingMs = Date.parse(entry.modifiedTime);
+          if (Number.isFinite(incomingMs) && (!Number.isFinite(priorMs) || incomingMs > priorMs)) {
+            existing.deletedAt = entry.modifiedTime;
+          }
+        }
         continue;
       }
       try {

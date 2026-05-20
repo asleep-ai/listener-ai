@@ -1487,6 +1487,10 @@ ipcMain.handle('codex-oauth-clear', async () => {
 
 let pendingGoogleLogin: { controller: AbortController; done: Promise<void> } | null = null;
 let googleSyncTimer: NodeJS.Timeout | null = null;
+// The 5s post-enable kick is tracked separately from the periodic interval so
+// `refreshGoogleSyncTimer` can cancel it when the user toggles off within the
+// window (otherwise the deferred sync runs after they think it's disabled).
+let googleSyncInitialKick: NodeJS.Timeout | null = null;
 let googleSyncInFlight = false;
 let googleLastSyncedAt: string | null = null;
 let googleLastSyncResult: SyncResult | null = null;
@@ -1561,14 +1565,26 @@ async function runGoogleSync(): Promise<SyncResult | undefined> {
 
 function refreshGoogleSyncTimer(): void {
   const shouldRun = configService.getGoogleDriveEnabled() && configService.hasGoogleOAuth();
+
+  // Cancel any pending initial kick unconditionally. If shouldRun is still
+  // true we'll re-arm it below; if not, this prevents a stray timeout from
+  // executing a sync the user thinks they disabled.
+  if (googleSyncInitialKick) {
+    clearTimeout(googleSyncInitialKick);
+    googleSyncInitialKick = null;
+  }
+
   if (shouldRun && !googleSyncTimer) {
     // Run one cycle shortly after toggle so the user sees activity quickly,
-    // then continue on the regular interval.
-    setTimeout(() => {
-      void runGoogleSync();
+    // then continue on the regular interval. Both callbacks route through
+    // maybeAutoSync, which re-checks the enabled flag at fire time as a
+    // defense in depth against config changes between schedule and execution.
+    googleSyncInitialKick = setTimeout(() => {
+      googleSyncInitialKick = null;
+      maybeAutoSync();
     }, GOOGLE_SYNC_INITIAL_DELAY_MS);
     googleSyncTimer = setInterval(() => {
-      void runGoogleSync();
+      maybeAutoSync();
     }, GOOGLE_SYNC_INTERVAL_MS);
     console.log('Google Drive sync timer started.');
   } else if (!shouldRun && googleSyncTimer) {
