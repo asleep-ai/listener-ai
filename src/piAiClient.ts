@@ -44,6 +44,18 @@ function loadPiAi(): Promise<PiAiModule> {
 }
 
 import { type AiProvider, toPiAiProvider } from './aiProvider';
+import { type CostSession, type UsageKind, recordUsage } from './services/usageTracker';
+
+/**
+ * Cost-tracking context passed alongside `complete()`. `kind` is required so
+ * a future caller can't be silently misclassified as 'agent'; pass `session`
+ * to also capture the cost in a transcribeWithTwoSteps aggregate.
+ */
+export interface UsageContext {
+  kind: UsageKind;
+  session?: CostSession;
+  transcriptionRef?: string;
+}
 
 // Explicit overrides for model ids pi-ai's bundled registry doesn't carry yet.
 // Mirrors pi-ai's upstream main-branch entry shape so the next published
@@ -134,6 +146,7 @@ async function runPiAiCall(
   signal: AbortSignal | undefined,
   context: Context,
   call: () => Promise<AssistantMessage>,
+  usageContext?: UsageContext,
 ): Promise<AssistantMessage> {
   const tag = `[pi-ai ${model.provider}/${model.id}]`;
   const startedAt = Date.now();
@@ -145,6 +158,30 @@ async function runPiAiCall(
   console.log(
     `${tag} <- ${elapsed}ms stop=${stop} textChars=${textChars} usage=in:${response.usage?.input ?? '?'}/out:${response.usage?.output ?? '?'}${response.errorMessage ? ` errorMessage=${response.errorMessage.slice(0, 300)}` : ''}`,
   );
+  // Record cost only on successful turns -- error/aborted paths throw below.
+  // pi-ai already priced this call against its bundled model table
+  // (see node_modules/@earendil-works/pi-ai/dist/models.generated.js); pass
+  // its `cost.total` through verbatim rather than re-implementing.
+  if (usageContext && response.stopReason !== 'error' && response.stopReason !== 'aborted') {
+    const usage = response.usage;
+    const recordInput = {
+      modelId: model.id,
+      kind: usageContext.kind,
+      usage: {
+        input: typeof usage?.input === 'number' ? usage.input : undefined,
+        output: typeof usage?.output === 'number' ? usage.output : undefined,
+        cacheRead: typeof usage?.cacheRead === 'number' ? usage.cacheRead : undefined,
+        cacheWrite: typeof usage?.cacheWrite === 'number' ? usage.cacheWrite : undefined,
+      },
+      precomputedUsd: typeof usage?.cost?.total === 'number' ? usage.cost.total : undefined,
+      transcriptionRef: usageContext.transcriptionRef,
+    };
+    if (usageContext.session) {
+      usageContext.session.record(recordInput);
+    } else {
+      recordUsage(recordInput);
+    }
+  }
   if (response.stopReason === 'error') {
     throw new Error(
       `Pi-ai ${model.provider}/${model.id} failed: ${response.errorMessage ?? 'no errorMessage'}`,
@@ -161,11 +198,16 @@ export async function complete(
   model: PiAiModel,
   context: Context,
   options?: ProviderStreamOptions,
+  usageContext?: UsageContext,
 ): Promise<AssistantMessage> {
   const m = await loadPiAi();
   const adjustedOptions = adjustOptionsForModel(model, options);
-  return runPiAiCall(model, options?.signal, context, () =>
-    m.complete(model, context, adjustedOptions),
+  return runPiAiCall(
+    model,
+    options?.signal,
+    context,
+    () => m.complete(model, context, adjustedOptions),
+    usageContext,
   );
 }
 
@@ -176,14 +218,19 @@ export async function completeSimple(
   model: PiAiModel,
   context: Context,
   options?: SimpleStreamOptions,
+  usageContext?: UsageContext,
 ): Promise<AssistantMessage> {
   const m = await loadPiAi();
   const adjustedOptions = adjustOptionsForModel(
     model,
     options as ProviderStreamOptions | undefined,
   ) as SimpleStreamOptions | undefined;
-  return runPiAiCall(model, options?.signal, context, () =>
-    m.completeSimple(model, context, adjustedOptions),
+  return runPiAiCall(
+    model,
+    options?.signal,
+    context,
+    () => m.completeSimple(model, context, adjustedOptions),
+    usageContext,
   );
 }
 

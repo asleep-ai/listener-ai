@@ -197,6 +197,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveMetadata: (filePath: string, metadata: any) =>
     ipcRenderer.invoke('save-metadata', filePath, metadata),
 
+  // Usage / cost tracking
+  getUsageSummary: (opts?: { month?: string }) => ipcRenderer.invoke('get-usage-summary', opts),
+
   // Auto-update events
   onUpdateStatus: (callback: (updateInfo: { event: string; data?: any }) => void) => {
     ipcRenderer.on('update-status', (_, updateInfo) => callback(updateInfo));

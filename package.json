@@ -23,10 +23,12 @@
     "dist/searchService.js",
     "dist/agentService.js",
     "dist/audioFormats.js",
+    "dist/usageFormat.js",
     "dist/services/ffmpegManager.js",
     "dist/services/audioConcatService.js",
     "dist/services/googleDriveService.js",
-    "dist/services/syncEngine.js"
+    "dist/services/syncEngine.js",
+    "dist/services/usageTracker.js"
   ],
   "scripts": {
     "start": "pnpm run build && electron .",
@@ -39,7 +41,7 @@
     "lint:fix": "oxlint --fix src renderer scripts",
     "format": "oxfmt 'src/**/*.ts' 'renderer/**/*.ts' 'renderer/**/*.tsx' 'scripts/**/*.js' 'scripts/**/*.ts'",
     "format:check": "oxfmt --check 'src/**/*.ts' 'renderer/**/*.ts' 'renderer/**/*.tsx' 'scripts/**/*.js' 'scripts/**/*.ts'",
-    "test": "tsc && node --test \"dist/**/*.test.js\"",
+    "test": "tsc && NODE_ENV=test node --test \"dist/**/*.test.js\"",
     "dist": "pnpm run build && electron-builder",
     "dist:mac": "pnpm run build && electron-builder --mac",
     "dist:mac-x64": "pnpm run build && electron-builder --mac --x64",

@@ -154,6 +154,42 @@ describe('listener CLI basics', () => {
     assert.equal(code, 1);
     assert.match(stderr, /Unknown key/);
   });
+
+  it('usage prints empty summary when no usage.jsonl exists', async () => {
+    const { stdout, code } = await runCli(['usage', '--month', '2026-05']);
+    assert.equal(code, 0);
+    assert.match(stdout, /Usage for 2026-05/);
+    assert.match(stdout, /No API calls recorded/);
+  });
+
+  it('usage --json emits a parseable JSON document', async () => {
+    const { stdout, code } = await runCli(['usage', '--month', '2026-05', '--json']);
+    assert.equal(code, 0);
+    const parsed = JSON.parse(stdout);
+    assert.equal(parsed.month, '2026-05');
+    assert.equal(parsed.totalUsd, 0);
+    assert.ok(Array.isArray(parsed.byModel));
+  });
+
+  it('usage rolls up entries from usage.jsonl', async () => {
+    const jsonl = path.join(basicsDataPath, 'usage.jsonl');
+    fs.writeFileSync(
+      jsonl,
+      `${JSON.stringify({ timestamp: '2026-05-10T10:00:00.000Z', modelId: 'gemini-2.5-pro', kind: 'summary', usage: { input: 1_000_000 }, usd: 1.25 })}\n${JSON.stringify({ timestamp: '2026-05-15T10:00:00.000Z', modelId: 'gpt-4o-transcribe', kind: 'transcription', usage: { audioSeconds: 60 }, usd: 0.006 })}\n`,
+      'utf-8',
+    );
+    const { stdout, code } = await runCli(['usage', '--month', '2026-05']);
+    assert.equal(code, 0);
+    assert.match(stdout, /Total: \$1\.26/);
+    assert.match(stdout, /gemini-2\.5-pro/);
+    assert.match(stdout, /gpt-4o-transcribe/);
+  });
+
+  it('usage rejects malformed --month', async () => {
+    const { code, stderr } = await runCli(['usage', '--month', 'not-a-month']);
+    assert.equal(code, 1);
+    assert.match(stderr, /Invalid month/);
+  });
 });
 
 describe('listener transcript (CLI integration)', () => {
