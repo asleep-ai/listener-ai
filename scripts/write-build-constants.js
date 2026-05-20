@@ -20,17 +20,13 @@ const distDir = path.join(__dirname, '..', 'dist');
 fs.mkdirSync(distDir, { recursive: true });
 
 const outPath = path.join(distDir, 'buildConstants.js');
-const content =
-  '// AUTO-GENERATED at build time. Do not edit. Do not commit.\n' +
-  "'use strict';\n" +
-  'module.exports = {\n' +
-  '  googleOAuthClientId: ' +
-  JSON.stringify(clientId) +
-  ',\n' +
-  '  googleOAuthClientSecret: ' +
-  JSON.stringify(clientSecret) +
-  ',\n' +
-  '};\n';
+const content = `// AUTO-GENERATED at build time. Do not edit. Do not commit.
+'use strict';
+module.exports = {
+  googleOAuthClientId: ${JSON.stringify(clientId)},
+  googleOAuthClientSecret: ${JSON.stringify(clientSecret)},
+};
+`;
 
 fs.writeFileSync(outPath, content, { mode: 0o644 });
 

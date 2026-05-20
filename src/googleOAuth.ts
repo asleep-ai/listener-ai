@@ -72,14 +72,19 @@ function loadBuildConstants(): BuildConstants | null {
   return cachedBuildConstants;
 }
 
+function resolveClientCreds(): { clientId?: string; clientSecret?: string } {
+  const bundled = loadBuildConstants();
+  return {
+    clientId:
+      process.env.LISTENER_GOOGLE_OAUTH_CLIENT_ID?.trim() || bundled?.googleOAuthClientId?.trim(),
+    clientSecret:
+      process.env.LISTENER_GOOGLE_OAUTH_CLIENT_SECRET?.trim() ||
+      bundled?.googleOAuthClientSecret?.trim(),
+  };
+}
+
 function getClientCredentials(): { clientId: string; clientSecret: string } {
-  let clientId = process.env.LISTENER_GOOGLE_OAUTH_CLIENT_ID?.trim();
-  let clientSecret = process.env.LISTENER_GOOGLE_OAUTH_CLIENT_SECRET?.trim();
-  if (!clientId || !clientSecret) {
-    const bundled = loadBuildConstants();
-    if (!clientId) clientId = bundled?.googleOAuthClientId?.trim();
-    if (!clientSecret) clientSecret = bundled?.googleOAuthClientSecret?.trim();
-  }
+  const { clientId, clientSecret } = resolveClientCreds();
   if (!clientId || !clientSecret) {
     throw new Error(
       'Google OAuth client not configured. Set LISTENER_GOOGLE_OAUTH_CLIENT_ID and ' +
@@ -91,11 +96,8 @@ function getClientCredentials(): { clientId: string; clientSecret: string } {
 }
 
 export function hasGoogleOAuthClientConfigured(): boolean {
-  const envId = process.env.LISTENER_GOOGLE_OAUTH_CLIENT_ID?.trim();
-  const envSecret = process.env.LISTENER_GOOGLE_OAUTH_CLIENT_SECRET?.trim();
-  if (envId && envSecret) return true;
-  const bundled = loadBuildConstants();
-  return !!bundled?.googleOAuthClientId?.trim() && !!bundled?.googleOAuthClientSecret?.trim();
+  const { clientId, clientSecret } = resolveClientCreds();
+  return !!clientId && !!clientSecret;
 }
 
 export function getGoogleOAuthEnvCredentials(): GoogleOAuthCredentials | undefined {
