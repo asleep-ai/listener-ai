@@ -30,6 +30,13 @@ import {
 import { type AppConfig, ConfigService } from './configService';
 import { loginCodexOAuth } from './codexOAuth';
 import { getDataPath } from './dataPath';
+import {
+  type GoogleOAuthCredentials,
+  loginGoogleOAuth,
+  resolveGoogleAccessToken,
+} from './googleOAuth';
+import { GoogleDriveClient } from './services/googleDriveService';
+import { SyncEngine, type SyncResult } from './services/syncEngine';
 import { DisplayDetectorService } from './displayDetectorService';
 import { GeminiService, TranscriptionError, type TranscriptionErrorPayload } from './geminiService';
 import { MeetingDetectorService } from './meetingDetectorService';
@@ -588,6 +595,10 @@ app.whenReady().then(() => {
   // Register global shortcut
   registerGlobalShortcut();
 
+  // Start Google Drive sync timer if the user previously enabled it. The
+  // timer is a no-op when sync is disabled or unauthenticated.
+  refreshGoogleSyncTimer();
+
   // Initialize meeting detector
   if (configService.getMeetingDetection()) {
     meetingDetector.start();
@@ -1007,6 +1018,7 @@ ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: st
         dataPath: app.getPath('userData'),
         mergedFrom: sourceFolders,
       });
+      maybeAutoSyncAfterTranscription();
     } catch (error) {
       console.error('Failed to save merged transcription files:', error);
       const message = error instanceof Error ? error.message : String(error);
@@ -1238,6 +1250,9 @@ function applyConfigSideEffects(changed: Partial<AppConfig>): void {
   if (changed.slackWebhookUrl !== undefined) {
     slackService = null; // re-init lazily on next send
   }
+  if (changed.googleDriveEnabled !== undefined || changed.googleOAuth !== undefined) {
+    refreshGoogleSyncTimer();
+  }
 }
 
 function getSlackService(): SlackService | null {
@@ -1411,6 +1426,213 @@ ipcMain.handle('codex-oauth-clear', async () => {
   }
 });
 
+// Google Drive sync: OAuth + manual sync + auto-trigger + periodic timer.
+// Mirrors the Codex OAuth IPC pattern. The sync engine itself lives in
+// src/services/syncEngine.ts; this module just orchestrates triggers.
+
+let pendingGoogleLogin: { controller: AbortController; done: Promise<void> } | null = null;
+let googleSyncTimer: NodeJS.Timeout | null = null;
+let googleSyncInFlight = false;
+let googleLastSyncedAt: string | null = null;
+let googleLastSyncResult: SyncResult | null = null;
+const GOOGLE_SYNC_INTERVAL_MS = 60_000;
+
+function broadcastGoogleSyncStatus(
+  phase: 'idle' | 'syncing' | 'success' | 'error',
+  extra?: { result?: SyncResult; error?: string },
+): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('google-sync-status', {
+      phase,
+      lastSyncedAt: googleLastSyncedAt,
+      result: extra?.result,
+      error: extra?.error,
+    });
+  }
+}
+
+function buildDriveClient(credentials: GoogleOAuthCredentials): GoogleDriveClient {
+  return new GoogleDriveClient({
+    getAccessToken: async () => {
+      const token = await resolveGoogleAccessToken({
+        credentials,
+        onCredentialsChanged: (next) => {
+          // Same gate as the Codex side: never silently persist refreshed
+          // tokens that originated from env vars.
+          if (configService.hasStoredGoogleOAuth()) {
+            configService.setGoogleOAuth(next);
+          }
+        },
+      });
+      if (!token) throw new Error('Failed to resolve Google access token.');
+      return token;
+    },
+  });
+}
+
+async function runGoogleSync(): Promise<SyncResult | undefined> {
+  if (googleSyncInFlight) return undefined;
+  const credentials = configService.getGoogleOAuth();
+  if (!credentials) return undefined;
+
+  googleSyncInFlight = true;
+  broadcastGoogleSyncStatus('syncing');
+  try {
+    const dataPath = app.getPath('userData');
+    const engine = new SyncEngine({
+      driveClient: buildDriveClient(credentials),
+      transcriptionsDir: getTranscriptionsDir(dataPath),
+      syncStatePath: path.join(dataPath, 'sync-state.json'),
+      logger: (msg) => console.log(`[google-sync] ${msg}`),
+    });
+    const result = await engine.syncOnce();
+    googleLastSyncedAt = new Date().toISOString();
+    googleLastSyncResult = result;
+    broadcastGoogleSyncStatus(
+      result.errors.length > 0 ? 'error' : 'success',
+      { result },
+    );
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Google Drive sync failed:', error);
+    broadcastGoogleSyncStatus('error', { error: message });
+    return undefined;
+  } finally {
+    googleSyncInFlight = false;
+  }
+}
+
+function refreshGoogleSyncTimer(): void {
+  const shouldRun =
+    configService.getGoogleDriveEnabled() && configService.hasGoogleOAuth();
+  if (shouldRun && !googleSyncTimer) {
+    // Run one cycle ~5s after toggle so the user sees activity quickly, then
+    // continue on the regular interval.
+    setTimeout(() => {
+      void runGoogleSync();
+    }, 5_000);
+    googleSyncTimer = setInterval(() => {
+      void runGoogleSync();
+    }, GOOGLE_SYNC_INTERVAL_MS);
+    console.log('Google Drive sync timer started.');
+  } else if (!shouldRun && googleSyncTimer) {
+    clearInterval(googleSyncTimer);
+    googleSyncTimer = null;
+    console.log('Google Drive sync timer stopped.');
+  }
+}
+
+// Fire-and-forget hook from the transcription save path. Skips silently when
+// sync is disabled or unauthenticated so the transcription flow is never
+// blocked on Drive availability.
+function maybeAutoSyncAfterTranscription(): void {
+  if (!configService.getGoogleDriveEnabled()) return;
+  if (!configService.hasGoogleOAuth()) return;
+  void runGoogleSync();
+}
+
+ipcMain.handle('google-oauth-login', async () => {
+  while (pendingGoogleLogin) {
+    const prior = pendingGoogleLogin;
+    prior.controller.abort();
+    await prior.done;
+  }
+
+  const controller = new AbortController();
+  let resolveDone: () => void = () => {};
+  const done = new Promise<void>((resolve) => {
+    resolveDone = resolve;
+  });
+  pendingGoogleLogin = { controller, done };
+
+  const sendProgress = (phase: 'browser-opened' | 'progress', message?: string) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('google-oauth-progress', { phase, message });
+    }
+  };
+
+  try {
+    const credentials = await loginGoogleOAuth({
+      openUrl: async (url) => {
+        await shell.openExternal(url);
+        sendProgress('browser-opened');
+      },
+      onProgress: (message) => {
+        console.log(`Google OAuth: ${message}`);
+        sendProgress('progress', message);
+      },
+      signal: controller.signal,
+    });
+    configService.setGoogleOAuth(credentials);
+    applyConfigSideEffects({ googleOAuth: credentials });
+    broadcastConfigChanged();
+    return { success: true as const, config: configService.getAllConfig() };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      return { success: false as const, error: 'Sign-in cancelled.', cancelled: true as const };
+    }
+    console.error('Google OAuth login failed:', error);
+    return {
+      success: false as const,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    await new Promise((resolve) => setTimeout(resolve, PORT_RELEASE_CUSHION_MS));
+    if (pendingGoogleLogin?.controller === controller) {
+      pendingGoogleLogin = null;
+    }
+    resolveDone();
+  }
+});
+
+ipcMain.handle('google-oauth-cancel', async () => {
+  const prior = pendingGoogleLogin;
+  if (prior) {
+    prior.controller.abort();
+    await prior.done;
+  }
+  return { success: true };
+});
+
+ipcMain.handle('google-oauth-clear', async () => {
+  try {
+    configService.clearGoogleOAuth();
+    applyConfigSideEffects({ googleOAuth: undefined });
+    broadcastConfigChanged();
+    return { success: true, config: configService.getAllConfig() };
+  } catch (error) {
+    console.error('Google OAuth clear failed:', error);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('google-drive-sync-now', async () => {
+  if (!configService.hasGoogleOAuth()) {
+    return { success: false as const, error: 'Not signed in to Google Drive.' };
+  }
+  const result = await runGoogleSync();
+  if (!result) {
+    return {
+      success: false as const,
+      error: googleSyncInFlight
+        ? 'A sync is already in progress.'
+        : 'Sync failed; see main process logs.',
+    };
+  }
+  return { success: true as const, result, lastSyncedAt: googleLastSyncedAt };
+});
+
+ipcMain.handle('google-drive-sync-status', async () => {
+  return {
+    inFlight: googleSyncInFlight,
+    lastSyncedAt: googleLastSyncedAt,
+    lastResult: googleLastSyncResult,
+    enabled: configService.getGoogleDriveEnabled(),
+    authenticated: configService.hasGoogleOAuth(),
+  };
+});
+
 ipcMain.handle('get-all-releases', async () => {
   console.log('Release list IPC: get-all-releases invoked');
   const results = await fetchAllReleases();
@@ -1554,6 +1776,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string, liveNotesRaw?: un
         liveNotes,
       });
       console.log('Transcription saved to:', transcriptionPath);
+      maybeAutoSyncAfterTranscription();
     } catch (error) {
       console.error('Failed to save transcription files:', error);
     }

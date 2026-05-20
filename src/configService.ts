@@ -34,6 +34,10 @@ export interface AppConfig {
   codexOAuthConfigured?: boolean;
   googleOAuth?: GoogleOAuthCredentials;
   googleOAuthConfigured?: boolean;
+  // When true, the app periodically syncs transcription folders to Drive
+  // (and auto-syncs after each new transcription completes). When false,
+  // sync only runs on explicit user trigger (CLI or "Sync now" button).
+  googleDriveEnabled?: boolean;
   notionApiKey?: string;
   notionDatabaseId?: string;
   autoMode?: boolean;
@@ -276,6 +280,15 @@ export class ConfigService {
 
   hasGoogleOAuth(): boolean {
     return hasGoogleOAuthEnvCredentials() || this.hasStoredGoogleOAuth();
+  }
+
+  getGoogleDriveEnabled(): boolean {
+    return this.config.googleDriveEnabled || false;
+  }
+
+  setGoogleDriveEnabled(enabled: boolean): void {
+    this.setKey('googleDriveEnabled', enabled);
+    this.saveConfig();
   }
 
   hasAiAuth(): boolean {
@@ -523,6 +536,7 @@ export class ConfigService {
       codexTranscriptionModel: this.getCodexTranscriptionModel(),
       codexOAuthConfigured: this.hasCodexOAuth(),
       googleOAuthConfigured: this.hasGoogleOAuth(),
+      googleDriveEnabled: this.getGoogleDriveEnabled(),
       notionApiKey: this.getNotionApiKey(),
       notionDatabaseId: this.getNotionDatabaseId(),
       autoMode: this.getAutoMode(),

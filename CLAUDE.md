@@ -129,6 +129,7 @@ All values are stored in plaintext JSON at `getDataPath()/config.json`.
 | `recordingReminderMinutes` | Reminder cadence |
 | `minRecordingSeconds` | Discards accidental short recordings |
 | `recordSystemAudio` | Mix system audio loopback (Zoom/Meet) into the recording (macOS only) |
+| `googleDriveEnabled` | When true, run periodic Google Drive sync + auto-sync after each transcription. When false, sync only via CLI or "Sync now" button |
 | `lastSeenVersion` | Drives "what's new" release-notes modal |
 
 Env-var fallbacks (read-only when the config key is empty): `GEMINI_API_KEY`, `LISTENER_AI_PROVIDER`, `CODEX_OAUTH_ACCESS_TOKEN`, `CODEX_OAUTH_REFRESH_TOKEN`, `CODEX_OAUTH_EXPIRES`, `OPENAI_CODEX_ACCESS_TOKEN`, `OPENAI_CODEX_REFRESH_TOKEN`, `OPENAI_CODEX_EXPIRES`, `GOOGLE_OAUTH_ACCESS_TOKEN`, `GOOGLE_OAUTH_REFRESH_TOKEN`, `GOOGLE_OAUTH_EXPIRES`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`.
@@ -150,6 +151,9 @@ Build-time env vars (required for Google Drive OAuth sign-in to work): `LISTENER
 - **Idempotency invariants.** `GoogleDriveClient.uploadFile` PATCHes on name collision in the target Drive folder, and `drive.file` scope means we only collide with our own previous uploads. The sync engine tracks per-file `localMtimeMs + driveFileId` so it skips unchanged files; the engine + Drive client together guarantee re-runs never duplicate content, even if `sync-state.json` gets wiped.
 - **Persist after each meeting.** `SyncEngine.syncOnce()` writes state after every meeting (not just at end-of-sync) so a mid-cycle crash doesn't lose the upload tracking that already succeeded. One bad meeting records an error but doesn't abort the rest.
 - **Upload-only today (Phase 3A).** No download path, no conflict resolution, no two-way sync yet. The state schema is designed to grow (Phase 3B adds download + conflict log; bump `version` and the loader will reset cleanly on older clients).
+- **GUI triggers (Phase 3E).** `src/main.ts` owns three sync triggers and one start/stop point. The triggers: (1) periodic `setInterval` every `GOOGLE_SYNC_INTERVAL_MS` (60s) with an initial 5s kick; (2) `maybeAutoSyncAfterTranscription()` called fire-and-forget from `save-transcription` and `merge-recordings` save paths; (3) explicit user click via `google-drive-sync-now` IPC. The single start/stop point: `refreshGoogleSyncTimer()`, called from `applyConfigSideEffects` whenever `googleDriveEnabled` or `googleOAuth` changes. All triggers no-op when `!googleDriveEnabled || !hasGoogleOAuth()`, and a `googleSyncInFlight` flag prevents two concurrent runs (manual + auto, or auto + timer). Don't add new start/stop sites -- gate any new trigger on `refreshGoogleSyncTimer()` semantics or you'll leak timers across config toggles.
+- **Sync status IPC channel.** `google-sync-status` main-to-renderer events carry `{phase: 'idle'|'syncing'|'success'|'error', lastSyncedAt, result?, error?}`. The modal also calls `getGoogleSyncStatus()` on open to recover the last-known state if no event has fired since mount (e.g. modal opened mid-cycle or after app restart). Renderer must handle both push (subscription) and pull (initial fetch) -- mirroring the Codex OAuth progress pattern.
+- **OAuth cancellation reuses the Codex pattern.** `pendingGoogleLogin` slot, `AbortController` per login, `PORT_RELEASE_CUSHION_MS` 250ms cushion. The Google loopback uses a dynamic port (unlike Codex's fixed 1455), so port-collision risk is lower, but keep the cushion anyway for symmetry and to avoid leaking the slot when the next login fires fast.
 
 ## Architecture Overview
 
