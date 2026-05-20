@@ -136,6 +136,8 @@ Env-var fallbacks (read-only when the config key is empty): `GEMINI_API_KEY`, `L
 
 Build-time env vars (required for Google Drive OAuth sign-in to work): `LISTENER_GOOGLE_OAUTH_CLIENT_ID`, `LISTENER_GOOGLE_OAUTH_CLIENT_SECRET`. Register a Desktop application OAuth client at https://console.cloud.google.com/apis/credentials. Desktop clients embed the secret in the binary by design (see Google's native-app OAuth doc); the loopback redirect + PKCE protect the flow, not the secret.
 
+Injection mechanism: `scripts/write-build-constants.js` runs as part of `pnpm run build` and `prepublishOnly`, reading the two env vars and writing `dist/buildConstants.js` (gitignored). `src/googleOAuth.ts` reads `process.env` first, then falls back to that bundled file -- so packaged Electron apps and the npm CLI work without any env vars on the end user's machine, while local devs can still override at runtime. The release workflow (`.github/workflows/release.yml`) passes the GitHub secrets to both the build and npm-publish jobs. `loadBuildConstants()` is a no-op when `NODE_ENV === 'test'` so unit tests stay deterministic regardless of which credentials the dev's last build baked.
+
 ## Transcription Storage
 
 - Root: `getDataPath()/transcriptions/`
