@@ -12,7 +12,7 @@ By installing or using Listener.AI ("the app"), you agree to these Terms of Serv
 
 ## 2. License and BYOK
 
-Asleep grants you a personal, non-exclusive, non-transferable license to install and use the app on devices you own or are authorized to administer. The app is "bring your own key": features that depend on third-party APIs (Google Gemini, OpenAI, Google Drive, Notion) require credentials you supply, and your use of those services is governed by the third party's own terms of service. Open-source components shipped with the app remain under their original licenses; see `THIRD_PARTY_NOTICES.md` in the application bundle.
+Asleep grants you a personal, non-exclusive, non-transferable license to install and use the distributed application binaries on devices you own or are authorized to administer. The source code for Listener.AI is published under the MIT License at [github.com/asleep-ai/listener-ai](https://github.com/asleep-ai/listener-ai); that license governs your use of the source, and nothing in these Terms restricts the rights it grants. The app is "bring your own key": features that depend on third-party APIs (Google Gemini, OpenAI, Google Drive, Notion) require credentials you supply, and your use of those services is governed by the third party's own terms of service. Open-source components shipped with the app remain under their original licenses; see `THIRD_PARTY_NOTICES.md` in the application bundle.
 
 ## 3. Acceptable use
 
@@ -24,7 +24,7 @@ You are responsible for using the app lawfully. In particular:
 
 ## 4. AI outputs
 
-The app uses third-party AI providers for transcription and summarization. AI-generated content may contain errors, omissions, hallucinations, or bias, and may misattribute statements between speakers. You are responsible for reviewing AI outputs before relying on them, sharing them, or using them to make decisions.
+The app uses third-party AI providers for transcription, summarization, and chat-style queries about your past meetings. AI-generated content may contain errors, omissions, hallucinations, or bias, and may misattribute statements between speakers. You are responsible for reviewing AI outputs before relying on them, sharing them, or using them to make decisions.
 
 ## 5. Disclaimers
 
