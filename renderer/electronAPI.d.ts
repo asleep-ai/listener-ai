@@ -50,6 +50,24 @@ export type ConfigPayload = {
   audioDeviceId?: string;
   slackWebhookUrl?: string;
   slackAutoShare?: boolean;
+  googleDriveEnabled?: boolean;
+};
+
+export type GoogleSyncResult = {
+  uploaded: string[];
+  downloaded: string[];
+  skipped: string[];
+  conflicts: string[];
+  deleted: string[];
+  tombstoned: string[];
+  errors: Array<{ meeting: string; file?: string; error: string }>;
+};
+
+export type GoogleSyncStatus = {
+  phase: 'idle' | 'syncing' | 'success' | 'error';
+  lastSyncedAt: string | null;
+  result?: GoogleSyncResult;
+  error?: string;
 };
 
 export type SlackSendApiResult =
@@ -101,6 +119,29 @@ export type ElectronAPI = {
   clearCodexOAuth: () => Promise<
     { success: true; config: Record<string, unknown> } | { success: false; error: string }
   >;
+  loginGoogleOAuth: () => Promise<
+    | { success: true; config: Record<string, unknown> }
+    | { success: false; error: string; cancelled?: boolean }
+  >;
+  cancelGoogleOAuth: () => Promise<{ success: boolean }>;
+  clearGoogleOAuth: () => Promise<
+    { success: true; config: Record<string, unknown> } | { success: false; error: string }
+  >;
+  onGoogleOAuthProgress: (
+    cb: (status: { phase: 'browser-opened' | 'progress'; message?: string }) => void,
+  ) => void;
+  syncGoogleDriveNow: () => Promise<
+    | { success: true; result: GoogleSyncResult; lastSyncedAt: string | null }
+    | { success: false; error: string }
+  >;
+  getGoogleSyncStatus: () => Promise<{
+    inFlight: boolean;
+    lastSyncedAt: string | null;
+    lastResult: GoogleSyncResult | null;
+    enabled: boolean;
+    authenticated: boolean;
+  }>;
+  onGoogleSyncStatus: (cb: (status: GoogleSyncStatus) => void) => void;
   transcribeAudio: (
     filePath: string,
     liveNotes?: Array<{ offsetMs: number; text: string }>,
@@ -156,6 +197,9 @@ export type ElectronAPI = {
   exportRecordingM4A: (
     srcPath: string,
   ) => Promise<{ success: boolean; outPath?: string; error?: string }>;
+  deleteMeeting: (
+    audioFilePath: string,
+  ) => Promise<{ success: true } | { success: false; error: string }>;
   mergeRecordings: (opts: { paths: string[]; title?: string }) => Promise<{
     success: boolean;
     folderName?: string;

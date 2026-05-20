@@ -17,13 +17,16 @@
     "dist/dataPath.js",
     "dist/esmImport.js",
     "dist/geminiService.js",
+    "dist/googleOAuth.js",
     "dist/piAiClient.js",
     "dist/outputService.js",
     "dist/searchService.js",
     "dist/agentService.js",
     "dist/audioFormats.js",
     "dist/services/ffmpegManager.js",
-    "dist/services/audioConcatService.js"
+    "dist/services/audioConcatService.js",
+    "dist/services/googleDriveService.js",
+    "dist/services/syncEngine.js"
   ],
   "scripts": {
     "start": "pnpm run build && electron .",
@@ -79,6 +82,7 @@
     "audiotee": "^0.0.7",
     "buffer-equal-constant-time": "^1.0.1",
     "fs-extra": "^11.2.0",
+    "google-auth-library": "^10.6.2",
     "jwa": "^2.0.1",
     "marked": "^15.0.0"
   },

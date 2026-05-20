@@ -16,6 +16,11 @@ import {
   getCodexOAuthEnvCredentials,
   hasCodexOAuthEnvCredentials,
 } from './codexOAuth';
+import {
+  type GoogleOAuthCredentials,
+  getGoogleOAuthEnvCredentials,
+  hasGoogleOAuthEnvCredentials,
+} from './googleOAuth';
 
 export interface AppConfig {
   aiProvider?: AiProvider;
@@ -27,6 +32,12 @@ export interface AppConfig {
   codexTranscriptionModel?: string;
   codexOAuth?: CodexOAuthCredentials;
   codexOAuthConfigured?: boolean;
+  googleOAuth?: GoogleOAuthCredentials;
+  googleOAuthConfigured?: boolean;
+  // When true, the app periodically syncs transcription folders to Drive
+  // (and auto-syncs after each new transcription completes). When false,
+  // sync only runs on explicit user trigger (CLI or "Sync now" button).
+  googleDriveEnabled?: boolean;
   notionApiKey?: string;
   notionDatabaseId?: string;
   autoMode?: boolean;
@@ -242,6 +253,42 @@ export class ConfigService {
 
   hasCodexOAuth(): boolean {
     return hasCodexOAuthEnvCredentials() || this.hasStoredCodexOAuth();
+  }
+
+  // Mirrors the Codex OAuth surface. The stored-vs-env distinction matters
+  // for the same reason: if credentials came from env, persisting refreshed
+  // tokens would silently leak ephemeral env values into config.json. Callers
+  // that handle refresh callbacks must gate persistence on hasStoredGoogleOAuth().
+  getGoogleOAuth(): GoogleOAuthCredentials | undefined {
+    return this.config.googleOAuth || getGoogleOAuthEnvCredentials();
+  }
+
+  hasStoredGoogleOAuth(): boolean {
+    const c = this.config.googleOAuth;
+    return !!(c?.access && c.refresh && Number.isFinite(c.expires));
+  }
+
+  setGoogleOAuth(credentials: GoogleOAuthCredentials): void {
+    this.setKey('googleOAuth', credentials);
+    this.saveConfig();
+  }
+
+  clearGoogleOAuth(): void {
+    this.setKey('googleOAuth', undefined);
+    this.saveConfig();
+  }
+
+  hasGoogleOAuth(): boolean {
+    return hasGoogleOAuthEnvCredentials() || this.hasStoredGoogleOAuth();
+  }
+
+  getGoogleDriveEnabled(): boolean {
+    return this.config.googleDriveEnabled ?? false;
+  }
+
+  setGoogleDriveEnabled(enabled: boolean): void {
+    this.setKey('googleDriveEnabled', enabled);
+    this.saveConfig();
   }
 
   hasAiAuth(): boolean {
@@ -488,6 +535,8 @@ export class ConfigService {
       codexModel: this.getCodexModel(),
       codexTranscriptionModel: this.getCodexTranscriptionModel(),
       codexOAuthConfigured: this.hasCodexOAuth(),
+      googleOAuthConfigured: this.hasGoogleOAuth(),
+      googleDriveEnabled: this.getGoogleDriveEnabled(),
       notionApiKey: this.getNotionApiKey(),
       notionDatabaseId: this.getNotionDatabaseId(),
       autoMode: this.getAutoMode(),

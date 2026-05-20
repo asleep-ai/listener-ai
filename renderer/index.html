@@ -292,6 +292,33 @@
                 <small>When auto mode is on, post the summary + Notion link to the configured webhook after each meeting.</small>
               </div>
             </fieldset>
+            <fieldset class="config-subgroup">
+              <legend>Google Drive</legend>
+              <div class="form-group">
+                <label>Sign-in</label>
+                <div class="codex-oauth-row">
+                  <button type="button" id="loginGoogleOAuth" class="reset-prompt-button">Sign in</button>
+                  <button type="button" id="clearGoogleOAuth" class="reset-prompt-button">Sign out</button>
+                  <span id="googleOAuthStatus" class="slack-webhook-status"></span>
+                </div>
+                <small>Signs you in to your asleep-ai Google account so meeting transcripts can sync to Drive. Uses the <code>drive.file</code> scope -- the app only sees files it created.</small>
+              </div>
+              <div class="form-group">
+                <label class="inline-label">
+                  <input type="checkbox" id="googleDriveEnabled">
+                  Enable Google Drive sync
+                </label>
+                <small>When on, transcripts auto-sync after each recording and every minute. When off, sync only runs from the Sync now button or CLI.</small>
+              </div>
+              <div class="form-group">
+                <label>Sync</label>
+                <div class="codex-oauth-row">
+                  <button type="button" id="googleDriveSyncNow" class="reset-prompt-button">Sync now</button>
+                  <span id="googleDriveSyncStatus" class="slack-webhook-status"></span>
+                </div>
+                <small>Manually runs one sync cycle. Safe to click any time; uploads only files that changed since the last sync.</small>
+              </div>
+            </fieldset>
           </section>
 
           <section class="config-pane" id="config-pane-recording" data-pane="recording" role="tabpanel" aria-labelledby="config-tab-recording">
@@ -447,6 +474,24 @@
       <div class="modal-buttons">
         <button id="mergeCancelBtn" class="cancel-button">Cancel</button>
         <button id="mergeConfirmBtn" class="save-button" disabled>Merge &amp; Transcribe</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="deleteRecordingModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Delete recording?</h2>
+        <span class="close" id="deleteRecordingClose">&times;</span>
+      </div>
+      <p>
+        <span id="deleteRecordingTarget" class="recording-title-emphasis"></span>
+      </p>
+      <p>This permanently removes the audio file, transcript, and notes. If Google Drive sync is on, the deletion will also be propagated to your other devices.</p>
+      <p id="deleteRecordingStatus" class="merge-status"></p>
+      <div class="modal-buttons">
+        <button id="deleteRecordingCancel" class="cancel-button">Cancel</button>
+        <button id="deleteRecordingConfirm" class="save-button">Delete</button>
       </div>
     </div>
   </dialog>

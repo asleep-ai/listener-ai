@@ -7,6 +7,7 @@ export const SUPPORTED_AUDIO_EXTENSIONS = [
   '.opus',
   '.flac',
   '.aac',
+  '.wma',
 ] as const;
 
 const MIME_FOR_EXTENSION: Record<string, string> = {
@@ -48,6 +49,20 @@ export function extensionForMimeType(mimeType: string): string {
 export function isSupportedAudioExtension(ext: string): boolean {
   const normalized = ext.startsWith('.') ? ext.toLowerCase() : `.${ext.toLowerCase()}`;
   return (SUPPORTED_AUDIO_EXTENSIONS as readonly string[]).includes(normalized);
+}
+
+// Mime detection for general upload paths (CLI google upload, sync engine).
+// Handles markdown/json/text/audio; falls back to octet-stream for anything
+// the recording pipeline doesn't recognize.
+export function mimeTypeForFile(filename: string): string {
+  const lastDot = filename.lastIndexOf('.');
+  if (lastDot < 0) return 'application/octet-stream';
+  const ext = filename.slice(lastDot).toLowerCase();
+  if (ext === '.md') return 'text/markdown';
+  if (ext === '.json') return 'application/json';
+  if (ext === '.txt') return 'text/plain';
+  if (isSupportedAudioExtension(ext)) return mimeTypeForExtension(ext);
+  return 'application/octet-stream';
 }
 
 // Transient files the transcription pipeline writes alongside user recordings:

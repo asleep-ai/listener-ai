@@ -21,6 +21,12 @@ let geminiThinkingLevelSelect: HTMLSelectElement | null = null;
 let loginCodexOAuthBtn: HTMLButtonElement | null = null;
 let clearCodexOAuthBtn: HTMLButtonElement | null = null;
 let codexOAuthStatus: HTMLElement | null = null;
+let loginGoogleOAuthBtn: HTMLButtonElement | null = null;
+let clearGoogleOAuthBtn: HTMLButtonElement | null = null;
+let googleOAuthStatus: HTMLElement | null = null;
+let googleDriveEnabledInput: HTMLInputElement | null = null;
+let googleDriveSyncNowBtn: HTMLButtonElement | null = null;
+let googleDriveSyncStatusEl: HTMLElement | null = null;
 let notionApiKeyInput: HTMLInputElement | null = null;
 let notionDatabaseIdInput: HTMLInputElement | null = null;
 let slackWebhookUrlInput: HTMLInputElement | null = null;
@@ -37,6 +43,7 @@ let aiPane: HTMLElement | null = null;
 // token against the current one after `await`, discarding stale results from
 // prior attempts that were aborted by a newer click.
 let codexLoginToken = 0;
+let googleLoginToken = 0;
 
 const MODEL_FIELDS: readonly ModelField[] = [
   'geminiModel',
@@ -122,10 +129,40 @@ function setupModelControls(): void {
   }
 }
 
+// Apply the project's status-pill styling to a target element. Reused by the
+// Codex sign-in, Google sign-in, and Google sync status indicators -- all
+// three pills share the same CSS surface, only the target element differs.
+function setStatusEl(
+  el: HTMLElement | null,
+  text: string,
+  state: 'idle' | 'success' | 'error' = 'idle',
+): void {
+  if (!el) return;
+  el.textContent = text;
+  el.className = `slack-webhook-status${state === 'idle' ? '' : ` is-${state}`}`;
+}
+
 function setCodexOAuthStatus(text: string, state: 'idle' | 'success' | 'error' = 'idle'): void {
-  if (!codexOAuthStatus) return;
-  codexOAuthStatus.textContent = text;
-  codexOAuthStatus.className = `slack-webhook-status${state === 'idle' ? '' : ` is-${state}`}`;
+  setStatusEl(codexOAuthStatus, text, state);
+}
+
+function setGoogleOAuthStatus(text: string, state: 'idle' | 'success' | 'error' = 'idle'): void {
+  setStatusEl(googleOAuthStatus, text, state);
+}
+
+function setGoogleSyncStatus(text: string, state: 'idle' | 'success' | 'error' = 'idle'): void {
+  setStatusEl(googleDriveSyncStatusEl, text, state);
+}
+
+function formatLastSynced(iso: string | null | undefined): string {
+  if (!iso) return 'Never synced';
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 1) return 'Synced just now';
+  if (mins < 60) return `Synced ${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `Synced ${hrs}h ago`;
+  return `Synced ${Math.floor(hrs / 24)}d ago`;
 }
 
 // Function to check and prompt for API keys
@@ -163,6 +200,8 @@ export async function showConfigModal(): Promise<void> {
     notionDatabaseId?: string;
     slackWebhookUrl?: string;
     slackAutoShare?: boolean;
+    googleOAuthConfigured?: boolean;
+    googleDriveEnabled?: boolean;
     globalShortcut?: string;
     knownWords?: string[];
     maxRecordingMinutes?: number | string;
@@ -190,6 +229,25 @@ export async function showConfigModal(): Promise<void> {
     config.codexOAuthConfigured ? 'Signed in' : 'Not signed in',
     config.codexOAuthConfigured ? 'success' : 'idle',
   );
+  setGoogleOAuthStatus(
+    config.googleOAuthConfigured ? 'Signed in' : 'Not signed in',
+    config.googleOAuthConfigured ? 'success' : 'idle',
+  );
+  if (googleDriveEnabledInput) {
+    googleDriveEnabledInput.checked = !!config.googleDriveEnabled;
+  }
+  // Pull the current sync status (last synced, in-flight) so the modal is
+  // accurate on open even if no event has fired since boot.
+  window.electronAPI
+    .getGoogleSyncStatus()
+    .then((s) => {
+      if (s.inFlight) {
+        setGoogleSyncStatus('Syncing...', 'idle');
+      } else {
+        setGoogleSyncStatus(formatLastSynced(s.lastSyncedAt));
+      }
+    })
+    .catch(() => {});
   if (notionApiKeyInput && config.notionApiKey) {
     notionApiKeyInput.value = config.notionApiKey;
   }
@@ -359,6 +417,14 @@ export function setupConfigModal(): void {
   loginCodexOAuthBtn = document.getElementById('loginCodexOAuth') as HTMLButtonElement | null;
   clearCodexOAuthBtn = document.getElementById('clearCodexOAuth') as HTMLButtonElement | null;
   codexOAuthStatus = document.getElementById('codexOAuthStatus');
+  loginGoogleOAuthBtn = document.getElementById('loginGoogleOAuth') as HTMLButtonElement | null;
+  clearGoogleOAuthBtn = document.getElementById('clearGoogleOAuth') as HTMLButtonElement | null;
+  googleOAuthStatus = document.getElementById('googleOAuthStatus');
+  googleDriveEnabledInput = document.getElementById(
+    'googleDriveEnabled',
+  ) as HTMLInputElement | null;
+  googleDriveSyncNowBtn = document.getElementById('googleDriveSyncNow') as HTMLButtonElement | null;
+  googleDriveSyncStatusEl = document.getElementById('googleDriveSyncStatus');
   notionApiKeyInput = document.getElementById('notionApiKey') as HTMLInputElement | null;
   notionDatabaseIdInput = document.getElementById('notionDatabaseId') as HTMLInputElement | null;
   slackWebhookUrlInput = document.getElementById('slackWebhookUrl') as HTMLInputElement | null;
@@ -505,14 +571,94 @@ export function setupConfigModal(): void {
     });
   }
 
+  // Google Drive OAuth + sync wiring. Same patterns as the Codex block above.
+  window.electronAPI.onGoogleOAuthProgress((status) => {
+    if (status.phase === 'browser-opened') {
+      setGoogleOAuthStatus('Waiting for browser sign-in — click Sign in again to retry.');
+    } else if (status.phase === 'progress' && status.message) {
+      setGoogleOAuthStatus(status.message);
+    }
+  });
+
+  window.electronAPI.onGoogleSyncStatus((status) => {
+    if (status.phase === 'syncing') {
+      setGoogleSyncStatus('Syncing...', 'idle');
+    } else if (status.phase === 'success' && status.result) {
+      const { uploaded, downloaded, skipped, conflicts, deleted, tombstoned } = status.result;
+      const parts = [
+        `${uploaded.length} uploaded`,
+        `${downloaded.length} downloaded`,
+        `${skipped.length} skipped`,
+      ];
+      if (conflicts.length > 0) parts.push(`${conflicts.length} conflict(s) backed up`);
+      if (deleted.length > 0) parts.push(`${deleted.length} deleted`);
+      if (tombstoned.length > 0) parts.push(`${tombstoned.length} marked for deletion`);
+      setGoogleSyncStatus(`Synced just now (${parts.join(', ')})`, 'success');
+    } else if (status.phase === 'error') {
+      const errCount = status.result?.errors.length ?? 0;
+      setGoogleSyncStatus(status.error ?? `Sync finished with ${errCount} error(s)`, 'error');
+    }
+  });
+
+  if (loginGoogleOAuthBtn) {
+    loginGoogleOAuthBtn.addEventListener('click', async () => {
+      const myToken = ++googleLoginToken;
+      setGoogleOAuthStatus('Opening browser sign-in...');
+      const result = await window.electronAPI.loginGoogleOAuth();
+      if (myToken !== googleLoginToken) return;
+      if (result.success) {
+        setGoogleOAuthStatus('Signed in', 'success');
+      } else if (result.cancelled) {
+        return;
+      } else {
+        setGoogleOAuthStatus(result.error, 'error');
+      }
+    });
+  }
+
+  if (clearGoogleOAuthBtn) {
+    clearGoogleOAuthBtn.addEventListener('click', async () => {
+      clearGoogleOAuthBtn!.disabled = true;
+      try {
+        const result = await window.electronAPI.clearGoogleOAuth();
+        if (result.success) {
+          setGoogleOAuthStatus('Not signed in');
+          setGoogleSyncStatus('Sign in to sync.');
+        } else {
+          setGoogleOAuthStatus(result.error, 'error');
+        }
+      } finally {
+        clearGoogleOAuthBtn!.disabled = false;
+      }
+    });
+  }
+
+  if (googleDriveSyncNowBtn) {
+    googleDriveSyncNowBtn.addEventListener('click', async () => {
+      googleDriveSyncNowBtn!.disabled = true;
+      setGoogleSyncStatus('Syncing...', 'idle');
+      try {
+        const result = await window.electronAPI.syncGoogleDriveNow();
+        if (!result.success) {
+          setGoogleSyncStatus(result.error, 'error');
+        }
+        // success path is handled by the onGoogleSyncStatus listener
+      } finally {
+        googleDriveSyncNowBtn!.disabled = false;
+      }
+    });
+  }
+
   const hideConfig = () => {
     configModal?.close();
     // Bumping the token drops any stale result from an in-flight Codex login
     // promise that resolves after the modal is gone.
     codexLoginToken++;
+    googleLoginToken++;
     // Free port 1455 if a Codex sign-in is still pending so the next attempt
-    // can bind a fresh loopback.
+    // can bind a fresh loopback. Same for the Google loopback (dynamic port).
     window.electronAPI.cancelCodexOAuth().catch(() => {});
+    window.electronAPI.cancelGoogleOAuth().catch(() => {});
   };
 
   // Native <dialog> emits `close` for any dismissal -- click on the X button,
@@ -602,6 +748,7 @@ export function setupConfigModal(): void {
         notionDatabaseId: notionDb,
         slackWebhookUrl: slackWebhookUrl,
         slackAutoShare: slackAutoShare,
+        googleDriveEnabled: !!googleDriveEnabledInput?.checked,
         globalShortcut: globalShortcut,
         knownWords: knownWords,
         summaryPrompt: summaryPrompt || DEFAULT_SUMMARY_PROMPT,

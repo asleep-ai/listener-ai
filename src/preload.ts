@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     audioDeviceId?: string;
     slackWebhookUrl?: string;
     slackAutoShare?: boolean;
+    googleDriveEnabled?: boolean;
   }) => ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   loginCodexOAuth: () => ipcRenderer.invoke('codex-oauth-login'),
@@ -39,6 +40,34 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('codex-oauth-progress', (_, status) => callback(status));
   },
   clearCodexOAuth: () => ipcRenderer.invoke('codex-oauth-clear'),
+  loginGoogleOAuth: () => ipcRenderer.invoke('google-oauth-login'),
+  cancelGoogleOAuth: () => ipcRenderer.invoke('google-oauth-cancel'),
+  clearGoogleOAuth: () => ipcRenderer.invoke('google-oauth-clear'),
+  onGoogleOAuthProgress: (
+    callback: (status: { phase: 'browser-opened' | 'progress'; message?: string }) => void,
+  ) => {
+    ipcRenderer.on('google-oauth-progress', (_, status) => callback(status));
+  },
+  syncGoogleDriveNow: () => ipcRenderer.invoke('google-drive-sync-now'),
+  getGoogleSyncStatus: () => ipcRenderer.invoke('google-drive-sync-status'),
+  onGoogleSyncStatus: (
+    callback: (status: {
+      phase: 'idle' | 'syncing' | 'success' | 'error';
+      lastSyncedAt: string | null;
+      result?: {
+        uploaded: string[];
+        downloaded: string[];
+        skipped: string[];
+        conflicts: string[];
+        deleted: string[];
+        tombstoned: string[];
+        errors: Array<{ meeting: string; file?: string; error: string }>;
+      };
+      error?: string;
+    }) => void,
+  ) => {
+    ipcRenderer.on('google-sync-status', (_, status) => callback(status));
+  },
   transcribeAudio: (filePath: string, liveNotes?: LiveNote[]) =>
     ipcRenderer.invoke('transcribe-audio', filePath, liveNotes),
   cancelTranscription: (filePath: string) => ipcRenderer.invoke('cancel-transcription', filePath),
@@ -106,6 +135,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Recording export
   exportRecordingM4A: (srcPath: string) => ipcRenderer.invoke('export-recording-m4a', srcPath),
+
+  // Permanent removal: audio file + metadata + transcription folder.
+  // Triggers a Drive sync if enabled so deletion propagates to other devices.
+  deleteMeeting: (audioFilePath: string) => ipcRenderer.invoke('delete-meeting', audioFilePath),
 
   // Merge multiple recordings into a single re-transcribed note
   mergeRecordings: (opts: { paths: string[]; title?: string }) =>

@@ -131,6 +131,12 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
       ariaLabel: 'Export as M4A',
     }),
   );
+  actions.appendChild(
+    createActionButton('delete-recording-btn', 'Delete', {
+      title: 'Delete this meeting (audio + transcript)',
+      ariaLabel: 'Delete this meeting',
+    }),
+  );
 
   if (hasTranscript) {
     actions.appendChild(
@@ -213,7 +219,82 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
     });
   }
 
+  const deleteBtn = item.querySelector('.delete-recording-btn') as HTMLButtonElement | null;
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', () => {
+      void openDeleteRecordingDialog(recording.path, recording.title);
+    });
+  }
+
   return item;
+}
+
+// Confirmation modal for permanent recording deletion. Uses the native
+// <dialog> pattern -- ESC + Cancel + close button all settle the in-flight
+// promise as `cancelled`, and successful delete dismisses the modal then
+// settles as `confirmed`. Mirrors the other modal lifecycle in this file.
+async function openDeleteRecordingDialog(audioFilePath: string, title: string): Promise<void> {
+  const modal = document.getElementById('deleteRecordingModal') as HTMLDialogElement | null;
+  if (!modal) return;
+  // Re-entry guard: don't open a second modal over the first.
+  if (modal.open) return;
+
+  const targetEl = document.getElementById('deleteRecordingTarget') as HTMLElement | null;
+  const statusEl = document.getElementById('deleteRecordingStatus') as HTMLElement | null;
+  const cancelBtn = document.getElementById('deleteRecordingCancel') as HTMLButtonElement | null;
+  const confirmBtn = document.getElementById('deleteRecordingConfirm') as HTMLButtonElement | null;
+  const closeBtn = document.getElementById('deleteRecordingClose') as HTMLElement | null;
+  if (!cancelBtn || !confirmBtn) return;
+
+  if (targetEl) targetEl.textContent = title;
+  if (statusEl) statusEl.textContent = '';
+  confirmBtn.disabled = false;
+
+  const cleanup = () => {
+    cancelBtn.removeEventListener('click', onCancel);
+    confirmBtn.removeEventListener('click', onConfirm);
+    closeBtn?.removeEventListener('click', onCancel);
+    modal.removeEventListener('cancel', onEscape);
+  };
+  const close = () => {
+    cleanup();
+    if (modal.open) modal.close();
+  };
+  const onCancel = () => close();
+  // <dialog> emits `cancel` on ESC. preventDefault routes through the same
+  // cleanup so listeners don't leak across modal reopens.
+  const onEscape = (e: Event) => {
+    e.preventDefault();
+    close();
+  };
+  const onConfirm = async () => {
+    confirmBtn.disabled = true;
+    if (statusEl) statusEl.textContent = 'Deleting…';
+    try {
+      const result = await window.electronAPI.deleteMeeting(audioFilePath);
+      if (result.success) {
+        close();
+        // The main process broadcasts `recordings-changed` after a
+        // successful delete; loadRecordings is the registered handler so
+        // the list refresh happens automatically. Belt-and-suspenders:
+        // refresh once more in case the broadcast races a re-render.
+        void loadRecordings();
+      } else {
+        if (statusEl) statusEl.textContent = result.error;
+        confirmBtn.disabled = false;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (statusEl) statusEl.textContent = msg;
+      confirmBtn.disabled = false;
+    }
+  };
+
+  cancelBtn.addEventListener('click', onCancel);
+  confirmBtn.addEventListener('click', onConfirm);
+  closeBtn?.addEventListener('click', onCancel);
+  modal.addEventListener('cancel', onEscape);
+  modal.showModal();
 }
 
 function createActionButton(
