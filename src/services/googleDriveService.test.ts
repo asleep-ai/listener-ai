@@ -113,6 +113,114 @@ describe('GoogleDriveClient.findFile', () => {
   });
 });
 
+describe('GoogleDriveClient.listFolder', () => {
+  it('concatenates results across pages following nextPageToken', async () => {
+    fetchStub
+      .enqueue(200, {
+        nextPageToken: 'page-2',
+        files: [
+          { id: 'a', name: 'a.md', mimeType: 'text/markdown' },
+          { id: 'b', name: 'b.md', mimeType: 'text/markdown' },
+        ],
+      })
+      .enqueue(200, {
+        nextPageToken: 'page-3',
+        files: [{ id: 'c', name: 'c.md', mimeType: 'text/markdown' }],
+      })
+      .enqueue(200, {
+        files: [{ id: 'd', name: 'd.md', mimeType: 'text/markdown' }],
+      });
+
+    const result = await client.listFolder('folder-id');
+
+    assert.equal(
+      fetchStub.calls.length,
+      3,
+      'should issue one request per page until token exhausted',
+    );
+    assert.deepEqual(
+      result.map((f) => f.id),
+      ['a', 'b', 'c', 'd'],
+    );
+    assert.equal(new URL(fetchStub.calls[0].url).searchParams.get('pageToken'), null);
+    assert.equal(new URL(fetchStub.calls[1].url).searchParams.get('pageToken'), 'page-2');
+    assert.equal(new URL(fetchStub.calls[2].url).searchParams.get('pageToken'), 'page-3');
+  });
+
+  it('requests nextPageToken in the fields parameter (otherwise Drive omits it)', async () => {
+    fetchStub.enqueue(200, { files: [] });
+
+    await client.listFolder('folder-id');
+
+    const fields = new URL(fetchStub.calls[0].url).searchParams.get('fields');
+    assert.ok(
+      fields?.includes('nextPageToken'),
+      `expected fields to include nextPageToken, got: ${fields}`,
+    );
+  });
+
+  it('returns a single page result without issuing a second request', async () => {
+    fetchStub.enqueue(200, {
+      files: [
+        { id: 'x', name: 'x.md', mimeType: 'text/markdown' },
+        { id: 'y', name: 'y.md', mimeType: 'text/markdown' },
+      ],
+    });
+
+    const result = await client.listFolder('folder-id');
+
+    assert.equal(fetchStub.calls.length, 1);
+    assert.equal(result.length, 2);
+  });
+
+  it('returns an empty array for an empty folder', async () => {
+    fetchStub.enqueue(200, { files: [] });
+
+    const result = await client.listFolder('empty-folder');
+
+    assert.equal(fetchStub.calls.length, 1);
+    assert.deepEqual(result, []);
+  });
+
+  it('treats empty-string nextPageToken as terminated (does not loop on it)', async () => {
+    fetchStub.enqueue(200, {
+      nextPageToken: '',
+      files: [{ id: 'only', name: 'only.md', mimeType: 'text/markdown' }],
+    });
+
+    const result = await client.listFolder('folder-id');
+
+    assert.equal(
+      fetchStub.calls.length,
+      1,
+      'empty-string token must not trigger another page request',
+    );
+    assert.deepEqual(
+      result.map((f) => f.id),
+      ['only'],
+    );
+  });
+
+  it('propagates an error from a non-first page and does not return partial results', async () => {
+    fetchStub
+      .enqueue(200, {
+        nextPageToken: 'page-2',
+        files: [{ id: 'a', name: 'a.md', mimeType: 'text/markdown' }],
+      })
+      .enqueue(500, { error: { message: 'internal' } });
+
+    await assert.rejects(
+      () => client.listFolder('folder-id'),
+      (err: unknown) => {
+        assert.ok(err instanceof GoogleDriveError);
+        assert.equal((err as GoogleDriveError).status, 500);
+        return true;
+      },
+    );
+    assert.equal(fetchStub.calls.length, 2);
+  });
+});
+
 describe('GoogleDriveClient.ensureFolder', () => {
   it('returns the existing folder when found', async () => {
     fetchStub.enqueue(200, {
