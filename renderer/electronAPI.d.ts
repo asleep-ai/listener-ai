@@ -55,7 +55,9 @@ export type ConfigPayload = {
 
 export type GoogleSyncResult = {
   uploaded: string[];
+  downloaded: string[];
   skipped: string[];
+  conflicts: string[];
   errors: Array<{ meeting: string; file?: string; error: string }>;
 };
 

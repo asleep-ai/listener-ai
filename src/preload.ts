@@ -56,7 +56,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       lastSyncedAt: string | null;
       result?: {
         uploaded: string[];
+        downloaded: string[];
         skipped: string[];
+        conflicts: string[];
         errors: Array<{ meeting: string; file?: string; error: string }>;
       };
       error?: string;

@@ -201,6 +201,17 @@ export class GoogleDriveClient {
     if (res.status === 204) return;
     await this.ensureOk(res, `Drive deleteFile ${fileId}`);
   }
+
+  // Downloads file content as a Buffer. Drive returns the raw bytes when
+  // `alt=media` is set; without it the response would be the file metadata.
+  async downloadFile(fileId: string): Promise<Buffer> {
+    const url = new URL(`${DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}`);
+    url.searchParams.set('alt', 'media');
+    const res = await this.authedFetch(url.toString());
+    await this.ensureOk(res, `Drive downloadFile ${fileId}`);
+    const arrayBuffer = await res.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  }
 }
 
 // Drive multipart upload requires a `multipart/related` body with two parts:

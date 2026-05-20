@@ -495,17 +495,20 @@ async function handleGoogleSync(config: ConfigService, dataPath: string): Promis
     logger: (msg) => process.stderr.write(`${msg}\n`),
   });
 
-  process.stderr.write('Syncing meetings to Google Drive...\n');
+  process.stderr.write('Syncing meetings with Google Drive...\n');
   const result = await engine.syncOnce();
 
   process.stderr.write(
-    `Done. Uploaded ${result.uploaded.length}, skipped ${result.skipped.length}, errors ${result.errors.length}.\n`,
+    `Done. Uploaded ${result.uploaded.length}, downloaded ${result.downloaded.length}, ` +
+      `skipped ${result.skipped.length}, conflicts ${result.conflicts.length}, errors ${result.errors.length}.\n`,
   );
   for (const u of result.uploaded) process.stderr.write(`  + ${u}\n`);
+  for (const d of result.downloaded) process.stderr.write(`  v ${d}\n`);
+  for (const c of result.conflicts) process.stderr.write(`  ! conflict (LWW + backup): ${c}\n`);
   if (result.errors.length > 0) {
     process.stderr.write('\nErrors:\n');
     for (const e of result.errors) {
-      process.stderr.write(`  ! ${e.meeting}${e.file ? `/${e.file}` : ''}: ${e.error}\n`);
+      process.stderr.write(`  x ${e.meeting}${e.file ? `/${e.file}` : ''}: ${e.error}\n`);
     }
     process.exit(1);
   }
