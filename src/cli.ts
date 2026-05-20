@@ -11,6 +11,9 @@ import { type AppConfig, ConfigService } from './configService';
 import { loginCodexOAuth } from './codexOAuth';
 import { getDataPath } from './dataPath';
 import { GeminiService } from './geminiService';
+import { loginGoogleOAuth, resolveGoogleAccessToken } from './googleOAuth';
+import { GoogleDriveClient, uploadMeetingFolder } from './services/googleDriveService';
+import { mimeTypeForExtension } from './audioFormats';
 import {
   formatTimestamp,
   getTranscriptionsDir,
@@ -64,6 +67,8 @@ const USAGE_TEXT =
   '       listener ask <question> [--ref <ref>]\n' +
   '                                           Ask the AI agent about saved meetings or settings\n' +
   '       listener codex login|logout|status  Manage OpenAI Codex OAuth sign-in\n' +
+  '       listener google login|logout|status Manage Google Drive OAuth sign-in\n' +
+  '       listener google upload <ref>        Upload a meeting folder to Google Drive\n' +
   '       listener config list|get|set|unset|path\n' +
   '                                           Manage configuration\n' +
   '\n' +
@@ -336,6 +341,130 @@ async function handleCodex(args: string[]): Promise<void> {
   config.setCodexOAuth(credentials);
   config.setAiProvider('codex');
   process.stderr.write('Signed in with Codex OAuth and set aiProvider=codex.\n');
+}
+
+async function handleGoogle(args: string[]): Promise<void> {
+  const sub = args[0];
+  const dataPath = getDataPath();
+  const config = new ConfigService(dataPath);
+
+  if (sub === 'status') {
+    const creds = config.getGoogleOAuth();
+    process.stdout.write(`googleOAuthConfigured=${config.hasGoogleOAuth()}\n`);
+    process.stdout.write(`googleOAuthStored=${config.hasStoredGoogleOAuth()}\n`);
+    if (creds?.email) {
+      process.stdout.write(`googleAccountEmail=${creds.email}\n`);
+    }
+    return;
+  }
+
+  if (sub === 'logout') {
+    config.clearGoogleOAuth();
+    process.stderr.write('Signed out of Google Drive OAuth.\n');
+    return;
+  }
+
+  if (sub === 'upload') {
+    await handleGoogleUpload(args.slice(1), config, dataPath);
+    return;
+  }
+
+  if (sub !== 'login') {
+    process.stderr.write(
+      'Error: Unknown google command. Usage: listener google login|logout|status|upload\n',
+    );
+    process.exit(1);
+  }
+
+  const credentials = await loginGoogleOAuth({
+    openUrl: (url) => {
+      process.stderr.write(`Open this URL in your browser:\n${url}\n`);
+    },
+    onProgress: (message) => process.stderr.write(`${message}\n`),
+  });
+  config.setGoogleOAuth(credentials);
+  const accountSuffix = credentials.email ? ` as ${credentials.email}` : '';
+  process.stderr.write(`Signed in with Google Drive OAuth${accountSuffix}.\n`);
+}
+
+async function handleGoogleUpload(
+  args: string[],
+  config: ConfigService,
+  dataPath: string,
+): Promise<void> {
+  const ref = args[0];
+  if (!ref) {
+    process.stderr.write('Error: Missing ref. Usage: listener google upload <ref>\n');
+    process.exit(1);
+  }
+
+  const credentials = config.getGoogleOAuth();
+  if (!credentials) {
+    process.stderr.write(
+      'Error: Not signed in to Google Drive. Run `listener google login` first.\n',
+    );
+    process.exit(1);
+  }
+
+  const folderPath = await resolveRef(ref, dataPath);
+  const folderName = path.basename(folderPath);
+
+  // Gather every regular file in the meeting folder. Drive mirrors the local
+  // layout, so anything in the folder (summary, transcript, audio, optional
+  // attachments) goes up. Hidden files (.DS_Store etc.) are skipped.
+  const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+  const files = entries
+    .filter((e) => e.isFile() && !e.name.startsWith('.'))
+    .map((e) => {
+      const filePath = path.join(folderPath, e.name);
+      const content = fs.readFileSync(filePath);
+      return {
+        name: e.name,
+        content,
+        mimeType: mimeTypeForUploadFile(e.name),
+      };
+    });
+
+  if (files.length === 0) {
+    process.stderr.write(`Error: No files to upload in ${folderPath}\n`);
+    process.exit(1);
+  }
+
+  const client = new GoogleDriveClient({
+    getAccessToken: async () => {
+      const token = await resolveGoogleAccessToken({
+        credentials,
+        onCredentialsChanged: (next) => {
+          // Only persist rotated tokens if the original came from disk -- env-
+          // sourced creds should not silently leak into config.json. Mirrors
+          // the Codex pattern.
+          if (config.hasStoredGoogleOAuth()) config.setGoogleOAuth(next);
+        },
+      });
+      if (!token) throw new Error('Failed to resolve Google access token.');
+      return token;
+    },
+  });
+
+  process.stderr.write(`Uploading "${folderName}" (${files.length} files) to Google Drive...\n`);
+  const result = await uploadMeetingFolder({
+    client,
+    meetingFolderName: folderName,
+    files,
+  });
+
+  process.stderr.write(`Uploaded to Listener.AI/${folderName}/:\n`);
+  for (const f of result.uploaded) {
+    process.stderr.write(`  - ${f.name} (${f.id})\n`);
+  }
+}
+
+function mimeTypeForUploadFile(fileName: string): string {
+  const ext = path.extname(fileName).toLowerCase();
+  if (ext === '.md') return 'text/markdown';
+  if (ext === '.json') return 'application/json';
+  if (ext === '.txt') return 'text/plain';
+  return mimeTypeForExtension(ext) ?? 'application/octet-stream';
 }
 
 function handleConfig(subArgs: string[]): void {
@@ -976,6 +1105,11 @@ async function main(): Promise<void> {
 
   if (args[0] === 'codex') {
     await handleCodex(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'google') {
+    await handleGoogle(args.slice(1));
     return;
   }
 

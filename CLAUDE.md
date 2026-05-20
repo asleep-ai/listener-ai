@@ -92,6 +92,8 @@ listener merge <ref1> <ref2> [<ref3>...] [--title <t>]
 listener ask <question> [--ref <ref>]
                                      Ask the AI agent about meetings or settings
 listener codex login|logout|status   Manage Codex OAuth sign-in
+listener google login|logout|status  Manage Google Drive OAuth sign-in
+listener google upload <ref>         Upload a meeting folder to Google Drive
 listener config list|get|set|unset|path
                                      Manage configuration
 listener --version                   Print CLI version
@@ -128,7 +130,9 @@ All values are stored in plaintext JSON at `getDataPath()/config.json`.
 | `recordSystemAudio` | Mix system audio loopback (Zoom/Meet) into the recording (macOS only) |
 | `lastSeenVersion` | Drives "what's new" release-notes modal |
 
-Env-var fallbacks (read-only when the config key is empty): `GEMINI_API_KEY`, `LISTENER_AI_PROVIDER`, `CODEX_OAUTH_ACCESS_TOKEN`, `CODEX_OAUTH_REFRESH_TOKEN`, `CODEX_OAUTH_EXPIRES`, `OPENAI_CODEX_ACCESS_TOKEN`, `OPENAI_CODEX_REFRESH_TOKEN`, `OPENAI_CODEX_EXPIRES`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`.
+Env-var fallbacks (read-only when the config key is empty): `GEMINI_API_KEY`, `LISTENER_AI_PROVIDER`, `CODEX_OAUTH_ACCESS_TOKEN`, `CODEX_OAUTH_REFRESH_TOKEN`, `CODEX_OAUTH_EXPIRES`, `OPENAI_CODEX_ACCESS_TOKEN`, `OPENAI_CODEX_REFRESH_TOKEN`, `OPENAI_CODEX_EXPIRES`, `GOOGLE_OAUTH_ACCESS_TOKEN`, `GOOGLE_OAUTH_REFRESH_TOKEN`, `GOOGLE_OAUTH_EXPIRES`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`.
+
+Build-time env vars (required for Google Drive OAuth sign-in to work): `LISTENER_GOOGLE_OAUTH_CLIENT_ID`, `LISTENER_GOOGLE_OAUTH_CLIENT_SECRET`. Register a Desktop application OAuth client at https://console.cloud.google.com/apis/credentials. Desktop clients embed the secret in the binary by design (see Google's native-app OAuth doc); the loopback redirect + PKCE protect the flow, not the secret.
 
 ## Transcription Storage
 
@@ -223,6 +227,7 @@ This pattern caught two issues during issue #95 verification: a hard-to-see Merg
 
 - **Electron `app.setPath()` ordering.** `main.ts` calls `app.setPath('userData', getDataPath())` near the top. Any module-level singleton instantiated by an `import` earlier in the file (or transitively) that calls `app.getPath('userData')` in its constructor resolves the path BEFORE the override is applied, producing a split-brain where one subsystem writes to `Listener.AI/...` while the rest write to `listener-ai/...`. For any service that needs `userData` at construction time, defer with a lazy getter that resolves on first method call.
 - **Codex OAuth credential source distinction.** `ConfigService.getCodexOAuth()` returns either stored (config.json) or env-supplied (`CODEX_OAUTH_*` / `OPENAI_CODEX_*`) credentials. Anywhere a refresh-callback persists rotated tokens to disk, gate it on `hasStoredCodexOAuth()` first -- if the credentials came from env vars, persisting them silently leaks ephemeral env tokens into the on-disk store.
+- **Google OAuth follows the same stored-vs-env distinction.** `ConfigService.getGoogleOAuth()` mirrors the Codex pattern (`GOOGLE_OAUTH_*` env fallback, `hasStoredGoogleOAuth()` gate before persisting rotated refresh tokens). When wiring a new refresh callback for Drive uploads/sync, always gate on `hasStoredGoogleOAuth()` before calling `setGoogleOAuth(next)` -- the CLI `google upload` handler already does this; replicate it in any new caller.
 - **Concurrent `config.json` writes.** Electron app and CLI both instantiate `ConfigService` against the same `config.json` and can refresh OAuth tokens in parallel. `saveConfig()` re-reads disk and applies only this process's `dirtyKeys` so writers don't clobber each other's unrelated keys. Setters that mutate config must go through `setKey()`, never `this.config.X = ...` directly, or the change won't be marked dirty and gets lost on the next save.
 
 ## AI Provider Stack
@@ -262,7 +267,7 @@ Recording starts silently — never bring the window to foreground (no `show()`/
 - Package name: `listener-ai`. Only the CLI portion is published to npm (Electron app ships via GitHub Releases).
 - `THIRD_PARTY_NOTICES.md` is shipped in npm and Electron artifacts for direct third-party notices.
 - Electron-only runtime deps (`electron-updater`, `@notionhq/client`) live in `optionalDependencies` — honest semantics for a package serving both Electron and CLI users. `build.files` includes `node_modules/**/*`, so they are still bundled in Electron builds.
-- `package.json.files` whitelists the exact compiled JS shipped to npm plus `THIRD_PARTY_NOTICES.md`: `dist/cli.js`, `aiProvider.js`, `codexOAuth.js`, `dataPath.js`, `configService.js`, `geminiService.js`, `openaiCodexClient.js`, `outputService.js`, `searchService.js`, `agentService.js`, `audioFormats.js`, `services/ffmpegManager.js`, `services/audioConcatService.js`. When adding a new module imported by any of these, append it to the whitelist or `npm install -g listener-ai` will fail with `Cannot find module`.
+- `package.json.files` whitelists the exact compiled JS shipped to npm plus `THIRD_PARTY_NOTICES.md`: `dist/cli.js`, `aiProvider.js`, `codexOAuth.js`, `dataPath.js`, `configService.js`, `geminiService.js`, `googleOAuth.js`, `openaiCodexClient.js`, `outputService.js`, `searchService.js`, `agentService.js`, `audioFormats.js`, `services/ffmpegManager.js`, `services/audioConcatService.js`, `services/googleDriveService.js`. When adding a new module imported by any of these, append it to the whitelist or `npm install -g listener-ai` will fail with `Cannot find module`.
 
 ## Future Enhancements (Optional)
 - Cloud sync of transcriptions, settings, and agent chat history across devices
