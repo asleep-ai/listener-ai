@@ -197,6 +197,9 @@ export type ElectronAPI = {
   exportRecordingM4A: (
     srcPath: string,
   ) => Promise<{ success: boolean; outPath?: string; error?: string }>;
+  deleteMeeting: (
+    audioFilePath: string,
+  ) => Promise<{ success: true } | { success: false; error: string }>;
   mergeRecordings: (opts: { paths: string[]; title?: string }) => Promise<{
     success: boolean;
     folderName?: string;

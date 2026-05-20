@@ -478,6 +478,24 @@
     </div>
   </dialog>
 
+  <dialog id="deleteRecordingModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Delete recording?</h2>
+        <span class="close" id="deleteRecordingClose">&times;</span>
+      </div>
+      <p>
+        <span id="deleteRecordingTarget" class="recording-title-emphasis"></span>
+      </p>
+      <p>This permanently removes the audio file, transcript, and notes. If Google Drive sync is on, the deletion will also be propagated to your other devices.</p>
+      <p id="deleteRecordingStatus" class="merge-status"></p>
+      <div class="modal-buttons">
+        <button id="deleteRecordingCancel" class="cancel-button">Cancel</button>
+        <button id="deleteRecordingConfirm" class="save-button">Delete</button>
+      </div>
+    </div>
+  </dialog>
+
   <!-- FFmpeg Download Progress Overlay -->
   <dialog id="ffmpegDownloadOverlay" class="modal">
     <div class="ffmpeg-download-card">

@@ -809,6 +809,61 @@ const execFileAsync = promisify(execFile);
 // Returns `code: 'ffmpeg-missing'` so the renderer can route users into the
 // existing ffmpeg-download UI (triggered by transcription) rather than
 // duplicating that flow here.
+// Permanently removes a meeting: audio file, metadata JSON, and the
+// transcription folder (if one exists). Containment-checks every path
+// before touching disk so a buggy or compromised renderer can't aim
+// fs.rmSync at arbitrary locations. Triggers a Drive sync immediately
+// afterward so the Phase 3C tombstone propagation kicks in -- otherwise
+// the user wouldn't see the deletion mirrored on their other devices
+// until the next 60s timer tick.
+ipcMain.handle('delete-meeting', async (_, audioFilePath: string) => {
+  try {
+    if (!audioFilePath || typeof audioFilePath !== 'string') {
+      return { success: false as const, error: 'Invalid audio file path' };
+    }
+    const recordingsDir = path.join(app.getPath('userData'), 'recordings');
+    const resolved = path.resolve(audioFilePath);
+    if (!resolved.startsWith(recordingsDir + path.sep)) {
+      return { success: false as const, error: 'Path is outside the recordings directory' };
+    }
+
+    // Pull metadata first so we know whether to clean up a transcription
+    // folder. Missing metadata is fine (raw recording never transcribed).
+    const meta = await metadataService.getMetadata(resolved);
+    if (meta?.transcriptionPath && isContainedTranscriptionPath(meta.transcriptionPath)) {
+      try {
+        fs.rmSync(meta.transcriptionPath, { recursive: true, force: true });
+      } catch (err) {
+        console.error('Failed to remove transcription folder:', err);
+        // Continue -- audio cleanup still useful even if folder rm partially failed.
+      }
+    }
+
+    try {
+      fs.rmSync(resolved, { force: true });
+    } catch (err) {
+      console.error('Failed to remove audio file:', err);
+    }
+
+    await metadataService.deleteMetadata(resolved);
+
+    // Refresh the renderer's list immediately; auto-sync to Drive in the
+    // background so the deletion propagates to other devices via tombstone.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('recordings-changed');
+    }
+    maybeAutoSync();
+
+    return { success: true as const };
+  } catch (error) {
+    console.error('delete-meeting failed:', error);
+    return {
+      success: false as const,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
+
 ipcMain.handle('export-recording-m4a', async (_, srcPath: string) => {
   try {
     if (!srcPath || typeof srcPath !== 'string') {
@@ -1018,7 +1073,7 @@ ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: st
         dataPath: app.getPath('userData'),
         mergedFrom: sourceFolders,
       });
-      maybeAutoSyncAfterTranscription();
+      maybeAutoSync();
     } catch (error) {
       console.error('Failed to save merged transcription files:', error);
       const message = error instanceof Error ? error.message : String(error);
@@ -1523,10 +1578,11 @@ function refreshGoogleSyncTimer(): void {
   }
 }
 
-// Fire-and-forget hook from the transcription save path. Skips silently when
-// sync is disabled or unauthenticated so the transcription flow is never
-// blocked on Drive availability.
-function maybeAutoSyncAfterTranscription(): void {
+// Fire-and-forget sync trigger. Skips silently when sync is disabled or
+// unauthenticated so the caller is never blocked on Drive availability.
+// Used by the post-transcription save path AND the meeting-delete path so
+// tombstone propagation kicks in promptly.
+function maybeAutoSync(): void {
   if (!configService.getGoogleDriveEnabled()) return;
   if (!configService.hasGoogleOAuth()) return;
   void runGoogleSync();
@@ -1776,7 +1832,7 @@ ipcMain.handle('transcribe-audio', async (_, filePath: string, liveNotesRaw?: un
         liveNotes,
       });
       console.log('Transcription saved to:', transcriptionPath);
-      maybeAutoSyncAfterTranscription();
+      maybeAutoSync();
     } catch (error) {
       console.error('Failed to save transcription files:', error);
     }

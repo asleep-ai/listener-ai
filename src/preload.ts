@@ -136,6 +136,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Recording export
   exportRecordingM4A: (srcPath: string) => ipcRenderer.invoke('export-recording-m4a', srcPath),
 
+  // Permanent removal: audio file + metadata + transcription folder.
+  // Triggers a Drive sync if enabled so deletion propagates to other devices.
+  deleteMeeting: (audioFilePath: string) => ipcRenderer.invoke('delete-meeting', audioFilePath),
+
   // Merge multiple recordings into a single re-transcribed note
   mergeRecordings: (opts: { paths: string[]; title?: string }) =>
     ipcRenderer.invoke('merge-recordings', opts),
