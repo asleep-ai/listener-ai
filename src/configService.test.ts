@@ -286,6 +286,25 @@ describe('ConfigService: geminiThinkingLevel', () => {
   });
 });
 
+describe('ConfigService: updateConfig validation for aiProvider', () => {
+  it('drops invalid aiProvider values', () => {
+    const dataPath = freshDataPath('provider-update-invalid');
+    const cfg = new ConfigService(dataPath);
+    cfg.setAiProvider('gemini');
+    cfg.updateConfig({ aiProvider: 'openai' as 'gemini' });
+
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dataPath, 'config.json'), 'utf-8'));
+    assert.equal(onDisk.aiProvider, 'gemini', 'invalid update must not overwrite valid value');
+  });
+
+  it('accepts valid aiProvider values', () => {
+    const dataPath = freshDataPath('provider-update-valid');
+    const cfg = new ConfigService(dataPath);
+    cfg.updateConfig({ aiProvider: 'codex' });
+    assert.equal(cfg.getAiProvider(), 'codex');
+  });
+});
+
 describe('ConfigService: codexTranscriptionModel migration to diarize default', () => {
   it('clears the legacy `gpt-4o-transcribe` value and stamps the marker', () => {
     const dataPath = freshDataPath('migrate-legacy');

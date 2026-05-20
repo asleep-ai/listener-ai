@@ -456,6 +456,12 @@ export class ConfigService {
       // that already validate, so without this an out-of-domain value would
       // persist and only get caught on read. The getter falls back to the
       // default, but the on-disk state would still be misleading.
+      if (key === 'aiProvider') {
+        const provider = normalizeAiProvider(value);
+        if (!provider) continue;
+        this.setKey('aiProvider', provider);
+        continue;
+      }
       if (key === 'geminiThinkingLevel') {
         const level = normalizeGeminiThinkingLevel(value);
         if (!level) continue;
