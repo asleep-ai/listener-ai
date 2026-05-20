@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as readline from 'readline';
 import * as path from 'path';
 import { type AgentScope, AgentService, type ConfigProposal } from './agentService';
-import { isAiProvider } from './aiProvider';
+import { GEMINI_THINKING_LEVELS, isAiProvider, normalizeGeminiThinkingLevel } from './aiProvider';
 import { extensionForMimeType } from './audioFormats';
 import { type AppConfig, ConfigService } from './configService';
 import { loginCodexOAuth } from './codexOAuth';
@@ -96,6 +96,7 @@ const KNOWN_CONFIG_KEYS = [
   'geminiApiKey',
   'geminiModel',
   'geminiFlashModel',
+  'geminiThinkingLevel',
   'codexModel',
   'codexTranscriptionModel',
   'notionApiKey',
@@ -178,6 +179,17 @@ function applyConfigSet(config: ConfigService, key: ConfigKey, value: string): v
     case 'geminiFlashModel':
       config.setGeminiFlashModel(value);
       return;
+    case 'geminiThinkingLevel': {
+      const level = normalizeGeminiThinkingLevel(value);
+      if (!level) {
+        process.stderr.write(
+          `Error: geminiThinkingLevel must be one of: ${GEMINI_THINKING_LEVELS.join(', ')}\n`,
+        );
+        process.exit(1);
+      }
+      config.setGeminiThinkingLevel(level);
+      return;
+    }
     case 'codexModel':
       config.setCodexModel(value);
       return;
@@ -257,6 +269,7 @@ function createTranscriptionService(config: ConfigService, dataPath: string): Ge
     knownWords: config.getKnownWords(),
     proModel: config.getGeminiModel(),
     flashModel: config.getGeminiFlashModel(),
+    thinkingLevel: config.getGeminiThinkingLevel(),
     codexModel: config.getCodexModel(),
     codexTranscriptionModel: config.getCodexTranscriptionModel(),
   });

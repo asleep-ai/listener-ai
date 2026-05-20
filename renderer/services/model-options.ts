@@ -22,7 +22,7 @@ export const CURATED_MODELS: Record<ModelField, readonly string[]> = {
 // dropdown entry so the user can see what gets used when no override is set,
 // and so Reset to Default has a stable visible target.
 export const BACKEND_DEFAULTS: Record<ModelField, string> = {
-  geminiModel: 'gemini-2.5-pro',
+  geminiModel: 'gemini-3.5-flash',
   geminiFlashModel: 'gemini-2.5-flash',
   codexModel: 'gpt-5.5',
   codexTranscriptionModel: 'gpt-4o-transcribe-diarize',
@@ -36,7 +36,7 @@ export type SelectChoice = { kind: 'curated'; value: string } | { kind: 'custom'
 //
 // `getAllConfig()` resolves empty -> backend default before sending to the
 // renderer, so a freshly-installed user whose `geminiModel` is unset arrives
-// here with `saved === 'gemini-2.5-pro'`. Treating that as "no override"
+// here with `saved === 'gemini-3.5-flash'`. Treating that as "no override"
 // keeps the Default entry visible instead of snapping to the curated entry
 // of the same name. The two are functionally identical anyway -- if the
 // user picks the curated entry explicitly, the backend resolves to the same

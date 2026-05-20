@@ -9,7 +9,7 @@ When prices drift, update the date in the cell and re-cite from the provider's o
 | Use case | Provider config | Model | Pricing | Notes |
 |---|---|---|---|---|
 | Transcription (Gemini) | `geminiFlashModel` | gemini-2.5-flash | $1.00/M audio-input tokens, $2.50/M output | Audio input only at this rate; text/image input is $0.30/M. Speaker diarization works via prompt instructions. |
-| Summary + agent (Gemini) | `geminiModel` | gemini-2.5-pro | $1.25/M input, $10.00/M output (≤200k ctx) | Doubles to $2.50/$15.00 at >200k ctx. Context cache at $0.125/M/hr storage. |
+| Summary (Gemini) | `geminiModel` | gemini-3.5-flash | $1.50/M input, $9.00/M output | Native thinking on (`thinking_level` configurable via `geminiThinkingLevel`: low/medium/high, default medium). Output billing includes thought tokens. |
 | Transcription (Codex) | `codexTranscriptionModel` | gpt-4o-transcribe | $0.006/min ($2.50/M audio in, $10.00/M text out) | No speaker diarization. `prompt` param is vocabulary/style hint only. |
 | Summary + agent (Codex) | `codexModel` | gpt-5.5 (via ChatGPT Codex Responses) | $5.00/M input, $30.00/M output (API price; ChatGPT subscription absorbs cost) | Rejects `temperature`/sampling params (reasoning model). Cached input $0.50/M. |
 
@@ -29,10 +29,11 @@ All prices per 1M tokens unless noted.
 
 | Model | Input | Output | Notes |
 |---|---|---|---|
-| gemini-2.5-pro (≤200k ctx) | $1.25 | $10.00 | Context cache: $0.125/M/hr storage |
+| gemini-3.5-flash | $1.50 | $9.00 | GA 2026-05-19. Native always-on thinking; output billing includes thought tokens. 1M ctx, 65k max output. |
+| gemini-2.5-pro (≤200k ctx) | $1.25 | $10.00 | Previous default summary model. Context cache: $0.125/M/hr storage |
 | gemini-2.5-pro (>200k ctx) | $2.50 | $15.00 | Same model, higher-context tier |
 | gemini-2.5-flash (text/image/video in) | $0.30 | $2.50 | Context cache: $0.03/M/hr |
-| gemini-2.5-flash (audio in) | $1.00 | $2.50 | Output price same regardless of input modality |
+| gemini-2.5-flash (audio in) | $1.00 | $2.50 | Output price same regardless of input modality; current transcription default |
 
 Batch tier: 50% of standard. Priority tier: ~1.8× standard. Source: <https://ai.google.dev/pricing> (verified 2026-05-13).
 

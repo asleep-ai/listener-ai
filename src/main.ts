@@ -180,6 +180,7 @@ function createGeminiService(): GeminiService | null {
     knownWords: configService.getKnownWords(),
     proModel: configService.getGeminiModel(),
     flashModel: configService.getGeminiFlashModel(),
+    thinkingLevel: configService.getGeminiThinkingLevel(),
     codexModel: configService.getCodexModel(),
     codexTranscriptionModel: configService.getCodexTranscriptionModel(),
     dataPath: app.getPath('userData'),
@@ -1210,6 +1211,7 @@ function applyConfigSideEffects(changed: Partial<AppConfig>): void {
     changed.geminiApiKey !== undefined ||
     changed.geminiModel !== undefined ||
     changed.geminiFlashModel !== undefined ||
+    changed.geminiThinkingLevel !== undefined ||
     changed.codexOAuth !== undefined ||
     changed.codexModel !== undefined ||
     changed.codexTranscriptionModel !== undefined

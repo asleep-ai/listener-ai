@@ -5,8 +5,11 @@ import {
   DEFAULT_CODEX_TRANSCRIPTION_MODEL,
   DEFAULT_GEMINI_FLASH_MODEL,
   DEFAULT_GEMINI_MODEL,
+  DEFAULT_GEMINI_THINKING_LEVEL,
   type AiProvider,
+  type GeminiThinkingLevel,
   normalizeAiProvider,
+  normalizeGeminiThinkingLevel,
 } from './aiProvider';
 import {
   type CodexOAuthCredentials,
@@ -19,6 +22,7 @@ export interface AppConfig {
   geminiApiKey?: string;
   geminiModel?: string;
   geminiFlashModel?: string;
+  geminiThinkingLevel?: GeminiThinkingLevel;
   codexModel?: string;
   codexTranscriptionModel?: string;
   codexOAuth?: CodexOAuthCredentials;
@@ -336,6 +340,20 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  // Stored values from older clients that no longer match the allowed set
+  // fall back to the default rather than throwing, so partial/legacy configs
+  // stay loadable.
+  getGeminiThinkingLevel(): GeminiThinkingLevel {
+    return (
+      normalizeGeminiThinkingLevel(this.config.geminiThinkingLevel) ?? DEFAULT_GEMINI_THINKING_LEVEL
+    );
+  }
+
+  setGeminiThinkingLevel(level: GeminiThinkingLevel): void {
+    this.setKey('geminiThinkingLevel', level);
+    this.saveConfig();
+  }
+
   getCodexModel(): string {
     return this.config.codexModel || DEFAULT_CODEX_MODEL;
   }
@@ -432,9 +450,19 @@ export class ConfigService {
 
   updateConfig(partial: Partial<AppConfig>): void {
     for (const [key, value] of Object.entries(partial)) {
-      if (value !== undefined) {
-        this.setKey(key as keyof AppConfig, value as AppConfig[keyof AppConfig]);
+      if (value === undefined) continue;
+      // Enum-domain keys need write-time validation; the IPC payload from the
+      // renderer (and any future agent write paths) bypasses the typed setters
+      // that already validate, so without this an out-of-domain value would
+      // persist and only get caught on read. The getter falls back to the
+      // default, but the on-disk state would still be misleading.
+      if (key === 'geminiThinkingLevel') {
+        const level = normalizeGeminiThinkingLevel(value);
+        if (!level) continue;
+        this.setKey('geminiThinkingLevel', level);
+        continue;
       }
+      this.setKey(key as keyof AppConfig, value as AppConfig[keyof AppConfig]);
     }
     this.saveConfig();
   }
@@ -450,6 +478,7 @@ export class ConfigService {
       geminiApiKey: this.getGeminiApiKey(),
       geminiModel: this.getGeminiModel(),
       geminiFlashModel: this.getGeminiFlashModel(),
+      geminiThinkingLevel: this.getGeminiThinkingLevel(),
       codexModel: this.getCodexModel(),
       codexTranscriptionModel: this.getCodexTranscriptionModel(),
       codexOAuthConfigured: this.hasCodexOAuth(),
