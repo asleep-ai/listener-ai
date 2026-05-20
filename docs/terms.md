@@ -50,5 +50,5 @@ We may update these Terms. Material changes will be reflected in the "Last updat
 
 ## 10. Contact
 
-Email: **legal@asleep.ai** (or **privacy@asleep.ai** for privacy-related questions).
+Email: **utils@asleep.ai**.
 Mailing address: Asleep, Inc., Seoul, Republic of Korea.

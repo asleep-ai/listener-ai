@@ -9,7 +9,7 @@ _Last updated: 2026-05-20_
 ## 1. Who we are
 
 Listener.AI is a desktop application provided by **Asleep, Inc.** ("Asleep", "we"), Republic of Korea.
-Contact for privacy questions: **privacy@asleep.ai**.
+Contact for privacy questions: **utils@asleep.ai**.
 
 ## 2. Scope
 
@@ -67,5 +67,5 @@ We may update this policy when the app's data flows change. Material changes wil
 
 ## 11. Contact
 
-Email: **privacy@asleep.ai**
+Email: **utils@asleep.ai**
 Mailing address: Asleep, Inc., Seoul, Republic of Korea.
