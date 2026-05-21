@@ -168,8 +168,9 @@ export async function searchTranscriptions(
   const scope = new Set(fields);
   const hits: SearchHit[] = [];
 
+  const skipTranscript = !scope.has('transcript');
   for (const entry of entries) {
-    const data = await readTranscription(entry.folderPath);
+    const data = await readTranscription(entry.folderPath, { skipTranscript });
     if (!data) continue;
     const hit = scoreRecordPrepared(entry, data, needle, scope);
     if (hit) hits.push(hit);

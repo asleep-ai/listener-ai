@@ -43,7 +43,9 @@ import { MeetingDetectorService } from './meetingDetectorService';
 import { MenuBarManager } from './menuBarManager';
 import { NotionService } from './notionService';
 import {
+  autoMigrateLegacyOnStartup,
   formatTimestamp,
+  gcLegacyBackups,
   getTranscriptionsDir,
   type LiveNote,
   readTranscription,
@@ -442,7 +444,43 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Run the one-shot v1 -> v2 transcription folder migration BEFORE anything
+  // else can touch the transcriptions directory (window creation, Drive sync
+  // timer, recording watcher). A partial migration would leave some folders
+  // v1 (unreadable to the v2-only runtime) and others v2 -- so on failure we
+  // log + show a dialog + quit rather than proceed with broken state.
+  try {
+    const result = await autoMigrateLegacyOnStartup(getDataPath(), {
+      onProgress: (current, total, name) => {
+        console.log(`[migrate] (${current}/${total}) ${name}`);
+      },
+    });
+    if (result.migrated.length > 0) {
+      console.log(
+        `[migrate] Migrated ${result.migrated.length} legacy meeting${result.migrated.length === 1 ? '' : 's'} to v2.` +
+          ` Backup: ${result.backupDir}`,
+      );
+    }
+    // Clean up backup directories older than 30 days. Best-effort; never fatal.
+    gcLegacyBackups(getDataPath()).catch((err) => console.warn('[migrate] backup GC failed:', err));
+  } catch (err) {
+    console.error('[migrate] startup migration failed:', err);
+    const message =
+      err instanceof Error
+        ? err.message
+        : 'Unknown error converting your transcriptions to the new layout.';
+    dialog.showErrorBox(
+      'Listener.AI could not start',
+      `Migrating your existing meetings to the new storage layout failed:\n\n${message}\n\n` +
+        `Your original files are backed up under ${getDataPath()}/.v1-backup-<timestamp>/ ` +
+        `(if the backup step completed). The app will now quit. ` +
+        `Please report this to the maintainer.`,
+    );
+    app.quit();
+    return;
+  }
+
   // Create menu with DevTools option
   const template = [
     {

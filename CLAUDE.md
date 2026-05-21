@@ -97,6 +97,8 @@ listener google upload <ref>         Upload a meeting folder to Google Drive
 listener google sync                 Sync all meetings to Google Drive (upload changes only)
 listener config list|get|set|unset|path
                                      Manage configuration
+listener migrate <ref> | --all [--dry-run]
+                                     Migrate legacy v1 folders to the v2 layout. Idempotent.
 listener --version                   Print CLI version
 listener --help                      Show usage
 ```
@@ -141,11 +143,35 @@ Injection mechanism: `scripts/write-build-constants.js` runs as part of `pnpm ru
 ## Transcription Storage
 
 - Root: `getDataPath()/transcriptions/`
-- One folder per meeting: `<sanitized-title>_<timestamp>/`
-  - `summary.md` — YAML frontmatter (`title`, `suggestedTitle`, `summary`, `keyPoints`, `actionItems`, `customFields`, `audioFilePath`, `transcribedAt`, `emoji`) plus markdown body
-  - `transcript.md` — full transcript
-  - Optional original audio file
-- `src/outputService.ts` is the only read/write surface: `saveTranscription`, `listTranscriptions`, `readTranscription`, `parseFrontmatter`, `getTranscriptionsDir`.
+- `src/outputService.ts` is the only read/write surface: `saveTranscription`, `listTranscriptions`, `readTranscription`, `updateTranscriptionStatus`, `migrateV1ToV2`, `parseFrontmatter`, `getTranscriptionsDir`.
+
+### v2 layout (current writer)
+
+Each meeting is a folder named `<ts24>_<sanitized-title>/` where `ts24` is a 24-character filesystem-safe ISO 8601 UTC timestamp (`YYYY-MM-DDTHH-MM-SS.mmmZ`). Time-first naming means `ls` sorts chronologically by default, which matters when an external agent (Claude Code, MCP server) walks the directory.
+
+Files inside the folder (each holds exactly one semantic field, so there is no in-file duplication and no body parser is needed):
+
+- `meta.json` — structured metadata: `schemaVersion`, `title`, `suggestedTitle`, `emoji`, `transcribedAt`, `audioFile`, `cost`, `customFields`, `merge.sourceIds`, `exports.notion`, `exports.slack`. Unknown keys are preserved on read so future writers can add fields without bumping `schemaVersion`. **`meta.json` is written LAST by `writeV2Files` so it doubles as a v2 sentinel — if a save/migration crashes mid-write the folder still looks like v1 and a retry restarts cleanly.**
+- `summary.md` — plain markdown text of the summary, no frontmatter, no `# heading`.
+- `key-points.md` — bullets (`- item` per line). Writer normalizes `\n` in items to spaces so the round-trip is unambiguous.
+- `action-items.md` — same shape as `key-points.md`.
+- `transcript.md` — plain transcript text, no `# title` heading.
+- `notes.json` (optional) — live notes captured during recording.
+- `highlights.json` (optional) — AI-enriched highlights.
+- Original audio file (optional, path lives in `meta.audioFile`).
+
+### v1 layout (legacy, auto-migrated on startup)
+
+Pre-v2 folders use `<sanitized-title>_<timestamp>/` with `summary.md` (YAML frontmatter + rendered markdown body) plus `transcript.md`. The runtime no longer reads v1 directly — `autoMigrateLegacyOnStartup` runs on every app/CLI entry point and converts each v1 folder to v2 in place before any other code touches the directory.
+
+### Runtime rules
+
+- **v2-only at runtime.** `readTranscription`, `listTranscriptions`, and `updateTranscriptionStatus` only understand v2. After `autoMigrateLegacyOnStartup` finishes, every folder has a `meta.json`. `readV1Transcription`, `buildFrontmatter`, `parseFrontmatter`, etc. exist only as migration helpers (called by `migrateV1ToV2`).
+- **Startup migration is mandatory and crash-safe.** `main.ts` (Electron) and `cli.ts` (CLI) both `await autoMigrateLegacyOnStartup(getDataPath())` before any other code. Failure aborts startup with a dialog (Electron) or error exit (CLI) — partial migration is worse than no migration. For each v1 folder, the destructively-overwritten files (`summary.md`, `transcript.md`) are snapshotted to `<dataPath>/.v1-backup-<ts>/<folderName>/` before migration. Backups are GC'd after 30 days via `gcLegacyBackups`.
+- **`meta.json` is written LAST in `writeV2Files`** so it doubles as the v2 sentinel — if a save/migration crashes mid-write the folder is still recognised as v1 and a retry restarts cleanly instead of treating a half-written folder as already-migrated.
+- **`updateTranscriptionStatus` touches only `meta.json`** so Drive sync sees a one-file change per status update. Content files (`summary.md`, `transcript.md`, etc.) keep their existing mtime.
+- **Migration preserves folder names.** Drive sync keys change detection on folder name; renaming would look like delete+recreate and force a full re-upload. v1-named folders keep their v1 names; only the internal file layout flips.
+- **`LISTENER_SKIP_AUTO_MIGRATE`** disables the startup migration. Used only by CLI tests that need to drive `listener migrate` against an un-migrated fixture; do not set this in production.
 
 ## Google Drive Sync
 
@@ -207,6 +233,7 @@ Injection mechanism: `scripts/write-build-constants.js` runs as part of `pnpm ru
 - Test escape hatches (read-only at process start, never set in production):
   - `LISTENER_DATA_PATH` — overrides `getDataPath()` so tests run against a temp directory
   - `LISTENER_TEST_MODE` — `GeminiService.transcribeAudio` returns a canned fixture instead of calling the API
+  - `LISTENER_SKIP_AUTO_MIGRATE` — CLI bypasses the v1→v2 startup migration, so `listener migrate` tests can drive the explicit command against an un-migrated fixture
 
 #### Patterns proven in this codebase
 
