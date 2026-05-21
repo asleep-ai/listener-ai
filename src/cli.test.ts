@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 // transcribe -> saveTranscription, and the mergedFrom round-trip.
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
-import { saveTranscription } from './outputService';
+import { __saveTranscriptionLegacyV1ForTests, saveTranscription } from './outputService';
 import { execFileAsync, findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
 const ffmpegPath = findFfmpegSync();
@@ -192,6 +192,212 @@ describe('listener CLI basics', () => {
   });
 });
 
+describe('listener show / export across v1 + v2 folders', () => {
+  let showDataPath: string;
+  let cliPath2: string;
+
+  before(() => {
+    showDataPath = makeTempDir('cli-show');
+    cliPath2 = path.join(__dirname, 'cli.js');
+  });
+
+  after(() => rmDir(showDataPath));
+
+  function runCli(
+    args: string[],
+    extraEnv: Record<string, string> = {},
+  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    return new Promise((resolve) => {
+      const { spawn } = require('child_process') as typeof import('child_process');
+      const child = spawn('node', [cliPath2, ...args], {
+        env: {
+          ...process.env,
+          NODE_ENV: 'test',
+          LISTENER_AI_PROVIDER: '',
+          LISTENER_DATA_PATH: showDataPath,
+          ...extraEnv,
+        },
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d: Buffer) => {
+        stdout += d.toString();
+      });
+      child.stderr.on('data', (d: Buffer) => {
+        stderr += d.toString();
+      });
+      child.on('close', (code: number | null) => {
+        resolve({ stdout, stderr, code });
+      });
+    });
+  }
+
+  it('show on a v2 folder prints synthesized markdown with all sections', async () => {
+    const folderPath = saveTranscription({
+      title: 'Show Test',
+      result: {
+        transcript: 't',
+        summary: 'Summary text.',
+        keyPoints: ['KP1', 'KP2'],
+        actionItems: ['AI1'],
+        emoji: 'X',
+      },
+      dataPath: showDataPath,
+    });
+
+    const { stdout, code } = await runCli(['show', path.basename(folderPath)]);
+    assert.equal(code, 0);
+    assert.match(stdout, /^# Show Test/);
+    assert.match(stdout, /## Summary\n[\s\S]*Summary text\./);
+    assert.match(stdout, /## Key Points\n[\s\S]*- KP1\n- KP2/);
+    assert.match(stdout, /## Action Items\n[\s\S]*- AI1/);
+  });
+
+  it('show on a v1 folder still prints its frontmatter body', async () => {
+    const folderPath = __saveTranscriptionLegacyV1ForTests({
+      title: 'V1 Show',
+      result: {
+        transcript: 't',
+        summary: 'Legacy summary.',
+        keyPoints: ['LK1'],
+        actionItems: ['LA1'],
+        emoji: 'L',
+      },
+      dataPath: showDataPath,
+    });
+    const { stdout, code } = await runCli(['show', path.basename(folderPath)]);
+    assert.equal(code, 0);
+    assert.match(stdout, /## Summary/);
+    assert.match(stdout, /Legacy summary\./);
+    assert.match(stdout, /## Key Points/);
+    assert.match(stdout, /- LK1/);
+  });
+
+  it('export --json works for both v1 and v2 (same shape)', async () => {
+    const v2Path = saveTranscription({
+      title: 'V2 Export',
+      result: {
+        transcript: 'tx',
+        summary: 'S',
+        keyPoints: ['K'],
+        actionItems: ['A'],
+        emoji: 'E',
+      },
+      dataPath: showDataPath,
+    });
+    const v1Path = __saveTranscriptionLegacyV1ForTests({
+      title: 'V1 Export',
+      result: {
+        transcript: 'tx',
+        summary: 'S',
+        keyPoints: ['K'],
+        actionItems: ['A'],
+        emoji: 'E',
+      },
+      dataPath: showDataPath,
+    });
+
+    const v2 = await runCli(['export', path.basename(v2Path), '--json']);
+    const v1 = await runCli(['export', path.basename(v1Path), '--json']);
+    assert.equal(v2.code, 0);
+    assert.equal(v1.code, 0);
+
+    const v2Json = JSON.parse(v2.stdout);
+    const v1Json = JSON.parse(v1.stdout);
+
+    // Field-by-field equivalence (excluding title and date which differ by fixture).
+    assert.equal(v2Json.summary, v1Json.summary);
+    assert.deepEqual(v2Json.keyPoints, v1Json.keyPoints);
+    assert.deepEqual(v2Json.actionItems, v1Json.actionItems);
+  });
+
+  it('export --json --transcript includes transcript on both formats', async () => {
+    const folderPath = saveTranscription({
+      title: 'V2 ExportTx',
+      result: {
+        transcript: 'transcript body',
+        summary: 's',
+        keyPoints: [],
+        actionItems: [],
+        emoji: 'E',
+      },
+      dataPath: showDataPath,
+    });
+    const { stdout, code } = await runCli([
+      'export',
+      path.basename(folderPath),
+      '--json',
+      '--transcript',
+    ]);
+    assert.equal(code, 0);
+    const json = JSON.parse(stdout);
+    assert.equal(json.transcript, 'transcript body');
+  });
+
+  it('list shows mixed v1 + v2 folders', async () => {
+    const { stdout, code } = await runCli(['list', '--limit', '0']);
+    assert.equal(code, 0);
+    assert.match(stdout, /Show Test/);
+    assert.match(stdout, /V1 Show/);
+    assert.match(stdout, /V2 Export/);
+    assert.match(stdout, /V1 Export/);
+  });
+
+  it('migrate <ref> converts a v1 folder to v2 in place', async () => {
+    const v1Path = __saveTranscriptionLegacyV1ForTests({
+      title: 'To Migrate',
+      result: {
+        transcript: 'mtx',
+        summary: 'mig summary',
+        keyPoints: ['mk1'],
+        actionItems: ['ma1'],
+        emoji: 'M',
+      },
+      dataPath: showDataPath,
+    });
+
+    // Sanity: v1 fixture has no meta.json yet
+    assert.ok(!fs.existsSync(path.join(v1Path, 'meta.json')));
+
+    // LISTENER_SKIP_AUTO_MIGRATE: otherwise the runtime's startup
+    // auto-migration converts the fixture before `listener migrate` even runs.
+    const { code, stderr } = await runCli(['migrate', path.basename(v1Path)], {
+      LISTENER_SKIP_AUTO_MIGRATE: '1',
+    });
+    assert.equal(code, 0);
+    assert.match(stderr, /1 migrated/);
+    assert.ok(fs.existsSync(path.join(v1Path, 'meta.json')));
+
+    // After migration, show still works and prints synthesized markdown.
+    const show = await runCli(['show', path.basename(v1Path)]);
+    assert.equal(show.code, 0);
+    assert.match(show.stdout, /^# To Migrate/);
+    assert.match(show.stdout, /mig summary/);
+  });
+
+  it('migrate --dry-run reports without modifying disk', async () => {
+    const v1Path = __saveTranscriptionLegacyV1ForTests({
+      title: 'Dry Run',
+      result: {
+        transcript: 'dry',
+        summary: 'dry summary',
+        keyPoints: [],
+        actionItems: [],
+        emoji: 'D',
+      },
+      dataPath: showDataPath,
+    });
+
+    const { code, stdout } = await runCli(
+      ['migrate', path.basename(v1Path), '--dry-run'],
+      { LISTENER_SKIP_AUTO_MIGRATE: '1' },
+    );
+    assert.equal(code, 0);
+    assert.match(stdout, /would migrate/);
+    assert.ok(!fs.existsSync(path.join(v1Path, 'meta.json')));
+  });
+});
+
 describe('listener transcript (CLI integration)', () => {
   let transcriptDataPath: string;
 
@@ -364,16 +570,16 @@ describe(
         `result folder must live inside the test dataPath, got ${resultFolder}`,
       );
 
-      const summary = fs.readFileSync(path.join(resultFolder, 'summary.md'), 'utf-8');
+      // v2 layout: structured data lives in meta.json, not in summary.md frontmatter.
+      const metaPath = path.join(resultFolder, 'meta.json');
+      assert.ok(fs.existsSync(metaPath), 'meta.json should exist (v2 layout)');
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
       // User-provided --title beats the stub's suggestedTitle.
-      assert.match(summary, /^title: Combined Meeting$/m);
-      assert.match(summary, /suggestedTitle: Stubbed Title/);
-      assert.match(summary, /## Sources/);
-      assert.match(summary, new RegExp(folderNameA.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-      assert.match(summary, new RegExp(folderNameB.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.equal(meta.title, 'Combined Meeting');
+      assert.equal(meta.suggestedTitle, 'Stubbed Title');
+      assert.deepEqual(meta.merge?.sourceIds, [folderNameA, folderNameB]);
 
-      const audioLine = summary.match(/^audioFilePath:\s*(.+)$/m);
-      const mergedAudioPath = audioLine?.[1].trim().replace(/^"|"$/g, '') ?? '';
+      const mergedAudioPath: string = meta.audioFile ?? '';
       assert.ok(
         mergedAudioPath.endsWith('.webm'),
         `merged audio should be webm, got ${mergedAudioPath}`,

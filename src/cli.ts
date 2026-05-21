@@ -15,12 +15,20 @@ import { loginGoogleOAuth, resolveGoogleAccessToken } from './googleOAuth';
 import { GoogleDriveClient, uploadMeetingFolder } from './services/googleDriveService';
 import { SyncEngine } from './services/syncEngine';
 import {
+  ACTION_ITEMS_FILE,
+  HIGHLIGHTS_JSON_FILE,
+  KEY_POINTS_FILE,
+  META_JSON,
+  NOTES_JSON_FILE,
+  SUMMARY_FILE,
+  TRANSCRIPT_FILE,
+  autoMigrateLegacyOnStartup,
+  formatSummary,
   formatTimestamp,
   getTranscriptionsDir,
+  isV2Folder,
   listTranscriptions,
-  parseFrontmatter,
-  parseHighlightsField,
-  parseLiveNotesField,
+  migrateV1ToV2,
   readTranscription,
   sanitizeForPath,
   saveTranscription,
@@ -41,6 +49,14 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.opus',
   '.webm',
 ]);
+
+/** Commands that don't trigger the one-shot v1->v2 startup migration:
+ * - `config`/`codex` never touch the transcriptions directory.
+ * - `migrate` IS the migration command itself; its own loop scans for v1
+ *   folders. Running the startup auto-migrate first would convert everything
+ *   to v2 before `--dry-run` could observe it. The `migrate` handler is
+ *   responsible for any conversion it does. */
+const COMMANDS_WITHOUT_DATA_ACCESS = new Set(['config', 'codex', 'migrate']);
 
 const VERSION = (() => {
   try {
@@ -75,6 +91,9 @@ const USAGE_TEXT =
   '                                           Manage configuration\n' +
   '       listener usage [--month YYYY-MM] [--json]\n' +
   '                                           Show estimated API spend (best-effort, default: current month)\n' +
+  '       listener migrate <ref> | --all [--dry-run]\n' +
+  '                                           Migrate one or all transcription folders from the legacy\n' +
+  '                                           single-summary.md layout to the v2 multi-file layout\n' +
   '\n' +
   '<ref> is a number from `listener list` or a folder name.\n' +
   '\n' +
@@ -666,14 +685,19 @@ async function handleShow(args: string[]): Promise<void> {
   }
   const dataPath = getDataPath();
   const folderPath = await resolveRef(ref, dataPath);
-  const summaryPath = path.join(folderPath, 'summary.md');
-  if (!fs.existsSync(summaryPath)) {
-    process.stderr.write(`Error: summary.md not found in ${folderPath}\n`);
+
+  const md = await renderV2Markdown(folderPath);
+  if (md === null) {
+    process.stderr.write(`Error: could not read transcription at ${folderPath}\n`);
     process.exit(1);
   }
-  const content = fs.readFileSync(summaryPath, 'utf-8');
-  const { body } = parseFrontmatter(content);
-  process.stdout.write(body);
+  process.stdout.write(md);
+}
+
+async function renderV2Markdown(folderPath: string): Promise<string | null> {
+  const data = await readTranscription(folderPath);
+  if (!data) return null;
+  return formatSummary(data, data.title, data.mergedFrom, data.liveNotes, data.highlights);
 }
 
 async function handleExport(args: string[]): Promise<void> {
@@ -713,14 +737,14 @@ async function handleExport(args: string[]): Promise<void> {
 
   const dataPath = getDataPath();
   const folderPath = await resolveRef(ref, dataPath);
-  const summaryPath = path.join(folderPath, 'summary.md');
 
-  if (!fs.existsSync(summaryPath)) {
-    process.stderr.write(`Error: summary.md not found in ${folderPath}\n`);
+  // meta.json is the v2 sentinel. Fires when migration was skipped
+  // (`LISTENER_SKIP_AUTO_MIGRATE`) or the folder is corrupt.
+  if (!isV2Folder(folderPath)) {
+    process.stderr.write(`Error: ${META_JSON} not found in ${folderPath}\n`);
     process.exit(1);
   }
 
-  // Copy files to target path
   if (targetPath && (json || includeTranscript)) {
     process.stderr.write(
       'Error: --json and --transcript are only supported when writing to stdout (omit <path>)\n',
@@ -730,55 +754,63 @@ async function handleExport(args: string[]): Promise<void> {
   if (targetPath) {
     targetPath = path.resolve(targetPath);
     fs.mkdirSync(targetPath, { recursive: true });
-    fs.copyFileSync(summaryPath, path.join(targetPath, 'summary.md'));
-    const transcriptPath = path.join(folderPath, 'transcript.md');
-    if (fs.existsSync(transcriptPath)) {
-      fs.copyFileSync(transcriptPath, path.join(targetPath, 'transcript.md'));
-    }
+    copyExportedFiles(folderPath, targetPath);
     process.stderr.write(`Exported to ${targetPath}\n`);
     return;
   }
 
-  // Output to stdout
-  const content = fs.readFileSync(summaryPath, 'utf-8');
-  const { meta, body } = parseFrontmatter(content);
-
   if (json) {
-    let customFields: Record<string, unknown> = {};
-    if (meta.customFields) {
-      try {
-        customFields =
-          typeof meta.customFields === 'string'
-            ? JSON.parse(meta.customFields as string)
-            : (meta.customFields as Record<string, unknown>);
-      } catch {
-        /* ignore */
-      }
+    const data = await readTranscription(folderPath);
+    if (!data) {
+      process.stderr.write(`Error: could not read transcription at ${folderPath}\n`);
+      process.exit(1);
     }
-    const liveNotes = parseLiveNotesField(meta.liveNotes);
-    const highlights = parseHighlightsField(meta.highlights);
     const obj: Record<string, unknown> = {
-      title: meta.title || '',
-      transcribedAt: meta.transcribedAt || '',
-      summary: meta.summary || '',
-      keyPoints: meta.keyPoints || [],
-      actionItems: meta.actionItems || [],
-      customFields,
-      ...(liveNotes ? { liveNotes } : {}),
-      ...(highlights ? { highlights } : {}),
+      title: data.title || '',
+      transcribedAt: data.transcribedAt || '',
+      summary: data.summary || '',
+      keyPoints: data.keyPoints ?? [],
+      actionItems: data.actionItems ?? [],
+      customFields: data.customFields ?? {},
+      ...(data.liveNotes ? { liveNotes: data.liveNotes } : {}),
+      ...(data.highlights ? { highlights: data.highlights } : {}),
     };
     if (includeTranscript) {
-      obj.transcript = meta.transcript || '';
+      obj.transcript = data.transcript || '';
     }
     process.stdout.write(`${JSON.stringify(obj, null, 2)}\n`);
   } else {
-    process.stdout.write(body);
+    const md = await renderV2Markdown(folderPath);
+    if (md === null) {
+      process.stderr.write(`Error: could not read transcription at ${folderPath}\n`);
+      process.exit(1);
+    }
+    process.stdout.write(md);
     if (includeTranscript) {
-      const transcriptPath = path.join(folderPath, 'transcript.md');
+      const transcriptPath = path.join(folderPath, TRANSCRIPT_FILE);
       if (fs.existsSync(transcriptPath)) {
         const transcriptContent = fs.readFileSync(transcriptPath, 'utf-8');
         process.stdout.write(`\n${transcriptContent}`);
       }
+    }
+  }
+}
+
+/** Whitelist known files so audio + ad-hoc artifacts stay local. */
+function copyExportedFiles(folderPath: string, targetPath: string): void {
+  const candidates = [
+    META_JSON,
+    SUMMARY_FILE,
+    KEY_POINTS_FILE,
+    ACTION_ITEMS_FILE,
+    TRANSCRIPT_FILE,
+    NOTES_JSON_FILE,
+    HIGHLIGHTS_JSON_FILE,
+  ];
+  for (const name of candidates) {
+    const src = path.join(folderPath, name);
+    if (fs.existsSync(src)) {
+      fs.copyFileSync(src, path.join(targetPath, name));
     }
   }
 }
@@ -1031,6 +1063,100 @@ async function handleAsk(args: string[]): Promise<void> {
   }
 }
 
+async function handleMigrate(args: string[]): Promise<void> {
+  let dryRun = false;
+  let all = false;
+  let ref: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--dry-run') {
+      dryRun = true;
+      continue;
+    }
+    if (a === '--all') {
+      all = true;
+      continue;
+    }
+    if (a.startsWith('-')) {
+      process.stderr.write(`Error: Unknown option: ${a}\n`);
+      process.exit(1);
+    }
+    if (!ref) {
+      ref = a;
+      continue;
+    }
+    process.stderr.write(`Error: Unexpected argument: ${a}\n`);
+    process.exit(1);
+  }
+
+  if (!ref && !all) {
+    process.stderr.write(
+      'Error: Missing target. Usage: listener migrate <ref> | --all [--dry-run]\n',
+    );
+    process.exit(1);
+  }
+  if (ref && all) {
+    process.stderr.write('Error: pass either <ref> or --all, not both.\n');
+    process.exit(1);
+  }
+
+  const dataPath = getDataPath();
+  const targets: { folderPath: string; folderName: string }[] = [];
+  if (all) {
+    // Use a direct readdir, NOT `listTranscriptions`: the v2-only lister
+    // filters out folders without meta.json, which is exactly the set we
+    // want to migrate.
+    const transcriptionsDir = getTranscriptionsDir(dataPath);
+    let dirents: fs.Dirent[] = [];
+    try {
+      dirents = fs.readdirSync(transcriptionsDir, { withFileTypes: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    for (const d of dirents) {
+      if (!d.isDirectory()) continue;
+      if (d.name.startsWith('.')) continue; // skip backup directories
+      const folderPath = path.join(transcriptionsDir, d.name);
+      targets.push({ folderPath, folderName: d.name });
+    }
+  } else {
+    const folderPath = await resolveRef(ref!, dataPath);
+    targets.push({ folderPath, folderName: path.basename(folderPath) });
+  }
+
+  let needsMigration = 0;
+  let alreadyV2 = 0;
+  let failed = 0;
+  for (const t of targets) {
+    if (isV2Folder(t.folderPath)) {
+      alreadyV2 += 1;
+      if (dryRun) process.stdout.write(`skip (already v2)  ${t.folderName}\n`);
+      continue;
+    }
+    if (dryRun) {
+      needsMigration += 1;
+      process.stdout.write(`would migrate      ${t.folderName}\n`);
+      continue;
+    }
+    try {
+      await migrateV1ToV2(t.folderPath);
+      needsMigration += 1;
+      process.stdout.write(`migrated           ${t.folderName}\n`);
+    } catch (err) {
+      failed += 1;
+      process.stderr.write(
+        `failed             ${t.folderName}: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
+  const verb = dryRun ? 'to migrate' : 'migrated';
+  const summary = `${dryRun ? 'dry-run: ' : ''}${needsMigration} ${verb}, ${alreadyV2} skipped, ${failed} failed (of ${targets.length} total).\n`;
+  process.stderr.write(summary);
+  if (failed > 0) process.exit(1);
+}
+
 async function handleUsage(args: string[]): Promise<void> {
   let month: string | undefined;
   let asJson = false;
@@ -1207,6 +1333,26 @@ async function main(): Promise<void> {
     usageError();
   }
 
+  // One-shot v1 -> v2 migration is the runtime's responsibility on every
+  // entry point. Skip for commands that don't touch the transcriptions dir
+  // (`config`, `codex`, `google login/logout/status`) so we don't pay the
+  // dir-scan when it's irrelevant. Also skip when `LISTENER_SKIP_AUTO_MIGRATE`
+  // is set -- the migrate-command tests use this to drive the explicit
+  // `listener migrate` flow on un-migrated fixtures.
+  if (
+    !COMMANDS_WITHOUT_DATA_ACCESS.has(args[0]) &&
+    !process.env.LISTENER_SKIP_AUTO_MIGRATE
+  ) {
+    try {
+      await autoMigrateLegacyOnStartup(getDataPath());
+    } catch (err) {
+      process.stderr.write(
+        `Error: legacy migration failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+      process.exit(1);
+    }
+  }
+
   if (args[0] === 'config') {
     handleConfig(args.slice(1));
     return;
@@ -1259,6 +1405,11 @@ async function main(): Promise<void> {
 
   if (args[0] === 'usage') {
     await handleUsage(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'migrate') {
+    await handleMigrate(args.slice(1));
     return;
   }
 
