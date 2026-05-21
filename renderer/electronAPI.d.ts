@@ -70,6 +70,10 @@ export type GoogleSyncStatus = {
   error?: string;
 };
 
+export type GoogleSyncProgress =
+  | { type: 'scanning' }
+  | { type: 'meeting'; meeting: string; index: number; total: number };
+
 export type SlackSendApiResult =
   | { success: true; sentAt: string }
   | { success: false; error: string };
@@ -138,10 +142,12 @@ export type ElectronAPI = {
     inFlight: boolean;
     lastSyncedAt: string | null;
     lastResult: GoogleSyncResult | null;
+    progress: GoogleSyncProgress | null;
     enabled: boolean;
     authenticated: boolean;
   }>;
   onGoogleSyncStatus: (cb: (status: GoogleSyncStatus) => void) => void;
+  onGoogleSyncProgress: (cb: (event: GoogleSyncProgress) => void) => void;
   transcribeAudio: (
     filePath: string,
     liveNotes?: Array<{ offsetMs: number; text: string }>,

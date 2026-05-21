@@ -11,6 +11,7 @@ import {
   chooseInitial,
 } from '../services/model-options';
 import { DEFAULT_SUMMARY_PROMPT } from '../state';
+import type { GoogleSyncProgress } from '../electronAPI';
 import { formatUsd } from '../../src/usageFormat';
 
 let configModal: HTMLDialogElement | null = null;
@@ -155,6 +156,15 @@ function setGoogleSyncStatus(text: string, state: 'idle' | 'success' | 'error' =
   setStatusEl(googleDriveSyncStatusEl, text, state);
 }
 
+// Translate a progress event into the pill label. Kept separate from the
+// onGoogleSyncStatus handler because the same shape arrives from two paths:
+// live `google-sync-progress` IPC events, and the snapshot returned by
+// getGoogleSyncStatus when the modal opens mid-sync.
+function syncProgressText(progress: GoogleSyncProgress): string {
+  if (progress.type === 'scanning') return 'Scanning...';
+  return `Syncing ${progress.index}/${progress.total}: ${progress.meeting}`;
+}
+
 function formatLastSynced(iso: string | null | undefined): string {
   if (!iso) return 'Never synced';
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -237,13 +247,15 @@ export async function showConfigModal(): Promise<void> {
   if (googleDriveEnabledInput) {
     googleDriveEnabledInput.checked = !!config.googleDriveEnabled;
   }
-  // Pull the current sync status (last synced, in-flight) so the modal is
-  // accurate on open even if no event has fired since boot.
+  // Pull the current sync status (last synced, in-flight, current progress)
+  // so the modal is accurate on open even if no event has fired since boot.
+  // If we land mid-sync with a known progress event, render that immediately
+  // instead of a generic "Syncing..." so the user doesn't see a phantom regress.
   window.electronAPI
     .getGoogleSyncStatus()
     .then((s) => {
       if (s.inFlight) {
-        setGoogleSyncStatus('Syncing...', 'idle');
+        setGoogleSyncStatus(s.progress ? syncProgressText(s.progress) : 'Syncing...', 'idle');
       } else {
         setGoogleSyncStatus(formatLastSynced(s.lastSyncedAt));
       }
@@ -634,6 +646,14 @@ export function setupConfigModal(): void {
     } else if (status.phase === 'progress' && status.message) {
       setGoogleOAuthStatus(status.message);
     }
+  });
+
+  window.electronAPI.onGoogleSyncProgress((event) => {
+    // Progress events only matter while syncing. If success/error has already
+    // fired (status.phase moved out of 'syncing') the next render comes from
+    // onGoogleSyncStatus and overwrites this one -- benign racing, no guard
+    // needed.
+    setGoogleSyncStatus(syncProgressText(event), 'idle');
   });
 
   window.electronAPI.onGoogleSyncStatus((status) => {

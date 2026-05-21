@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { LiveNote } from './outputService';
+import type { SyncProgressEvent } from './services/syncEngine';
 
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
@@ -67,6 +68,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }) => void,
   ) => {
     ipcRenderer.on('google-sync-status', (_, status) => callback(status));
+  },
+  onGoogleSyncProgress: (callback: (event: SyncProgressEvent) => void) => {
+    ipcRenderer.on('google-sync-progress', (_, event) => callback(event));
   },
   transcribeAudio: (filePath: string, liveNotes?: LiveNote[]) =>
     ipcRenderer.invoke('transcribe-audio', filePath, liveNotes),

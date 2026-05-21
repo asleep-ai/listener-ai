@@ -82,6 +82,15 @@ export type SyncResult = {
   errors: Array<{ meeting: string; file?: string; error: string }>;
 };
 
+// Per-stage progress signal for the UI. Emitted before the work begins so a
+// listener can show "Scanning..." while we wait for the Drive listing, then
+// "Syncing 3/12: <meeting>" once we know the total. Kept intentionally coarse
+// (per-meeting, not per-file) -- file-level chatter is too noisy for a pill
+// label and the per-meeting boundary is enough to answer "is it stuck?".
+export type SyncProgressEvent =
+  | { type: 'scanning' }
+  | { type: 'meeting'; meeting: string; index: number; total: number };
+
 export type SyncEngineOptions = {
   driveClient: GoogleDriveClient;
   transcriptionsDir: string;
@@ -93,6 +102,9 @@ export type SyncEngineOptions = {
   // Files matching these names are skipped from sync (hidden / system files).
   excludeFilePatterns?: RegExp[];
   logger?: (msg: string) => void;
+  // Optional progress sink. Exceptions thrown from the callback are caught
+  // and logged so a buggy UI subscriber can't break the sync cycle.
+  onProgress?: (event: SyncProgressEvent) => void;
 };
 
 const DEFAULT_EXCLUDES: RegExp[] = [/^\./];
@@ -120,6 +132,7 @@ export class SyncEngine {
   private readonly appFolderName: string;
   private readonly excludePatterns: RegExp[];
   private readonly logger: (msg: string) => void;
+  private readonly onProgress: (event: SyncProgressEvent) => void;
 
   constructor(opts: SyncEngineOptions) {
     this.driveClient = opts.driveClient;
@@ -130,6 +143,16 @@ export class SyncEngine {
     this.appFolderName = opts.appFolderName ?? LISTENER_DRIVE_FOLDER_NAME;
     this.excludePatterns = opts.excludeFilePatterns ?? DEFAULT_EXCLUDES;
     this.logger = opts.logger ?? (() => {});
+    const userProgress = opts.onProgress;
+    this.onProgress = userProgress
+      ? (event) => {
+          try {
+            userProgress(event);
+          } catch (err) {
+            this.logger(`onProgress callback threw: ${(err as Error).message}`);
+          }
+        }
+      : () => {};
   }
 
   loadState(): SyncState {
@@ -200,6 +223,13 @@ export class SyncEngine {
 
     fs.mkdirSync(this.transcriptionsDir, { recursive: true });
 
+    // Signal to the UI that we're past the auth/folder-ensure step and into
+    // the work-discovery phase. The Drive listing in scanRemoteMeetingFolders
+    // is the biggest opaque wait before the per-meeting loop starts emitting
+    // its own events, so the user gets a "Scanning..." pill instead of a
+    // silent "Syncing..." for that window.
+    this.onProgress({ type: 'scanning' });
+
     // 1. Process remote tombstones first -- delete local meetings that were
     //    deleted on another device. Must come BEFORE the upload pass so we
     //    don't immediately re-upload a meeting we're about to delete.
@@ -238,7 +268,14 @@ export class SyncEngine {
       ...remoteMeetingEntries.map((m) => m.name),
     ]);
 
-    for (const name of [...allNames].sort()) {
+    const sortedNames = [...allNames].sort();
+    for (const [i, name] of sortedNames.entries()) {
+      this.onProgress({
+        type: 'meeting',
+        meeting: name,
+        index: i + 1,
+        total: sortedNames.length,
+      });
       if (state.tombstones[name]) {
         // Local file resurrected after deletion (manual restore, backup
         // tool, etc.) -- re-delete to honor the user's prior deletion.

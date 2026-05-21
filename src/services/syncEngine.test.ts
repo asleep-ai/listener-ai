@@ -9,7 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { makeTempDir, rmDir } from '../test-helpers';
 import type { DriveFile, GoogleDriveClient } from './googleDriveService';
-import { SyncEngine, type SyncState } from './syncEngine';
+import { SyncEngine, type SyncProgressEvent, type SyncState } from './syncEngine';
 
 type UploadCall = {
   name: string;
@@ -777,6 +777,83 @@ describe('SyncEngine: empty cases', () => {
     const result = await makeEngine().syncOnce();
     assert.deepEqual(result.uploaded, []);
     assert.deepEqual(result.downloaded, []);
+    assert.deepEqual(result.errors, []);
+  });
+});
+
+describe('SyncEngine: progress reporting', () => {
+  function makeEngineWithProgress(events: SyncProgressEvent[]): SyncEngine {
+    return new SyncEngine({
+      driveClient: mockClient.asDriveClient(),
+      transcriptionsDir,
+      syncStatePath,
+      onProgress: (e) => events.push(e),
+    });
+  }
+
+  it('emits scanning, then one meeting event per meeting in deterministic order', async () => {
+    // Two local meetings; alphabetical sort means "a-meeting" before "b-meeting".
+    makeMeeting('b-meeting', { 'summary.md': 'B' });
+    makeMeeting('a-meeting', { 'summary.md': 'A' });
+
+    const events: SyncProgressEvent[] = [];
+    await makeEngineWithProgress(events).syncOnce();
+
+    assert.deepEqual(events, [
+      { type: 'scanning' },
+      { type: 'meeting', meeting: 'a-meeting', index: 1, total: 2 },
+      { type: 'meeting', meeting: 'b-meeting', index: 2, total: 2 },
+    ]);
+  });
+
+  it('emits scanning even when there is no work to do', async () => {
+    const events: SyncProgressEvent[] = [];
+    await makeEngineWithProgress(events).syncOnce();
+    // No meetings local or remote -> only the scanning event is emitted, no
+    // meeting events. The UI sees "Scanning..." flash then falls through to
+    // the success status.
+    assert.deepEqual(events, [{ type: 'scanning' }]);
+  });
+
+  it('counts remote-only meetings in the total alongside local ones', async () => {
+    makeMeeting('local-only', { 'summary.md': 'local' });
+    // Seed a remote meeting in the app folder. ensureFolder("Listener.AI")
+    // happens inside syncOnce; we proactively register it so seedRemoteMeeting
+    // can target the right parent id.
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    mockClient.seedRemoteMeeting('remote-only', appFolder.id, [
+      { name: 'summary.md', content: 'remote' },
+    ]);
+
+    const events: SyncProgressEvent[] = [];
+    await makeEngineWithProgress(events).syncOnce();
+
+    const meetingEvents = events.filter((e) => e.type === 'meeting');
+    assert.equal(meetingEvents.length, 2);
+    assert.deepEqual(
+      meetingEvents.map((e) => (e.type === 'meeting' ? e.meeting : '')),
+      ['local-only', 'remote-only'],
+    );
+    for (const e of meetingEvents) {
+      assert.equal(e.type === 'meeting' && e.total, 2);
+    }
+  });
+
+  it('does not let an onProgress exception abort the sync', async () => {
+    makeMeeting('m1', { 'summary.md': 'hi' });
+    const engine = new SyncEngine({
+      driveClient: mockClient.asDriveClient(),
+      transcriptionsDir,
+      syncStatePath,
+      onProgress: () => {
+        throw new Error('subscriber crashed');
+      },
+    });
+
+    const result = await engine.syncOnce();
+    // Sync proceeded to completion despite the buggy subscriber: the file
+    // upload still happened and the result reflects it.
+    assert.ok(result.uploaded.includes('m1/summary.md'));
     assert.deepEqual(result.errors, []);
   });
 });

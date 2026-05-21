@@ -36,7 +36,7 @@ import {
   resolveGoogleAccessToken,
 } from './googleOAuth';
 import { GoogleDriveClient } from './services/googleDriveService';
-import { SyncEngine, type SyncResult } from './services/syncEngine';
+import { SyncEngine, type SyncProgressEvent, type SyncResult } from './services/syncEngine';
 import { DisplayDetectorService } from './displayDetectorService';
 import { GeminiService, TranscriptionError, type TranscriptionErrorPayload } from './geminiService';
 import { MeetingDetectorService } from './meetingDetectorService';
@@ -1538,6 +1538,10 @@ let googleSyncInitialKick: NodeJS.Timeout | null = null;
 let googleSyncInFlight = false;
 let googleLastSyncedAt: string | null = null;
 let googleLastSyncResult: SyncResult | null = null;
+// Most recent progress event from the currently-running sync. Cleared when
+// the cycle finishes so getGoogleSyncStatus doesn't surface a stale "Syncing
+// 7/12" pill after a sync error and the next modal open.
+let googleSyncProgress: SyncProgressEvent | null = null;
 const GOOGLE_SYNC_INTERVAL_MS = 60_000;
 // Delay before the first sync after enable/sign-in. Short enough that users
 // see activity quickly, long enough that batched config saves (multi-key
@@ -1555,6 +1559,13 @@ function broadcastGoogleSyncStatus(
       result: extra?.result,
       error: extra?.error,
     });
+  }
+}
+
+function broadcastGoogleSyncProgress(event: SyncProgressEvent): void {
+  googleSyncProgress = event;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('google-sync-progress', event);
   }
 }
 
@@ -1591,6 +1602,7 @@ async function runGoogleSync(): Promise<SyncResult | undefined> {
       transcriptionsDir: getTranscriptionsDir(dataPath),
       syncStatePath: path.join(dataPath, 'sync-state.json'),
       logger: (msg) => console.log(`[google-sync] ${msg}`),
+      onProgress: broadcastGoogleSyncProgress,
     });
     const result = await engine.syncOnce();
     googleLastSyncedAt = new Date().toISOString();
@@ -1604,6 +1616,7 @@ async function runGoogleSync(): Promise<SyncResult | undefined> {
     return undefined;
   } finally {
     googleSyncInFlight = false;
+    googleSyncProgress = null;
   }
 }
 
@@ -1744,6 +1757,7 @@ ipcMain.handle('google-drive-sync-status', async () => {
     inFlight: googleSyncInFlight,
     lastSyncedAt: googleLastSyncedAt,
     lastResult: googleLastSyncResult,
+    progress: googleSyncProgress,
     enabled: configService.getGoogleDriveEnabled(),
     authenticated: configService.hasGoogleOAuth(),
   };
