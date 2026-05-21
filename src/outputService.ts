@@ -589,10 +589,7 @@ function writeV2Files(folderPath: string, inputs: V2WriteInputs): void {
   if (inputs.result.emoji) meta.emoji = inputs.result.emoji;
   if (inputs.audioFilePath) meta.audioFile = inputs.audioFilePath;
   if (inputs.result.cost && inputs.result.cost.breakdown.length > 0) meta.cost = inputs.result.cost;
-  if (
-    inputs.result.customFields &&
-    Object.keys(inputs.result.customFields).length > 0
-  ) {
+  if (inputs.result.customFields && Object.keys(inputs.result.customFields).length > 0) {
     meta.customFields = inputs.result.customFields;
   }
   if (inputs.mergedFrom?.length) {
@@ -701,7 +698,11 @@ export function __saveTranscriptionLegacyV1ForTests(opts: SaveTranscriptionOptio
     opts.liveNotes,
     highlights,
   );
-  fs.writeFileSync(path.join(folderPath, 'summary.md'), `${frontmatter}\n\n${summaryBody}`, 'utf-8');
+  fs.writeFileSync(
+    path.join(folderPath, 'summary.md'),
+    `${frontmatter}\n\n${summaryBody}`,
+    'utf-8',
+  );
   fs.writeFileSync(
     path.join(folderPath, 'transcript.md'),
     formatTranscript(opts.result, opts.title),
@@ -918,9 +919,7 @@ export async function readTranscription(
 /** Migration-only reader: parses a v1 summary.md (YAML frontmatter) into the
  * shared shape so `migrateV1ToV2` can lift the data forward. Not exported --
  * runtime reads always go through the v2 `readTranscription`. */
-async function readV1Transcription(
-  folderPath: string,
-): Promise<ReadTranscriptionResult | null> {
+async function readV1Transcription(folderPath: string): Promise<ReadTranscriptionResult | null> {
   try {
     const summaryPath = path.join(folderPath, 'summary.md');
 
@@ -1278,10 +1277,7 @@ function snapshotV1Files(folderPath: string, backupTargetDir: string): void {
 
 /** Remove `.v1-backup-*` directories older than `retentionDays` days.
  * Returns the number of backups removed. */
-export async function gcLegacyBackups(
-  dataPath: string,
-  retentionDays = 30,
-): Promise<number> {
+export async function gcLegacyBackups(dataPath: string, retentionDays = 30): Promise<number> {
   let dirents: fs.Dirent[];
   try {
     dirents = await fs.promises.readdir(dataPath, { withFileTypes: true });

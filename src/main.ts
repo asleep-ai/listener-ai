@@ -463,9 +463,7 @@ app.whenReady().then(async () => {
       );
     }
     // Clean up backup directories older than 30 days. Best-effort; never fatal.
-    gcLegacyBackups(getDataPath()).catch((err) =>
-      console.warn('[migrate] backup GC failed:', err),
-    );
+    gcLegacyBackups(getDataPath()).catch((err) => console.warn('[migrate] backup GC failed:', err));
   } catch (err) {
     console.error('[migrate] startup migration failed:', err);
     const message =

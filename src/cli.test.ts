@@ -388,10 +388,9 @@ describe('listener show / export across v1 + v2 folders', () => {
       dataPath: showDataPath,
     });
 
-    const { code, stdout } = await runCli(
-      ['migrate', path.basename(v1Path), '--dry-run'],
-      { LISTENER_SKIP_AUTO_MIGRATE: '1' },
-    );
+    const { code, stdout } = await runCli(['migrate', path.basename(v1Path), '--dry-run'], {
+      LISTENER_SKIP_AUTO_MIGRATE: '1',
+    });
     assert.equal(code, 0);
     assert.match(stdout, /would migrate/);
     assert.ok(!fs.existsSync(path.join(v1Path, 'meta.json')));

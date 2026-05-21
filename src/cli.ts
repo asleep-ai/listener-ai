@@ -1339,10 +1339,7 @@ async function main(): Promise<void> {
   // dir-scan when it's irrelevant. Also skip when `LISTENER_SKIP_AUTO_MIGRATE`
   // is set -- the migrate-command tests use this to drive the explicit
   // `listener migrate` flow on un-migrated fixtures.
-  if (
-    !COMMANDS_WITHOUT_DATA_ACCESS.has(args[0]) &&
-    !process.env.LISTENER_SKIP_AUTO_MIGRATE
-  ) {
+  if (!COMMANDS_WITHOUT_DATA_ACCESS.has(args[0]) && !process.env.LISTENER_SKIP_AUTO_MIGRATE) {
     try {
       await autoMigrateLegacyOnStartup(getDataPath());
     } catch (err) {
