@@ -1231,7 +1231,12 @@ export async function autoMigrateLegacyOnStartup(
   let alreadyV2 = 0;
   for (const d of dirents) {
     if (!d.isDirectory()) continue;
-    if (d.name.startsWith('.')) continue; // skip prior backup directories
+    // Skip dotfile-prefixed dirs. `.v1-backup-*` lives at the data-path root
+    // (not here), but a misplaced backup, restored-archive artifact, or stray
+    // OS dir (e.g. `.fseventsd`) would otherwise try to migrate, fail to read
+    // a v1 summary.md, and abort startup. The app itself never produces
+    // dot-prefixed meeting folder names, so this is purely defensive.
+    if (d.name.startsWith('.')) continue;
     const folderPath = path.join(transcriptionsDir, d.name);
     if (isV2Folder(folderPath)) {
       alreadyV2 += 1;
