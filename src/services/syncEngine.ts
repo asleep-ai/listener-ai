@@ -148,10 +148,16 @@ function safeBasename(name: string): string | null {
   return base;
 }
 
-function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
+// Set-equality (order-insensitive). Used by knownWords sync: order is a
+// display detail, not part of the synced content. Comparing as arrays would
+// ping-pong forever between two devices whose insertion orders disagree --
+// each cycle would detect "different" and re-upload, flipping the order on
+// remote and triggering the same detection on the next device's turn.
+function setsEqual(a: readonly string[], b: readonly string[]): boolean {
   if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
+  const sa = new Set(a);
+  for (const w of b) {
+    if (!sa.has(w)) return false;
   }
   return true;
 }
@@ -587,10 +593,17 @@ export class SyncEngine {
         }
       }
 
-      const localDiffers = !arraysEqual(localWords, merged);
-      const remoteDiffers = !arraysEqual(remoteWords, merged);
+      const localDiffers = !setsEqual(localWords, merged);
+      const remoteDiffers = !setsEqual(remoteWords, merged);
 
       if (localDiffers) {
+        // Known limitation: if the Settings UI is open in the renderer when
+        // this fires, its in-memory `knownWords` snapshot is now stale.
+        // A subsequent "Save" in the modal will overwrite our merge with
+        // the renderer's stale view. Mitigation deferred -- the next sync
+        // cycle re-unions from remote, so the only durable loss is when
+        // the originating peer is offline before then. To fix properly,
+        // emit a config-changed IPC and have the renderer reconcile.
         this.configSync.setKnownWords(merged);
         this.logger(
           `knownWords: updated local (${localWords.length} -> ${merged.length}).`,

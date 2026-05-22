@@ -1074,6 +1074,31 @@ describe('SyncEngine: knownWords config sync (issue #152)', () => {
     );
   });
 
+  it('does not ping-pong when two devices have the same set in different order', async () => {
+    // Device A uploads ['B', 'A'] first.
+    const cfgA = makeConfigSync(['B', 'A']);
+    await makeEngineWithConfigSync(cfgA.accessors).syncOnce();
+
+    // Device B starts with the same set in a different order.
+    const cfgB = makeConfigSync(['A', 'B']);
+    const uploadsBeforeB = mockClient.uploads.length;
+    await makeEngineWithConfigSync(cfgB.accessors).syncOnce();
+
+    // B must not upload: remote already has the same *set*. An array-equality
+    // check (order-sensitive) would flip remote to ['A','B'] and the next A
+    // sync would flip it back -- forever, every cycle, on every device.
+    const newUploads = mockClient.uploads
+      .slice(uploadsBeforeB)
+      .filter((u) => u.name === 'known-words.json');
+    assert.equal(
+      newUploads.length,
+      0,
+      'must not re-upload when remote already has the same set',
+    );
+    // And B's local order is preserved (order is a per-device display detail).
+    assert.deepEqual(cfgB.current, ['A', 'B']);
+  });
+
   it('is stable across repeated syncs: converged state stays converged', async () => {
     const cfg = makeConfigSync(['A', 'B', 'C']);
     await makeEngineWithConfigSync(cfg.accessors).syncOnce();
