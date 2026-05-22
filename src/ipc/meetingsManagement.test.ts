@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 import Module from 'node:module';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import type { IpcContext } from './types';
@@ -47,7 +46,6 @@ describe('meetingsManagement.register', () => {
     // already required the real electron stub).
     const mPath = require.resolve('./meetingsManagement');
     delete require.cache[mPath];
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const mod = require('./meetingsManagement') as { register: (ctx: IpcContext) => void };
     registerFn = mod.register;
   });
