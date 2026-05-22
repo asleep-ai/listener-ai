@@ -890,8 +890,7 @@ describe('SyncEngine: knownWords config sync (issue #152)', () => {
     for (const files of mockClient.folderContents.values()) {
       const found = files.find(
         (f) =>
-          f.name === '.listener-config-sync' &&
-          f.mimeType === 'application/vnd.google-apps.folder',
+          f.name === '.listener-config-sync' && f.mimeType === 'application/vnd.google-apps.folder',
       );
       if (found) return found;
     }
@@ -1090,11 +1089,7 @@ describe('SyncEngine: knownWords config sync (issue #152)', () => {
     const newUploads = mockClient.uploads
       .slice(uploadsBeforeB)
       .filter((u) => u.name === 'known-words.json');
-    assert.equal(
-      newUploads.length,
-      0,
-      'must not re-upload when remote already has the same set',
-    );
+    assert.equal(newUploads.length, 0, 'must not re-upload when remote already has the same set');
     // And B's local order is preserved (order is a per-device display detail).
     assert.deepEqual(cfgB.current, ['A', 'B']);
   });

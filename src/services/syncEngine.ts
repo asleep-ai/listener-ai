@@ -605,9 +605,7 @@ export class SyncEngine {
         // the originating peer is offline before then. To fix properly,
         // emit a config-changed IPC and have the renderer reconcile.
         this.configSync.setKnownWords(merged);
-        this.logger(
-          `knownWords: updated local (${localWords.length} -> ${merged.length}).`,
-        );
+        this.logger(`knownWords: updated local (${localWords.length} -> ${merged.length}).`);
       }
       if (remoteDiffers) {
         const payload = {
