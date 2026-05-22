@@ -857,3 +857,327 @@ describe('SyncEngine: progress reporting', () => {
     assert.deepEqual(result.errors, []);
   });
 });
+
+describe('SyncEngine: knownWords config sync (issue #152)', () => {
+  function makeConfigSync(initial: string[] = []) {
+    const state = { words: [...initial] };
+    return {
+      accessors: {
+        getKnownWords: () => [...state.words],
+        setKnownWords: (words: string[]) => {
+          state.words = [...words];
+        },
+      },
+      get current() {
+        return [...state.words];
+      },
+    };
+  }
+
+  function makeEngineWithConfigSync(accessors: {
+    getKnownWords: () => string[];
+    setKnownWords: (words: string[]) => void;
+  }) {
+    return new SyncEngine({
+      driveClient: mockClient.asDriveClient(),
+      transcriptionsDir,
+      syncStatePath,
+      configSync: accessors,
+    });
+  }
+
+  function findRemoteConfigSyncFolder(): RemoteFile | undefined {
+    for (const files of mockClient.folderContents.values()) {
+      const found = files.find(
+        (f) =>
+          f.name === '.listener-config-sync' && f.mimeType === 'application/vnd.google-apps.folder',
+      );
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  function readRemoteKnownWords(): { version: number; words: string[] } | undefined {
+    const configFolder = findRemoteConfigSyncFolder();
+    if (!configFolder) return undefined;
+    const children = mockClient.folderContents.get(configFolder.id) ?? [];
+    const wordsFile = children.find((f) => f.name === 'known-words.json');
+    if (!wordsFile) return undefined;
+    const buf = mockClient.fileContents.get(wordsFile.id);
+    if (!buf) return undefined;
+    return JSON.parse(buf.toString('utf-8'));
+  }
+
+  it('uploads local knownWords on first sync when remote is empty', async () => {
+    const cfg = makeConfigSync(['Asleep', 'SleepHub']);
+    const result = await makeEngineWithConfigSync(cfg.accessors).syncOnce();
+
+    assert.deepEqual(result.errors, []);
+    // Local untouched (local was already the merged value).
+    assert.deepEqual(cfg.current, ['Asleep', 'SleepHub']);
+    const remote = readRemoteKnownWords();
+    assert.deepEqual(remote, { version: 1, words: ['Asleep', 'SleepHub'] });
+  });
+
+  it('downloads remote knownWords on first sync when local is empty', async () => {
+    // Pre-seed the remote config sync folder + file as if another device
+    // synced first.
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    const configFolder = await mockClient.ensureFolder('.listener-config-sync', appFolder.id);
+    await mockClient.uploadFile({
+      name: 'known-words.json',
+      parentId: configFolder.id,
+      content: JSON.stringify({ version: 1, words: ['Foo', 'Bar'] }),
+      mimeType: 'application/json',
+    });
+    const uploadsBefore = mockClient.uploads.length;
+
+    const cfg = makeConfigSync([]);
+    const result = await makeEngineWithConfigSync(cfg.accessors).syncOnce();
+
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(cfg.current, ['Foo', 'Bar']);
+    // No upload triggered for known-words.json: remote already equals merged.
+    const newUploads = mockClient.uploads.slice(uploadsBefore);
+    assert.equal(
+      newUploads.filter((u) => u.name === 'known-words.json').length,
+      0,
+      'should not re-upload when remote already matches merged',
+    );
+  });
+
+  it('merges local and remote as a set-union (no word lost)', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    const configFolder = await mockClient.ensureFolder('.listener-config-sync', appFolder.id);
+    await mockClient.uploadFile({
+      name: 'known-words.json',
+      parentId: configFolder.id,
+      content: JSON.stringify({ version: 1, words: ['Remote1', 'Shared'] }),
+      mimeType: 'application/json',
+    });
+
+    const cfg = makeConfigSync(['Local1', 'Shared']);
+    const result = await makeEngineWithConfigSync(cfg.accessors).syncOnce();
+
+    assert.deepEqual(result.errors, []);
+    // Local first, then remote-only additions. Shared appears once.
+    assert.deepEqual(cfg.current, ['Local1', 'Shared', 'Remote1']);
+    const remote = readRemoteKnownWords();
+    assert.deepEqual(remote, { version: 1, words: ['Local1', 'Shared', 'Remote1'] });
+  });
+
+  it('is a no-op when local and remote already match', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    const configFolder = await mockClient.ensureFolder('.listener-config-sync', appFolder.id);
+    await mockClient.uploadFile({
+      name: 'known-words.json',
+      parentId: configFolder.id,
+      content: JSON.stringify({ version: 1, words: ['A', 'B'] }),
+      mimeType: 'application/json',
+    });
+    const uploadsBefore = mockClient.uploads.length;
+
+    let setCalls = 0;
+    const cfg = {
+      getKnownWords: () => ['A', 'B'],
+      setKnownWords: (_w: string[]) => {
+        setCalls += 1;
+      },
+    };
+    const result = await makeEngineWithConfigSync(cfg).syncOnce();
+
+    assert.deepEqual(result.errors, []);
+    assert.equal(setCalls, 0, 'should not call setKnownWords when local already matches merged');
+    const newUploads = mockClient.uploads.slice(uploadsBefore);
+    assert.equal(
+      newUploads.filter((u) => u.name === 'known-words.json').length,
+      0,
+      'should not upload when remote already matches merged',
+    );
+  });
+
+  it('records a parse error and leaves local untouched when remote JSON is malformed', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    const configFolder = await mockClient.ensureFolder('.listener-config-sync', appFolder.id);
+    await mockClient.uploadFile({
+      name: 'known-words.json',
+      parentId: configFolder.id,
+      content: '{ not valid json',
+      mimeType: 'application/json',
+    });
+
+    const cfg = makeConfigSync(['Local1']);
+    const result = await makeEngineWithConfigSync(cfg.accessors).syncOnce();
+
+    const configError = result.errors.find((e) => e.meeting === '.listener-config-sync');
+    assert.ok(configError, 'should record a config sync error');
+    assert.match(configError!.error, /parse remote/);
+    // Local untouched -- a malformed remote must never wipe out user data.
+    assert.deepEqual(cfg.current, ['Local1']);
+    // And meeting sync still ran (no early abort on config error).
+    // (We have no meetings, but the absence of further errors proves the
+    // engine completed.)
+    assert.equal(result.errors.length, 1);
+  });
+
+  it('skips sync without overwriting when remote schema version is unknown', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    const configFolder = await mockClient.ensureFolder('.listener-config-sync', appFolder.id);
+    await mockClient.uploadFile({
+      name: 'known-words.json',
+      parentId: configFolder.id,
+      content: JSON.stringify({ version: 99, words: ['FutureFmt'] }),
+      mimeType: 'application/json',
+    });
+    const uploadsBefore = mockClient.uploads.length;
+
+    const cfg = makeConfigSync(['Local1']);
+    const result = await makeEngineWithConfigSync(cfg.accessors).syncOnce();
+
+    assert.deepEqual(result.errors, []);
+    // Local untouched + no upload: we deliberately leave the future-format
+    // file alone so a down-leveled client never destroys forward-compat data.
+    assert.deepEqual(cfg.current, ['Local1']);
+    const newUploads = mockClient.uploads.slice(uploadsBefore);
+    assert.equal(newUploads.filter((u) => u.name === 'known-words.json').length, 0);
+  });
+
+  it('skips config sync entirely when no configSync option is provided', async () => {
+    // The default makeEngine() omits configSync; the engine must not create
+    // a .listener-config-sync folder or do any related Drive work.
+    await makeEngine().syncOnce();
+
+    assert.equal(findRemoteConfigSyncFolder(), undefined);
+  });
+
+  it('persists configSyncFolderId so the second sync skips ensureFolder', async () => {
+    const cfg = makeConfigSync(['A']);
+    await makeEngineWithConfigSync(cfg.accessors).syncOnce();
+
+    const state1 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    assert.ok(state1.configSyncFolderId, 'first sync should record the folder id');
+
+    const ensureCountBefore = mockClient.ensureFolderCalls.filter(
+      (c) => c.name === '.listener-config-sync',
+    ).length;
+
+    await makeEngineWithConfigSync(cfg.accessors).syncOnce();
+
+    const ensureCountAfter = mockClient.ensureFolderCalls.filter(
+      (c) => c.name === '.listener-config-sync',
+    ).length;
+    assert.equal(
+      ensureCountAfter,
+      ensureCountBefore,
+      'second sync should not re-ensure the config folder',
+    );
+  });
+
+  it('does not ping-pong when two devices have the same set in different order', async () => {
+    // Device A uploads ['B', 'A'] first.
+    const cfgA = makeConfigSync(['B', 'A']);
+    await makeEngineWithConfigSync(cfgA.accessors).syncOnce();
+
+    // Device B starts with the same set in a different order.
+    const cfgB = makeConfigSync(['A', 'B']);
+    const uploadsBeforeB = mockClient.uploads.length;
+    await makeEngineWithConfigSync(cfgB.accessors).syncOnce();
+
+    // B must not upload: remote already has the same *set*. An array-equality
+    // check (order-sensitive) would flip remote to ['A','B'] and the next A
+    // sync would flip it back -- forever, every cycle, on every device.
+    const newUploads = mockClient.uploads
+      .slice(uploadsBeforeB)
+      .filter((u) => u.name === 'known-words.json');
+    assert.equal(newUploads.length, 0, 'must not re-upload when remote already has the same set');
+    // And B's local order is preserved (order is a per-device display detail).
+    assert.deepEqual(cfgB.current, ['A', 'B']);
+  });
+
+  it('is stable across repeated syncs: converged state stays converged', async () => {
+    const cfg = makeConfigSync(['A', 'B', 'C']);
+    await makeEngineWithConfigSync(cfg.accessors).syncOnce();
+    const afterFirstUploads = mockClient.uploads.length;
+    const afterFirst = cfg.current;
+
+    await makeEngineWithConfigSync(cfg.accessors).syncOnce();
+    await makeEngineWithConfigSync(cfg.accessors).syncOnce();
+
+    // Once converged, no further uploads of known-words.json and the array
+    // order/content is byte-identical across runs.
+    const newKnownWordsUploads = mockClient.uploads
+      .slice(afterFirstUploads)
+      .filter((u) => u.name === 'known-words.json');
+    assert.equal(newKnownWordsUploads.length, 0);
+    assert.deepEqual(cfg.current, afterFirst);
+    assert.deepEqual(cfg.current, ['A', 'B', 'C']);
+  });
+
+  it('dedupes when remote contains duplicates', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    const configFolder = await mockClient.ensureFolder('.listener-config-sync', appFolder.id);
+    await mockClient.uploadFile({
+      name: 'known-words.json',
+      parentId: configFolder.id,
+      content: JSON.stringify({ version: 1, words: ['A', 'A', 'B', 'B', 'C'] }),
+      mimeType: 'application/json',
+    });
+
+    const cfg = makeConfigSync([]);
+    const result = await makeEngineWithConfigSync(cfg.accessors).syncOnce();
+
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(cfg.current, ['A', 'B', 'C']);
+    // Deduped form is written back so a buggy remote writer doesn't keep
+    // re-poisoning every device's local copy.
+    const remote = readRemoteKnownWords();
+    assert.deepEqual(remote, { version: 1, words: ['A', 'B', 'C'] });
+  });
+
+  it('drops non-string entries from local without losing valid words', async () => {
+    // Hypothetical: a buggy renderer wrote `[1, 'A', null, 'B']` to config.
+    const cfg = {
+      // Cast through unknown to allow the malformed shape; the engine has to
+      // be defensive even though the public API is typed string[].
+      getKnownWords: () => [1, 'A', null, 'B'] as unknown as string[],
+      setCalls: [] as string[][],
+      setKnownWords(words: string[]) {
+        this.setCalls.push(words);
+      },
+    };
+    const result = await makeEngineWithConfigSync({
+      getKnownWords: cfg.getKnownWords,
+      setKnownWords: (w) => cfg.setKnownWords(w),
+    }).syncOnce();
+
+    assert.deepEqual(result.errors, []);
+    // Local rewritten to the cleaned form.
+    assert.deepEqual(cfg.setCalls[0], ['A', 'B']);
+    const remote = readRemoteKnownWords();
+    assert.deepEqual(remote, { version: 1, words: ['A', 'B'] });
+  });
+
+  it('skips sync when remote has no version field (treated as unknown)', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    const configFolder = await mockClient.ensureFolder('.listener-config-sync', appFolder.id);
+    await mockClient.uploadFile({
+      name: 'known-words.json',
+      parentId: configFolder.id,
+      // Missing `version` field. Could be a legitimate future shape or
+      // corruption; either way, refuse to overwrite.
+      content: JSON.stringify({ words: ['Stranger'] }),
+      mimeType: 'application/json',
+    });
+    const uploadsBefore = mockClient.uploads.length;
+
+    const cfg = makeConfigSync(['Local']);
+    const result = await makeEngineWithConfigSync(cfg.accessors).syncOnce();
+
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(cfg.current, ['Local']);
+    const newKnownWordsUploads = mockClient.uploads
+      .slice(uploadsBefore)
+      .filter((u) => u.name === 'known-words.json');
+    assert.equal(newKnownWordsUploads.length, 0);
+  });
+});

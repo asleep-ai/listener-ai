@@ -514,6 +514,7 @@ async function handleGoogleSync(config: ConfigService, dataPath: string): Promis
     transcriptionsDir: getTranscriptionsDir(dataPath),
     syncStatePath: path.join(dataPath, 'sync-state.json'),
     logger: (msg) => process.stderr.write(`${msg}\n`),
+    configSync: config,
   });
 
   process.stderr.write('Syncing meetings with Google Drive...\n');

@@ -66,6 +66,11 @@ export type SyncState = {
   version: SyncStateVersion;
   appFolderId?: string;
   tombstonesFolderId?: string;
+  // Drive folder ID for `.listener-config-sync/`. Lazily created on the first
+  // sync that has a `configSync` accessor wired up. Optional because legacy
+  // state files predate config sync and we don't want to bump the schema
+  // version for a forward-compatible addition.
+  configSyncFolderId?: string;
   appFolderName: string;
   meetings: Record<string, MeetingSyncState>;
   tombstones?: Record<string, TombstoneState>;
@@ -91,6 +96,13 @@ export type SyncProgressEvent =
   | { type: 'scanning' }
   | { type: 'meeting'; meeting: string; index: number; total: number };
 
+// Structural interface so tests can drive the merge without instantiating
+// ConfigService (which itself satisfies this shape).
+export type ConfigSyncAccessors = {
+  getKnownWords: () => string[];
+  setKnownWords: (words: string[]) => void;
+};
+
 export type SyncEngineOptions = {
   driveClient: GoogleDriveClient;
   transcriptionsDir: string;
@@ -105,11 +117,23 @@ export type SyncEngineOptions = {
   // Optional progress sink. Exceptions thrown from the callback are caught
   // and logged so a buggy UI subscriber can't break the sync cycle.
   onProgress?: (event: SyncProgressEvent) => void;
+  // When provided, syncOnce() also merges the `knownWords` config list with
+  // the remote copy stored in `.listener-config-sync/known-words.json`.
+  // Omitting the option disables config sync entirely (back-compat: tests and
+  // legacy callers keep working without changes).
+  configSync?: ConfigSyncAccessors;
 };
 
 const DEFAULT_EXCLUDES: RegExp[] = [/^\./];
 const TOMBSTONES_FOLDER_NAME = '.listener-tombstones';
 const TOMBSTONE_RETENTION_DAYS = 30;
+const CONFIG_SYNC_FOLDER_NAME = '.listener-config-sync';
+const KNOWN_WORDS_FILENAME = 'known-words.json';
+// Bump only on a breaking shape change (e.g. add per-word tombstones). Until
+// then, unknown versions are treated as "ignore the remote and re-upload from
+// local" so a future writer's format never destroys today's words on a
+// down-leveled client.
+const KNOWN_WORDS_SCHEMA_VERSION = 1;
 
 // Defense against path traversal via remote-controlled names. Drive returns
 // file/folder names verbatim, so a malicious or buggy peer could push an
@@ -124,6 +148,20 @@ function safeBasename(name: string): string | null {
   return base;
 }
 
+// Set-equality (order-insensitive). Used by knownWords sync: order is a
+// display detail, not part of the synced content. Comparing as arrays would
+// ping-pong forever between two devices whose insertion orders disagree --
+// each cycle would detect "different" and re-upload, flipping the order on
+// remote and triggering the same detection on the next device's turn.
+function setsEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = new Set(a);
+  for (const w of b) {
+    if (!sa.has(w)) return false;
+  }
+  return true;
+}
+
 export class SyncEngine {
   private readonly driveClient: GoogleDriveClient;
   private readonly transcriptionsDir: string;
@@ -133,6 +171,7 @@ export class SyncEngine {
   private readonly excludePatterns: RegExp[];
   private readonly logger: (msg: string) => void;
   private readonly onProgress: (event: SyncProgressEvent) => void;
+  private readonly configSync?: ConfigSyncAccessors;
 
   constructor(opts: SyncEngineOptions) {
     this.driveClient = opts.driveClient;
@@ -143,6 +182,7 @@ export class SyncEngine {
     this.appFolderName = opts.appFolderName ?? LISTENER_DRIVE_FOLDER_NAME;
     this.excludePatterns = opts.excludeFilePatterns ?? DEFAULT_EXCLUDES;
     this.logger = opts.logger ?? (() => {});
+    this.configSync = opts.configSync;
     const userProgress = opts.onProgress;
     this.onProgress = userProgress
       ? (event) => {
@@ -168,6 +208,7 @@ export class SyncEngine {
         version: 1,
         appFolderId: parsed.appFolderId,
         tombstonesFolderId: parsed.tombstonesFolderId,
+        configSyncFolderId: parsed.configSyncFolderId,
         appFolderName: parsed.appFolderName ?? this.appFolderName,
         meetings: parsed.meetings ?? {},
         tombstones: parsed.tombstones ?? {},
@@ -234,6 +275,15 @@ export class SyncEngine {
     //    deleted on another device. Must come BEFORE the upload pass so we
     //    don't immediately re-upload a meeting we're about to delete.
     await this.processRemoteTombstones(state, result);
+
+    // 1b. Sync non-secret config (currently: knownWords list). Independent of
+    //     the meeting loop -- one Drive file, set-union merge, no per-file
+    //     mtime tracking. Placed after tombstones so the app-folder ID is
+    //     guaranteed populated, and before the meeting scan so a buggy config
+    //     payload can't abort the much more expensive meeting work below.
+    if (this.configSync) {
+      await this.syncKnownWords(state, result);
+    }
 
     // Capture the local + remote snapshot once. We need both for the
     // deletion detection pass and the upload/download pass that follows.
@@ -450,6 +500,131 @@ export class SyncEngine {
       } catch (err) {
         result.errors.push({ meeting: name, error: `tombstone GC: ${(err as Error).message}` });
       }
+    }
+  }
+
+  // Sync the user's `knownWords` list cross-device via
+  // `Listener.AI/.listener-config-sync/known-words.json`.
+  //
+  // Merge strategy: set-union (CRDT G-Set). Both sides keep everyone's
+  // additions; nobody can delete via sync. Deletion is intentionally out of
+  // scope for the MVP -- "User A adds 'Asleep Inc', User B adds 'SleepHub'"
+  // needs to converge to both words on both devices, which LWW can't
+  // guarantee. Trade-off documented in issue #152.
+  //
+  // Concurrent-write race: if device A and B both run this cycle with
+  // overlapping windows, the later upload PATCHes the file by name and
+  // appears to clobber the earlier one. Set-union saves us on the *next*
+  // sync (both devices re-download, re-union, re-upload), so no word is
+  // permanently lost on remote -- only delayed by one cycle. The local copy
+  // is never lost on either device. Accepted trade-off vs introducing ETag /
+  // If-Match conditional updates to the Drive client.
+  //
+  // No per-file mtime tracking: set-union is idempotent, so re-downloading
+  // the small JSON every cycle is cheaper than tracking when it last changed.
+  // We only upload when the merged result differs from the remote snapshot,
+  // so steady state has zero writes.
+  private async syncKnownWords(state: SyncState, result: SyncResult): Promise<void> {
+    if (!this.configSync) return;
+    if (!state.appFolderId) return;
+
+    try {
+      if (!state.configSyncFolderId) {
+        const folder = await this.driveClient.ensureFolder(
+          CONFIG_SYNC_FOLDER_NAME,
+          state.appFolderId,
+        );
+        state.configSyncFolderId = folder.id;
+        this.saveState(state);
+      }
+
+      const entries = await this.driveClient.listFolder(state.configSyncFolderId);
+      // Exact-string match on a hardcoded filename, so `safeBasename` isn't
+      // needed: the remote name never reaches the local filesystem.
+      const remoteFile = entries.find((f) => f.name === KNOWN_WORDS_FILENAME);
+
+      let remoteWords: string[] = [];
+      if (remoteFile) {
+        try {
+          const buf = await this.driveClient.downloadFile(remoteFile.id);
+          const parsed = JSON.parse(buf.toString('utf-8')) as {
+            version?: number;
+            words?: unknown;
+          };
+          // Unknown version: don't touch local, don't overwrite remote. Bail
+          // so a future-format file on Drive (e.g. v2 with tombstones) never
+          // gets silently downgraded by an older client.
+          if (parsed.version !== KNOWN_WORDS_SCHEMA_VERSION) {
+            this.logger(
+              `Skipping knownWords sync: remote schema version ${parsed.version} unknown.`,
+            );
+            return;
+          }
+          if (Array.isArray(parsed.words)) {
+            remoteWords = parsed.words.filter((w): w is string => typeof w === 'string');
+          }
+        } catch (err) {
+          result.errors.push({
+            meeting: CONFIG_SYNC_FOLDER_NAME,
+            file: KNOWN_WORDS_FILENAME,
+            error: `parse remote: ${(err as Error).message}`,
+          });
+          return;
+        }
+      }
+
+      const localWords = this.configSync.getKnownWords();
+
+      // Order: local additions first, then remote-only additions. Stable so
+      // a device that already has the merged value stays no-op on subsequent
+      // syncs (the array-equality check below relies on this).
+      const merged: string[] = [];
+      const seen = new Set<string>();
+      for (const w of localWords) {
+        if (typeof w === 'string' && !seen.has(w)) {
+          seen.add(w);
+          merged.push(w);
+        }
+      }
+      for (const w of remoteWords) {
+        if (!seen.has(w)) {
+          seen.add(w);
+          merged.push(w);
+        }
+      }
+
+      const localDiffers = !setsEqual(localWords, merged);
+      const remoteDiffers = !setsEqual(remoteWords, merged);
+
+      if (localDiffers) {
+        // Known limitation: if the Settings UI is open in the renderer when
+        // this fires, its in-memory `knownWords` snapshot is now stale.
+        // A subsequent "Save" in the modal will overwrite our merge with
+        // the renderer's stale view. Mitigation deferred -- the next sync
+        // cycle re-unions from remote, so the only durable loss is when
+        // the originating peer is offline before then. To fix properly,
+        // emit a config-changed IPC and have the renderer reconcile.
+        this.configSync.setKnownWords(merged);
+        this.logger(`knownWords: updated local (${localWords.length} -> ${merged.length}).`);
+      }
+      if (remoteDiffers) {
+        const payload = {
+          version: KNOWN_WORDS_SCHEMA_VERSION,
+          words: merged,
+        };
+        await this.driveClient.uploadFile({
+          name: KNOWN_WORDS_FILENAME,
+          parentId: state.configSyncFolderId,
+          content: JSON.stringify(payload, null, 2),
+          mimeType: 'application/json',
+        });
+        this.logger(`knownWords: uploaded (${merged.length} words).`);
+      }
+    } catch (err) {
+      result.errors.push({
+        meeting: CONFIG_SYNC_FOLDER_NAME,
+        error: `knownWords sync: ${(err as Error).message}`,
+      });
     }
   }
 
