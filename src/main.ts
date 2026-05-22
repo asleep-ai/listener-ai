@@ -1603,6 +1603,7 @@ async function runGoogleSync(): Promise<SyncResult | undefined> {
       syncStatePath: path.join(dataPath, 'sync-state.json'),
       logger: (msg) => console.log(`[google-sync] ${msg}`),
       onProgress: broadcastGoogleSyncProgress,
+      configSync: configService,
     });
     const result = await engine.syncOnce();
     googleLastSyncedAt = new Date().toISOString();
