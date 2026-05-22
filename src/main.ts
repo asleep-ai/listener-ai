@@ -1344,6 +1344,12 @@ function applyConfigSideEffects(changed: Partial<AppConfig>): void {
     const databaseId = configService.getNotionDatabaseId();
     if (apiKey && databaseId) {
       notionService = new NotionService({ apiKey, databaseId });
+    } else {
+      // Credentials cleared (one or both blank) — drop the cached client so
+      // the next upload doesn't reuse stale credentials targeting a different
+      // workspace. The upload-to-notion handler re-checks config on a null
+      // service and returns "Notion configuration not found".
+      notionService = null;
     }
   }
   if (changed.slackWebhookUrl !== undefined) {
