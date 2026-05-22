@@ -1,3 +1,4 @@
+import * as googleDriveIpc from './googleDrive';
 import * as meetingsManagementIpc from './meetingsManagement';
 import * as transcriptionIpc from './transcription';
 import type { IpcContext } from './types';
@@ -11,4 +12,5 @@ import type { IpcContext } from './types';
 export function registerAllIpc(ctx: IpcContext): void {
   meetingsManagementIpc.register(ctx);
   transcriptionIpc.register(ctx);
+  googleDriveIpc.register(ctx);
 }
