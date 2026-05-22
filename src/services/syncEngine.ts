@@ -830,26 +830,22 @@ export class SyncEngine {
     }
     fs.renameSync(partialPath, finalPath);
 
-    // Commit: now register state.meetings, attach staged files, surface the
-    // downloads in the caller's result. From this point a crash leaves a
-    // consistent on-disk + state pair that the next sync treats as steady.
-    const meetingState: MeetingSyncState = state.meetings[meetingName] ?? {
+    // Commit: register state.meetings as a fresh entry, then attach
+    // cloudOnly audio. syncOnce's deletion-detect pass guarantees
+    // state.meetings[meetingName] is undefined at this point (any pre-
+    // existing entry without a local folder was tombstoned or orphan-cleaned
+    // in step 2 before we got here), so building a fresh object is correct
+    // and avoids retaining stale fields from a hypothetical leftover entry.
+    const meetingState: MeetingSyncState = {
       driveFolderId: remoteFolder.id,
-      files: {},
+      files: stagedFiles,
       lastSyncedAt: new Date().toISOString(),
     };
-    meetingState.driveFolderId = remoteFolder.id;
-    for (const [name, fileState] of Object.entries(stagedFiles)) {
-      meetingState.files[name] = fileState;
-    }
     for (const { name, remote } of stagedCloudOnly) {
       this.trackCloudOnly(meetingState, name, remote);
     }
-    meetingState.lastSyncedAt = new Date().toISOString();
     state.meetings[meetingName] = meetingState;
-    for (const label of stagedDownloads) {
-      result.downloaded.push(label);
-    }
+    result.downloaded.push(...stagedDownloads);
   }
 
   // Path C: meeting exists on both sides. Diff each file and resolve.
