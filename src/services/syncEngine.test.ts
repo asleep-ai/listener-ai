@@ -38,6 +38,11 @@ class MockDriveClient {
   private folderIds = new Map<string, string>();
   private fileIds = new Map<string, string>();
   failNextUpload?: (call: UploadCall) => Error | undefined;
+  // Hook that runs at the top of every downloadFile call. Returning an Error
+  // (or throwing) makes the call fail without consuming the content. Used by
+  // download-path crash-recovery tests; one-shot semantics like
+  // failNextUpload would be too coarse for "fail the 2nd of 3 downloads".
+  shouldFailDownload?: (fileId: string, callIndex: number) => Error | undefined;
 
   asDriveClient(): GoogleDriveClient {
     return this as unknown as GoogleDriveClient;
@@ -128,7 +133,12 @@ class MockDriveClient {
   }
 
   async downloadFile(fileId: string): Promise<Buffer> {
+    const callIndex = this.downloadCalls.length;
     this.downloadCalls.push(fileId);
+    if (this.shouldFailDownload) {
+      const err = this.shouldFailDownload(fileId, callIndex);
+      if (err) throw err;
+    }
     const content = this.fileContents.get(fileId);
     if (!content) throw new Error(`MockDriveClient: no content for ${fileId}`);
     return content;
@@ -1179,5 +1189,175 @@ describe('SyncEngine: knownWords config sync (issue #152)', () => {
       .slice(uploadsBefore)
       .filter((u) => u.name === 'known-words.json');
     assert.equal(newKnownWordsUploads.length, 0);
+  });
+});
+
+describe('SyncEngine: download atomicity (meta.json sentinel safety)', () => {
+  // Regression coverage for the bug where syncMeetingDownloadOnly wrote files
+  // straight into <transcriptionsDir>/<meeting>/. If meta.json arrived before
+  // the rest and the sync crashed, the leftover folder satisfied
+  // outputService.isV2Folder() -- the user saw a meeting with no summary,
+  // and subsequent syncs treated the stub as already-downloaded so no
+  // recovery ever happened. The fix stages downloads in
+  // .listener-partial/<meeting>/ and atomically renames on full success.
+
+  it('writes nothing into the final meeting folder until all downloads complete', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    mockClient.seedRemoteMeeting('m1', appFolder.id, [
+      { name: 'meta.json', content: '{"schemaVersion":2,"title":"M1"}' },
+      { name: 'summary.md', content: 'summary content' },
+      { name: 'transcript.md', content: 'transcript content' },
+    ]);
+
+    // Fail the second download to simulate a mid-sync crash. The exact file
+    // that fails doesn't matter -- we want to prove the partial state never
+    // leaks into <transcriptionsDir>/m1/, regardless of order.
+    mockClient.shouldFailDownload = (_id, callIndex) => {
+      if (callIndex === 1) return new Error('simulated network failure');
+      return undefined;
+    };
+
+    const result = await makeEngine().syncOnce();
+
+    // At least one file errored.
+    assert.ok(
+      result.errors.some((e) => e.meeting === 'm1'),
+      'expected at least one download error for m1',
+    );
+    // Critical invariant: the final meeting folder must NOT exist on disk.
+    // If it did, a v2 reader would see meta.json (the sentinel) and treat
+    // the half-populated folder as a complete meeting.
+    assert.equal(
+      fs.existsSync(path.join(transcriptionsDir, 'm1')),
+      false,
+      'final meeting folder must not exist after a partial download',
+    );
+    // No file from the partial download should have been claimed as
+    // "downloaded" in the result.
+    assert.deepEqual(
+      result.downloaded.filter((d) => d.startsWith('m1/')),
+      [],
+    );
+    // And no per-file state should have been recorded for the meeting's
+    // text files -- promotion to meetingState only happens after rename.
+    const state = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    const m1Files = state.meetings['m1']?.files ?? {};
+    for (const name of ['meta.json', 'summary.md', 'transcript.md']) {
+      assert.equal(m1Files[name], undefined, `no staged state expected for ${name}`);
+    }
+  });
+
+  it('recovers cleanly on the next sync after a mid-download failure', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    mockClient.seedRemoteMeeting('m1', appFolder.id, [
+      { name: 'meta.json', content: '{"schemaVersion":2,"title":"M1"}' },
+      { name: 'summary.md', content: 'summary content' },
+      { name: 'transcript.md', content: 'transcript content' },
+    ]);
+
+    // First sync: fail mid-download.
+    let failOnce = true;
+    mockClient.shouldFailDownload = (_id, callIndex) => {
+      if (failOnce && callIndex === 1) {
+        failOnce = false;
+        return new Error('simulated network failure');
+      }
+      return undefined;
+    };
+    const first = await makeEngine().syncOnce();
+    assert.ok(first.errors.length >= 1, 'first sync should record the download error');
+    assert.equal(fs.existsSync(path.join(transcriptionsDir, 'm1')), false);
+
+    // Second sync: no failures injected. The engine should wipe the stale
+    // partial and complete the download.
+    mockClient.shouldFailDownload = undefined;
+    const second = await makeEngine().syncOnce();
+
+    assert.deepEqual(
+      second.errors.filter((e) => e.meeting === 'm1'),
+      [],
+      'second sync should complete without errors',
+    );
+    assert.deepEqual(second.downloaded.sort(), [
+      'm1/meta.json',
+      'm1/summary.md',
+      'm1/transcript.md',
+    ]);
+    const finalDir = path.join(transcriptionsDir, 'm1');
+    assert.equal(fs.existsSync(path.join(finalDir, 'meta.json')), true);
+    assert.equal(fs.existsSync(path.join(finalDir, 'summary.md')), true);
+    assert.equal(fs.existsSync(path.join(finalDir, 'transcript.md')), true);
+    assert.equal(fs.readFileSync(path.join(finalDir, 'summary.md'), 'utf-8'), 'summary content');
+  });
+
+  it('cleans up the staging directory after a successful download', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    mockClient.seedRemoteMeeting('m1', appFolder.id, [
+      { name: 'meta.json', content: '{"schemaVersion":2,"title":"M1"}' },
+      { name: 'summary.md', content: 's' },
+    ]);
+
+    await makeEngine().syncOnce();
+
+    // The staging dir (.listener-partial/m1) is consumed by the atomic
+    // rename; only the parent .listener-partial/ may remain (empty).
+    const partialMeetingDir = path.join(transcriptionsDir, '.listener-partial', 'm1');
+    assert.equal(
+      fs.existsSync(partialMeetingDir),
+      false,
+      'staging dir for the meeting should be gone after rename',
+    );
+  });
+
+  it('does not register the staging directory as a syncable meeting', async () => {
+    // Bookend: a leftover staging dir from a crashed prior sync must not be
+    // confused with a real meeting and start replicating itself to Drive.
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    mockClient.seedRemoteMeeting('m1', appFolder.id, [
+      { name: 'meta.json', content: '{"schemaVersion":2,"title":"M1"}' },
+      { name: 'summary.md', content: 'summary content' },
+    ]);
+    // Pre-seed a stale partial dir as if a prior sync had crashed.
+    const stalePartial = path.join(transcriptionsDir, '.listener-partial', 'm1');
+    fs.mkdirSync(stalePartial, { recursive: true });
+    fs.writeFileSync(path.join(stalePartial, 'meta.json'), '{"old": true}');
+
+    const result = await makeEngine().syncOnce();
+
+    // The .listener-partial dir is hidden (starts with `.`) so it never
+    // appears as a local meeting in result.uploaded. Only the real download
+    // result for m1 should be visible.
+    assert.ok(
+      !result.uploaded.some((u) => u.startsWith('.listener-partial/')),
+      'staging dir must not be uploaded as a meeting',
+    );
+    assert.deepEqual(result.downloaded.sort(), ['m1/meta.json', 'm1/summary.md']);
+    // The stale partial is replaced and consumed by the new download.
+    assert.equal(fs.existsSync(stalePartial), false);
+  });
+
+  it('still tracks cloudOnly audio when the text download fully succeeds', async () => {
+    // The atomic-rename refactor must not regress the cloudOnly audio
+    // behavior: audio entries live in state, not on disk, and must survive
+    // the move from staging to final state.
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    mockClient.seedRemoteMeeting('m1', appFolder.id, [
+      { name: 'meta.json', content: '{"schemaVersion":2,"title":"M1"}' },
+      { name: 'summary.md', content: 's' },
+      { name: 'recording.webm', content: Buffer.from([0x1a]) },
+    ]);
+
+    const result = await makeEngine().syncOnce();
+
+    assert.deepEqual(result.downloaded.sort(), ['m1/meta.json', 'm1/summary.md']);
+    assert.equal(
+      fs.existsSync(path.join(transcriptionsDir, 'm1', 'recording.webm')),
+      false,
+      'audio must not be downloaded',
+    );
+    const state = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    const audioEntry = state.meetings['m1'].files['recording.webm'];
+    assert.ok(audioEntry, 'cloudOnly audio entry should be recorded in state');
+    assert.equal(audioEntry.cloudOnly, true);
   });
 });

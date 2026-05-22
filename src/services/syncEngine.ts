@@ -129,6 +129,16 @@ const TOMBSTONES_FOLDER_NAME = '.listener-tombstones';
 const TOMBSTONE_RETENTION_DAYS = 30;
 const CONFIG_SYNC_FOLDER_NAME = '.listener-config-sync';
 const KNOWN_WORDS_FILENAME = 'known-words.json';
+// Staging area for new-meeting downloads. The download path writes every file
+// into `<transcriptionsDir>/.listener-partial/<meeting>/` and only renames into
+// place after all text files succeed. This preserves the v2 invariant that
+// `meta.json` is the last sentinel a reader sees: a crash mid-download leaves
+// a hidden partial folder that the next sync wipes and restarts from scratch,
+// never a real meeting folder containing only `meta.json` (which would fool
+// `isV2Folder` into treating an empty stub as a complete v2 meeting and the
+// missing summary/transcript as user-visible data loss).
+const PARTIAL_DOWNLOAD_DIRNAME = '.listener-partial';
+const META_JSON_FILENAME = 'meta.json';
 // Bump only on a breaking shape change (e.g. add per-word tombstones). Until
 // then, unknown versions are treated as "ignore the remote and re-upload from
 // local" so a future writer's format never destroys today's words on a
@@ -146,6 +156,18 @@ function safeBasename(name: string): string | null {
   const base = path.basename(name);
   if (!base || base === '.' || base === '..' || base.includes('\0')) return null;
   return base;
+}
+
+// Sort comparator that forces `meta.json` to the end of the iteration order
+// while leaving every other name in lexicographic position. Used by the
+// bidirectional download path to preserve the v2 sentinel invariant -- if
+// `meta.json` were written before its sibling content files and the sync
+// crashed mid-loop, `isV2Folder` would treat the half-populated folder as a
+// complete v2 meeting on the next startup.
+function metaJsonLastCompare(a: string, b: string): number {
+  if (a === META_JSON_FILENAME && b !== META_JSON_FILENAME) return 1;
+  if (b === META_JSON_FILENAME && a !== META_JSON_FILENAME) return -1;
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 // Set-equality (order-insensitive). Used by knownWords sync: order is a
@@ -703,62 +725,131 @@ export class SyncEngine {
   // Path B: remote-only meeting (downloaded from another device for the first
   // time). Creates the local folder, downloads text files, leaves audio as
   // cloudOnly entries (no auto-hydrate per A1' decision).
+  //
+  // Atomicity: all files land in `<transcriptionsDir>/.listener-partial/<meeting>/`
+  // first, then the whole directory is `fs.renameSync`d into place. This
+  // preserves the v2 sentinel invariant -- a crash mid-download never leaves
+  // a final `<meeting>/` directory containing only `meta.json` (which
+  // `isV2Folder` would treat as a complete v2 meeting and silently hide the
+  // missing summary/transcript). The staging dir name starts with `.` so it
+  // is excluded from `scanLocalMeetingNames` -- the next sync's
+  // `localExists=false` branch routes back here, wipes the stale partial, and
+  // retries cleanly from scratch.
   private async syncMeetingDownloadOnly(
     meetingName: string,
     remoteFolder: DriveFile,
     state: SyncState,
     result: SyncResult,
   ): Promise<void> {
-    let meetingState = state.meetings[meetingName];
-    if (!meetingState) {
-      meetingState = {
-        driveFolderId: remoteFolder.id,
-        files: {},
-        lastSyncedAt: new Date().toISOString(),
-      };
-      state.meetings[meetingName] = meetingState;
-    }
-    meetingState.driveFolderId = remoteFolder.id;
+    const finalPath = path.join(this.transcriptionsDir, meetingName);
+    const partialPath = path.join(this.transcriptionsDir, PARTIAL_DOWNLOAD_DIRNAME, meetingName);
 
-    const folderPath = path.join(this.transcriptionsDir, meetingName);
-    fs.mkdirSync(folderPath, { recursive: true });
+    // Wipe any leftover staging dir from a prior crashed download before
+    // starting fresh. `fs.rmSync` with force ignores ENOENT, so calling it
+    // unconditionally is safe and saves the existsSync round-trip.
+    fs.rmSync(partialPath, { recursive: true, force: true });
+    fs.mkdirSync(partialPath, { recursive: true });
 
     const remoteFiles = this.filterSafeRemoteEntries(
       await this.driveClient.listFolder(remoteFolder.id),
       `syncMeetingDownloadOnly("${meetingName}")`,
     );
+
+    // Stage everything in scratch state; only merge into state.meetings AFTER
+    // the rename succeeds. The pre-rename window is intentionally a no-op for
+    // the durable state file -- if we crash before the rename, the next sync
+    // sees no local folder, no entry in state.meetings, and routes back into
+    // this method to retry from scratch. Writing state.meetings eagerly here
+    // would trick the deletion-detection pass into reading "tracked meeting,
+    // not on disk, on Drive" as "user deleted locally" and tombstone the
+    // remote on the next cycle.
+    const stagedFiles: Record<string, FileSyncState> = {};
+    const stagedDownloads: string[] = [];
+    const stagedCloudOnly: Array<{ name: string; remote: DriveFile }> = [];
+    let downloadFailed = false;
+
     for (const remote of remoteFiles) {
       if (this.shouldExcludeName(remote.name)) continue;
       if (this.isAudioFile(remote.name)) {
         // Track but don't download. Phase 3D will surface a "Download for
         // playback" affordance per file.
-        this.trackCloudOnly(meetingState, remote.name, remote);
+        stagedCloudOnly.push({ name: remote.name, remote });
         this.logger(`Cloud-only audio tracked: ${meetingName}/${remote.name}`);
         continue;
       }
       try {
         const content = await this.driveClient.downloadFile(remote.id);
-        const target = path.join(folderPath, remote.name);
+        const target = path.join(partialPath, remote.name);
         fs.writeFileSync(target, content);
         const stat = fs.statSync(target);
-        meetingState.files[remote.name] = {
+        stagedFiles[remote.name] = {
           driveFileId: remote.id,
           localMtimeMs: stat.mtimeMs,
           driveModifiedTime: remote.modifiedTime,
           mimeType: remote.mimeType,
           lastUploadedAt: new Date().toISOString(),
         };
-        result.downloaded.push(`${meetingName}/${remote.name}`);
-        this.logger(`Downloaded ${meetingName}/${remote.name} from ${remote.id}`);
+        stagedDownloads.push(`${meetingName}/${remote.name}`);
+        this.logger(`Downloaded ${meetingName}/${remote.name} from ${remote.id} (staged)`);
       } catch (err) {
+        downloadFailed = true;
         result.errors.push({
           meeting: meetingName,
           file: remote.name,
           error: (err as Error).message,
         });
+        // Continue draining the loop: the result should still record every
+        // file-level error so the UI can surface them, even though the rename
+        // will be skipped at the end.
       }
     }
+
+    if (downloadFailed) {
+      // Leave the partial dir for inspection / retry visibility. The next
+      // sync will rmSync it before re-staging, so no leak. Don't touch
+      // state.meetings at all -- on retry the meeting still routes as
+      // remote-only and we re-stage from scratch.
+      this.logger(
+        `syncMeetingDownloadOnly("${meetingName}"): aborted before rename; staging dir kept at ${partialPath}.`,
+      );
+      return;
+    }
+
+    // Atomic flip: move the staging dir into place. Same filesystem (both
+    // under transcriptionsDir) so renameSync is a single inode swap. Note
+    // that finalPath cannot already exist in this code path -- the caller
+    // only invokes us when `localExists=false`. If a race did create it
+    // between the check and here, prefer to surface a clear error rather
+    // than silently overwriting a sibling meeting.
+    if (fs.existsSync(finalPath)) {
+      result.errors.push({
+        meeting: meetingName,
+        error: `download race: ${meetingName} appeared locally during download; staging kept at ${partialPath}`,
+      });
+      return;
+    }
+    fs.renameSync(partialPath, finalPath);
+
+    // Commit: now register state.meetings, attach staged files, surface the
+    // downloads in the caller's result. From this point a crash leaves a
+    // consistent on-disk + state pair that the next sync treats as steady.
+    const meetingState: MeetingSyncState = state.meetings[meetingName] ?? {
+      driveFolderId: remoteFolder.id,
+      files: {},
+      lastSyncedAt: new Date().toISOString(),
+    };
+    meetingState.driveFolderId = remoteFolder.id;
+    for (const [name, fileState] of Object.entries(stagedFiles)) {
+      meetingState.files[name] = fileState;
+    }
+    for (const { name, remote } of stagedCloudOnly) {
+      this.trackCloudOnly(meetingState, name, remote);
+    }
     meetingState.lastSyncedAt = new Date().toISOString();
+    state.meetings[meetingName] = meetingState;
+    for (const label of stagedDownloads) {
+      result.downloaded.push(label);
+    }
   }
 
   // Path C: meeting exists on both sides. Diff each file and resolve.
@@ -794,7 +885,14 @@ export class SyncEngine {
     const remoteByName = new Map(remoteFiles.map((f) => [f.name, f]));
     const allFilenames = new Set<string>([...localByName.keys(), ...remoteByName.keys()]);
 
-    for (const filename of [...allFilenames].sort()) {
+    // Defensive ordering: process `meta.json` LAST so a crash mid-loop never
+    // promotes a half-populated folder to v2 (the writer side in
+    // `outputService.writeV2Files` makes the same guarantee). Practically
+    // matters only when a local meeting folder predates the v2 sentinel
+    // (legacy v1, manual restore, or a still-staged partial download) -- the
+    // rest of the time `meta.json` is already on disk and reordering is a
+    // no-op. Cheap insurance; no semantic change for the common case.
+    for (const filename of [...allFilenames].sort(metaJsonLastCompare)) {
       if (this.shouldExcludeName(filename)) continue;
       const localEntry = localByName.get(filename);
       const remoteEntry = remoteByName.get(filename);
