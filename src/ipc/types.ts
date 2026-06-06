@@ -1,6 +1,7 @@
 import type { BrowserWindow } from 'electron';
 import type { ConfigService } from '../configService';
-import type { GeminiService } from '../geminiService';
+import type { GeminiService, TranscriptionErrorPayload } from '../geminiService';
+import type { LiveNote } from '../outputService';
 import type { NotificationService } from '../services/notificationService';
 import type { FFmpegManager } from '../services/ffmpegManager';
 
@@ -23,7 +24,7 @@ export interface IpcContext {
   // GeminiService is module-cached in main.ts and re-created on relevant
   // config changes (model, provider, OAuth). Handlers that may be the first
   // caller after a config flip use this to get-or-create instead of reaching
-  // for a stale reference.
+  // for a stale reference. Returns null when AI credentials are missing.
   ensureGeminiService(): GeminiService | null;
   // Fire-and-forget Google Drive sync trigger. No-ops when sync is disabled
   // or unauthenticated; safe to call from any handler that mutates a meeting
@@ -35,4 +36,11 @@ export interface IpcContext {
   // Formats the provider-aware "you need credentials" message so handlers
   // can surface a consistent error string regardless of aiProvider.
   formatAiCredentialsError(): string;
+  // Renderer-facing classification of provider errors (network/auth/quota/etc).
+  // Used by the transcription cluster so the inline progress UI can route
+  // users to the right remediation (settings dialog, retry, ffmpeg installer).
+  serializeTranscriptionError(error: unknown): TranscriptionErrorPayload;
+  // Validates and clips raw live-notes payloads (renderer or metadata source)
+  // before they flow into Gemini prompts or get persisted.
+  sanitizeLiveNotes(raw: unknown): LiveNote[] | undefined;
 }

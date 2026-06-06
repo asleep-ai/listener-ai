@@ -71,6 +71,8 @@ describe('meetingsManagement.register', () => {
       maybeAutoSync: () => {},
       isContainedTranscriptionPath: (p): p is string => typeof p === 'string',
       formatAiCredentialsError: () => 'no credentials',
+      serializeTranscriptionError: () => ({ message: 'stub' }) as never,
+      sanitizeLiveNotes: () => undefined,
     });
     assert.deepEqual([...handlers.keys()].sort(), [
       'delete-meeting',
