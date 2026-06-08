@@ -1,5 +1,5 @@
 import type { BrowserWindow } from 'electron';
-import type { ConfigService } from '../configService';
+import type { AppConfig, ConfigService } from '../configService';
 import type { GeminiService, TranscriptionErrorPayload } from '../geminiService';
 import type { LiveNote } from '../outputService';
 import type { NotificationService } from '../services/notificationService';
@@ -43,4 +43,12 @@ export interface IpcContext {
   // Validates and clips raw live-notes payloads (renderer or metadata source)
   // before they flow into Gemini prompts or get persisted.
   sanitizeLiveNotes(raw: unknown): LiveNote[] | undefined;
+  // Re-runs main's per-key side effects after a config write (rebuild Gemini
+  // service on model change, restart Drive sync timer on auth change, etc).
+  // Google-drive IPC calls this after login/clear so other subsystems pick
+  // up the new credentials immediately.
+  applyConfigSideEffects(changed: Partial<AppConfig>): void;
+  // Pushes the latest masked config to the renderer so the settings modal
+  // reflects writes made from inside an IPC handler.
+  broadcastConfigChanged(): void;
 }

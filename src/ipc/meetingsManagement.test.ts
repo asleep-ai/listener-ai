@@ -73,6 +73,8 @@ describe('meetingsManagement.register', () => {
       formatAiCredentialsError: () => 'no credentials',
       serializeTranscriptionError: () => ({ message: 'stub' }) as never,
       sanitizeLiveNotes: () => undefined,
+      applyConfigSideEffects: () => {},
+      broadcastConfigChanged: () => {},
     });
     assert.deepEqual([...handlers.keys()].sort(), [
       'delete-meeting',

@@ -23,16 +23,10 @@ import { isSupportedAudioExtension, isTranscriptionTempFile } from './audioForma
 import { type AppConfig, ConfigService } from './configService';
 import { loginCodexOAuth } from './codexOAuth';
 import { getDataPath } from './dataPath';
-import {
-  type GoogleOAuthCredentials,
-  loginGoogleOAuth,
-  resolveGoogleAccessToken,
-} from './googleOAuth';
-import { GoogleDriveClient } from './services/googleDriveService';
-import { SyncEngine, type SyncProgressEvent, type SyncResult } from './services/syncEngine';
+import { maybeAutoSync, refreshGoogleSyncTimer } from './ipc/googleDrive';
+import { registerAllIpc } from './ipc/register';
 import { DisplayDetectorService } from './displayDetectorService';
 import { GeminiService, TranscriptionError, type TranscriptionErrorPayload } from './geminiService';
-import { registerAllIpc } from './ipc/register';
 import { MeetingDetectorService } from './meetingDetectorService';
 import { MenuBarManager } from './menuBarManager';
 import { NotionService } from './notionService';
@@ -816,9 +810,10 @@ ipcMain.handle('cancel-ffmpeg-download', async () => {
 });
 
 // Domain-grouped IPC handlers (delete-meeting / export-recording-m4a /
-// merge-recordings / transcribe-audio / cancel-transcription) live under
-// src/ipc/. Each domain registers itself in src/ipc/register.ts; main keeps
-// owning the singletons and exposes them through this one ctx object.
+// merge-recordings / transcribe-audio / cancel-transcription / google-oauth-*
+// / google-drive-sync-*) live under src/ipc/. Each domain registers itself in
+// src/ipc/register.ts; main keeps owning the singletons and exposes them
+// through this one ctx object.
 registerAllIpc({
   getMainWindow: () => mainWindow,
   configService,
@@ -830,6 +825,8 @@ registerAllIpc({
   formatAiCredentialsError,
   serializeTranscriptionError,
   sanitizeLiveNotes,
+  applyConfigSideEffects,
+  broadcastConfigChanged,
 });
 
 // Audio capture runs in the renderer via MediaRecorder; chunks stream over IPC as
@@ -1198,245 +1195,6 @@ ipcMain.handle('codex-oauth-clear', async () => {
     console.error('Codex OAuth clear failed:', error);
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
-});
-
-// Google Drive sync: OAuth + manual sync + auto-trigger + periodic timer.
-// Mirrors the Codex OAuth IPC pattern. The sync engine itself lives in
-// src/services/syncEngine.ts; this module just orchestrates triggers.
-
-let pendingGoogleLogin: { controller: AbortController; done: Promise<void> } | null = null;
-let googleSyncTimer: NodeJS.Timeout | null = null;
-// The 5s post-enable kick is tracked separately from the periodic interval so
-// `refreshGoogleSyncTimer` can cancel it when the user toggles off within the
-// window (otherwise the deferred sync runs after they think it's disabled).
-let googleSyncInitialKick: NodeJS.Timeout | null = null;
-let googleSyncInFlight = false;
-let googleLastSyncedAt: string | null = null;
-let googleLastSyncResult: SyncResult | null = null;
-// Most recent progress event from the currently-running sync. Cleared when
-// the cycle finishes so getGoogleSyncStatus doesn't surface a stale "Syncing
-// 7/12" pill after a sync error and the next modal open.
-let googleSyncProgress: SyncProgressEvent | null = null;
-const GOOGLE_SYNC_INTERVAL_MS = 60_000;
-// Delay before the first sync after enable/sign-in. Short enough that users
-// see activity quickly, long enough that batched config saves (multi-key
-// settings modal commits) don't trigger multiple bursts in flight.
-const GOOGLE_SYNC_INITIAL_DELAY_MS = 5_000;
-
-function broadcastGoogleSyncStatus(
-  phase: 'idle' | 'syncing' | 'success' | 'error',
-  extra?: { result?: SyncResult; error?: string },
-): void {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('google-sync-status', {
-      phase,
-      lastSyncedAt: googleLastSyncedAt,
-      result: extra?.result,
-      error: extra?.error,
-    });
-  }
-}
-
-function broadcastGoogleSyncProgress(event: SyncProgressEvent): void {
-  googleSyncProgress = event;
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('google-sync-progress', event);
-  }
-}
-
-function buildDriveClient(credentials: GoogleOAuthCredentials): GoogleDriveClient {
-  return new GoogleDriveClient({
-    getAccessToken: async () => {
-      const token = await resolveGoogleAccessToken({
-        credentials,
-        onCredentialsChanged: (next) => {
-          // Same gate as the Codex side: never silently persist refreshed
-          // tokens that originated from env vars.
-          if (configService.hasStoredGoogleOAuth()) {
-            configService.setGoogleOAuth(next);
-          }
-        },
-      });
-      if (!token) throw new Error('Failed to resolve Google access token.');
-      return token;
-    },
-  });
-}
-
-async function runGoogleSync(): Promise<SyncResult | undefined> {
-  if (googleSyncInFlight) return undefined;
-  const credentials = configService.getGoogleOAuth();
-  if (!credentials) return undefined;
-
-  googleSyncInFlight = true;
-  broadcastGoogleSyncStatus('syncing');
-  try {
-    const dataPath = app.getPath('userData');
-    const engine = new SyncEngine({
-      driveClient: buildDriveClient(credentials),
-      transcriptionsDir: getTranscriptionsDir(dataPath),
-      syncStatePath: path.join(dataPath, 'sync-state.json'),
-      logger: (msg) => console.log(`[google-sync] ${msg}`),
-      onProgress: broadcastGoogleSyncProgress,
-      configSync: configService,
-    });
-    const result = await engine.syncOnce();
-    googleLastSyncedAt = new Date().toISOString();
-    googleLastSyncResult = result;
-    broadcastGoogleSyncStatus(result.errors.length > 0 ? 'error' : 'success', { result });
-    return result;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error('Google Drive sync failed:', error);
-    broadcastGoogleSyncStatus('error', { error: message });
-    return undefined;
-  } finally {
-    googleSyncInFlight = false;
-    googleSyncProgress = null;
-  }
-}
-
-function refreshGoogleSyncTimer(): void {
-  const shouldRun = configService.getGoogleDriveEnabled() && configService.hasGoogleOAuth();
-
-  // Cancel any pending initial kick unconditionally. If shouldRun is still
-  // true we'll re-arm it below; if not, this prevents a stray timeout from
-  // executing a sync the user thinks they disabled.
-  if (googleSyncInitialKick) {
-    clearTimeout(googleSyncInitialKick);
-    googleSyncInitialKick = null;
-  }
-
-  if (shouldRun && !googleSyncTimer) {
-    // Run one cycle shortly after toggle so the user sees activity quickly,
-    // then continue on the regular interval. Both callbacks route through
-    // maybeAutoSync, which re-checks the enabled flag at fire time as a
-    // defense in depth against config changes between schedule and execution.
-    googleSyncInitialKick = setTimeout(() => {
-      googleSyncInitialKick = null;
-      maybeAutoSync();
-    }, GOOGLE_SYNC_INITIAL_DELAY_MS);
-    googleSyncTimer = setInterval(() => {
-      maybeAutoSync();
-    }, GOOGLE_SYNC_INTERVAL_MS);
-    console.log('Google Drive sync timer started.');
-  } else if (!shouldRun && googleSyncTimer) {
-    clearInterval(googleSyncTimer);
-    googleSyncTimer = null;
-    console.log('Google Drive sync timer stopped.');
-  }
-}
-
-// Fire-and-forget sync trigger. Skips silently when sync is disabled or
-// unauthenticated so the caller is never blocked on Drive availability.
-// Used by the post-transcription save path AND the meeting-delete path so
-// tombstone propagation kicks in promptly.
-function maybeAutoSync(): void {
-  if (!configService.getGoogleDriveEnabled()) return;
-  if (!configService.hasGoogleOAuth()) return;
-  void runGoogleSync();
-}
-
-ipcMain.handle('google-oauth-login', async () => {
-  while (pendingGoogleLogin) {
-    const prior = pendingGoogleLogin;
-    prior.controller.abort();
-    await prior.done;
-  }
-
-  const controller = new AbortController();
-  let resolveDone: () => void = () => {};
-  const done = new Promise<void>((resolve) => {
-    resolveDone = resolve;
-  });
-  pendingGoogleLogin = { controller, done };
-
-  const sendProgress = (phase: 'browser-opened' | 'progress', message?: string) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('google-oauth-progress', { phase, message });
-    }
-  };
-
-  try {
-    const credentials = await loginGoogleOAuth({
-      openUrl: async (url) => {
-        await shell.openExternal(url);
-        sendProgress('browser-opened');
-      },
-      onProgress: (message) => {
-        console.log(`Google OAuth: ${message}`);
-        sendProgress('progress', message);
-      },
-      signal: controller.signal,
-    });
-    configService.setGoogleOAuth(credentials);
-    applyConfigSideEffects({ googleOAuth: credentials });
-    broadcastConfigChanged();
-    return { success: true as const, config: configService.getAllConfig() };
-  } catch (error) {
-    if (controller.signal.aborted) {
-      return { success: false as const, error: 'Sign-in cancelled.', cancelled: true as const };
-    }
-    console.error('Google OAuth login failed:', error);
-    return {
-      success: false as const,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  } finally {
-    await new Promise((resolve) => setTimeout(resolve, PORT_RELEASE_CUSHION_MS));
-    if (pendingGoogleLogin?.controller === controller) {
-      pendingGoogleLogin = null;
-    }
-    resolveDone();
-  }
-});
-
-ipcMain.handle('google-oauth-cancel', async () => {
-  const prior = pendingGoogleLogin;
-  if (prior) {
-    prior.controller.abort();
-    await prior.done;
-  }
-  return { success: true };
-});
-
-ipcMain.handle('google-oauth-clear', async () => {
-  try {
-    configService.clearGoogleOAuth();
-    applyConfigSideEffects({ googleOAuth: undefined });
-    broadcastConfigChanged();
-    return { success: true, config: configService.getAllConfig() };
-  } catch (error) {
-    console.error('Google OAuth clear failed:', error);
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
-  }
-});
-
-ipcMain.handle('google-drive-sync-now', async () => {
-  if (!configService.hasGoogleOAuth()) {
-    return { success: false as const, error: 'Not signed in to Google Drive.' };
-  }
-  const result = await runGoogleSync();
-  if (!result) {
-    return {
-      success: false as const,
-      error: googleSyncInFlight
-        ? 'A sync is already in progress.'
-        : 'Sync failed; see main process logs.',
-    };
-  }
-  return { success: true as const, result, lastSyncedAt: googleLastSyncedAt };
-});
-
-ipcMain.handle('google-drive-sync-status', async () => {
-  return {
-    inFlight: googleSyncInFlight,
-    lastSyncedAt: googleLastSyncedAt,
-    lastResult: googleLastSyncResult,
-    progress: googleSyncProgress,
-    enabled: configService.getGoogleDriveEnabled(),
-    authenticated: configService.hasGoogleOAuth(),
-  };
 });
 
 ipcMain.handle('get-all-releases', async () => {
