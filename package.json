@@ -1,6 +1,7 @@
 {
   "name": "listener-ai",
   "version": "2.10.0",
+  "packageManager": "pnpm@11.5.2",
   "description": "A lightweight desktop application for recording and transcribing meetings with AI-powered notes.",
   "main": "dist/main.js",
   "bin": {
@@ -93,11 +94,6 @@
   "optionalDependencies": {
     "@notionhq/client": "^4.0.0",
     "electron-updater": "^6.6.2"
-  },
-  "pnpm": {
-    "overrides": {
-      "js-yaml@>=4.0.0 <4.1.1": "^4.1.1"
-    }
   },
   "build": {
     "appId": "com.listenerai.app",

@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { dialog, ipcMain } from 'electron';
 import { app } from 'electron';
+import { getFileInfo } from './fileInfo';
 
 interface FileResult {
   success: boolean;
@@ -95,20 +96,7 @@ export class FileHandlerService {
 
     // Get file info for validation
     ipcMain.handle('get-file-info', async (_, filePath: string) => {
-      try {
-        const stats = fs.statSync(filePath);
-        const name = path.basename(filePath);
-
-        return {
-          success: true,
-          name,
-          size: stats.size,
-          isFile: stats.isFile(),
-        };
-      } catch (error) {
-        console.error('Error getting file info:', error);
-        return { success: false, error: error instanceof Error ? error.message : String(error) };
-      }
+      return getFileInfo(filePath);
     });
 
     // Open file dialog to select audio file
