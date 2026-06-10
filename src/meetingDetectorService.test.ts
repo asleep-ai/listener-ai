@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { hasSleepAssertionFrom } from './meetingDetectorService';
+import {
+  MEETING_DETECTION_TRANSIENT_MISS_GRACE_MS,
+  hasSleepAssertionFrom,
+  shouldHoldDuringTransientMiss,
+} from './meetingDetectorService';
 
 // Sample pmset -g assertions output with a Microsoft Teams call in progress.
 // Format is taken from real macOS output.
@@ -86,5 +90,27 @@ describe('hasSleepAssertionFrom', () => {
     assert.equal(hasSleepAssertionFrom(input, /^Microsoft Teams$/), false);
     // But the raw-string check would match, which is why detectMacOS ANDs the two.
     assert.ok(input.includes('Microsoft Teams Call in progress'));
+  });
+});
+
+describe('shouldHoldDuringTransientMiss', () => {
+  it('holds Google Meet active during the transient miss grace window', () => {
+    const missingSince = 1_000;
+    const now = missingSince + MEETING_DETECTION_TRANSIENT_MISS_GRACE_MS - 1;
+
+    assert.equal(shouldHoldDuringTransientMiss('Google Meet', missingSince, now), true);
+  });
+
+  it('lets Google Meet end after the transient miss grace window', () => {
+    const missingSince = 1_000;
+    const now = missingSince + MEETING_DETECTION_TRANSIENT_MISS_GRACE_MS;
+
+    assert.equal(shouldHoldDuringTransientMiss('Google Meet', missingSince, now), false);
+  });
+
+  it('keeps non-window-title detectors on the normal end debounce', () => {
+    assert.equal(shouldHoldDuringTransientMiss('Zoom', 1_000, 2_000), false);
+    assert.equal(shouldHoldDuringTransientMiss('Microsoft Teams', 1_000, 2_000), false);
+    assert.equal(shouldHoldDuringTransientMiss('Google Meet', null, 2_000), false);
   });
 });

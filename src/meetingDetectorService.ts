@@ -9,6 +9,22 @@ interface MeetingInfo {
   detectedAt: Date;
 }
 
+// macOS Space/Mission Control switches can briefly hide browser window titles
+// from System Events. Keep active browser-title detections alive through that.
+export const MEETING_DETECTION_TRANSIENT_MISS_GRACE_MS = 90_000;
+
+const TRANSIENT_MISS_GRACE_APPS = new Set(['Google Meet']);
+
+export function shouldHoldDuringTransientMiss(
+  app: string | undefined,
+  missingSinceMs: number | null,
+  nowMs: number,
+  graceMs = MEETING_DETECTION_TRANSIENT_MISS_GRACE_MS,
+): boolean {
+  if (!app || missingSinceMs === null || !TRANSIENT_MISS_GRACE_APPS.has(app)) return false;
+  return nowMs - missingSinceMs < graceMs;
+}
+
 // True if `pmset -g assertions` output has any `PreventUserIdle{Display,System}Sleep`
 // assertion whose owning process matches `processPattern`. Video-call apps raise
 // these assertions only while a call is active, so this distinguishes "app open"
@@ -32,6 +48,7 @@ export class MeetingDetectorService extends EventEmitter {
   private currentMeeting: MeetingInfo | null = null;
   private consecutiveDetections = 0;
   private consecutiveNonDetections = 0;
+  private missingSinceMs: number | null = null;
   private static readonly POLL_MS = 5000;
   private static readonly START_THRESHOLD = 2; // 2 consecutive detections to confirm start
   private static readonly END_THRESHOLD = 3; // 3 consecutive non-detections to confirm end
@@ -57,6 +74,7 @@ export class MeetingDetectorService extends EventEmitter {
     }
     this.consecutiveDetections = 0;
     this.consecutiveNonDetections = 0;
+    this.missingSinceMs = null;
     console.log('Meeting detector stopped');
   }
 
@@ -88,6 +106,7 @@ export class MeetingDetectorService extends EventEmitter {
             : null;
 
       if (detected) {
+        this.missingSinceMs = null;
         this.consecutiveNonDetections = 0;
         this.consecutiveDetections++;
 
@@ -103,16 +122,22 @@ export class MeetingDetectorService extends EventEmitter {
           console.log(`Meeting started: ${detected}`);
         }
       } else {
+        const now = Date.now();
+        if (this.currentMeeting && this.missingSinceMs === null) {
+          this.missingSinceMs = now;
+        }
         this.consecutiveDetections = 0;
         this.consecutiveNonDetections++;
 
         if (
           this.currentMeeting &&
+          !shouldHoldDuringTransientMiss(this.currentMeeting.app, this.missingSinceMs, now) &&
           this.consecutiveNonDetections >= MeetingDetectorService.END_THRESHOLD
         ) {
           const duration = Date.now() - this.currentMeeting.detectedAt.getTime();
           const app = this.currentMeeting.app;
           this.currentMeeting = null;
+          this.missingSinceMs = null;
           this.emit('meeting-ended', { app, duration });
           console.log(`Meeting ended: ${app} (${Math.round(duration / 1000)}s)`);
         }
