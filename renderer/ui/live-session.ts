@@ -49,6 +49,7 @@ let interimEl: HTMLElement | null = null;
 let interimTranslationEl: HTMLElement | null = null;
 let realtimePeer: RTCPeerConnection | null = null;
 let realtimeDataChannel: RTCDataChannel | null = null;
+let realtimeCommitTimer: ReturnType<typeof setInterval> | null = null;
 let realtimeEndpoint: 'realtime' | 'translation' | null = null;
 let realtimeInputTranscript = '';
 let realtimeOutputTranscript = '';
@@ -299,6 +300,10 @@ function realtimeOffsetMs(): number {
 }
 
 function resetRealtimeState(): void {
+  if (realtimeCommitTimer) {
+    clearInterval(realtimeCommitTimer);
+    realtimeCommitTimer = null;
+  }
   realtimeInputTranscript = '';
   realtimeOutputTranscript = '';
   realtimeItemText = new Map<string, string>();
@@ -434,6 +439,18 @@ async function startRealtimeWebRtc(
   realtimeDataChannel = events;
   events.onmessage = (event) => handleRealtimeMessage(sessionId, String(event.data));
   events.onerror = () => reportRealtimeError('OpenAI Realtime event channel failed.');
+  if (client.endpoint === 'realtime') {
+    // gpt-realtime-whisper transcription sessions disable turn detection, so the
+    // server never auto-commits the input buffer. Commit on an interval to keep
+    // incremental transcription events flowing (mirrors the WebSocket fallback).
+    events.onopen = () => {
+      realtimeCommitTimer = setInterval(() => {
+        if (events.readyState === 'open') {
+          events.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+        }
+      }, 2_000);
+    };
+  }
 
   const offer = await peer.createOffer();
   await peer.setLocalDescription(offer);

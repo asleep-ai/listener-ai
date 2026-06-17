@@ -624,7 +624,9 @@ export class ConfigService {
       codexModel: this.getCodexModel(),
       codexTranscriptionModel: this.getCodexTranscriptionModel(),
       liveSttProvider: this.getLiveSttProvider(),
-      openaiApiKey: this.getOpenAiApiKey(),
+      // Stored value only -- never surface the OPENAI_API_KEY env fallback to the
+      // settings form, or saving any change would persist an env-only key to config.json.
+      openaiApiKey: this.config.openaiApiKey,
       openaiLiveTranscriptionModel: this.getOpenAiLiveTranscriptionModel(),
       openaiLiveTranslationModel: this.getOpenAiLiveTranslationModel(),
       liveSttLanguage: this.getLiveSttLanguage(),
