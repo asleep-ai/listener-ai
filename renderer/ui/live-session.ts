@@ -48,6 +48,7 @@ let hasInterimTranslation = false;
 let interimEl: HTMLElement | null = null;
 let interimTranslationEl: HTMLElement | null = null;
 let realtimePeer: RTCPeerConnection | null = null;
+let realtimeDataChannel: RTCDataChannel | null = null;
 let realtimeEndpoint: 'realtime' | 'translation' | null = null;
 let realtimeInputTranscript = '';
 let realtimeOutputTranscript = '';
@@ -430,6 +431,7 @@ async function startRealtimeWebRtc(
   };
 
   const events = peer.createDataChannel('oai-events');
+  realtimeDataChannel = events;
   events.onmessage = (event) => handleRealtimeMessage(sessionId, String(event.data));
   events.onerror = () => reportRealtimeError('OpenAI Realtime event channel failed.');
 
@@ -473,16 +475,36 @@ async function startRealtimeWebRtc(
 
 async function stopRealtimeWebRtc(sessionId?: string): Promise<void> {
   const peer = realtimePeer;
+  const events = realtimeDataChannel;
   if (sessionId && realtimeEndpoint === 'translation' && !realtimeTranslationFinalSent) {
-    // OpenAI Realtime has no `session.close` client event, so there is no
-    // `session.closed` to wait for; flush whatever translation we have and
-    // close the peer directly instead of stalling on a 1.5s timeout.
+    // Translation sessions flush their final output in response to
+    // `session.close`; wait for `session.closed` (or a 1.5s cap) before tearing
+    // down so the last translated segment isn't lost.
+    if (events?.readyState === 'open') {
+      events.send(JSON.stringify({ type: 'session.close' }));
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 1_500);
+        const previous = events.onmessage;
+        events.onmessage = (event) => {
+          previous?.call(events, event);
+          try {
+            const payload = JSON.parse(String(event.data)) as { type?: string };
+            if (payload.type === 'session.closed') {
+              clearTimeout(timer);
+              resolve();
+            }
+          } catch {
+            // ignore
+          }
+        };
+      });
+    }
     await realtimeFinalChain.catch(() => {});
     if (!realtimeTranslationFinalSent) {
-      realtimeTranslationFinalSent = true;
       await sendRealtimeFinal(sessionId, realtimeInputTranscript, realtimeOutputTranscript);
     }
   }
+  realtimeDataChannel = null;
   realtimePeer = null;
   if (peer) peer.close();
   resetRealtimeState();
@@ -770,8 +792,11 @@ export async function stopLiveSessionCapture(opts: { hidePanel?: boolean } = {})
     }
     stoppingCapture = true;
     processingChain = Promise.resolve();
-    activeSessionId = null;
+    // Keep activeSessionId set through stopLiveSession: closing a streaming
+    // provider in main flushes its final `segment` events, and
+    // handleLiveSessionEvent drops any event whose sessionId != activeSessionId.
     await finalizeStoppedSession(sessionId, Promise.resolve(), opts);
+    activeSessionId = null;
   } finally {
     finalizingCapture = false;
   }

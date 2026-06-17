@@ -416,11 +416,26 @@ class OpenAiRealtimeTranslationSession implements LiveSttSession {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    // OpenAI Realtime has no `session.close` client event; emit whatever
-    // translation has accumulated and close the socket directly. Sending the
-    // unsupported event only drew a server error and forced the 2s timeout.
-    this.emitFinal(this.callbacks);
-    this.ws.close();
+    // OpenAI Realtime translation sessions support `session.close`: it flushes
+    // pending audio, emits the remaining translated output, then replies with
+    // `session.closed`. Wait for that (or a 2s cap) before closing the socket so
+    // the final translated segment isn't dropped mid-drain.
+    sendJson(this.ws, { type: 'session.close' });
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.emitFinal(this.callbacks);
+        this.ws.close();
+        resolve();
+      }, 2_000);
+      const done = () => {
+        clearTimeout(timer);
+        this.ws.off('close', done);
+        this.ws.off('error', done);
+        resolve();
+      };
+      this.ws.once('close', done);
+      this.ws.once('error', done);
+    });
   }
 }
 
