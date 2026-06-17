@@ -55,6 +55,7 @@ let realtimeInputTranscript = '';
 let realtimeOutputTranscript = '';
 let realtimeItemText = new Map<string, string>();
 let realtimeRendererActive = false;
+let realtimeFailureHandled = false;
 let realtimeTranslationFinalSent = false;
 let realtimeFinalChain: Promise<void> = Promise.resolve();
 
@@ -415,9 +416,11 @@ async function startRealtimeWebRtc(
   sessionId: string,
   client: RealtimeClientConfig,
   stream: MediaStream,
+  preferredMimeType: string,
 ): Promise<void> {
   await stopRealtimeWebRtc();
   resetRealtimeState();
+  realtimeFailureHandled = false;
   const track = stream.getAudioTracks()[0];
   if (!track) throw new Error('Live Realtime needs an audio track.');
 
@@ -431,7 +434,14 @@ async function startRealtimeWebRtc(
   };
   peer.onconnectionstatechange = () => {
     if (peer.connectionState === 'failed') {
-      reportRealtimeError('OpenAI Realtime connection failed.');
+      // Failure after the SDP handshake succeeded: fall back instead of freezing
+      // captions (realtimeRendererActive otherwise blocks PCM from reaching main).
+      void fallbackFromRealtimeFailure(
+        sessionId,
+        new Error('OpenAI Realtime connection failed.'),
+        stream,
+        preferredMimeType,
+      );
     }
   };
 
@@ -551,6 +561,45 @@ async function stopRealtimeWebRtc(sessionId?: string): Promise<void> {
   realtimePeer = null;
   if (peer) peer.close();
   resetRealtimeState();
+}
+
+async function fallbackFromRealtimeFailure(
+  sessionId: string,
+  error: unknown,
+  fallbackStream: MediaStream,
+  preferredMimeType: string,
+): Promise<void> {
+  if (activeSessionId !== sessionId || realtimeFailureHandled) return;
+  realtimeFailureHandled = true;
+  realtimeRendererActive = false;
+  reportRealtimeError(error, getRealtimeErrorDetails(error));
+  await stopRealtimeWebRtc(sessionId).catch(() => {});
+  if (activeSessionId !== sessionId) return;
+  const fallback = await window.electronAPI.handleLiveRealtimeFailure({
+    sessionId,
+    error: getErrorMessage(error),
+  });
+  if (activeSessionId !== sessionId) return;
+  if (fallback.success) {
+    captureMode = fallback.session.mode;
+    setStatus(
+      fallback.session.mode === 'streaming'
+        ? `Listening with ${fallback.session.provider}...`
+        : 'Listening with fallback...',
+    );
+    if (fallback.session.mode === 'chunked') {
+      startFallbackWindow(fallbackStream, preferredMimeType);
+    }
+    updateAskEnabled();
+    return;
+  }
+  reportRealtimeError(fallback.error);
+  await window.electronAPI.stopLiveSession(sessionId).catch(() => {});
+  if (activeSessionId === sessionId) {
+    activeSessionId = null;
+    captureMode = null;
+  }
+  updateAskEnabled();
 }
 
 function queueFallbackBlob(
@@ -731,33 +780,16 @@ export async function startLiveSession(
       : 'Listening with fallback...',
   );
   if (result.session.realtimeClient) {
+    const sessionId = result.session.sessionId;
     try {
-      await startRealtimeWebRtc(activeSessionId, result.session.realtimeClient, fallbackStream);
+      await startRealtimeWebRtc(
+        sessionId,
+        result.session.realtimeClient,
+        fallbackStream,
+        preferredMimeType,
+      );
     } catch (error) {
-      reportRealtimeError(error, getRealtimeErrorDetails(error));
-      await stopRealtimeWebRtc().catch(() => {});
-      const fallback = await window.electronAPI.handleLiveRealtimeFailure({
-        sessionId: activeSessionId,
-        error: getErrorMessage(error),
-      });
-      if (fallback.success) {
-        captureMode = fallback.session.mode;
-        setStatus(
-          fallback.session.mode === 'streaming'
-            ? `Listening with ${fallback.session.provider}...`
-            : 'Listening with fallback...',
-        );
-        if (fallback.session.mode === 'chunked') {
-          startFallbackWindow(fallbackStream, preferredMimeType);
-        }
-        updateAskEnabled();
-        return;
-      }
-      reportRealtimeError(fallback.error);
-      await window.electronAPI.stopLiveSession(activeSessionId).catch(() => {});
-      activeSessionId = null;
-      captureMode = null;
-      updateAskEnabled();
+      await fallbackFromRealtimeFailure(sessionId, error, fallbackStream, preferredMimeType);
     }
     return;
   }
