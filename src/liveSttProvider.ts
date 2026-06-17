@@ -155,7 +155,12 @@ function closeAfterDelay(ws: WebSocket, delayMs: number): Promise<void> {
 function downsamplePcm16(input: Uint8Array, inputRate: number, outputRate: number): Uint8Array {
   if (inputRate === outputRate) return input;
   if (input.byteLength < 2) return input;
-  const source = new Int16Array(input.buffer, input.byteOffset, Math.floor(input.byteLength / 2));
+  // Int16Array views require a 2-byte-aligned offset; copy when the incoming
+  // view starts on an odd byte to avoid a RangeError.
+  const source =
+    input.byteOffset % 2 === 0
+      ? new Int16Array(input.buffer, input.byteOffset, Math.floor(input.byteLength / 2))
+      : new Int16Array(input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength));
   const ratio = inputRate / outputRate;
   const outputLength = Math.max(1, Math.floor(source.length / ratio));
   const output = new Int16Array(outputLength);
@@ -246,9 +251,11 @@ class OpenAiRealtimeTranscriptionSession implements LiveSttSession {
       }
     });
     ws.on('close', () => {
+      clearInterval(this.commitTimer);
       if (!this.closed) callbacks.onError(new Error('OpenAI Realtime transcription disconnected.'));
     });
     ws.on('error', () => {
+      clearInterval(this.commitTimer);
       callbacks.onError(new Error('OpenAI Realtime transcription connection failed.'));
     });
   }
@@ -409,22 +416,11 @@ class OpenAiRealtimeTranslationSession implements LiveSttSession {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    sendJson(this.ws, { type: 'session.close' });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        this.emitFinal(this.callbacks);
-        this.ws.close();
-        resolve();
-      }, 2_000);
-      const done = () => {
-        clearTimeout(timer);
-        this.ws.off('close', done);
-        this.ws.off('error', done);
-        resolve();
-      };
-      this.ws.once('close', done);
-      this.ws.once('error', done);
-    });
+    // OpenAI Realtime has no `session.close` client event; emit whatever
+    // translation has accumulated and close the socket directly. Sending the
+    // unsupported event only drew a server error and forced the 2s timeout.
+    this.emitFinal(this.callbacks);
+    this.ws.close();
   }
 }
 

@@ -30,6 +30,7 @@ let liveStartedAt = 0;
 let liveWindowStartedAt = 0;
 let liveWindowChunks: Blob[] = [];
 let stoppingCapture = false;
+let finalizingCapture = false;
 let processingChain: Promise<void> = Promise.resolve();
 let launcher: {
   title: string;
@@ -47,7 +48,6 @@ let hasInterimTranslation = false;
 let interimEl: HTMLElement | null = null;
 let interimTranslationEl: HTMLElement | null = null;
 let realtimePeer: RTCPeerConnection | null = null;
-let realtimeDataChannel: RTCDataChannel | null = null;
 let realtimeEndpoint: 'realtime' | 'translation' | null = null;
 let realtimeInputTranscript = '';
 let realtimeOutputTranscript = '';
@@ -430,7 +430,6 @@ async function startRealtimeWebRtc(
   };
 
   const events = peer.createDataChannel('oai-events');
-  realtimeDataChannel = events;
   events.onmessage = (event) => handleRealtimeMessage(sessionId, String(event.data));
   events.onerror = () => reportRealtimeError('OpenAI Realtime event channel failed.');
 
@@ -474,33 +473,16 @@ async function startRealtimeWebRtc(
 
 async function stopRealtimeWebRtc(sessionId?: string): Promise<void> {
   const peer = realtimePeer;
-  const events = realtimeDataChannel;
   if (sessionId && realtimeEndpoint === 'translation' && !realtimeTranslationFinalSent) {
-    if (events?.readyState === 'open') {
-      events.send(JSON.stringify({ type: 'session.close' }));
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 1_500);
-        const previous = events.onmessage;
-        events.onmessage = (event) => {
-          previous?.call(events, event);
-          try {
-            const payload = JSON.parse(String(event.data)) as { type?: string };
-            if (payload.type === 'session.closed') {
-              clearTimeout(timer);
-              resolve();
-            }
-          } catch {
-            // ignore
-          }
-        };
-      });
-    }
+    // OpenAI Realtime has no `session.close` client event, so there is no
+    // `session.closed` to wait for; flush whatever translation we have and
+    // close the peer directly instead of stalling on a 1.5s timeout.
     await realtimeFinalChain.catch(() => {});
     if (!realtimeTranslationFinalSent) {
+      realtimeTranslationFinalSent = true;
       await sendRealtimeFinal(sessionId, realtimeInputTranscript, realtimeOutputTranscript);
     }
   }
-  realtimeDataChannel = null;
   realtimePeer = null;
   if (peer) peer.close();
   resetRealtimeState();
@@ -587,7 +569,7 @@ function startFallbackWindow(stream: MediaStream, preferredMimeType: string): vo
   }, FALLBACK_SNIPPET_MS);
 }
 
-function stopActiveFallbackRecorder(): Promise<void> {
+function stopActiveFallbackRecorder(sessionId: string): Promise<void> {
   if (liveRecorderTimer) {
     clearTimeout(liveRecorderTimer);
     liveRecorderTimer = null;
@@ -595,9 +577,22 @@ function stopActiveFallbackRecorder(): Promise<void> {
   const recorder = liveRecorder;
   if (!recorder || recorder.state === 'inactive') return Promise.resolve();
   return new Promise((resolve) => {
-    const previous = recorder.onstop;
-    recorder.onstop = (event) => {
-      previous?.call(recorder, event);
+    // Final flush: queue this last window (the normal onstop refuses once we
+    // begin tearing down) and do NOT restart another window.
+    recorder.onstop = () => {
+      const chunks = liveWindowChunks;
+      const offsetMs = Math.max(0, liveWindowStartedAt - liveStartedAt);
+      const durationMs = Math.max(0, Date.now() - liveWindowStartedAt);
+      liveWindowChunks = [];
+      liveRecorder = null;
+      if (sessionId && chunks.length > 0) {
+        queueFallbackBlob(
+          new Blob(chunks, { type: recorder.mimeType || '' }),
+          offsetMs,
+          durationMs,
+          sessionId,
+        );
+      }
       resolve();
     };
     recorder.stop();
@@ -609,7 +604,12 @@ async function finalizeStoppedSession(
   chain: Promise<void>,
   opts: { hidePanel?: boolean } = {},
 ): Promise<void> {
-  const result = await window.electronAPI.stopLiveSession(sessionId);
+  let result: Awaited<ReturnType<typeof window.electronAPI.stopLiveSession>>;
+  try {
+    result = await window.electronAPI.stopLiveSession(sessionId);
+  } catch (err) {
+    result = { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
   await chain.catch(() => {});
   captureMode = null;
   stoppingCapture = false;
@@ -749,26 +749,32 @@ export function handleLivePcmFrame(frame: LivePcmFrame): void {
 export async function stopLiveSessionCapture(opts: { hidePanel?: boolean } = {}): Promise<void> {
   startCancellationVersion++;
   if (launcher) launcher.startVersion = startCancellationVersion;
-  if (!activeSessionId) {
+  if (!activeSessionId || finalizingCapture) {
     if (opts.hidePanel) hidePanel();
     return;
   }
+  finalizingCapture = true;
   const sessionId = activeSessionId;
   const mode = captureMode;
-  const chain = processingChain;
-  stoppingCapture = true;
-  processingChain = Promise.resolve();
   setStatus('Finalizing live transcript...');
   updateAskEnabled();
   if (startButtonEl) startButtonEl.textContent = 'Live Transcript';
-  await stopRealtimeWebRtc(sessionId);
-  activeSessionId = null;
-  if (mode === 'chunked') {
-    await stopActiveFallbackRecorder();
-    await finalizeStoppedSession(sessionId, chain, opts);
-    return;
+  try {
+    await stopRealtimeWebRtc(sessionId);
+    if (mode === 'chunked') {
+      // Flush the in-progress window and let any queued/in-flight fallback work
+      // finish while the main session is still active, so the final captions
+      // aren't dropped.
+      await stopActiveFallbackRecorder(sessionId);
+      await processingChain.catch(() => {});
+    }
+    stoppingCapture = true;
+    processingChain = Promise.resolve();
+    activeSessionId = null;
+    await finalizeStoppedSession(sessionId, Promise.resolve(), opts);
+  } finally {
+    finalizingCapture = false;
   }
-  await finalizeStoppedSession(sessionId, Promise.resolve(), opts);
 }
 
 async function submitLiveQuestion(question: string): Promise<void> {

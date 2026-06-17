@@ -157,6 +157,33 @@ function resolveLiveUsageModelId(
     : DEFAULT_GEMINI_LIVE_TRANSCRIPTION_MODEL;
 }
 
+const LIVE_TRANSLATION_LANGUAGE_NAMES: Record<string, string> = {
+  ko: 'Korean',
+  en: 'English',
+  ja: 'Japanese',
+  zh: 'Chinese',
+  es: 'Spanish',
+  fr: 'French',
+  de: 'German',
+  it: 'Italian',
+  pt: 'Portuguese',
+  ru: 'Russian',
+  vi: 'Vietnamese',
+  th: 'Thai',
+  id: 'Indonesian',
+  hi: 'Hindi',
+  ar: 'Arabic',
+};
+
+// The live translation target is stored as a BCP-47 code (e.g. `ja`) but the
+// chunked-fallback translator prompt reads better with a language name. Map
+// known codes to names and pass through anything already spelled out.
+function resolveLiveTranslationTarget(language: string | undefined): string {
+  const value = language?.trim();
+  if (!value) return 'Korean';
+  return LIVE_TRANSLATION_LANGUAGE_NAMES[value.toLowerCase()] ?? value;
+}
+
 export class LiveSessionService {
   private readonly opts: LiveSessionServiceOptions;
   private session: LiveSessionState | null = null;
@@ -282,10 +309,13 @@ export class LiveSessionService {
   async stop(sessionId: string): Promise<LiveSessionSnapshot | null> {
     const session = this.session;
     if (!session || session.id !== sessionId) return null;
-    session.active = false;
-    session.abortController.abort();
+    // Close the stream while the session is still active so streaming providers
+    // (Gemini Live, OpenAI translation) can flush their final transcript via
+    // onFinal -- handleFinalTranscript drops segments once active is false.
     await session.stream?.close().catch((err) => this.handleStreamError(session, err));
     session.stream = null;
+    session.active = false;
+    session.abortController.abort();
     this.recordLiveUsage(session);
     return this.snapshot();
   }
@@ -492,7 +522,9 @@ export class LiveSessionService {
         try {
           translation = (
             await geminiService.translateText(transcript, {
-              targetLanguage: 'Korean',
+              targetLanguage: resolveLiveTranslationTarget(
+                this.opts.getLiveSttConfig().translationLanguage,
+              ),
               signal: session.abortController.signal,
             })
           ).trim();
@@ -644,7 +676,9 @@ export class LiveSessionService {
     }
     try {
       const translation = await geminiService.translateText(transcript, {
-        targetLanguage: 'Korean',
+        targetLanguage: resolveLiveTranslationTarget(
+          this.opts.getLiveSttConfig().translationLanguage,
+        ),
         signal: session.abortController.signal,
       });
       if (this.session !== session || !session.active || session.abortController.signal.aborted)
