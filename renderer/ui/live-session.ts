@@ -388,7 +388,7 @@ function handleRealtimeMessage(sessionId: string, raw: string): void {
     const text = (payload.transcript || realtimeItemText.get(itemId) || '').trim();
     realtimeItemText.delete(itemId);
     realtimeInputTranscript = '';
-    void sendRealtimeFinal(sessionId, text);
+    realtimeFinalChain = realtimeFinalChain.then(() => sendRealtimeFinal(sessionId, text));
     return;
   }
   if (payload.type === 'session.input_transcript.delta') {
@@ -493,6 +493,10 @@ async function startRealtimeWebRtc(
 async function stopRealtimeWebRtc(sessionId?: string): Promise<void> {
   const peer = realtimePeer;
   const events = realtimeDataChannel;
+  if (realtimeCommitTimer) {
+    clearInterval(realtimeCommitTimer);
+    realtimeCommitTimer = null;
+  }
   if (sessionId && realtimeEndpoint === 'translation' && !realtimeTranslationFinalSent) {
     // Translation sessions flush their final output in response to
     // `session.close`; wait for `session.closed` (or a 1.5s cap) before tearing
@@ -520,6 +524,28 @@ async function stopRealtimeWebRtc(sessionId?: string): Promise<void> {
     if (!realtimeTranslationFinalSent) {
       await sendRealtimeFinal(sessionId, realtimeInputTranscript, realtimeOutputTranscript);
     }
+  } else if (sessionId && realtimeEndpoint === 'realtime' && events?.readyState === 'open') {
+    // Transcription sessions disable turn detection, so flush the buffered tail
+    // with a final commit and wait for the completion event (which queues the
+    // final segment via handleRealtimeMessage) before tearing down.
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 1_500);
+      const previous = events.onmessage;
+      events.onmessage = (event) => {
+        previous?.call(events, event);
+        try {
+          const payload = JSON.parse(String(event.data)) as { type?: string };
+          if (payload.type === 'conversation.item.input_audio_transcription.completed') {
+            clearTimeout(timer);
+            resolve();
+          }
+        } catch {
+          // ignore
+        }
+      };
+      events.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+    });
+    await realtimeFinalChain.catch(() => {});
   }
   realtimeDataChannel = null;
   realtimePeer = null;

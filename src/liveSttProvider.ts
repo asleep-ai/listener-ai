@@ -309,8 +309,29 @@ class OpenAiRealtimeTranscriptionSession implements LiveSttSession {
   async close(): Promise<void> {
     this.closed = true;
     clearInterval(this.commitTimer);
+    const hadUncommitted = this.hasUncommittedAudio;
     this.commit();
-    await closeAfterDelay(this.ws, 500);
+    if (hadUncommitted) {
+      // Wait for the final committed window to transcribe (the message handler
+      // emits it via onFinal) instead of racing a fixed 500ms timer.
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 2_000);
+        const onMessage = (data: RawData) => {
+          try {
+            const payload = JSON.parse(parseMessageData(data)) as { type?: string };
+            if (payload.type === 'conversation.item.input_audio_transcription.completed') {
+              clearTimeout(timer);
+              this.ws.off('message', onMessage);
+              resolve();
+            }
+          } catch {
+            // ignore
+          }
+        };
+        this.ws.on('message', onMessage);
+      });
+    }
+    await closeAfterDelay(this.ws, 0);
   }
 }
 
