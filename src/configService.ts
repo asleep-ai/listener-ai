@@ -6,15 +6,21 @@ import {
   DEFAULT_GEMINI_FLASH_MODEL,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_GEMINI_THINKING_LEVEL,
+  DEFAULT_LIVE_STT_PROVIDER,
+  DEFAULT_OPENAI_LIVE_TRANSCRIPTION_MODEL,
+  DEFAULT_OPENAI_LIVE_TRANSLATION_MODEL,
   type AiProvider,
   type GeminiThinkingLevel,
+  type LiveSttProvider,
   normalizeAiProvider,
   normalizeGeminiThinkingLevel,
+  normalizeLiveSttProvider,
 } from './aiProvider';
 import {
+  type CodexOAuthCredentialSource,
   type CodexOAuthCredentials,
+  getCodexOAuthCliCredentials,
   getCodexOAuthEnvCredentials,
-  hasCodexOAuthEnvCredentials,
 } from './codexOAuth';
 import {
   type GoogleOAuthCredentials,
@@ -30,8 +36,15 @@ export interface AppConfig {
   geminiThinkingLevel?: GeminiThinkingLevel;
   codexModel?: string;
   codexTranscriptionModel?: string;
+  liveSttProvider?: LiveSttProvider;
+  openaiApiKey?: string;
+  openaiLiveTranscriptionModel?: string;
+  openaiLiveTranslationModel?: string;
+  liveSttLanguage?: string;
+  liveTranslationLanguage?: string;
   codexOAuth?: CodexOAuthCredentials;
   codexOAuthConfigured?: boolean;
+  codexOAuthSource?: CodexOAuthCredentialSource['source'];
   googleOAuth?: GoogleOAuthCredentials;
   googleOAuthConfigured?: boolean;
   // When true, the app periodically syncs transcription folders to Drive
@@ -226,12 +239,39 @@ export class ConfigService {
     this.saveConfig();
   }
 
-  // Returns the active OAuth credentials whether they came from config or env.
+  // Returns the active OAuth credentials whether they came from config, env, or
+  // the Codex CLI auth file. Preference is:
+  //   1. Fresh config credentials (app sign-in)
+  //   2. Fresh env credentials (ephemeral automation)
+  //   3. Fresh Codex CLI credentials (~/.codex/auth.json, read-only fallback)
+  //   4. Any stale source in the same order, so the refresh helper can still try
+  //
+  // The source distinction matters: only config-sourced refreshes may be
+  // persisted back into config.json.
+  getCodexOAuthSource(): CodexOAuthCredentialSource | undefined {
+    const candidates: CodexOAuthCredentialSource[] = [];
+    const config = this.config.codexOAuth;
+    if (config?.access && config.refresh && Number.isFinite(config.expires)) {
+      candidates.push({ source: 'config', credentials: config });
+    }
+    const env = getCodexOAuthEnvCredentials();
+    if (env) candidates.push({ source: 'env', credentials: env });
+    const cli = getCodexOAuthCliCredentials();
+    if (cli) candidates.push({ source: 'codexCli', credentials: cli });
+    if (candidates.length === 0) return undefined;
+    return (
+      candidates.find((candidate) => candidate.credentials.expires > Date.now()) ?? candidates[0]
+    );
+  }
+
+  // Returns the active OAuth credentials whether they came from config, env, or
+  // the Codex CLI auth file.
   // Callers that intend to PERSIST refreshed credentials must additionally check
-  // `hasStoredCodexOAuth()` and skip the persistence callback when source is env --
-  // otherwise a normal token refresh writes env-sourced tokens to plaintext disk.
+  // `getCodexOAuthSource()?.source === 'config'` and skip the persistence
+  // callback for env/CLI sources. Otherwise a normal token refresh writes
+  // external credentials to plaintext app config.
   getCodexOAuth(): CodexOAuthCredentials | undefined {
-    return this.config.codexOAuth || getCodexOAuthEnvCredentials();
+    return this.getCodexOAuthSource()?.credentials;
   }
 
   // True only when credentials are stored in config.json. Env-only credentials
@@ -252,7 +292,7 @@ export class ConfigService {
   }
 
   hasCodexOAuth(): boolean {
-    return hasCodexOAuthEnvCredentials() || this.hasStoredCodexOAuth();
+    return !!this.getCodexOAuthSource();
   }
 
   // Mirrors the Codex OAuth surface. The stored-vs-env distinction matters
@@ -419,6 +459,49 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getLiveSttProvider(): LiveSttProvider {
+    return normalizeLiveSttProvider(this.config.liveSttProvider) ?? DEFAULT_LIVE_STT_PROVIDER;
+  }
+
+  setLiveSttProvider(provider: LiveSttProvider): void {
+    this.setKey('liveSttProvider', provider);
+    this.saveConfig();
+  }
+
+  getOpenAiApiKey(): string | undefined {
+    return this.config.openaiApiKey || process.env.OPENAI_API_KEY;
+  }
+
+  setOpenAiApiKey(apiKey: string): void {
+    this.setKey('openaiApiKey', apiKey);
+    this.saveConfig();
+  }
+
+  getOpenAiLiveTranscriptionModel(): string {
+    return this.config.openaiLiveTranscriptionModel || DEFAULT_OPENAI_LIVE_TRANSCRIPTION_MODEL;
+  }
+
+  getOpenAiLiveTranslationModel(): string {
+    return this.config.openaiLiveTranslationModel || DEFAULT_OPENAI_LIVE_TRANSLATION_MODEL;
+  }
+
+  getLiveSttLanguage(): string | undefined {
+    return this.config.liveSttLanguage?.trim() || undefined;
+  }
+
+  getLiveTranslationLanguage(): string {
+    return this.config.liveTranslationLanguage?.trim() || 'ko';
+  }
+
+  hasStreamingLiveSttAuth(): boolean {
+    const provider = this.getLiveSttProvider();
+    const hasOpenAiRealtimeAuth = !!this.getOpenAiApiKey();
+    if (provider === 'openai') return hasOpenAiRealtimeAuth;
+    if (provider === 'gemini') return !!this.getGeminiApiKey();
+    if (provider === 'chunked') return false;
+    return hasOpenAiRealtimeAuth || !!this.getGeminiApiKey();
+  }
+
   getMaxRecordingMinutes(): number {
     return this.config.maxRecordingMinutes || 0;
   }
@@ -515,6 +598,12 @@ export class ConfigService {
         this.setKey('geminiThinkingLevel', level);
         continue;
       }
+      if (key === 'liveSttProvider') {
+        const provider = normalizeLiveSttProvider(value);
+        if (!provider) continue;
+        this.setKey('liveSttProvider', provider);
+        continue;
+      }
       this.setKey(key as keyof AppConfig, value as AppConfig[keyof AppConfig]);
     }
     this.saveConfig();
@@ -534,7 +623,14 @@ export class ConfigService {
       geminiThinkingLevel: this.getGeminiThinkingLevel(),
       codexModel: this.getCodexModel(),
       codexTranscriptionModel: this.getCodexTranscriptionModel(),
+      liveSttProvider: this.getLiveSttProvider(),
+      openaiApiKey: this.getOpenAiApiKey(),
+      openaiLiveTranscriptionModel: this.getOpenAiLiveTranscriptionModel(),
+      openaiLiveTranslationModel: this.getOpenAiLiveTranslationModel(),
+      liveSttLanguage: this.getLiveSttLanguage(),
+      liveTranslationLanguage: this.getLiveTranslationLanguage(),
       codexOAuthConfigured: this.hasCodexOAuth(),
+      codexOAuthSource: this.getCodexOAuthSource()?.source,
       googleOAuthConfigured: this.hasGoogleOAuth(),
       googleDriveEnabled: this.getGoogleDriveEnabled(),
       notionApiKey: this.getNotionApiKey(),

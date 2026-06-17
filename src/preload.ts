@@ -4,6 +4,12 @@ import type { SyncProgressEvent } from './services/syncEngine';
 
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
+  logRenderer: (payload: {
+    level: 'debug' | 'log' | 'info' | 'warn' | 'error';
+    timestamp: string;
+    url: string;
+    args: unknown[];
+  }) => ipcRenderer.send('renderer-log', payload),
   startRecording: (payload: { title: string; mimeType: string }) =>
     ipcRenderer.invoke('start-recording', payload),
   sendRecordingChunk: (data: ArrayBuffer) => ipcRenderer.send('recording-chunk', data),
@@ -18,6 +24,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     geminiApiKey?: string;
     codexModel?: string;
     codexTranscriptionModel?: string;
+    liveSttProvider?: 'auto' | 'openai' | 'gemini' | 'chunked';
+    openaiApiKey?: string;
+    openaiLiveTranscriptionModel?: string;
+    openaiLiveTranslationModel?: string;
+    liveSttLanguage?: string;
+    liveTranslationLanguage?: string;
     notionApiKey?: string;
     notionDatabaseId?: string;
     autoMode?: boolean;
@@ -95,6 +107,56 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRecordings: () => ipcRenderer.invoke('get-recordings'),
   searchTranscriptions: (opts: { query: string; fields?: string[]; limit?: number }) =>
     ipcRenderer.invoke('search-transcriptions', opts),
+  startLiveSession: (opts: { title?: string; translate?: boolean }) =>
+    ipcRenderer.invoke('live-session-start', opts),
+  handleLiveRealtimeFailure: (opts: { sessionId: string; error?: string }) =>
+    ipcRenderer.invoke('live-session-realtime-failed', opts),
+  processLiveAudioChunk: (opts: {
+    sessionId: string;
+    audioData: ArrayBuffer;
+    mimeType: string;
+    offsetMs: number;
+    durationMs: number;
+    translate?: boolean;
+  }) => ipcRenderer.invoke('live-session-process-chunk', opts),
+  sendLivePcmChunk: (opts: {
+    sessionId: string;
+    audioData: ArrayBuffer;
+    sampleRate: number;
+    channelCount: number;
+    offsetMs: number;
+    durationMs: number;
+    sequence: number;
+  }) => ipcRenderer.send('live-session-pcm-chunk', opts),
+  updateLiveSessionInterim: (opts: {
+    sessionId: string;
+    text: string;
+    translation?: boolean;
+    offsetMs?: number;
+  }) => ipcRenderer.send('live-session-interim', opts),
+  completeLiveSessionSegment: (opts: {
+    sessionId: string;
+    text: string;
+    offsetMs?: number;
+    durationMs?: number;
+    translation?: string;
+  }) => ipcRenderer.invoke('live-session-final', opts),
+  stopLiveSession: (sessionId: string) => ipcRenderer.invoke('live-session-stop', sessionId),
+  getLiveSessionSnapshot: () => ipcRenderer.invoke('live-session-snapshot'),
+  setLiveSessionTranslate: (opts: { sessionId: string; translate: boolean }) =>
+    ipcRenderer.invoke('live-session-set-translate', opts),
+  askLiveSession: (opts: {
+    sessionId: string;
+    question: string;
+    history?: Array<{
+      role: 'user' | 'model';
+      text: string;
+      piaiMessages?: unknown[];
+    }>;
+  }) => ipcRenderer.invoke('live-session-ask', opts),
+  onLiveSessionEvent: (callback: (event: unknown) => void) => {
+    ipcRenderer.on('live-session-event', (_event, payload) => callback(payload));
+  },
   agentChat: (opts: {
     question: string;
     history?: Array<{

@@ -2,6 +2,10 @@ export const AI_PROVIDERS = ['gemini', 'codex'] as const;
 
 export type AiProvider = (typeof AI_PROVIDERS)[number];
 
+export const LIVE_STT_PROVIDERS = ['auto', 'openai', 'gemini', 'chunked'] as const;
+
+export type LiveSttProvider = (typeof LIVE_STT_PROVIDERS)[number];
+
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash';
 export const DEFAULT_GEMINI_FLASH_MODEL = 'gemini-2.5-flash';
 // Gemini 3.x replaces the older numeric `thinking_budget` knob with a coarse
@@ -41,6 +45,13 @@ export const DEFAULT_CODEX_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe-diarize';
 // labels. Switch via `listener config set codexTranscriptionModel gpt-4o-transcribe`.
 export const CODEX_TRANSCRIPTION_NON_DIARIZE_MODEL = 'gpt-4o-transcribe';
 
+export const DEFAULT_LIVE_STT_PROVIDER: LiveSttProvider = 'auto';
+export const DEFAULT_OPENAI_LIVE_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper';
+export const DEFAULT_OPENAI_LIVE_TRANSLATION_MODEL = 'gpt-realtime-translate';
+export const DEFAULT_OPENAI_REALTIME_SESSION_MODEL = 'gpt-realtime-2';
+export const DEFAULT_GEMINI_LIVE_TRANSCRIPTION_MODEL = 'gemini-3.1-flash-live-preview';
+export const DEFAULT_GEMINI_LIVE_TRANSLATION_MODEL = 'gemini-3.5-live-translate-preview';
+
 export function isAiProvider(value: string): value is AiProvider {
   return (AI_PROVIDERS as readonly string[]).includes(value);
 }
@@ -49,6 +60,16 @@ export function normalizeAiProvider(value: unknown): AiProvider | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim().toLowerCase();
   return isAiProvider(normalized) ? normalized : undefined;
+}
+
+export function isLiveSttProvider(value: string): value is LiveSttProvider {
+  return (LIVE_STT_PROVIDERS as readonly string[]).includes(value);
+}
+
+export function normalizeLiveSttProvider(value: unknown): LiveSttProvider | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  return isLiveSttProvider(normalized) ? normalized : undefined;
 }
 
 // pi-ai uses different provider ids than our internal `AiProvider`. Map at the

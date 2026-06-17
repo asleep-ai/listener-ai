@@ -4,12 +4,14 @@
 
 import { setupRecorder } from './audio/recorder';
 import { setupFileHandler } from './services/file-handler';
+import { setupRendererLogger } from './services/renderer-logger';
 import { getDom, initDom } from './state';
 import { setupAgentConfirmHandler, setupHomeChat, setupModalChat } from './ui/chat-panel';
 import { checkAndPromptForConfig, setupConfigModal, showConfigModal } from './ui/config-modal';
 import { setupDragAndDrop, setupPasteListener } from './ui/drag-drop';
 import { setupHomeToggles } from './ui/home-toggles';
 import { setupLiveNotes } from './ui/live-notes';
+import { setupLiveSession } from './ui/live-session';
 import { setupMicSelector } from './ui/mic-selector';
 import { setupNotifications } from './ui/notifications';
 import { setupPermissionStatus } from './ui/permission-status';
@@ -35,6 +37,8 @@ if (!window.electronAPI) {
     '<div style="padding: 20px; color: red;">Error: Application failed to load properly. Please restart.</div>';
   throw new Error('electronAPI not available');
 }
+
+setupRendererLogger();
 
 // File handler is a service singleton consumed by drag-drop, paste, and
 // dialog flows. Set up at module load (no DOM dependency) so callers can
@@ -82,6 +86,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     setupNotifications();
     setupRecorder();
     setupLiveNotes();
+    setupLiveSession();
     setupHomeToggles();
     setupMicSelector();
     setupPermissionStatus();

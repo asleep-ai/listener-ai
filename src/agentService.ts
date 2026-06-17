@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { DEFAULT_CODEX_MODEL, type AiProvider } from './aiProvider';
+import { DEFAULT_CODEX_MODEL, type AiProvider, normalizeLiveSttProvider } from './aiProvider';
 import { type CodexOAuthCredentials } from './codexOAuth';
 import { CodexOAuthHolder } from './codexOAuthHolder';
 import type { ConfigService } from './configService';
@@ -23,7 +23,17 @@ import {
 } from './outputService';
 import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
 
-export type AgentScope = { kind: 'all' } | { kind: 'single'; folderName: string };
+export type AgentScope =
+  | { kind: 'all' }
+  | { kind: 'single'; folderName: string }
+  | {
+      kind: 'live';
+      title: string;
+      transcript: string;
+      interimTranscript?: string;
+      interimTranslation?: string;
+      translation?: string;
+    };
 
 export interface ConfigProposal {
   kind: 'setConfig';
@@ -77,6 +87,9 @@ export const WRITABLE_CONFIG_KEYS = [
   'recordingReminderMinutes',
   'minRecordingSeconds',
   'recordSystemAudio',
+  'liveSttProvider',
+  'liveSttLanguage',
+  'liveTranslationLanguage',
 ] as const;
 
 export type WritableConfigKey = (typeof WRITABLE_CONFIG_KEYS)[number];
@@ -88,6 +101,8 @@ export const READABLE_CONFIG_KEYS = [
   'geminiFlashModel',
   'codexModel',
   'codexTranscriptionModel',
+  'openaiLiveTranscriptionModel',
+  'openaiLiveTranslationModel',
 ] as const;
 
 export type ReadableConfigKey = (typeof READABLE_CONFIG_KEYS)[number];
@@ -120,6 +135,19 @@ export function coerceConfigValue(
         return { ok: false, error: `${key} expects a non-empty string` };
       }
       return { ok: true, value: raw.trim() };
+    }
+    case 'liveSttProvider': {
+      const provider = normalizeLiveSttProvider(raw);
+      if (!provider) return { ok: false, error: `${key} expects auto, openai, gemini, or chunked` };
+      return { ok: true, value: provider };
+    }
+    case 'liveSttLanguage': {
+      if (typeof raw !== 'string') return { ok: false, error: `${key} expects a string` };
+      return { ok: true, value: raw.trim() };
+    }
+    case 'liveTranslationLanguage': {
+      if (typeof raw !== 'string') return { ok: false, error: `${key} expects a string` };
+      return { ok: true, value: raw.trim() || 'ko' };
     }
     case 'maxRecordingMinutes':
     case 'recordingReminderMinutes':
@@ -220,6 +248,10 @@ function systemInstructionFor(scope: AgentScope, currentTranscriptionTitle?: str
     return `${common}\n\nYou are currently focused on a single meeting titled "${currentTranscriptionTitle ?? 'this meeting'}". The full transcription data is already provided in the conversation. Prefer answering directly from that data. Do not call search_transcriptions or list_recent_transcriptions in this mode — they are disabled. You may still read or change app settings via get_config / set_config (set_config always requires user confirmation).`;
   }
 
+  if (scope.kind === 'live') {
+    return `${common}\n\nYou are currently focused on an in-progress live session titled "${scope.title || 'Live Session'}". The live transcript so far is provided in the conversation. Treat it as partial and time-local: answer from what has been heard so far, and say when the transcript does not contain enough information. Do not call search_transcriptions or list_recent_transcriptions in this mode -- they are disabled.`;
+  }
+
   return `${common}\n\nScope: ALL saved meetings. Use search_transcriptions to find relevant meetings (title/summary/key points are searched by default; pass include_transcript=true if keywords are likely only in the transcript body). Use list_recent_transcriptions for "recent/latest" questions. Use get_transcription to read a specific meeting when you have its folder name.`;
 }
 
@@ -250,6 +282,26 @@ function buildSinglePrimer(data: ReadTranscriptionResult): string {
   if (data.transcript) {
     lines.push('Transcript:');
     lines.push(data.transcript);
+  }
+  return lines.join('\n');
+}
+
+function buildLivePrimer(scope: Extract<AgentScope, { kind: 'live' }>): string {
+  const lines: string[] = [];
+  lines.push(`[Context: live session "${scope.title || 'Live Session'}"]`);
+  lines.push('Finalized transcript so far:');
+  lines.push(scope.transcript || '(empty)');
+  if (scope.interimTranscript?.trim()) {
+    lines.push('Current in-progress transcript:');
+    lines.push(scope.interimTranscript.trim());
+  }
+  if (scope.translation?.trim()) {
+    lines.push('Korean translation so far:');
+    lines.push(scope.translation.trim());
+  }
+  if (scope.interimTranslation?.trim()) {
+    lines.push('Current in-progress Korean translation:');
+    lines.push(scope.interimTranslation.trim());
   }
   return lines.join('\n');
 }
@@ -360,6 +412,7 @@ export class AgentService {
             path.join(getTranscriptionsDir(this.dataPath), opts.scope.folderName),
           )
         : null;
+    const livePrimer = opts.scope.kind === 'live' ? buildLivePrimer(opts.scope) : null;
 
     const history = opts.history ? [...opts.history] : [];
     const context: Context = {
@@ -376,6 +429,9 @@ export class AgentService {
         content: buildSinglePrimer(singleData),
         timestamp: Date.now(),
       });
+    }
+    if (livePrimer) {
+      context.messages.push({ role: 'user', content: livePrimer, timestamp: Date.now() });
     }
     for (const m of historyToMessages(history, this.provider)) context.messages.push(m);
     context.messages.push({ role: 'user', content: opts.question, timestamp: Date.now() });

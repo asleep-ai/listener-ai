@@ -3,11 +3,19 @@
 
 import { getDom, state } from '../state';
 import { hideLiveNotesPanel, showLiveNotesPanel } from '../ui/live-notes';
+import {
+  clearLiveSessionLauncher,
+  configureLiveSessionLauncher,
+  handleLivePcmFrame,
+  stopLiveSessionCapture,
+} from '../ui/live-session';
 import { showNotification, showToast } from '../ui/notifications';
 import { refreshRecordingsList } from '../ui/recordings-list';
 import { buildProcessedStream, cleanupAudioState, pickRecordingMimeType } from './graph';
 import { acquireMediaStream, attachTrackEndedHandlers } from './mic';
 import { createSystemAudioSource } from './system-audio';
+
+let stopRecordingInProgress = false;
 
 export async function startRecording(): Promise<void> {
   const { recordButton, statusIndicator, statusText, recordingTime, meetingTitle } = getDom();
@@ -75,7 +83,7 @@ export async function startRecording(): Promise<void> {
           return node;
         }
       : null;
-    graph = await buildProcessedStream(state.mediaStream, addSystemAudio);
+    graph = await buildProcessedStream(state.mediaStream, addSystemAudio, handleLivePcmFrame);
     state.audioContext = graph.ctx;
     state.processedStream = graph.stream;
     state.sourceNode = graph.source;
@@ -127,6 +135,7 @@ export async function startRecording(): Promise<void> {
   state.mediaRecorder.onerror = (event: Event) => {
     const err = (event as unknown as { error?: unknown }).error ?? event;
     console.error('MediaRecorder error:', err);
+    void stopLiveSessionCapture();
     cleanupAudioState();
     resetRecordingUI();
     window.electronAPI.stopRecording().catch(() => {});
@@ -144,9 +153,13 @@ export async function startRecording(): Promise<void> {
     );
     return;
   }
-
   state.isRecording = true;
   state.recordingStartTime = Date.now();
+  configureLiveSessionLauncher(
+    title,
+    state.processedStream,
+    state.mediaRecorder.mimeType || state.recordingMimeType || 'audio/webm',
+  );
 
   recordButton.textContent = 'Stop Recording';
   recordButton.classList.add('recording');
@@ -168,6 +181,7 @@ export function resetRecordingUI(): void {
   statusText.textContent = 'Ready to record';
   recordingTime.classList.remove('active');
   hideLiveNotesPanel();
+  clearLiveSessionLauncher();
 }
 
 function pickMeetingTitle(recordingTitle: string, suggestedTitle?: string): string {
@@ -313,60 +327,72 @@ export async function handleRecordingStopped(
 }
 
 export async function stopRecording(): Promise<void> {
-  // Snapshot live notes before they get cleared by the UI reset. Passed to
-  // main so they're persisted alongside the audio file regardless of whether
-  // auto-mode kicks off transcription right away, and forwarded into the
-  // auto-mode path so transcribe-audio gets them without re-reading state.
-  const liveNotesSnapshot = state.liveNotes.length > 0 ? state.liveNotes.slice() : undefined;
-  const liveNotesPayload = liveNotesSnapshot ? { liveNotes: liveNotesSnapshot } : undefined;
-
-  // If the recorder already transitioned to inactive on its own (e.g. USB mic
-  // unplugged, stream ended, Chromium force-stopped encoding), still unwind the
-  // session so the next recording isn't blocked by stuck state.
-  if (!state.mediaRecorder || state.mediaRecorder.state === 'inactive') {
-    cleanupAudioState();
-    try {
-      const result = await window.electronAPI.stopRecording(liveNotesPayload);
-      if (result?.success) {
-        await handleRecordingStopped(result.filePath, result.durationMs, liveNotesSnapshot);
-        return;
-      }
-    } catch {
-      // fall through to UI reset
-    }
-    resetRecordingUI();
-    return;
-  }
+  if (stopRecordingInProgress) return;
+  stopRecordingInProgress = true;
+  const { recordButton } = getDom();
+  recordButton.disabled = true;
 
   try {
-    // MediaRecorder.stop() flushes the final chunk via ondataavailable before
-    // firing onstop. We then await chunkSendChain so every in-flight arrayBuffer()
-    // conversion lands on main's IPC queue before stop-recording invoke — Electron
-    // multiplexes all IPC over one Mojo pipe, preserving delivery order.
-    const recorder = state.mediaRecorder;
-    const stopped = new Promise<void>((resolve) => {
-      recorder.onstop = () => resolve();
-    });
-    recorder.stop();
-    await stopped;
-    await state.chunkSendChain;
-    cleanupAudioState();
+    // Snapshot live notes before they get cleared by the UI reset. Passed to
+    // main so they're persisted alongside the audio file regardless of whether
+    // auto-mode kicks off transcription right away, and forwarded into the
+    // auto-mode path so transcribe-audio gets them without re-reading state.
+    const liveNotesSnapshot = state.liveNotes.length > 0 ? state.liveNotes.slice() : undefined;
+    const liveNotesPayload = liveNotesSnapshot ? { liveNotes: liveNotesSnapshot } : undefined;
 
-    const result = await window.electronAPI.stopRecording(liveNotesPayload);
-
-    if (result.success) {
-      await handleRecordingStopped(result.filePath, result.durationMs, liveNotesSnapshot);
-    } else if (result.reason === 'empty') {
-      alert('No audio captured.');
+    // If the recorder already transitioned to inactive on its own (e.g. USB mic
+    // unplugged, stream ended, Chromium force-stopped encoding), still unwind the
+    // session so the next recording isn't blocked by stuck state.
+    if (!state.mediaRecorder || state.mediaRecorder.state === 'inactive') {
+      await stopLiveSessionCapture({ hidePanel: true });
+      cleanupAudioState();
+      try {
+        const result = await window.electronAPI.stopRecording(liveNotesPayload);
+        if (result?.success) {
+          await handleRecordingStopped(result.filePath, result.durationMs, liveNotesSnapshot);
+          return;
+        }
+      } catch {
+        // fall through to UI reset
+      }
       resetRecordingUI();
-    } else {
-      alert(`Failed to save recording: ${result.error || 'Unknown error'}`);
+      return;
+    }
+
+    try {
+      // MediaRecorder.stop() flushes the final chunk via ondataavailable before
+      // firing onstop. We then await chunkSendChain so every in-flight arrayBuffer()
+      // conversion lands on main's IPC queue before stop-recording invoke — Electron
+      // multiplexes all IPC over one Mojo pipe, preserving delivery order.
+      const recorder = state.mediaRecorder;
+      const stopped = new Promise<void>((resolve) => {
+        recorder.onstop = () => resolve();
+      });
+      recorder.stop();
+      await stopped;
+      await state.chunkSendChain;
+      await stopLiveSessionCapture({ hidePanel: true });
+      cleanupAudioState();
+
+      const result = await window.electronAPI.stopRecording(liveNotesPayload);
+
+      if (result.success) {
+        await handleRecordingStopped(result.filePath, result.durationMs, liveNotesSnapshot);
+      } else if (result.reason === 'empty') {
+        alert('No audio captured.');
+        resetRecordingUI();
+      } else {
+        alert(`Failed to save recording: ${result.error || 'Unknown error'}`);
+        resetRecordingUI();
+      }
+    } catch (error) {
+      alert(`Failed to stop recording: ${error instanceof Error ? error.message : String(error)}`);
+      cleanupAudioState();
       resetRecordingUI();
     }
-  } catch (error) {
-    alert(`Failed to stop recording: ${error instanceof Error ? error.message : String(error)}`);
-    cleanupAudioState();
-    resetRecordingUI();
+  } finally {
+    stopRecordingInProgress = false;
+    if (!state.isAutoModeProcessing) recordButton.disabled = false;
   }
 }
 

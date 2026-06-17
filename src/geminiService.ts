@@ -143,9 +143,11 @@ export interface TranscriptionOptions {
   /**
    * Override the default speaker-identification instruction sent to Gemini
    * during transcription. The user-supplied glossary (knownWords) and
-   * per-segment positional prefix are still applied automatically.
+   * per-segment positional prefix are still applied automatically unless
+   * includeGlossary is false.
    */
   transcriptionPrompt?: string;
+  includeGlossary?: boolean;
   /**
    * Cancellation signal. The pipeline checks `signal.aborted` at every stage
    * boundary and forwards it to the underlying provider SDKs (pi-ai, Gemini
@@ -494,6 +496,40 @@ export class GeminiService {
     return extractFinalText(response);
   }
 
+  private async completeTextTask(
+    systemPrompt: string,
+    promptText: string,
+    opts: {
+      signal?: AbortSignal;
+      maxTokens?: number;
+      temperature?: number;
+      reasoning?: GeminiThinkingLevel | 'xhigh';
+      modelId?: string;
+    } = {},
+  ): Promise<string> {
+    const modelId = opts.modelId ?? (this.provider === 'codex' ? this.codexModel : this.proModel);
+    const apiKey =
+      this.provider === 'codex' ? await this.getCodexToken() : this.requireGeminiApiKey();
+    const model = await getModel(this.provider, modelId);
+    const context: Context = {
+      systemPrompt,
+      messages: [{ role: 'user', content: promptText, timestamp: Date.now() }],
+    };
+    const response = await completeSimple(
+      model,
+      context,
+      {
+        apiKey,
+        temperature: opts.temperature ?? 0.2,
+        maxTokens: opts.maxTokens ?? 4096,
+        reasoning: opts.reasoning ?? 'low',
+        signal: opts.signal,
+      },
+      { kind: 'agent' },
+    );
+    return extractFinalText(response);
+  }
+
   private async prepareAudioForProvider(
     audioFilePath: string,
     signal?: AbortSignal,
@@ -618,6 +654,48 @@ export class GeminiService {
     } finally {
       prepared.cleanup?.();
     }
+  }
+
+  async transcribeLiveSnippet(
+    audioFilePath: string,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<string> {
+    const result = await this.transcribeAudio(audioFilePath, undefined, undefined, undefined, {
+      transcriptOnly: true,
+      includeGlossary: false,
+      transcriptionPrompt: `Please transcribe this short live meeting audio snippet.
+
+Requirements:
+- Keep the original spoken language.
+- Preserve proper nouns and technical terms.
+- Do not infer names, company names, or terms from context. Write them only when clearly spoken.
+- If there is no clearly intelligible speech, return exactly [NO_SPEECH].
+- If speakers are distinguishable, prefix turns with 참가자1, 참가자2, etc.
+- Return only transcript text. Do not summarize and do not add commentary.`,
+      signal: opts.signal,
+    });
+    const transcript = result.transcript.trim();
+    return transcript === '[NO_SPEECH]' ? '' : transcript;
+  }
+
+  async translateText(
+    text: string,
+    opts: { targetLanguage?: string; signal?: AbortSignal } = {},
+  ): Promise<string> {
+    const source = text.trim();
+    if (!source) return '';
+    const targetLanguage = opts.targetLanguage || 'Korean';
+    return await this.completeTextTask(
+      `You translate live meeting transcript snippets into ${targetLanguage}. Preserve speaker labels, names, numbers, and technical terms. If the source is already ${targetLanguage}, lightly clean it without changing meaning. Return only the translated text.`,
+      `Translate this live transcript snippet:\n\n${source}`,
+      {
+        signal: opts.signal,
+        maxTokens: 4096,
+        temperature: 0.1,
+        reasoning: 'low',
+        modelId: this.provider === 'gemini' ? this.flashModel : undefined,
+      },
+    );
   }
 
   // Get audio duration using ffmpeg
@@ -855,6 +933,7 @@ export class GeminiService {
           segmentDuration,
           signal,
           costSession,
+          options.includeGlossary !== false,
         );
       } else {
         // Get transcript for short audio
@@ -866,6 +945,7 @@ export class GeminiService {
           options.transcriptionPrompt,
           signal,
           costSession,
+          options.includeGlossary !== false,
         );
       }
 
@@ -994,6 +1074,7 @@ Return as JSON:
     customPrompt?: string,
     signal?: AbortSignal,
     session?: CostSession,
+    includeGlossary = true,
   ): Promise<string> {
     try {
       const stats = await fs.promises.stat(audioFilePath);
@@ -1003,7 +1084,7 @@ Return as JSON:
         progressCallback(20, 'Processing audio file...');
       }
 
-      const transcriptPrompt = `${this.buildGlossaryBlock()}${customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT}`;
+      const transcriptPrompt = `${includeGlossary ? this.buildGlossaryBlock() : ''}${customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT}`;
       if (this.provider === 'codex') {
         const text = await transcribeCodexAudio({
           getToken: () => this.getCodexToken(),
@@ -1155,10 +1236,11 @@ Return as JSON:
     segmentIndex: number,
     totalSegments: number,
     customPrompt?: string,
+    includeGlossary = true,
   ): string {
     const positional = `[Audio segment ${segmentIndex + 1} of ${totalSegments}]\n\n`;
     const body = customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT;
-    return `${this.buildGlossaryBlock()}${positional}${body}`;
+    return `${includeGlossary ? this.buildGlossaryBlock() : ''}${positional}${body}`;
   }
 
   // Transcribe a single segment with retry logic
@@ -1171,11 +1253,17 @@ Return as JSON:
     customPrompt?: string,
     signal?: AbortSignal,
     session?: CostSession,
+    includeGlossary = true,
   ): Promise<{ index: number; content: string }> {
     const maxRetries = 3;
     let lastError: any = null;
     let attemptsMade = 0;
-    const segmentPrompt = this.createSegmentPrompt(segmentIndex, totalSegments, customPrompt);
+    const segmentPrompt = this.createSegmentPrompt(
+      segmentIndex,
+      totalSegments,
+      customPrompt,
+      includeGlossary,
+    );
     const segmentSeconds = Math.max(0, segmentEndTime - segmentStartTime);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -1305,6 +1393,7 @@ Return as JSON:
     segmentDuration = 300,
     signal?: AbortSignal,
     session?: CostSession,
+    includeGlossary = true,
   ): Promise<string> {
     // Track segments outside the try so the finally can clean them up on
     // abort / mid-pipeline failure too. Without this, cancelled transcribes
@@ -1349,6 +1438,7 @@ Return as JSON:
           customPrompt,
           combinedSignal,
           session,
+          includeGlossary,
         ).catch((err) => {
           aborter.abort();
           throw err;

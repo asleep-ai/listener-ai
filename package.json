@@ -19,6 +19,9 @@
     "dist/esmImport.js",
     "dist/geminiService.js",
     "dist/googleOAuth.js",
+    "dist/liveSessionService.js",
+    "dist/liveSttProvider.js",
+    "dist/openAiRealtimeClient.js",
     "dist/piAiClient.js",
     "dist/outputService.js",
     "dist/searchService.js",
@@ -71,6 +74,7 @@
     "@electron/notarize": "^3.0.1",
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^24.0.12",
+    "@types/ws": "^8.18.1",
     "dotenv": "^17.2.0",
     "electron": "^39.8.5",
     "electron-builder": "^26.8.1",
@@ -82,22 +86,18 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.74.0",
-    "@google/genai": "^1.13.0",
+    "@google/genai": "^2.8.0",
     "audiotee": "^0.0.7",
     "buffer-equal-constant-time": "^1.0.1",
     "fs-extra": "^11.2.0",
     "google-auth-library": "^10.6.2",
     "jwa": "^2.0.1",
-    "marked": "^15.0.0"
+    "marked": "^15.0.0",
+    "ws": "^8.21.0"
   },
   "optionalDependencies": {
     "@notionhq/client": "^4.0.0",
     "electron-updater": "^6.6.2"
-  },
-  "pnpm": {
-    "overrides": {
-      "js-yaml@>=4.0.0 <4.1.1": "^4.1.1"
-    }
   },
   "build": {
     "appId": "com.listenerai.app",

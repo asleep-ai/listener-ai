@@ -5,6 +5,7 @@
 // Brick-wall limiter at the tail prevents Opus encoder clipping.
 
 import { state } from '../state';
+import livePcmTapUrl from './live-pcm-tap-processor.js?url';
 
 export function pickRecordingMimeType(): string {
   const candidates = [
@@ -70,6 +71,14 @@ export type ProcessedGraph = {
   head: AudioNode;
 };
 
+export type LivePcmFrame = {
+  audioData: ArrayBuffer;
+  sampleRate: number;
+  channelCount: number;
+  frames: number;
+  sequence: number;
+};
+
 // Mic keeps the voice-lift chain; system audio (Zoom/Meet, browser tabs) is digital-clean
 // so it only gets a gentle -2dB attenuation before the shared brick-wall limiter catches
 // any combined peaks before the Opus encoder.
@@ -80,6 +89,7 @@ export type ProcessedGraph = {
 export async function buildProcessedStream(
   micStream: MediaStream,
   addSystemAudio: ((ctx: AudioContext) => Promise<AudioNode | null>) | null = null,
+  onLivePcmFrame: ((frame: LivePcmFrame) => void) | null = null,
 ): Promise<ProcessedGraph> {
   const ctx = new AudioContext({ sampleRate: 48000 });
   const mic = buildMicChain(ctx, micStream);
@@ -98,7 +108,22 @@ export async function buildProcessedStream(
   }
 
   const destination = ctx.createMediaStreamDestination();
-  preLimit.connect(buildLimiter(ctx)).connect(destination);
+  const limiter = buildLimiter(ctx);
+  preLimit.connect(limiter).connect(destination);
+  if (onLivePcmFrame) {
+    await ctx.audioWorklet.addModule(livePcmTapUrl);
+    const tap = new AudioWorkletNode(ctx, 'live-pcm-tap', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+    });
+    const tapSink = ctx.createGain();
+    tapSink.gain.value = 0;
+    tap.port.onmessage = (event: MessageEvent<LivePcmFrame & { type?: string }>) => {
+      if (event.data?.type === 'pcm') onLivePcmFrame(event.data);
+    };
+    limiter.connect(tap).connect(tapSink).connect(destination);
+  }
   // source/head support hot-swapping the mic mid-recording (mic selector).
   return { ctx, stream: destination.stream, source: mic.source, head: mic.head };
 }

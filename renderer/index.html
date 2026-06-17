@@ -48,6 +48,10 @@
 
       <div id="recordingTime" class="recording-time">00:00</div>
 
+      <button id="liveSessionStartButton" class="live-session-start-button" type="button" hidden>
+        Live Transcript
+      </button>
+
       <div id="liveNotesPanel" class="live-notes-panel" style="display: none;">
         <div class="live-notes-header">
           <span class="live-notes-title">🗒️ Highlights</span>
@@ -65,6 +69,52 @@
           autocomplete="off"
           spellcheck="false"
         />
+      </div>
+
+      <div id="liveSessionPanel" class="live-session-modal" role="dialog" aria-modal="true" aria-labelledby="liveSessionHeading" hidden>
+        <div class="live-session-card">
+          <div class="live-session-header">
+            <div>
+              <h2 id="liveSessionHeading">Live Session</h2>
+              <p id="liveSessionStatus" class="live-session-status">Idle</p>
+            </div>
+            <div class="live-session-header-actions">
+              <label class="live-translate-toggle">
+                <input type="checkbox" id="liveTranslateToggle" checked>
+                <span>Translation</span>
+              </label>
+              <button type="button" id="liveSessionCloseButton" class="live-session-close-button">
+                Stop Live
+              </button>
+            </div>
+          </div>
+          <div class="live-session-columns">
+            <section class="live-session-column" aria-labelledby="liveTranscriptHeading">
+              <h3 id="liveTranscriptHeading">Transcript</h3>
+              <div id="liveTranscriptList" class="live-session-list" aria-live="polite">
+                <p class="live-session-empty">Waiting for speech...</p>
+              </div>
+            </section>
+            <section class="live-session-column" id="liveTranslationColumn" aria-labelledby="liveTranslationHeading">
+              <h3 id="liveTranslationHeading">Translation</h3>
+              <div id="liveTranslationList" class="live-session-list" aria-live="polite">
+                <p class="live-session-empty">Waiting for transcript...</p>
+              </div>
+            </section>
+          </div>
+          <div class="live-ask-panel">
+            <div class="live-ask-header">
+              <h3>Ask</h3>
+            </div>
+            <div class="chat-messages" id="liveChatMessages" role="log" aria-live="polite">
+              <p class="chat-empty">Ask about what has been heard so far.</p>
+            </div>
+            <form class="chat-input-row" id="liveChatForm">
+              <input type="text" id="liveChatInput" class="chat-input" placeholder="Ask about the live session..." autocomplete="off" spellcheck="false" disabled />
+              <button type="submit" id="liveChatSend" class="chat-send-button" disabled>Send</button>
+            </form>
+          </div>
+        </div>
       </div>
 
       <div class="auto-mode-container">
@@ -178,6 +228,35 @@
                 <option value="codex">Codex (ChatGPT Plus/Pro)</option>
               </select>
             </div>
+            <fieldset class="config-subgroup">
+              <legend>Live transcription</legend>
+              <div class="form-group">
+                <label for="liveSttProvider">Provider</label>
+                <select id="liveSttProvider">
+                  <option value="auto">Auto (OpenAI key, Gemini Live, then fallback)</option>
+                  <option value="openai">OpenAI Realtime</option>
+                  <option value="gemini">Gemini Live</option>
+                  <option value="chunked">12s fallback</option>
+                </select>
+                <small>Used only while recording. Auto tries a direct OpenAI key first, then Gemini Live, then 12-second chunks.</small>
+              </div>
+              <div class="form-group">
+                <label for="openaiApiKey">OpenAI API Key</label>
+                <input type="password" id="openaiApiKey" placeholder="sk-...">
+                <small>Required for OpenAI Realtime live translation. Codex sign-in does not currently authorize this live translation call.</small>
+                <div id="liveProviderNotice" class="config-notice" role="status" aria-live="polite"></div>
+              </div>
+              <div class="form-group">
+                <label for="liveSttLanguage">Language Hint <span class="config-optional">optional</span></label>
+                <input type="text" id="liveSttLanguage" placeholder="auto, en, ko, ja">
+                <small>Optional source-language hint for live transcription.</small>
+              </div>
+              <div class="form-group">
+                <label for="liveTranslationLanguage">Translation Target</label>
+                <input type="text" id="liveTranslationLanguage" placeholder="ko">
+                <small>BCP-47 target language for live translated captions. Default: ko.</small>
+              </div>
+            </fieldset>
             <fieldset class="config-subgroup" data-provider="gemini">
               <legend>Gemini</legend>
               <div class="form-group">
@@ -200,8 +279,8 @@
                   <button type="button" id="resetGeminiFlashModel" class="reset-prompt-button">Reset to Default</button>
                 </div>
                 <select id="geminiFlashModelSelect"></select>
-                <input type="text" id="geminiFlashModel" placeholder="gemini-2.5-flash" hidden>
-                <small>Default: gemini-2.5-flash</small>
+                <input type="text" id="geminiFlashModel" placeholder="gemini-3.5-flash" hidden>
+                <small>Default: gemini-3.5-flash</small>
               </div>
               <div class="form-group">
                 <label for="geminiThinkingLevel">Summary Thinking Level <span class="config-optional">optional</span></label>
