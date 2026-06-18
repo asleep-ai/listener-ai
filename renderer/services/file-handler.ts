@@ -199,7 +199,13 @@ export class FileHandler {
       // Get file info from main process
       const fileInfo = await window.electronAPI.getFileInfo(result.filePath);
 
-      if (fileInfo.exists && fileInfo.name !== undefined && fileInfo.size !== undefined) {
+      if (
+        fileInfo.success &&
+        fileInfo.exists &&
+        fileInfo.isFile &&
+        fileInfo.name !== undefined &&
+        fileInfo.size !== undefined
+      ) {
         const name = fileInfo.name;
         const ext = name.toLowerCase().substring(name.lastIndexOf('.'));
         const fileWithPath: AudioFileLike = {

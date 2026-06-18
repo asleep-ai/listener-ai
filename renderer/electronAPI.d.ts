@@ -2,6 +2,8 @@
 // contextBridge. Keep in sync with that file -- the preload TypeScript
 // definition is the source of truth, this is a renderer-side mirror.
 
+import type { FileInfoResult } from '../src/services/fileInfoTypes';
+
 export interface TranscriptionErrorPayload {
   userMessage: string;
   rawMessage: string;
@@ -386,7 +388,7 @@ export type ElectronAPI = {
     error?: string;
   }>;
   selectAudioFile: () => Promise<{ success: boolean; filePath?: string; canceled?: boolean }>;
-  getFileInfo: (filePath: string) => Promise<{ exists: boolean; size?: number; name?: string }>;
+  getFileInfo: (filePath: string) => Promise<FileInfoResult>;
   getMetadata: (filePath: string) => Promise<Record<string, any> | null>;
   saveMetadata: (filePath: string, metadata: any) => Promise<{ success: boolean }>;
   getUsageSummary: (opts?: { month?: string }) => Promise<

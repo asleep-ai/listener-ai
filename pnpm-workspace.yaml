@@ -1,0 +1,26 @@
+packages:
+  - .
+
+strictPeerDependencies: false
+
+# electron-builder's dependency walker has dropped some indirect deps from the
+# packaged asar with pnpm's nested layout. Keep an npm-style flat node_modules.
+nodeLinker: hoisted
+publicHoistPattern:
+  - '*electron*'
+  - '*electron-builder*'
+  - '*electron-rebuild*'
+  - '*esbuild*'
+  - '*node-abi*'
+shamefullyHoist: true
+enablePrePostScripts: true
+
+overrides:
+  js-yaml@>=4.0.0 <4.1.1: ^4.1.1
+
+allowBuilds:
+  '@google/genai': true
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+  protobufjs: true
