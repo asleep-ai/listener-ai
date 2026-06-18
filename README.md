@@ -81,6 +81,21 @@ listener config set slackWebhookUrl <your-webhook-url>
 listener config set slackAutoShare true  # Auto-share when auto mode is enabled
 ```
 
+Optional live transcription streaming:
+
+```bash
+# Auto uses OpenAI Realtime with a direct OpenAI key, then Gemini Live,
+# then 12-second chunked fallback.
+listener config set liveSttProvider auto
+# Required for OpenAI Realtime live translation. Codex sign-in is not enough
+# for OpenAI Realtime live translation.
+listener config set openaiApiKey <your-openai-key>
+
+# Optional BCP-47 source hint and translation target.
+listener config set liveSttLanguage ko
+listener config set liveTranslationLanguage ko
+```
+
 ### Usage
 
 ```bash
@@ -138,7 +153,7 @@ CLI and desktop app share the same config file. Existing installs that already h
 2. Complete the browser sign-in to ChatGPT.
 3. Confirm `listener codex status` shows `codexOAuthConfigured=true`.
 
-Codex transcription, summarization, and the Ask Listener agent all go through your ChatGPT subscription -- no separate API key needed.
+Codex transcription, summarization, and the Ask Listener agent go through your ChatGPT subscription -- no separate API key needed for those features. OpenAI Realtime live translation still needs a standard OpenAI API key; Codex OAuth is not treated as live translation auth. Listener.AI prefers its own stored Codex OAuth credentials, then environment credentials, then the local Codex CLI auth file (`~/.codex/auth.json`) as a read-only fallback for Codex-backed features. Refreshes are only written back when the token came from Listener.AI's own Settings/login flow.
 
 #### Notion Integration
 

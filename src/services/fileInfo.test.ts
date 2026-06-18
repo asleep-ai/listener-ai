@@ -36,4 +36,15 @@ describe('getFileInfo', () => {
     assert.equal(info.exists, false);
     assert.match(info.error, /ENOENT|no such file/i);
   });
+
+  it('returns isFile=false for a directory', () => {
+    const dirPath = path.join(workDir, 'a-directory');
+    fs.mkdirSync(dirPath);
+
+    const info = getFileInfo(dirPath);
+
+    assert.equal(info.success, true);
+    assert.equal(info.exists, true);
+    assert.equal(info.isFile, false);
+  });
 });

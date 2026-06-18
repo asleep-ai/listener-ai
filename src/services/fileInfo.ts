@@ -1,19 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import type { FileInfoResult } from './fileInfoTypes';
 
-export type FileInfoResult =
-  | {
-      success: true;
-      exists: true;
-      name: string;
-      size: number;
-      isFile: boolean;
-    }
-  | {
-      success: false;
-      exists: false;
-      error: string;
-    };
+export type { FileInfoResult };
 
 export function getFileInfo(filePath: string): FileInfoResult {
   try {

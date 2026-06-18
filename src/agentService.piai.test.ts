@@ -217,4 +217,24 @@ describe('AgentService (pi-ai integration via faux provider)', () => {
     // from the prior model turn is replayed verbatim before the new user input.
     assert.equal(second.history.length, 4);
   });
+
+  it('answers against live-session scope without requiring a saved transcription', async () => {
+    const pi = await setupFauxAsGoogle();
+    registration!.setResponses([pi.fauxAssistantMessage('The launch is Friday.')]);
+
+    const config = new ConfigService(configDir);
+    const agent = makeAgent(config);
+    const result = await agent.run({
+      question: 'When is launch?',
+      scope: {
+        kind: 'live',
+        title: 'Planning',
+        transcript: 'Participant: The launch is on Friday.',
+        translation: '참가자: 출시는 금요일입니다.',
+      },
+    });
+
+    assert.equal(result.answer, 'The launch is Friday.');
+    assert.equal(result.appliedActions.length, 0);
+  });
 });

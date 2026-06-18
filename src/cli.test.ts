@@ -118,6 +118,20 @@ describe('listener CLI basics', () => {
     assert.equal(get.stdout.trim(), 'codex');
   });
 
+  it('config set + get round-trips liveSttProvider', async () => {
+    const set = await runCli(['config', 'set', 'liveSttProvider', 'openai']);
+    assert.equal(set.code, 0);
+    const get = await runCli(['config', 'get', 'liveSttProvider']);
+    assert.equal(get.code, 0);
+    assert.equal(get.stdout.trim(), 'openai');
+  });
+
+  it('config set rejects invalid liveSttProvider', async () => {
+    const { stderr, code } = await runCli(['config', 'set', 'liveSttProvider', 'claude']);
+    assert.equal(code, 1);
+    assert.match(stderr, /liveSttProvider must be one of/);
+  });
+
   it('config set rejects invalid aiProvider', async () => {
     const { stderr, code } = await runCli(['config', 'set', 'aiProvider', 'openai']);
     assert.equal(code, 1);

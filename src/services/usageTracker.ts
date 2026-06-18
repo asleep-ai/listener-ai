@@ -28,7 +28,8 @@ import { getDataPath } from '../dataPath';
 
 /**
  * Per-model rates. Text/image/audio token rates are $ per 1M tokens.
- * `audioPerMinute` is $ per minute of audio input (STT models bill this way).
+ * `audioPerMinute` is $ per minute of audio input or realtime audio session
+ * duration for models billed by elapsed audio time.
  * `audioInput` overrides `input` when the call kind is 'transcription' and the
  * provider charges a different rate for audio tokens (gemini-2.5-flash:
  * $1.00/M for audio vs $0.30/M for text).
@@ -42,14 +43,15 @@ export interface ModelPricing {
   audioPerMinute?: number;
 }
 
-// Source: docs/model-pricing.md (verified 2026-05-13). Keep in sync.
+// Source: docs/model-pricing.md (verified 2026-06-15). Keep in sync.
 //
-// This table covers ONLY the two non-pi-ai paths. Anything reachable through
-// pi-ai's `complete()` (gemini-2.5-pro, gpt-5.x, etc.) is priced by pi-ai
-// itself -- adding it here would just create drift with the upstream table.
+// This table is consulted ONLY for non-pi-ai paths. If the same model is used
+// through pi-ai's `complete()`, the caller passes pi-ai's precomputed cost
+// instead and this table is bypassed.
 export const MODEL_PRICING: Record<string, ModelPricing> = {
-  // Gemini transcription: @google/genai SDK direct call. Audio-token rate
-  // ($1/M) overrides the text rate when kind is 'transcription'.
+  // Gemini transcription: @google/genai SDK direct call. Audio-token rates can
+  // override text rates when kind is 'transcription'.
+  'gemini-3.5-flash': { input: 1.5, output: 9.0 },
   'gemini-2.5-flash': { input: 0.3, audioInput: 1.0, output: 2.5 },
   // OpenAI STT (raw fetch to /v1/audio/transcriptions). Billed per audio
   // minute, prorated to the second.
@@ -57,9 +59,17 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   'gpt-4o-transcribe-diarize': { audioPerMinute: 0.006 },
   'gpt-4o-mini-transcribe': { audioPerMinute: 0.003 },
   'whisper-1': { audioPerMinute: 0.006 },
+  // OpenAI Realtime audio-duration pricing.
+  'gpt-realtime-whisper': { audioPerMinute: 0.017 },
+  'gpt-realtime-translate': { audioPerMinute: 0.034 },
+  // Gemini Live effective per-minute pricing from Google's audio-token rates.
+  // 3.1 Flash Live transcription uses input audio only. 3.5 Live Translate
+  // uses the documented combined input+output effective price.
+  'gemini-3.1-flash-live-preview': { audioPerMinute: 0.005 },
+  'gemini-3.5-live-translate-preview': { audioPerMinute: 0.0368 },
 };
 
-export type UsageKind = 'summary' | 'transcription' | 'agent';
+export type UsageKind = 'summary' | 'transcription' | 'agent' | 'realtime';
 
 export interface UsageTokens {
   /** Input tokens (text/image, or audio when kind=transcription). */
@@ -126,10 +136,10 @@ export function computeCost(modelId: string, kind: UsageKind, usage: UsageTokens
     return { usd: (seconds / PER_MINUTE_SECONDS) * pricing.audioPerMinute };
   }
 
-  // Token-priced model (gemini-2.5-flash today). Transcription kind uses the
-  // audio-input rate; summary/agent use the text rate. cacheRead falls back
-  // to the same input rate when no cache discount is defined (avoids silent
-  // $0 billing for cached tokens).
+  // Token-priced models. Transcription kind uses audioInput when a model has
+  // a modality-specific audio rate; summary/agent use the text rate. cacheRead
+  // falls back to the same input rate when no cache discount is defined
+  // (avoids silent $0 billing for cached tokens).
   const inputRate =
     kind === 'transcription' && typeof pricing.audioInput === 'number'
       ? pricing.audioInput
