@@ -20,7 +20,70 @@ export type AgentChatMessage = {
   // through IPC unchanged so the next agent run can replay tool-use history.
   piaiMessages?: unknown[];
 };
-export type AgentScope = { kind: 'all' } | { kind: 'single'; folderName: string };
+export type AgentScope =
+  | { kind: 'all' }
+  | { kind: 'single'; folderName: string }
+  | {
+      kind: 'live';
+      title: string;
+      transcript: string;
+      interimTranscript?: string;
+      interimTranslation?: string;
+      translation?: string;
+    };
+
+export type LiveTranscriptSegment = {
+  id: string;
+  offsetMs: number;
+  durationMs: number;
+  transcript: string;
+  translation?: string;
+  translationError?: string;
+  final: boolean;
+  createdAt: string;
+};
+
+export type LiveSessionStartResult = {
+  sessionId: string;
+  title: string;
+  startedAt: string;
+  translate: boolean;
+  mode: 'streaming' | 'chunked';
+  provider: 'openai' | 'gemini' | 'chunked';
+  realtimeClient?: {
+    transport: 'webrtc';
+    endpoint: 'realtime' | 'translation';
+    clientSecret: string;
+  };
+};
+
+export type LiveSessionSnapshot = {
+  sessionId: string;
+  title: string;
+  startedAt: string;
+  active: boolean;
+  translate: boolean;
+  mode: 'streaming' | 'chunked';
+  provider: 'openai' | 'gemini' | 'chunked';
+  segments: LiveTranscriptSegment[];
+  interimTranscript: string;
+  interimTranslation: string;
+  transcript: string;
+  translation: string;
+};
+
+export type LiveSessionEvent =
+  | {
+      type: 'status';
+      sessionId: string;
+      status: string;
+      mode?: 'streaming' | 'chunked';
+      provider?: 'openai' | 'gemini' | 'chunked';
+    }
+  | { type: 'interim'; sessionId: string; text: string; offsetMs?: number }
+  | { type: 'translationInterim'; sessionId: string; text: string; offsetMs?: number }
+  | { type: 'segment'; sessionId: string; segment: LiveTranscriptSegment }
+  | { type: 'error'; sessionId: string; error: string };
 
 export type AgentConfirmRequest = {
   id: string;
@@ -36,8 +99,17 @@ export type AgentConfirmRequest = {
 export type ConfigPayload = {
   aiProvider?: 'gemini' | 'codex';
   geminiApiKey?: string;
+  geminiModel?: string;
+  geminiFlashModel?: string;
+  geminiThinkingLevel?: 'low' | 'medium' | 'high';
   codexModel?: string;
   codexTranscriptionModel?: string;
+  liveSttProvider?: 'auto' | 'openai' | 'gemini' | 'chunked';
+  openaiApiKey?: string;
+  openaiLiveTranscriptionModel?: string;
+  openaiLiveTranslationModel?: string;
+  liveSttLanguage?: string;
+  liveTranslationLanguage?: string;
   notionApiKey?: string;
   notionDatabaseId?: string;
   autoMode?: boolean;
@@ -51,6 +123,13 @@ export type ConfigPayload = {
   slackWebhookUrl?: string;
   slackAutoShare?: boolean;
   googleDriveEnabled?: boolean;
+};
+
+export type RendererLogPayload = {
+  level: 'debug' | 'log' | 'info' | 'warn' | 'error';
+  timestamp: string;
+  url: string;
+  args: unknown[];
 };
 
 export type GoogleSyncResult = {
@@ -88,6 +167,7 @@ export type SystemAudioStartResult =
 
 export type ElectronAPI = {
   platform: NodeJS.Platform;
+  logRenderer: (payload: RendererLogPayload) => void;
   startRecording: (payload: { title: string; mimeType: string }) => Promise<{
     success: boolean;
     error?: string;
@@ -184,6 +264,72 @@ export type ElectronAPI = {
     fields?: string[];
     limit?: number;
   }) => Promise<Array<Record<string, any>>>;
+  startLiveSession: (opts: {
+    title?: string;
+    translate?: boolean;
+  }) => Promise<
+    { success: true; session: LiveSessionStartResult } | { success: false; error: string }
+  >;
+  handleLiveRealtimeFailure: (opts: {
+    sessionId: string;
+    error?: string;
+  }) => Promise<
+    { success: true; session: LiveSessionStartResult } | { success: false; error: string }
+  >;
+  processLiveAudioChunk: (opts: {
+    sessionId: string;
+    audioData: ArrayBuffer;
+    mimeType: string;
+    offsetMs: number;
+    durationMs: number;
+    translate?: boolean;
+  }) => Promise<
+    | { success: true; segment: LiveTranscriptSegment | null; snapshot: LiveSessionSnapshot | null }
+    | { success: false; error: string }
+  >;
+  sendLivePcmChunk: (opts: {
+    sessionId: string;
+    audioData: ArrayBuffer;
+    sampleRate: number;
+    channelCount: number;
+    offsetMs: number;
+    durationMs: number;
+    sequence: number;
+  }) => void;
+  updateLiveSessionInterim: (opts: {
+    sessionId: string;
+    text: string;
+    translation?: boolean;
+    offsetMs?: number;
+  }) => void;
+  completeLiveSessionSegment: (opts: {
+    sessionId: string;
+    text: string;
+    offsetMs?: number;
+    durationMs?: number;
+    translation?: string;
+  }) => Promise<{ success: boolean; error?: string }>;
+  stopLiveSession: (
+    sessionId: string,
+  ) => Promise<
+    { success: true; snapshot: LiveSessionSnapshot | null } | { success: false; error: string }
+  >;
+  getLiveSessionSnapshot: () => Promise<{
+    success: true;
+    snapshot: LiveSessionSnapshot | null;
+  }>;
+  setLiveSessionTranslate: (opts: {
+    sessionId: string;
+    translate: boolean;
+  }) => Promise<
+    { success: true; snapshot: LiveSessionSnapshot | null } | { success: false; error: string }
+  >;
+  askLiveSession: (opts: {
+    sessionId: string;
+    question: string;
+    history?: AgentChatMessage[];
+  }) => Promise<{ success: true; result: any } | { success: false; error: string }>;
+  onLiveSessionEvent: (cb: (event: LiveSessionEvent) => void) => void;
   agentChat: (opts: {
     question: string;
     history?: AgentChatMessage[];

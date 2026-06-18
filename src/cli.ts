@@ -5,7 +5,13 @@ import * as fs from 'fs';
 import * as readline from 'readline';
 import * as path from 'path';
 import { type AgentScope, AgentService, type ConfigProposal } from './agentService';
-import { GEMINI_THINKING_LEVELS, isAiProvider, normalizeGeminiThinkingLevel } from './aiProvider';
+import {
+  GEMINI_THINKING_LEVELS,
+  LIVE_STT_PROVIDERS,
+  isAiProvider,
+  normalizeGeminiThinkingLevel,
+  normalizeLiveSttProvider,
+} from './aiProvider';
 import { extensionForMimeType, mimeTypeForFile } from './audioFormats';
 import { type AppConfig, ConfigService } from './configService';
 import { loginCodexOAuth } from './codexOAuth';
@@ -127,6 +133,12 @@ const KNOWN_CONFIG_KEYS = [
   'geminiThinkingLevel',
   'codexModel',
   'codexTranscriptionModel',
+  'liveSttProvider',
+  'openaiApiKey',
+  'openaiLiveTranscriptionModel',
+  'openaiLiveTranslationModel',
+  'liveSttLanguage',
+  'liveTranslationLanguage',
   'notionApiKey',
   'notionDatabaseId',
   'autoMode',
@@ -224,6 +236,32 @@ function applyConfigSet(config: ConfigService, key: ConfigKey, value: string): v
     case 'codexTranscriptionModel':
       config.setCodexTranscriptionModel(value);
       return;
+    case 'liveSttProvider': {
+      const provider = normalizeLiveSttProvider(value);
+      if (!provider) {
+        process.stderr.write(
+          `Error: liveSttProvider must be one of: ${LIVE_STT_PROVIDERS.join(', ')}\n`,
+        );
+        process.exit(1);
+      }
+      config.setLiveSttProvider(provider);
+      return;
+    }
+    case 'openaiApiKey':
+      config.setOpenAiApiKey(value);
+      return;
+    case 'openaiLiveTranscriptionModel':
+      config.updateConfig({ openaiLiveTranscriptionModel: value });
+      return;
+    case 'openaiLiveTranslationModel':
+      config.updateConfig({ openaiLiveTranslationModel: value });
+      return;
+    case 'liveSttLanguage':
+      config.updateConfig({ liveSttLanguage: value });
+      return;
+    case 'liveTranslationLanguage':
+      config.updateConfig({ liveTranslationLanguage: value });
+      return;
     case 'notionApiKey':
       config.setNotionApiKey(value);
       return;
@@ -290,9 +328,10 @@ function createTranscriptionService(config: ConfigService, dataPath: string): Ge
     // Persist refreshed tokens only when credentials are stored in config.json.
     // Env-only credentials must stay ephemeral; persisting them silently writes
     // env-provided OAuth tokens to disk on every refresh.
-    onCodexOAuthUpdate: config.hasStoredCodexOAuth()
-      ? (credentials) => config.setCodexOAuth(credentials)
-      : undefined,
+    onCodexOAuthUpdate:
+      config.getCodexOAuthSource()?.source === 'config'
+        ? (credentials) => config.setCodexOAuth(credentials)
+        : undefined,
     dataPath,
     knownWords: config.getKnownWords(),
     proModel: config.getGeminiModel(),
@@ -309,9 +348,10 @@ function createAgentService(config: ConfigService, dataPath: string): AgentServi
     apiKey: config.getGeminiApiKey(),
     codexOAuth: config.getCodexOAuth(),
     // See note in createTranscriptionService(): persist only for stored creds.
-    onCodexOAuthUpdate: config.hasStoredCodexOAuth()
-      ? (credentials) => config.setCodexOAuth(credentials)
-      : undefined,
+    onCodexOAuthUpdate:
+      config.getCodexOAuthSource()?.source === 'config'
+        ? (credentials) => config.setCodexOAuth(credentials)
+        : undefined,
     dataPath,
     configService: config,
     codexModel: config.getCodexModel(),

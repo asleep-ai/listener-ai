@@ -27,6 +27,8 @@ import { maybeAutoSync, refreshGoogleSyncTimer } from './ipc/googleDrive';
 import { registerAllIpc } from './ipc/register';
 import { DisplayDetectorService } from './displayDetectorService';
 import { GeminiService, TranscriptionError, type TranscriptionErrorPayload } from './geminiService';
+import { LiveSessionService } from './liveSessionService';
+import type { LiveSttProviderConfig } from './liveSttProvider';
 import { MeetingDetectorService } from './meetingDetectorService';
 import { MenuBarManager } from './menuBarManager';
 import { NotionService } from './notionService';
@@ -51,9 +53,34 @@ import {
   summarizeUsage,
   type UsageSummaryResult,
 } from './services/usageTracker';
+import {
+  createOpenAiRealtimeClientConfig,
+  type OpenAiRealtimeBearer,
+} from './openAiRealtimeClient';
 import { SYSTEM_AUDIO_FORMAT, SystemAudioService } from './services/systemAudioService';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
 import { SLACK_WEBHOOK_PREFIX, SlackService, isLikelySlackWebhookUrl } from './slackService';
+
+type AppLogLevel = 'debug' | 'log' | 'info' | 'warn' | 'error';
+
+type RendererLogPayload = {
+  level?: AppLogLevel;
+  timestamp?: string;
+  url?: string;
+  args?: unknown[];
+};
+
+const APP_LOG_LEVELS = new Set<AppLogLevel>(['debug', 'log', 'info', 'warn', 'error']);
+const SENSITIVE_LOG_KEY_RE =
+  /(authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret|secret|webhook)/i;
+const originalConsole = {
+  debug: console.debug.bind(console),
+  log: console.log.bind(console),
+  info: console.info.bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+} satisfies Record<AppLogLevel, (...args: unknown[]) => void>;
+let appLogDirReady = false;
 
 // Enable macOS system-audio loopback capture so getDisplayMedia({audio: 'loopback'})
 // can pull Zoom/Meet participant audio alongside the mic.
@@ -75,6 +102,100 @@ declare global {
 global.isQuitting = false;
 
 app.setPath('userData', getDataPath());
+
+function redactLogString(value: string): string {
+  return value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, 'Bearer [REDACTED]')
+    .replace(/sk-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]');
+}
+
+function sanitizeLogValue(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
+  if (typeof value === 'string') return redactLogString(value);
+  if (typeof value === 'number' || typeof value === 'boolean' || value == null) return value;
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'function') return `[Function ${value.name || 'anonymous'}]`;
+  if (typeof value !== 'object') return String(value);
+
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: redactLogString(value.message),
+      stack: value.stack ? redactLogString(value.stack) : undefined,
+    };
+  }
+
+  if (seen.has(value)) return '[Circular]';
+  if (depth >= 4) return '[MaxDepth]';
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeLogValue(item, depth + 1, seen));
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = SENSITIVE_LOG_KEY_RE.test(key)
+      ? '[REDACTED]'
+      : sanitizeLogValue(item, depth + 1, seen);
+  }
+  return out;
+}
+
+function formatLogArg(value: unknown): string {
+  const sanitized = sanitizeLogValue(value);
+  if (typeof sanitized === 'string') return sanitized;
+  try {
+    return JSON.stringify(sanitized);
+  } catch {
+    return String(sanitized);
+  }
+}
+
+function appendAppLogLine(line: string): void {
+  try {
+    const logDir = path.join(app.getPath('userData'), 'logs');
+    if (!appLogDirReady) {
+      fs.mkdirSync(logDir, { recursive: true });
+      appLogDirReady = true;
+    }
+    fs.appendFileSync(path.join(logDir, 'app.log'), `${line}\n`);
+  } catch (error) {
+    originalConsole.warn('Failed to append app log:', error);
+  }
+}
+
+function formatAppLogLine(
+  scope: 'main' | 'renderer',
+  level: AppLogLevel,
+  args: unknown[],
+  timestamp = new Date().toISOString(),
+): string {
+  return `[${timestamp}] [${scope}:${level}] ${args.map(formatLogArg).join(' ')}`;
+}
+
+function installMainConsoleLogger(): void {
+  for (const level of APP_LOG_LEVELS) {
+    console[level] = (...args: unknown[]) => {
+      originalConsole[level](...args);
+      appendAppLogLine(formatAppLogLine('main', level, args));
+    };
+  }
+}
+
+function handleRendererLog(payload: RendererLogPayload): void {
+  const level = payload.level && APP_LOG_LEVELS.has(payload.level) ? payload.level : 'log';
+  const args = Array.isArray(payload.args) ? payload.args : [];
+  const prefixArgs = payload.url ? [`url=${payload.url}`, ...args] : args;
+  const timestamp = payload.timestamp || new Date().toISOString();
+  const line = formatAppLogLine('renderer', level, prefixArgs, timestamp);
+  appendAppLogLine(line);
+  originalConsole[level](line);
+}
+
+installMainConsoleLogger();
+ipcMain.on('renderer-log', (_event, payload: RendererLogPayload) => {
+  handleRendererLog(payload);
+});
 
 let mainWindow: BrowserWindow | null = null;
 const audioRecorder = new SimpleAudioRecorder();
@@ -106,19 +227,20 @@ function formatAiCredentialsError(): string {
 function getAgentService(): AgentService | null {
   if (agentService) return agentService;
   if (!configService.hasAiAuth()) return null;
+  const codexOAuthSource = configService.getCodexOAuthSource();
   agentService = new AgentService({
     provider: configService.getAiProvider(),
     apiKey: configService.getGeminiApiKey(),
-    codexOAuth: configService.getCodexOAuth(),
-    // Only persist refreshed tokens when the credentials originated in config.json.
-    // Env-only credentials must stay ephemeral -- writing refreshed tokens to disk
-    // would leak ephemeral env creds into the persistent store.
-    onCodexOAuthUpdate: configService.hasStoredCodexOAuth()
-      ? (credentials) => {
-          configService.setCodexOAuth(credentials);
-          broadcastConfigChanged();
-        }
-      : undefined,
+    codexOAuth: codexOAuthSource?.credentials,
+    // Only persist refreshed tokens when the credentials originated in
+    // config.json. Env and Codex CLI credentials must stay external.
+    onCodexOAuthUpdate:
+      codexOAuthSource?.source === 'config'
+        ? (credentials) => {
+            configService.setCodexOAuth(credentials);
+            broadcastConfigChanged();
+          }
+        : undefined,
     codexModel: configService.getCodexModel(),
     dataPath: app.getPath('userData'),
     configService,
@@ -165,17 +287,20 @@ function trackFinalize(work: Promise<void>): void {
 
 function createGeminiService(): GeminiService | null {
   if (!configService.hasAiAuth()) return null;
+  const codexOAuthSource = configService.getCodexOAuthSource();
   return new GeminiService({
     provider: configService.getAiProvider(),
     apiKey: configService.getGeminiApiKey(),
-    codexOAuth: configService.getCodexOAuth(),
-    // See note in getAgentService(): persist refreshed tokens only for stored creds.
-    onCodexOAuthUpdate: configService.hasStoredCodexOAuth()
-      ? (credentials) => {
-          configService.setCodexOAuth(credentials);
-          broadcastConfigChanged();
-        }
-      : undefined,
+    codexOAuth: codexOAuthSource?.credentials,
+    // Persist refreshed tokens only when they came from app config. Env and
+    // Codex CLI credentials are external sources and must remain read-only here.
+    onCodexOAuthUpdate:
+      codexOAuthSource?.source === 'config'
+        ? (credentials) => {
+            configService.setCodexOAuth(credentials);
+            broadcastConfigChanged();
+          }
+        : undefined,
     knownWords: configService.getKnownWords(),
     proModel: configService.getGeminiModel(),
     flashModel: configService.getGeminiFlashModel(),
@@ -195,6 +320,43 @@ function ensureGeminiService(): GeminiService | null {
   geminiService = createGeminiService();
   return geminiService;
 }
+
+async function resolveOpenAiRealtimeBearer(
+  config: LiveSttProviderConfig,
+): Promise<OpenAiRealtimeBearer | null> {
+  if (config.provider === 'chunked' || config.provider === 'gemini') return null;
+  const openaiApiKey = config.openaiApiKey?.trim();
+  if (openaiApiKey) return { token: openaiApiKey, source: 'apiKey' };
+
+  console.warn('OpenAI Realtime requires a standard OpenAI API key; skipping Codex OAuth.');
+  return null;
+}
+
+async function createOpenAiRealtimeClientConfigForLive(config: LiveSttProviderConfig) {
+  return await createOpenAiRealtimeClientConfig(config, resolveOpenAiRealtimeBearer);
+}
+
+const liveSessionService = new LiveSessionService({
+  getDataPath: () => app.getPath('userData'),
+  ensureGeminiService,
+  getAgentService,
+  formatAiCredentialsError,
+  getLiveSttConfig: () => ({
+    provider: configService.getLiveSttProvider(),
+    openaiApiKey: configService.getOpenAiApiKey(),
+    geminiApiKey: configService.getGeminiApiKey(),
+    openaiLiveTranscriptionModel: configService.getOpenAiLiveTranscriptionModel(),
+    openaiLiveTranslationModel: configService.getOpenAiLiveTranslationModel(),
+    language: configService.getLiveSttLanguage(),
+    translationLanguage: configService.getLiveTranslationLanguage(),
+  }),
+  createRealtimeClientConfig: createOpenAiRealtimeClientConfigForLive,
+  emitEvent: (event) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('live-session-event', event);
+    }
+  },
+});
 
 function registerGlobalShortcut() {
   try {
@@ -1653,6 +1815,214 @@ ipcMain.handle('system-audio-stop', async () => {
   await systemAudioService.stop();
   return { success: true };
 });
+
+ipcMain.handle('live-session-start', async (_, opts?: { title?: string; translate?: boolean }) => {
+  try {
+    if (!configService.hasStreamingLiveSttAuth() && !configService.hasAiAuth()) {
+      return {
+        success: false,
+        error: `Live transcription auth is not configured, and fallback is unavailable: ${formatAiCredentialsError()}`,
+      };
+    }
+    const session = await liveSessionService.start({
+      title: typeof opts?.title === 'string' ? opts.title : undefined,
+      translate: opts?.translate !== false,
+    });
+    return { success: true, session };
+  } catch (error) {
+    console.error('live-session-start failed:', error);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle(
+  'live-session-realtime-failed',
+  async (_, opts?: { sessionId?: string; error?: string }) => {
+    try {
+      if (!opts?.sessionId) return { success: false, error: 'Missing live session id.' };
+      const session = await liveSessionService.fallbackFromRealtime({
+        sessionId: opts.sessionId,
+        error: typeof opts.error === 'string' ? opts.error : undefined,
+      });
+      return { success: true, session };
+    } catch (error) {
+      console.error('live-session-realtime-failed failed:', error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+);
+
+ipcMain.handle(
+  'live-session-process-chunk',
+  async (
+    _event,
+    opts?: {
+      sessionId?: string;
+      audioData?: ArrayBuffer | Uint8Array;
+      mimeType?: string;
+      offsetMs?: number;
+      durationMs?: number;
+      translate?: boolean;
+    },
+  ) => {
+    try {
+      if (!opts?.sessionId || !opts.audioData) {
+        return { success: false, error: 'Missing live session audio payload.' };
+      }
+      const segment = await liveSessionService.processAudioChunk({
+        sessionId: opts.sessionId,
+        audioData: opts.audioData,
+        mimeType: typeof opts.mimeType === 'string' ? opts.mimeType : 'audio/webm',
+        offsetMs: Number.isFinite(opts.offsetMs) ? Number(opts.offsetMs) : 0,
+        durationMs: Number.isFinite(opts.durationMs) ? Number(opts.durationMs) : 0,
+        translate: opts.translate !== false,
+      });
+      return { success: true, segment, snapshot: liveSessionService.snapshot() };
+    } catch (error) {
+      console.error('live-session-process-chunk failed:', error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+);
+
+ipcMain.on(
+  'live-session-interim',
+  (
+    _event,
+    opts?: {
+      sessionId?: string;
+      text?: string;
+      translation?: boolean;
+      offsetMs?: number;
+    },
+  ) => {
+    try {
+      if (!opts?.sessionId || typeof opts.text !== 'string') return;
+      liveSessionService.receiveInterim({
+        sessionId: opts.sessionId,
+        text: opts.text,
+        translation: opts.translation === true,
+        offsetMs: Number.isFinite(opts.offsetMs) ? Number(opts.offsetMs) : undefined,
+      });
+    } catch (error) {
+      console.error('live-session-interim failed:', error);
+    }
+  },
+);
+
+ipcMain.handle(
+  'live-session-final',
+  (
+    _event,
+    opts?: {
+      sessionId?: string;
+      text?: string;
+      offsetMs?: number;
+      durationMs?: number;
+      translation?: string;
+    },
+  ) => {
+    try {
+      if (!opts?.sessionId || typeof opts.text !== 'string') {
+        return { success: false, error: 'Missing live transcript payload.' };
+      }
+      liveSessionService.receiveFinalTranscript({
+        sessionId: opts.sessionId,
+        text: opts.text,
+        offsetMs: Number.isFinite(opts.offsetMs) ? Number(opts.offsetMs) : undefined,
+        durationMs: Number.isFinite(opts.durationMs) ? Number(opts.durationMs) : undefined,
+        translation: typeof opts.translation === 'string' ? opts.translation : undefined,
+      });
+      return { success: true };
+    } catch (error) {
+      console.error('live-session-final failed:', error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+);
+
+ipcMain.on(
+  'live-session-pcm-chunk',
+  (
+    _event,
+    opts?: {
+      sessionId?: string;
+      audioData?: ArrayBuffer | Uint8Array;
+      sampleRate?: number;
+      channelCount?: number;
+      offsetMs?: number;
+      durationMs?: number;
+      sequence?: number;
+    },
+  ) => {
+    try {
+      if (!opts?.sessionId || !opts.audioData) return;
+      liveSessionService.appendPcm({
+        sessionId: opts.sessionId,
+        audioData: opts.audioData,
+        sampleRate: Number.isFinite(opts.sampleRate) ? Number(opts.sampleRate) : 48_000,
+        channelCount: Number.isFinite(opts.channelCount) ? Number(opts.channelCount) : 1,
+        offsetMs: Number.isFinite(opts.offsetMs) ? Number(opts.offsetMs) : 0,
+        durationMs: Number.isFinite(opts.durationMs) ? Number(opts.durationMs) : 0,
+        sequence: Number.isFinite(opts.sequence) ? Number(opts.sequence) : 0,
+      });
+    } catch (error) {
+      console.error('live-session-pcm-chunk failed:', error);
+    }
+  },
+);
+
+ipcMain.handle('live-session-stop', async (_, sessionId?: string) => {
+  try {
+    if (!sessionId) return { success: false, error: 'Missing live session id.' };
+    return { success: true, snapshot: await liveSessionService.stop(sessionId) };
+  } catch (error) {
+    console.error('live-session-stop failed:', error);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('live-session-snapshot', async () => ({
+  success: true,
+  snapshot: liveSessionService.snapshot(),
+}));
+
+ipcMain.handle(
+  'live-session-set-translate',
+  async (_, opts?: { sessionId?: string; translate?: boolean }) => {
+    try {
+      if (!opts?.sessionId) return { success: false, error: 'Missing live session id.' };
+      return {
+        success: true,
+        snapshot: liveSessionService.setTranslate(opts.sessionId, opts.translate !== false),
+      };
+    } catch (error) {
+      console.error('live-session-set-translate failed:', error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+);
+
+ipcMain.handle(
+  'live-session-ask',
+  async (
+    _event,
+    opts?: { sessionId?: string; question?: string; history?: AgentChatMessage[] },
+  ): Promise<{ success: true; result: AgentRunResult } | { success: false; error: string }> => {
+    try {
+      if (!opts?.sessionId) return { success: false, error: 'Missing live session id.' };
+      const result = await liveSessionService.ask({
+        sessionId: opts.sessionId,
+        question: opts.question ?? '',
+        history: Array.isArray(opts.history) ? opts.history : [],
+      });
+      return { success: true, result };
+    } catch (error) {
+      console.error('live-session-ask failed:', error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+);
 
 // Agent chat: blocks until the agent produces a final answer. During the run the
 // main process may ask the renderer to confirm a config change via the

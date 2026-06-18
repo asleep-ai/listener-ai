@@ -44,6 +44,15 @@ describe('computeCost', () => {
     assert.equal(roundCents(summary.usd), pricing.input!);
   });
 
+  it('prices gemini-3.5-flash when used for direct transcription', () => {
+    const pricing = MODEL_PRICING['gemini-3.5-flash'];
+    const result = computeCost('gemini-3.5-flash', 'transcription', {
+      input: 1_000_000,
+      output: 1_000_000,
+    });
+    assert.equal(roundCents(result.usd), pricing.input! + pricing.output!);
+  });
+
   it('prices gpt-4o-transcribe per audio minute, ignoring tokens', () => {
     const pricing = MODEL_PRICING['gpt-4o-transcribe'];
     // 600s = 10min; spurious `input` field must not double-bill.
@@ -52,6 +61,33 @@ describe('computeCost', () => {
       input: 1_000_000,
     });
     assert.equal(roundCents(result.usd), 10 * pricing.audioPerMinute!);
+  });
+
+  it('prices realtime models per audio minute', () => {
+    assert.equal(
+      roundCents(
+        computeCost('gpt-realtime-whisper', 'realtime', {
+          audioSeconds: 120,
+        }).usd,
+      ),
+      0.034,
+    );
+    assert.equal(
+      roundCents(
+        computeCost('gpt-realtime-translate', 'realtime', {
+          audioSeconds: 60,
+        }).usd,
+      ),
+      0.034,
+    );
+    assert.equal(
+      roundCents(
+        computeCost('gemini-3.5-live-translate-preview', 'realtime', {
+          audioSeconds: 60,
+        }).usd,
+      ),
+      0.0368,
+    );
   });
 
   it('treats thoughts tokens as output (folded by caller)', () => {

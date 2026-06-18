@@ -19,7 +19,10 @@ const CODEX_ENV_KEYS = [
   'OPENAI_CODEX_ACCESS_TOKEN',
   'OPENAI_CODEX_REFRESH_TOKEN',
   'OPENAI_CODEX_EXPIRES',
+  'OPENAI_API_KEY',
+  'GEMINI_API_KEY',
   'LISTENER_AI_PROVIDER',
+  'LISTENER_CODEX_AUTH_PATH',
 ];
 const savedEnv = new Map<string, string | undefined>();
 
@@ -48,6 +51,35 @@ function freshDataPath(suffix: string): string {
   const dir = path.join(workDir, suffix);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+function fakeJwt(expMs: number, accountId = 'acct_cli'): string {
+  const payload = {
+    exp: Math.floor(expMs / 1000),
+    'https://api.openai.com/auth': { chatgpt_account_id: accountId },
+  };
+  const encoded = Buffer.from(JSON.stringify(payload))
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+  return `header.${encoded}.sig`;
+}
+
+function writeCodexCliAuth(filePath: string, expMs = Date.now() + 60_000): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(
+    filePath,
+    JSON.stringify({
+      auth_mode: 'chatgpt',
+      tokens: {
+        access_token: fakeJwt(expMs),
+        refresh_token: 'cli-refresh',
+        account_id: 'acct_cli',
+      },
+    }),
+    'utf-8',
+  );
 }
 
 describe('ConfigService: Codex OAuth credential source', () => {
@@ -87,6 +119,52 @@ describe('ConfigService: Codex OAuth credential source', () => {
     cfg.setCodexOAuth({ access: 'config-access', refresh: 'r', expires: Date.now() + 60_000 });
 
     assert.equal(cfg.getCodexOAuth()?.access, 'config-access');
+  });
+
+  it('returns Codex CLI credentials when app config and env have none', () => {
+    const authPath = path.join(freshDataPath('cli-auth'), 'auth.json');
+    writeCodexCliAuth(authPath);
+    process.env.LISTENER_CODEX_AUTH_PATH = authPath;
+
+    const cfg = new ConfigService(freshDataPath('cli-only'));
+    const source = cfg.getCodexOAuthSource();
+
+    assert.equal(source?.source, 'codexCli');
+    assert.equal(source?.credentials.refresh, 'cli-refresh');
+    assert.equal(source?.credentials.accountId, 'acct_cli');
+    assert.equal(cfg.hasStoredCodexOAuth(), false);
+    assert.equal(cfg.hasCodexOAuth(), true);
+  });
+
+  it('prefers fresh Codex CLI credentials over stale app config credentials', () => {
+    const authPath = path.join(freshDataPath('cli-auth-over-stale'), 'auth.json');
+    writeCodexCliAuth(authPath, Date.now() + 60_000);
+    process.env.LISTENER_CODEX_AUTH_PATH = authPath;
+
+    const cfg = new ConfigService(freshDataPath('stale-config-cli-fallback'));
+    cfg.setCodexOAuth({ access: 'stale-config-access', refresh: 'stale-refresh', expires: 1 });
+    const source = cfg.getCodexOAuthSource();
+
+    assert.equal(source?.source, 'codexCli');
+    assert.equal(source?.credentials.refresh, 'cli-refresh');
+    assert.equal(cfg.getCodexOAuth()?.refresh, 'cli-refresh');
+    assert.equal(cfg.hasStoredCodexOAuth(), true);
+  });
+
+  it('keeps fresh app config credentials ahead of Codex CLI credentials', () => {
+    const authPath = path.join(freshDataPath('cli-auth-lower-priority'), 'auth.json');
+    writeCodexCliAuth(authPath);
+    process.env.LISTENER_CODEX_AUTH_PATH = authPath;
+
+    const cfg = new ConfigService(freshDataPath('fresh-config-cli-present'));
+    cfg.setCodexOAuth({
+      access: 'fresh-config-access',
+      refresh: 'fresh-config-refresh',
+      expires: Date.now() + 60_000,
+    });
+
+    assert.equal(cfg.getCodexOAuthSource()?.source, 'config');
+    assert.equal(cfg.getCodexOAuth()?.access, 'fresh-config-access');
   });
 
   it('clearCodexOAuth removes the key from disk (not resurrected by save-merge)', () => {
@@ -302,6 +380,66 @@ describe('ConfigService: updateConfig validation for aiProvider', () => {
     const cfg = new ConfigService(dataPath);
     cfg.updateConfig({ aiProvider: 'codex' });
     assert.equal(cfg.getAiProvider(), 'codex');
+  });
+});
+
+describe('ConfigService: live STT config', () => {
+  it('returns env live STT keys when config has none', () => {
+    process.env.OPENAI_API_KEY = 'env-openai';
+
+    const cfg = new ConfigService(freshDataPath('live-env'));
+    assert.equal(cfg.getOpenAiApiKey(), 'env-openai');
+    assert.equal(cfg.hasStreamingLiveSttAuth(), true);
+  });
+
+  it('does not count Codex OAuth as OpenAI live Realtime auth', () => {
+    const cfg = new ConfigService(freshDataPath('live-codex-oauth'));
+    cfg.updateConfig({ liveSttProvider: 'openai' });
+    cfg.setCodexOAuth({
+      access: 'codex-access',
+      refresh: 'codex-refresh',
+      expires: Date.now() + 60_000,
+    });
+
+    assert.equal(cfg.getOpenAiApiKey(), undefined);
+    assert.equal(cfg.hasStreamingLiveSttAuth(), false);
+  });
+
+  it('does not count Codex OAuth as auto live streaming auth', () => {
+    const cfg = new ConfigService(freshDataPath('live-auto-codex-oauth'));
+    cfg.updateConfig({ liveSttProvider: 'auto' });
+    cfg.setCodexOAuth({
+      access: 'codex-access',
+      refresh: 'codex-refresh',
+      expires: Date.now() + 60_000,
+    });
+
+    assert.equal(cfg.hasStreamingLiveSttAuth(), false);
+  });
+
+  it('accepts Gemini API key as Gemini live auth', () => {
+    process.env.GEMINI_API_KEY = 'env-gemini';
+
+    const cfg = new ConfigService(freshDataPath('live-gemini-env'));
+    cfg.updateConfig({ liveSttProvider: 'gemini' });
+    assert.equal(cfg.getGeminiApiKey(), 'env-gemini');
+    assert.equal(cfg.hasStreamingLiveSttAuth(), true);
+  });
+
+  it('config live STT keys win over env values', () => {
+    process.env.OPENAI_API_KEY = 'env-openai';
+
+    const cfg = new ConfigService(freshDataPath('live-config-wins'));
+    cfg.setOpenAiApiKey('config-openai');
+    assert.equal(cfg.getOpenAiApiKey(), 'config-openai');
+  });
+
+  it('drops invalid liveSttProvider values on updateConfig', () => {
+    const cfg = new ConfigService(freshDataPath('live-provider-validation'));
+    cfg.updateConfig({ liveSttProvider: 'openai' });
+    assert.equal(cfg.getLiveSttProvider(), 'openai');
+    cfg.updateConfig({ liveSttProvider: 'claude' as never });
+    assert.equal(cfg.getLiveSttProvider(), 'openai');
   });
 });
 

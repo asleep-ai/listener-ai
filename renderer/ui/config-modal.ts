@@ -20,6 +20,11 @@ let cancelConfigBtn: HTMLButtonElement | null = null;
 let aiProviderSelect: HTMLSelectElement | null = null;
 let geminiApiKeyInput: HTMLInputElement | null = null;
 let geminiThinkingLevelSelect: HTMLSelectElement | null = null;
+let liveSttProviderSelect: HTMLSelectElement | null = null;
+let openaiApiKeyInput: HTMLInputElement | null = null;
+let liveProviderNotice: HTMLElement | null = null;
+let liveSttLanguageInput: HTMLInputElement | null = null;
+let liveTranslationLanguageInput: HTMLInputElement | null = null;
 let loginCodexOAuthBtn: HTMLButtonElement | null = null;
 let clearCodexOAuthBtn: HTMLButtonElement | null = null;
 let codexOAuthStatus: HTMLElement | null = null;
@@ -40,6 +45,8 @@ let knownWordsContainer: HTMLElement | null = null;
 let knownWordsField: HTMLInputElement | null = null;
 let knownWordsValues: string[] = [];
 let aiPane: HTMLElement | null = null;
+let codexOAuthConfigured = false;
+let codexOAuthSource: 'config' | 'env' | 'codexCli' | null = null;
 
 // Each Codex sign-in click bumps this; the in-flight click checks its captured
 // token against the current one after `await`, discarding stale results from
@@ -156,6 +163,109 @@ function setGoogleSyncStatus(text: string, state: 'idle' | 'success' | 'error' =
   setStatusEl(googleDriveSyncStatusEl, text, state);
 }
 
+function codexOAuthStatusLabel(source: typeof codexOAuthSource): string {
+  if (source === 'codexCli') return 'Signed in via Codex CLI';
+  if (source === 'env') return 'Signed in via env';
+  return 'Signed in';
+}
+
+function applyCodexOAuthState(config: {
+  codexOAuthConfigured?: unknown;
+  codexOAuthSource?: unknown;
+}): void {
+  codexOAuthConfigured = !!config.codexOAuthConfigured;
+  codexOAuthSource =
+    config.codexOAuthSource === 'config' ||
+    config.codexOAuthSource === 'env' ||
+    config.codexOAuthSource === 'codexCli'
+      ? config.codexOAuthSource
+      : null;
+}
+
+function readLiveProvider(): 'auto' | 'openai' | 'gemini' | 'chunked' {
+  const value = liveSttProviderSelect?.value;
+  if (value === 'openai' || value === 'gemini' || value === 'chunked') return value;
+  return 'auto';
+}
+
+function setLiveProviderNotice(
+  text: string,
+  state: 'info' | 'success' | 'warning' | 'error' = 'info',
+): void {
+  if (!liveProviderNotice) return;
+  liveProviderNotice.textContent = text;
+  liveProviderNotice.hidden = text.length === 0;
+  liveProviderNotice.className = `config-notice is-${state}`;
+}
+
+function updateLiveProviderNotice(): void {
+  const provider = readLiveProvider();
+  const hasOpenAiKey = (openaiApiKeyInput?.value.trim() ?? '').length > 0;
+  const hasGeminiKey = (geminiApiKeyInput?.value.trim() ?? '').length > 0;
+
+  if (provider === 'chunked') {
+    setLiveProviderNotice(
+      'Live captions will use 12-second chunks through the saved AI provider. This is slower but avoids live API credentials.',
+      'info',
+    );
+    return;
+  }
+
+  if (provider === 'gemini') {
+    if (hasGeminiKey) {
+      setLiveProviderNotice(
+        'Gemini Live will handle live transcription and translation.',
+        'success',
+      );
+    } else {
+      setLiveProviderNotice(
+        'Gemini Live needs a Gemini API key. Add one or choose 12s fallback.',
+        'warning',
+      );
+    }
+    return;
+  }
+
+  if (hasOpenAiKey) {
+    setLiveProviderNotice(
+      'OpenAI Realtime live translation will use this OpenAI API key.',
+      'success',
+    );
+    return;
+  }
+
+  if (provider === 'openai') {
+    if (hasGeminiKey) {
+      setLiveProviderNotice(
+        'OpenAI Realtime live translation needs an OpenAI API key. Without one, Listener.AI will fall back to Gemini Live.',
+        'warning',
+      );
+    } else {
+      setLiveProviderNotice(
+        'OpenAI Realtime live translation needs an OpenAI API key. Codex sign-in is not enough for this live translation call.',
+        'warning',
+      );
+    }
+    return;
+  }
+
+  if (hasGeminiKey) {
+    setLiveProviderNotice(
+      codexOAuthConfigured
+        ? 'Codex sign-in is available for Codex features, but OpenAI live translation needs an OpenAI API key. Auto will use Gemini Live.'
+        : 'Auto will use Gemini Live unless you add an OpenAI API key for OpenAI Realtime.',
+      'info',
+    );
+  } else {
+    setLiveProviderNotice(
+      codexOAuthConfigured
+        ? 'Codex sign-in is available for Codex features, but live streaming needs an OpenAI API key or Gemini API key.'
+        : 'Auto needs an OpenAI API key or Gemini API key for streaming live translation; otherwise use 12s fallback.',
+      'warning',
+    );
+  }
+}
+
 // Translate a progress event into the pill label. Kept separate from the
 // onGoogleSyncStatus handler because the same shape arrives from two paths:
 // live `google-sync-progress` IPC events, and the snapshot returned by
@@ -206,7 +316,12 @@ export async function showConfigModal(): Promise<void> {
     geminiThinkingLevel?: 'low' | 'medium' | 'high';
     codexModel?: string;
     codexTranscriptionModel?: string;
+    liveSttProvider?: 'auto' | 'openai' | 'gemini' | 'chunked';
+    openaiApiKey?: string;
+    liveSttLanguage?: string;
+    liveTranslationLanguage?: string;
     codexOAuthConfigured?: boolean;
+    codexOAuthSource?: 'config' | 'env' | 'codexCli';
     notionApiKey?: string;
     notionDatabaseId?: string;
     slackWebhookUrl?: string;
@@ -228,6 +343,18 @@ export async function showConfigModal(): Promise<void> {
   if (geminiApiKeyInput && config.geminiApiKey) {
     geminiApiKeyInput.value = config.geminiApiKey;
   }
+  if (liveSttProviderSelect) {
+    liveSttProviderSelect.value = config.liveSttProvider || 'auto';
+  }
+  if (openaiApiKeyInput) {
+    openaiApiKeyInput.value = config.openaiApiKey || '';
+  }
+  if (liveSttLanguageInput) {
+    liveSttLanguageInput.value = config.liveSttLanguage || '';
+  }
+  if (liveTranslationLanguageInput) {
+    liveTranslationLanguageInput.value = config.liveTranslationLanguage || 'ko';
+  }
   applyModelValue('geminiModel', config.geminiModel);
   applyModelValue('geminiFlashModel', config.geminiFlashModel);
   applyModelValue('codexModel', config.codexModel);
@@ -236,9 +363,10 @@ export async function showConfigModal(): Promise<void> {
     // Defensive fallback; backend's getGeminiThinkingLevel normalizes first.
     geminiThinkingLevelSelect.value = config.geminiThinkingLevel || 'medium';
   }
+  applyCodexOAuthState(config);
   setCodexOAuthStatus(
-    config.codexOAuthConfigured ? 'Signed in' : 'Not signed in',
-    config.codexOAuthConfigured ? 'success' : 'idle',
+    codexOAuthConfigured ? codexOAuthStatusLabel(codexOAuthSource) : 'Not signed in',
+    codexOAuthConfigured ? 'success' : 'idle',
   );
   setGoogleOAuthStatus(
     config.googleOAuthConfigured ? 'Signed in' : 'Not signed in',
@@ -320,6 +448,7 @@ export async function showConfigModal(): Promise<void> {
   }
 
   applyAiProviderVisibility();
+  updateLiveProviderNotice();
 
   // Refresh "Usage this month" card on each open so the totals stay current
   // even if the user has been recording in the same session. Fire-and-forget;
@@ -478,6 +607,13 @@ export function setupConfigModal(): void {
   cancelConfigBtn = document.getElementById('cancelConfig') as HTMLButtonElement | null;
   aiProviderSelect = document.getElementById('aiProvider') as HTMLSelectElement | null;
   geminiApiKeyInput = document.getElementById('geminiApiKey') as HTMLInputElement | null;
+  liveSttProviderSelect = document.getElementById('liveSttProvider') as HTMLSelectElement | null;
+  openaiApiKeyInput = document.getElementById('openaiApiKey') as HTMLInputElement | null;
+  liveProviderNotice = document.getElementById('liveProviderNotice');
+  liveSttLanguageInput = document.getElementById('liveSttLanguage') as HTMLInputElement | null;
+  liveTranslationLanguageInput = document.getElementById(
+    'liveTranslationLanguage',
+  ) as HTMLInputElement | null;
   setupModelControls();
   geminiThinkingLevelSelect = document.getElementById(
     'geminiThinkingLevel',
@@ -558,6 +694,9 @@ export function setupConfigModal(): void {
   if (aiProviderSelect) {
     aiProviderSelect.addEventListener('change', applyAiProviderVisibility);
   }
+  liveSttProviderSelect?.addEventListener('change', updateLiveProviderNotice);
+  openaiApiKeyInput?.addEventListener('input', updateLiveProviderNotice);
+  geminiApiKeyInput?.addEventListener('input', updateLiveProviderNotice);
 
   const openSlackAppCreatorBtn = document.getElementById(
     'openSlackAppCreator',
@@ -612,9 +751,11 @@ export function setupConfigModal(): void {
       const result = await window.electronAPI.loginCodexOAuth();
       if (myToken !== codexLoginToken) return;
       if (result.success) {
+        applyCodexOAuthState(result.config);
         if (aiProviderSelect) aiProviderSelect.value = 'codex';
         applyAiProviderVisibility();
-        setCodexOAuthStatus('Signed in', 'success');
+        updateLiveProviderNotice();
+        setCodexOAuthStatus(codexOAuthStatusLabel(codexOAuthSource), 'success');
       } else if (result.cancelled) {
         return;
       } else {
@@ -629,7 +770,12 @@ export function setupConfigModal(): void {
       try {
         const result = await window.electronAPI.clearCodexOAuth();
         if (result.success) {
-          setCodexOAuthStatus('Not signed in');
+          applyCodexOAuthState(result.config);
+          updateLiveProviderNotice();
+          setCodexOAuthStatus(
+            codexOAuthConfigured ? codexOAuthStatusLabel(codexOAuthSource) : 'Not signed in',
+            codexOAuthConfigured ? 'success' : 'idle',
+          );
         } else {
           setCodexOAuthStatus(result.error, 'error');
         }
@@ -752,6 +898,16 @@ export function setupConfigModal(): void {
     saveConfigBtn.addEventListener('click', async () => {
       const aiProvider = aiProviderSelect?.value === 'codex' ? 'codex' : 'gemini';
       const geminiKey = geminiApiKeyInput?.value.trim() ?? '';
+      const liveSttProviderValue = liveSttProviderSelect?.value;
+      const liveSttProvider =
+        liveSttProviderValue === 'openai' ||
+        liveSttProviderValue === 'gemini' ||
+        liveSttProviderValue === 'chunked'
+          ? liveSttProviderValue
+          : 'auto';
+      const openaiApiKey = openaiApiKeyInput?.value.trim() ?? '';
+      const liveSttLanguage = liveSttLanguageInput?.value.trim() ?? '';
+      const liveTranslationLanguage = liveTranslationLanguageInput?.value.trim() || 'ko';
       const geminiModel = readModelValue('geminiModel');
       const geminiFlashModel = readModelValue('geminiFlashModel');
       const codexModel = readModelValue('codexModel');
@@ -820,6 +976,10 @@ export function setupConfigModal(): void {
         geminiThinkingLevel: geminiThinkingLevel,
         codexModel: codexModel,
         codexTranscriptionModel: codexTranscriptionModel,
+        liveSttProvider: liveSttProvider,
+        openaiApiKey: openaiApiKey,
+        liveSttLanguage: liveSttLanguage,
+        liveTranslationLanguage: liveTranslationLanguage,
         notionApiKey: notionKey,
         notionDatabaseId: notionDb,
         slackWebhookUrl: slackWebhookUrl,

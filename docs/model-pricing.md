@@ -1,6 +1,6 @@
 # AI Model Pricing Reference
 
-Pricing for the AI models Listener.AI uses (or could switch to) for transcription, summarization, and the chat agent. Verified May 2026.
+Pricing for the AI models Listener.AI uses (or could switch to) for transcription, live captions, summarization, and the chat agent. Verified June 2026.
 
 When prices drift, update the date in the cell and re-cite from the provider's own pricing page (not blogs).
 
@@ -12,6 +12,8 @@ When prices drift, update the date in the cell and re-cite from the provider's o
 | Summary (Gemini) | `geminiModel` | gemini-3.5-flash | $1.50/M input, $9.00/M output | Native thinking on (`thinking_level` configurable via `geminiThinkingLevel`: low/medium/high, default medium). Output billing includes thought tokens. |
 | Transcription (Codex) | `codexTranscriptionModel` | gpt-4o-transcribe | $0.006/min ($2.50/M audio in, $10.00/M text out) | No speaker diarization. `prompt` param is vocabulary/style hint only. |
 | Summary + agent (Codex) | `codexModel` | gpt-5.5 (via ChatGPT Codex Responses) | $5.00/M input, $30.00/M output (API price; ChatGPT subscription absorbs cost) | Rejects `temperature`/sampling params (reasoning model). Cached input $0.50/M. |
+| Live transcription (streaming) | `liveSttProvider`, `openaiLiveTranscriptionModel` | gpt-realtime-whisper or gemini-3.1-flash-live-preview | OpenAI: $0.017/min. Gemini: ~$0.005/min input audio | Auto mode tries OpenAI Realtime with a direct OpenAI API key, then Gemini Live, then chunked fallback. |
+| Live translation (streaming captions) | `liveSttProvider`, `openaiLiveTranslationModel`, `liveTranslationLanguage` | gpt-realtime-translate or gemini-3.5-live-translate-preview | OpenAI: $0.034/min. Gemini: $0.0053/min input audio + $0.0315/min output audio | OpenAI Realtime live translation requires a standard OpenAI API key; Codex OAuth is not treated as live translation auth. |
 
 ## Provider notes
 
@@ -104,6 +106,8 @@ For Korean meetings the data points are thin. AssemblyAI Universal-2 has confirm
 
 - [Google AI Pricing](https://ai.google.dev/pricing)
 - [OpenAI API Pricing](https://developers.openai.com/api/docs/pricing)
+- [OpenAI Realtime transcription](https://developers.openai.com/api/docs/guides/realtime-transcription)
+- [OpenAI Realtime translation](https://developers.openai.com/api/docs/guides/realtime-translation)
 - [OpenAI Codex Pricing](https://developers.openai.com/codex/pricing)
 - [OpenAI Transcription pricing aggregator](https://costgoat.com/pricing/openai-transcription)
 - [gpt-4o-transcribe-diarize model card](https://platform.openai.com/docs/models/gpt-4o-transcribe-diarize)
