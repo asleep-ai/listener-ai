@@ -477,6 +477,10 @@ const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 4_000;
 const RECONNECT_STABLE_MS = 30_000;
+// @google/genai resolves ai.live.connect from `onopen` and does not reject on a
+// pre-open error/close, so a dead network can leave it pending forever. Bound
+// each attempt so a wedged reconnect fails and the loop can retry or give up.
+const CONNECT_TIMEOUT_MS = 15_000;
 
 export type GeminiLiveConnect = (params: LiveConnectParameters) => Promise<Session>;
 
@@ -568,12 +572,20 @@ export class GeminiLiveSession implements LiveSttSession {
     // no per-connection guard. If a GoAway pre-handoff is ever added (opening the
     // next socket before the old one closes), connections would overlap and each
     // callback would then have to ignore events from a non-current connection.
-    const session = await this.connectFn({
+    let timedOut = false;
+    const connectPromise = this.connectFn({
       model: this.model,
-      config: { ...this.baseConfig, sessionResumption: { handle: this.resumeHandle } },
+      // Pass the handle only when present -- an explicit `handle: undefined` could
+      // be serialized differently than an absent key by some clients.
+      config: {
+        ...this.baseConfig,
+        sessionResumption: this.resumeHandle ? { handle: this.resumeHandle } : {},
+      },
       callbacks: {
         onopen: () => {
-          this.lastConnectedAt = Date.now();
+          // Monotonic clock: connection-stability timing must not be skewed by
+          // wall-clock adjustments (NTP, manual changes).
+          this.lastConnectedAt = performance.now();
           this.callbacks.onStatus?.(
             isResume
               ? `Reconnected to Gemini Live ${this.kind}.`
@@ -591,7 +603,27 @@ export class GeminiLiveSession implements LiveSttSession {
         },
       },
     });
-    this.session = session;
+    // If the connection opens only after we have already timed out, discard the
+    // late socket so it doesn't leak.
+    connectPromise
+      .then((late) => {
+        if (timedOut) late.close();
+      })
+      .catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      this.session = await Promise.race([
+        connectPromise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(new Error('Timed out connecting to Gemini Live.'));
+          }, CONNECT_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private async handleDisconnect(): Promise<void> {
@@ -608,7 +640,10 @@ export class GeminiLiveSession implements LiveSttSession {
         // A connection that stayed up comfortably (e.g. the ~10-min cap) is a
         // fresh failure, not a flapping retry storm -- reset the counter so a
         // long-running session can keep reconnecting indefinitely.
-        if (this.lastConnectedAt && Date.now() - this.lastConnectedAt > RECONNECT_STABLE_MS) {
+        if (
+          this.lastConnectedAt &&
+          performance.now() - this.lastConnectedAt > RECONNECT_STABLE_MS
+        ) {
           this.reconnectAttempts = 0;
         }
         let reconnected = false;

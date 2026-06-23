@@ -22,7 +22,9 @@ class FakeSession {
 }
 
 interface ConnectCapture {
-  params: { config: { sessionResumption?: { handle?: string }; contextWindowCompression?: unknown } };
+  params: {
+    config: { sessionResumption?: { handle?: string }; contextWindowCompression?: unknown };
+  };
   callbacks: {
     onopen: () => void;
     onmessage: (message: unknown) => void;
@@ -218,5 +220,8 @@ test('GeminiLiveSession coalesces a close that arrives during an in-flight recon
   await flush();
 
   assert.equal(calls, 3, 'initial connect + first reconnect + coalesced second reconnect');
-  assert.ok(!events.some((e) => e.type === 'error'), 'the coalesced close did not surface an error');
+  assert.ok(
+    !events.some((e) => e.type === 'error'),
+    'the coalesced close did not surface an error',
+  );
 });
