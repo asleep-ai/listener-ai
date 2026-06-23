@@ -261,3 +261,40 @@ test('GeminiLiveSession fails create() on a pre-open close without a background 
 
   assert.equal(calls, 1, 'a pre-open initial failure does not spawn a background reconnect');
 });
+
+test('GeminiLiveSession ignores a late open/close from a timed-out reconnect attempt', async () => {
+  const captures: ConnectCapture[] = [];
+  let calls = 0;
+  const connect = (async (params: unknown) => {
+    const idx = calls++;
+    const session = new FakeSession();
+    const p = params as ConnectCapture['params'] & { callbacks: ConnectCapture['callbacks'] };
+    captures.push({ params: p, callbacks: p.callbacks, session });
+    // Reconnect attempt #1 (idx 1) hangs so it hits the connect timeout; the
+    // initial connect (idx 0) and the second reconnect attempt (idx 2) resolve.
+    if (idx === 1) return new Promise<FakeSession>(() => {});
+    return session;
+  }) as never;
+
+  const { callbacks, events } = recordCallbacks();
+  await GeminiLiveSession.create(CONFIG, callbacks, {
+    connect,
+    sleep: instantSleep,
+    connectTimeoutMs: 5,
+  });
+  captures[0].callbacks.onopen();
+  captures[0].callbacks.onclose();
+  // Wait for the hung attempt #1 to time out (~5ms) and attempt #2 to take over.
+  for (let i = 0; i < 100 && calls < 3; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(calls, 3, 'the hung attempt timed out and a retry reconnected');
+
+  // Attempt #1 (captures[1]) opens only now -- after it timed out and our cleanup
+  // would close it. Both the late open and close must be ignored so they don't
+  // start a reconnect over the healthy attempt #2.
+  captures[1].callbacks.onopen();
+  captures[1].callbacks.onclose();
+  await flush();
+
+  assert.equal(calls, 3, 'a late open/close from the timed-out attempt starts no new reconnect');
+  assert.ok(!events.some((e) => e.type === 'error'), 'no error surfaced from the stale attempt');
+});

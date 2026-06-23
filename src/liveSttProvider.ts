@@ -489,6 +489,8 @@ export interface GeminiLiveSessionDeps {
   connect?: GeminiLiveConnect;
   /** Override the backoff/flush sleep (tests collapse it so reconnects run instantly). */
   sleep?: (ms: number) => Promise<void>;
+  /** Override the per-attempt connect timeout (tests shrink it to force timeouts fast). */
+  connectTimeoutMs?: number;
 }
 
 export class GeminiLiveSession implements LiveSttSession {
@@ -508,6 +510,7 @@ export class GeminiLiveSession implements LiveSttSession {
   private constructor(
     private readonly connectFn: GeminiLiveConnect,
     private readonly sleepFn: (ms: number) => Promise<void>,
+    private readonly connectTimeoutMs: number,
     private readonly model: string,
     private readonly baseConfig: LiveConnectConfig,
     kind: 'transcription' | 'translation',
@@ -527,6 +530,7 @@ export class GeminiLiveSession implements LiveSttSession {
     const ai = new GoogleGenAI({ apiKey });
     const connectFn = deps.connect ?? ((params) => ai.live.connect(params));
     const sleepFn = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    const connectTimeoutMs = deps.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
     const model = translate
       ? DEFAULT_GEMINI_LIVE_TRANSLATION_MODEL
       : DEFAULT_GEMINI_LIVE_TRANSCRIPTION_MODEL;
@@ -554,6 +558,7 @@ export class GeminiLiveSession implements LiveSttSession {
     const instance = new GeminiLiveSession(
       connectFn,
       sleepFn,
+      connectTimeoutMs,
       model,
       baseConfig,
       translate ? 'translation' : 'transcription',
@@ -596,6 +601,9 @@ export class GeminiLiveSession implements LiveSttSession {
       },
       callbacks: {
         onopen: () => {
+          // Ignore a late open from an attempt we already abandoned (timed out)
+          // or from any attempt once the session has been closed.
+          if (timedOut || this.closed) return;
           opened = true;
           // Monotonic clock: connection-stability timing must not be skewed by
           // wall-clock adjustments (NTP, manual changes).
@@ -606,13 +614,20 @@ export class GeminiLiveSession implements LiveSttSession {
               : `Connected to Gemini Live ${this.kind}.`,
           );
         },
-        onmessage: (message) => this.handleMessage(message),
+        onmessage: (message) => {
+          if (timedOut || this.closed) return;
+          this.handleMessage(message);
+        },
         onerror: (event) => {
           // Let onclose drive reconnection; retain the message so the surfaced
           // error is meaningful if the reconnect budget is exhausted.
           this.lastErrorMessage = event.message || 'Gemini Live connection failed.';
         },
         onclose: () => {
+          // A timed-out attempt's late close (including our own timeout cleanup
+          // close) must not drive a reconnect over the connection that already
+          // replaced it; likewise once the session is closed.
+          if (timedOut || this.closed) return;
           if (opened) {
             void this.handleDisconnect();
           } else {
@@ -637,7 +652,7 @@ export class GeminiLiveSession implements LiveSttSession {
           timer = setTimeout(() => {
             timedOut = true;
             reject(new Error('Timed out connecting to Gemini Live.'));
-          }, CONNECT_TIMEOUT_MS);
+          }, this.connectTimeoutMs);
         }),
       ]);
     } finally {
