@@ -209,7 +209,13 @@ test('GeminiLiveSession coalesces a close that arrives during an in-flight recon
     const session = new FakeSession();
     const p = params as ConnectCapture['params'] & { callbacks: ConnectCapture['callbacks'] };
     captures.push({ params: p, callbacks: p.callbacks, session });
-    if (idx === 1) p.callbacks.onclose();
+    // The first reconnect opens, then immediately drops again before
+    // handleDisconnect settles. Only an opened connection drives a reconnect, so
+    // fire onopen before onclose to exercise the pendingReconnect coalescing.
+    if (idx === 1) {
+      p.callbacks.onopen();
+      p.callbacks.onclose();
+    }
     return session;
   }) as never;
 
@@ -224,4 +230,34 @@ test('GeminiLiveSession coalesces a close that arrives during an in-flight recon
     !events.some((e) => e.type === 'error'),
     'the coalesced close did not surface an error',
   );
+});
+
+test('GeminiLiveSession fails create() on a pre-open close without a background reconnect', async () => {
+  const captures: ConnectCapture[] = [];
+  let calls = 0;
+  // The initial connection closes before it ever opens (the pre-open SDK failure
+  // mode). create() must reject so LiveSessionService can fall back, and must NOT
+  // start a background reconnect on the instance it is about to discard.
+  const connect = (async (params: unknown) => {
+    const idx = calls++;
+    const session = new FakeSession();
+    const p = params as ConnectCapture['params'] & { callbacks: ConnectCapture['callbacks'] };
+    captures.push({ params: p, callbacks: p.callbacks, session });
+    if (idx === 0) {
+      // Pre-open close: the SDK fires onclose but never resolves the connect
+      // promise (no onopen), so model that by never resolving here.
+      p.callbacks.onclose();
+      return new Promise<FakeSession>(() => {});
+    }
+    return session;
+  }) as never;
+
+  const { callbacks } = recordCallbacks();
+  await assert.rejects(
+    GeminiLiveSession.create(CONFIG, callbacks, { connect, sleep: instantSleep }),
+    /closed before opening/,
+  );
+  await flush();
+
+  assert.equal(calls, 1, 'a pre-open initial failure does not spawn a background reconnect');
 });

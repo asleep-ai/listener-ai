@@ -559,20 +559,33 @@ export class GeminiLiveSession implements LiveSttSession {
       translate ? 'translation' : 'transcription',
       callbacks,
     );
-    // The first connect rejects on failure so LiveSessionService can fall back
-    // to another provider; only post-open closes drive the reconnect loop.
-    await instance.connect(false);
+    // The first connect rejects on failure so LiveSessionService can fall back to
+    // another provider. Mark the instance closed on failure so a socket that opens
+    // after we've timed out can't start a background reconnect on an instance the
+    // caller is about to discard.
+    try {
+      await instance.connect(false);
+    } catch (error) {
+      instance.closed = true;
+      throw error;
+    }
     return instance;
   }
 
   private async connect(isResume: boolean): Promise<void> {
-    // A reconnect only ever starts from a connection's terminal `onclose` (the
-    // sole caller of handleDisconnect), so a superseded connection never emits
-    // again: at most one connection is live at a time, and these callbacks need
-    // no per-connection guard. If a GoAway pre-handoff is ever added (opening the
-    // next socket before the old one closes), connections would overlap and each
-    // callback would then have to ignore events from a non-current connection.
+    // Only a connection that actually opens may drive the reconnect loop. A close
+    // before onopen means this attempt never came up (the pre-open SDK failure the
+    // timeout also guards): fail the connect so create()/the reconnect loop can
+    // fall back or retry, instead of spinning a background reconnect on a dead
+    // attempt. Once opened, a reconnect only ever starts from that connection's
+    // terminal onclose, so connections never overlap and the callbacks need no
+    // further per-connection guard (a GoAway pre-handoff would change that).
+    let opened = false;
     let timedOut = false;
+    let failPreOpen: (error: Error) => void = () => {};
+    const preOpenFailure = new Promise<never>((_, reject) => {
+      failPreOpen = reject;
+    });
     const connectPromise = this.connectFn({
       model: this.model,
       // Pass the handle only when present -- an explicit `handle: undefined` could
@@ -583,6 +596,7 @@ export class GeminiLiveSession implements LiveSttSession {
       },
       callbacks: {
         onopen: () => {
+          opened = true;
           // Monotonic clock: connection-stability timing must not be skewed by
           // wall-clock adjustments (NTP, manual changes).
           this.lastConnectedAt = performance.now();
@@ -599,7 +613,11 @@ export class GeminiLiveSession implements LiveSttSession {
           this.lastErrorMessage = event.message || 'Gemini Live connection failed.';
         },
         onclose: () => {
-          void this.handleDisconnect();
+          if (opened) {
+            void this.handleDisconnect();
+          } else {
+            failPreOpen(new Error(this.lastErrorMessage ?? 'Gemini Live closed before opening.'));
+          }
         },
       },
     });
@@ -614,6 +632,7 @@ export class GeminiLiveSession implements LiveSttSession {
     try {
       this.session = await Promise.race([
         connectPromise,
+        preOpenFailure,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
             timedOut = true;
