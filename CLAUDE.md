@@ -243,6 +243,7 @@ Pre-v2 folders use `<sanitized-title>_<timestamp>/` with `summary.md` (YAML fron
 - **Test the assumption, not just the code.** When the implementation depends on "tool X errors on bad input", verify it. The original concat fallback assumed `-c copy` would throw on mismatched codecs; it doesn't.
 - **Generate synthetic fixtures with the tool itself.** `ffmpeg -f lavfi -i sine=frequency=440:duration=1` produces a 1-second webm in milliseconds — see `makeOpusWebm` in `test-helpers.ts`. No fixture binaries committed.
 - **No real Gemini calls in tests.** Add a `LISTENER_TEST_MODE` env-var stub before writing CLI/integration tests that exercise `GeminiService`.
+- **Inject the transport for network state machines.** `LISTENER_TEST_MODE` only stubs `GeminiService.transcribeAudio`, not the live WebSocket. `GeminiLiveSession.create(config, callbacks, { connect, sleep })` exposes a DI seam (a scripted fake `connect` transport plus an instant `sleep`) so `liveSttProvider.test.ts` drives the full reconnect/backoff/give-up state machine offline and deterministically. Reuse this shape for any future streaming provider rather than mocking `ws`/SDK internals.
 
 #### Conventions
 
@@ -288,6 +289,14 @@ This pattern caught two issues during issue #95 verification: a hard-to-see Merg
 - **Cancelling an in-flight Codex sign-in.** pi-ai's `loginOpenAICodex` doesn't take an AbortSignal; cancellation goes through the `onManualCodeInput` callback's rejection. When that promise rejects, pi-ai calls `server.cancelWait()` (so `waitForCode()` resolves null), records the error, and re-throws from the finally block, which closes the loopback server. `src/codexOAuth.ts` translates AbortSignal into that surface -- don't bypass it. The loopback is bound to fixed port 1455 with no fallback, and `server.close()` releases the socket on the next libuv tick but isn't awaited by pi-ai. `src/main.ts` keeps the pending-login slot occupied for an extra ~250ms cushion (`PORT_RELEASE_CUSHION_MS`) so a re-bind from the next attempt doesn't race the kernel. Treat the cushion as heuristic, not a guarantee.
 - **Testing via faux provider.** `pi.registerFauxProvider({ api: 'google-generative-ai', provider: 'google' })` overwrites the live API registry entry so `complete()` dispatches to scripted responses. `agentService.piai.test.ts` uses this to drive the full tool-call loop offline. Use `registration.unregister()` in `afterEach` to avoid leaking state between tests.
 
+## Live Captions / Streaming STT
+
+The live caption/translation panel streams mic (and optional system) audio to a realtime STT provider and renders interim/final segments plus a Q&A chat. Surfaces: `src/liveSessionService.ts` (session state machine), `src/liveSttProvider.ts` (provider transports), `src/openAiRealtimeClient.ts` (OpenAI ephemeral client-secret), `renderer/ui/live-session.ts` (UI + WebRTC peer). Provider is chosen by `liveSttProvider` (`auto` | `openai` | `gemini` | `chunked`): `auto` prefers OpenAI WebRTC when an OpenAI key is set, else Gemini Live, else a 12s chunked-REST fallback. The renderer ships mic PCM frames to main via IPC; main forwards them to the active provider session. `LiveSessionService` holds one `stream: LiveSttSession`, so swapping the underlying connection is invisible to the renderer.
+
+- **Gemini Live disconnects roughly every ~10 minutes by design.** Gemini caps an audio-only session at 15 min and the underlying WebSocket connection at ~10 min, sending a `GoAway` first ([Live API session docs](https://ai.google.dev/gemini-api/docs/live-session)). `GeminiLiveSession` survives this with `sessionResumption: {}` + `contextWindowCompression: { slidingWindow: {} }` in the connect config: it persists `sessionResumptionUpdate.newHandle` and, on an unexpected close, transparently reconnects with that handle. The inner `Session` is swapped in place so PCM keeps flowing and the user only sees "Reconnecting/Reconnected" status. Verified live: a real 12.5-min session reconnected at ~9:52 in ~1s with zero errors.
+- **Reconnect policy (in `GeminiLiveSession`).** Exponential backoff (500ms→4s), max 5 attempts. The attempt counter resets when the prior connection stayed up >30s, so a long session reconnects indefinitely while a flapping open/close loop still gives up after the cap. The **first** connect rejects on failure (so `LiveSessionService` can fall back to another provider); only a **post-open** close drives the reconnect loop. `close()` sets `closed` first so a user stop never triggers a reconnect, and a reconnect that resolves after `close()` tears down the orphaned socket. Reconnect logic is unit-tested offline via the `{ connect, sleep }` DI seam — no network.
+- **Not yet covered:** the OpenAI WebSocket fallback classes (`OpenAiRealtimeTranscription/TranslationSession`) and the OpenAI WebRTC primary path have **no** equivalent reconnect — they `onError` on a long-session drop. Only the Gemini path is hardened today.
+
 ## Background Recording Policy
 Recording starts silently — never bring the window to foreground (no `show()`/`focus()`) and never fire a "Recording Started" notification. This applies to all recording triggers: global shortcut, tray click, meeting detection, and display detection. Display detection in particular is designed to be discreet — the user allows recording via the notification without the app becoming visible. Only explicit user actions (dock click, tray menu "Open", notification click for non-recording events) should show the window.
 
@@ -318,7 +327,6 @@ Recording starts silently — never bring the window to foreground (no `show()`/
 ## Future Enhancements (Optional)
 - Cloud sync of transcriptions, settings, and agent chat history across devices
 - Email delivery of summaries / weekly digests
-- Live transcription during recording
 - Speaker diarization improvements
 - Export to PDF
 - Full multi-language support beyond Korean
