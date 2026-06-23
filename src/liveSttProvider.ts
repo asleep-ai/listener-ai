@@ -1,4 +1,11 @@
-import { GoogleGenAI, Modality, type LiveServerMessage, type Session } from '@google/genai';
+import {
+  GoogleGenAI,
+  Modality,
+  type LiveConnectConfig,
+  type LiveConnectParameters,
+  type LiveServerMessage,
+  type Session,
+} from '@google/genai';
 import WebSocket, { type RawData } from 'ws';
 import {
   DEFAULT_GEMINI_LIVE_TRANSCRIPTION_MODEL,
@@ -460,15 +467,45 @@ class OpenAiRealtimeTranslationSession implements LiveSttSession {
   }
 }
 
-class GeminiLiveSession implements LiveSttSession {
+// Gemini Live caps an audio-only session at 15 minutes and the underlying
+// WebSocket connection at ~10 minutes (sending a GoAway first), so a live
+// caption stream is severed roughly every 10 minutes. Session resumption plus
+// sliding-window context compression let one logical session outlive that cap;
+// on an unexpected socket close we transparently reconnect with the last
+// resumption handle instead of surfacing a fatal error.
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_BASE_DELAY_MS = 500;
+const RECONNECT_MAX_DELAY_MS = 4_000;
+const RECONNECT_STABLE_MS = 30_000;
+
+export type GeminiLiveConnect = (params: LiveConnectParameters) => Promise<Session>;
+
+export interface GeminiLiveSessionDeps {
+  /** Override the live-connect transport (tests inject a scripted fake). */
+  connect?: GeminiLiveConnect;
+  /** Override the backoff/flush sleep (tests collapse it so reconnects run instantly). */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export class GeminiLiveSession implements LiveSttSession {
   readonly provider = 'gemini' as const;
   readonly kind: 'transcription' | 'translation';
+  private session: Session | null = null;
   private inputTranscript = '';
   private outputTranscript = '';
   private closed = false;
+  private resumeHandle: string | undefined;
+  private reconnectAttempts = 0;
+  private reconnecting = false;
+  private pendingReconnect = false;
+  private lastConnectedAt = 0;
+  private lastErrorMessage: string | undefined;
 
   private constructor(
-    private readonly session: Session,
+    private readonly connectFn: GeminiLiveConnect,
+    private readonly sleepFn: (ms: number) => Promise<void>,
+    private readonly model: string,
+    private readonly baseConfig: LiveConnectConfig,
     kind: 'transcription' | 'translation',
     private readonly callbacks: LiveSttCallbacks,
   ) {
@@ -478,22 +515,27 @@ class GeminiLiveSession implements LiveSttSession {
   static async create(
     config: LiveSttProviderConfig,
     callbacks: LiveSttCallbacks,
+    deps: GeminiLiveSessionDeps = {},
   ): Promise<GeminiLiveSession> {
     const apiKey = config.geminiApiKey?.trim();
     if (!apiKey) throw new Error('Gemini API key is not configured.');
     const translate = config.translate !== false;
     const ai = new GoogleGenAI({ apiKey });
-    const holder: { live?: GeminiLiveSession } = {};
-    const pendingMessages: LiveServerMessage[] = [];
+    const connectFn = deps.connect ?? ((params) => ai.live.connect(params));
+    const sleepFn = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     const model = translate
       ? DEFAULT_GEMINI_LIVE_TRANSLATION_MODEL
       : DEFAULT_GEMINI_LIVE_TRANSCRIPTION_MODEL;
-    const session = await ai.live.connect({
-      model,
-      config: translate
+    // sessionResumption + contextWindowCompression keep one logical session
+    // alive past the ~10-minute connection cap; the resume handle is injected
+    // per-connect (empty on the first connect, populated on reconnects).
+    const baseConfig: LiveConnectConfig = {
+      responseModalities: [Modality.AUDIO],
+      inputAudioTranscription: {},
+      sessionResumption: {},
+      contextWindowCompression: { slidingWindow: {} },
+      ...(translate
         ? {
-            responseModalities: [Modality.AUDIO],
-            inputAudioTranscription: {},
             outputAudioTranscription: {},
             translationConfig: {
               targetLanguageCode: config.translationLanguage?.trim() || 'ko',
@@ -501,66 +543,147 @@ class GeminiLiveSession implements LiveSttSession {
             },
           }
         : {
-            responseModalities: [Modality.AUDIO],
-            inputAudioTranscription: {},
             systemInstruction:
               'You are a passive live captioner. Transcribe the user audio only. Do not answer, ask questions, or generate assistant content.',
-          },
-      callbacks: {
-        onopen: () =>
-          callbacks.onStatus?.(
-            `Connected to Gemini Live ${translate ? 'translation' : 'transcription'}.`,
-          ),
-        onmessage: (message) => {
-          if (holder.live) {
-            holder.live.handleMessage(message);
-          } else {
-            pendingMessages.push(message);
-          }
-        },
-        onerror: (event) => {
-          callbacks.onError(new Error(event.message || 'Gemini Live connection failed.'));
-        },
-        onclose: () => {
-          if (!holder.live?.closed) callbacks.onError(new Error('Gemini Live disconnected.'));
-        },
-      },
-    });
-    holder.live = new GeminiLiveSession(
-      session,
+          }),
+    };
+    const instance = new GeminiLiveSession(
+      connectFn,
+      sleepFn,
+      model,
+      baseConfig,
       translate ? 'translation' : 'transcription',
       callbacks,
     );
-    for (const message of pendingMessages) holder.live.handleMessage(message);
-    return holder.live;
+    // The first connect rejects on failure so LiveSessionService can fall back
+    // to another provider; only post-open closes drive the reconnect loop.
+    await instance.connect(false);
+    return instance;
+  }
+
+  private async connect(isResume: boolean): Promise<void> {
+    // A reconnect only ever starts from a connection's terminal `onclose` (the
+    // sole caller of handleDisconnect), so a superseded connection never emits
+    // again: at most one connection is live at a time, and these callbacks need
+    // no per-connection guard. If a GoAway pre-handoff is ever added (opening the
+    // next socket before the old one closes), connections would overlap and each
+    // callback would then have to ignore events from a non-current connection.
+    const session = await this.connectFn({
+      model: this.model,
+      config: { ...this.baseConfig, sessionResumption: { handle: this.resumeHandle } },
+      callbacks: {
+        onopen: () => {
+          this.lastConnectedAt = Date.now();
+          this.callbacks.onStatus?.(
+            isResume
+              ? `Reconnected to Gemini Live ${this.kind}.`
+              : `Connected to Gemini Live ${this.kind}.`,
+          );
+        },
+        onmessage: (message) => this.handleMessage(message),
+        onerror: (event) => {
+          // Let onclose drive reconnection; retain the message so the surfaced
+          // error is meaningful if the reconnect budget is exhausted.
+          this.lastErrorMessage = event.message || 'Gemini Live connection failed.';
+        },
+        onclose: () => {
+          void this.handleDisconnect();
+        },
+      },
+    });
+    this.session = session;
+  }
+
+  private async handleDisconnect(): Promise<void> {
+    if (this.closed) return;
+    if (this.reconnecting) {
+      // A close fired while we were already reconnecting; re-run once we settle.
+      this.pendingReconnect = true;
+      return;
+    }
+    this.reconnecting = true;
+    try {
+      do {
+        this.pendingReconnect = false;
+        // A connection that stayed up comfortably (e.g. the ~10-min cap) is a
+        // fresh failure, not a flapping retry storm -- reset the counter so a
+        // long-running session can keep reconnecting indefinitely.
+        if (this.lastConnectedAt && Date.now() - this.lastConnectedAt > RECONNECT_STABLE_MS) {
+          this.reconnectAttempts = 0;
+        }
+        let reconnected = false;
+        while (!this.closed && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+          this.reconnectAttempts++;
+          const delayMs = Math.min(
+            RECONNECT_MAX_DELAY_MS,
+            RECONNECT_BASE_DELAY_MS * 2 ** (this.reconnectAttempts - 1),
+          );
+          this.callbacks.onStatus?.(
+            `Reconnecting to Gemini Live ${this.kind} (attempt ${this.reconnectAttempts})...`,
+          );
+          await this.sleepFn(delayMs);
+          if (this.closed) return;
+          try {
+            await this.connect(true);
+            if (this.closed) {
+              // close() landed during the reconnect; don't leak the new socket.
+              this.session?.close();
+              return;
+            }
+            reconnected = true;
+            break;
+          } catch (error) {
+            // Keep the latest failure so the give-up error below is fresh and
+            // accurate, not a stale message from an earlier, already-recovered blip.
+            this.lastErrorMessage = error instanceof Error ? error.message : String(error);
+          }
+        }
+        if (!reconnected && !this.closed) {
+          this.callbacks.onError(new Error(this.lastErrorMessage ?? 'Gemini Live disconnected.'));
+          return;
+        }
+      } while (this.pendingReconnect && !this.closed);
+    } finally {
+      this.reconnecting = false;
+    }
   }
 
   sendPcm(frame: LiveSttPcmFrame): void {
+    if (this.closed || this.reconnecting || !this.session) return;
     if (frame.channelCount !== 1) return;
     const audio = pcmFrameToGeminiBase64(frame);
     if (!audio) return;
-    this.session.sendRealtimeInput({
-      audio: {
-        data: audio,
-        mimeType: `audio/pcm;rate=${GEMINI_PCM_RATE}`,
-      },
-    });
+    try {
+      this.session.sendRealtimeInput({
+        audio: {
+          data: audio,
+          mimeType: `audio/pcm;rate=${GEMINI_PCM_RATE}`,
+        },
+      });
+    } catch {
+      // The socket may be tearing down just before a reconnect; drop the frame.
+    }
   }
 
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     try {
-      this.session.sendRealtimeInput({ audioStreamEnd: true });
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      this.session?.sendRealtimeInput({ audioStreamEnd: true });
+      await this.sleepFn(2_000);
     } catch {
       // Best-effort flush before closing the websocket.
     }
     this.emitFinal();
-    this.session.close();
+    this.session?.close();
   }
 
   private handleMessage(message: LiveServerMessage): void {
+    // Persist the latest resumption handle so a reconnect resumes this session
+    // rather than starting fresh. newHandle is empty when resumable is false.
+    const resumption = message.sessionResumptionUpdate;
+    if (resumption?.newHandle) this.resumeHandle = resumption.newHandle;
+
     const content = message.serverContent;
     if (!content) return;
     const inputText = content.inputTranscription?.text;
