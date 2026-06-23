@@ -298,3 +298,27 @@ test('GeminiLiveSession ignores a late open/close from a timed-out reconnect att
   assert.equal(calls, 3, 'a late open/close from the timed-out attempt starts no new reconnect');
   assert.ok(!events.some((e) => e.type === 'error'), 'no error surfaced from the stale attempt');
 });
+
+test('GeminiLiveSession still emits a final transcript that arrives during the close drain', async () => {
+  const { connect, captures } = scriptConnect(['ok']);
+  const { callbacks, events } = recordCallbacks();
+  const session = await GeminiLiveSession.create(CONFIG, callbacks, {
+    connect,
+    sleep: instantSleep,
+  });
+  captures[0].callbacks.onopen();
+
+  // close() sets this.closed before the audioStreamEnd drain; a final transcript
+  // delivered during that window must still be processed and emitted.
+  const closing = session.close();
+  captures[0].callbacks.onmessage({
+    serverContent: { inputTranscription: { text: 'final words', finished: true } },
+  });
+  await closing;
+
+  const finals = events.filter((e) => e.type === 'final');
+  assert.ok(
+    finals.some((e) => JSON.stringify(e.value).includes('final words')),
+    'the final transcript from the close drain is captured, not dropped',
+  );
+});

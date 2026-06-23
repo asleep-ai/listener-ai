@@ -615,7 +615,11 @@ export class GeminiLiveSession implements LiveSttSession {
           );
         },
         onmessage: (message) => {
-          if (timedOut || this.closed) return;
+          // Keep processing during the close drain -- close() sets this.closed
+          // before the 2s audioStreamEnd flush, and the final transcript arrives
+          // in that window. Only drop messages from an attempt we abandoned on
+          // timeout (a closed socket delivers nothing more once close() returns).
+          if (timedOut) return;
           this.handleMessage(message);
         },
         onerror: (event) => {
