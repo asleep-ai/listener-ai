@@ -14,9 +14,15 @@ import { join } from 'node:path';
 // full dev node_modules. It MUST run against the packaged build: a dev-mode
 // launch would resolve the missing module from node_modules and hide the bug.
 test('packaged app boots without crashing', async () => {
-  const buildPath = findLatestBuild('release');
+  // CI builds the app OUTSIDE the checkout (via LISTENER_SMOKE_BUILD_DIR) so a
+  // require() from the packaged app cannot walk up to the repo's hoisted
+  // node_modules and resolve a dependency that was pruned from app.asar -- which
+  // would mask the exact regression this smoke exists to catch. Defaults to
+  // 'release' for quick local runs.
+  const buildDir = process.env.LISTENER_SMOKE_BUILD_DIR ?? 'release';
+  const buildPath = findLatestBuild(buildDir);
   if (!buildPath) {
-    throw new Error("No packaged build found under 'release/'. Run `pnpm exec electron-builder --dir` first.");
+    throw new Error(`No packaged build found under '${buildDir}'. Run an electron-builder --dir build first.`);
   }
   const app = parseElectronApp(buildPath);
   // Launch against a throwaway data dir so the smoke never reads/migrates/writes

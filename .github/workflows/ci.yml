@@ -77,8 +77,11 @@ jobs:
           key: ${{ runner.os }}-electron-builder-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: ${{ runner.os }}-electron-builder-
 
-      - name: Package unpacked build
-        run: pnpm exec electron-builder --dir --linux
+      - name: Package unpacked build (outside the checkout)
+        # Output outside the repo so a require() from the packaged app cannot walk
+        # up to the checkout's hoisted node_modules and resolve a dep that was
+        # pruned from app.asar -- that would mask the regression this smoke catches.
+        run: pnpm exec electron-builder --dir --linux --config.directories.output="$RUNNER_TEMP/smoke-build"
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
@@ -90,3 +93,5 @@ jobs:
 
       - name: Smoke-test that the packaged app launches
         run: xvfb-run --auto-servernum -- pnpm run test:e2e
+        env:
+          LISTENER_SMOKE_BUILD_DIR: ${{ runner.temp }}/smoke-build
