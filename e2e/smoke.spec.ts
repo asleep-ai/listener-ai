@@ -11,15 +11,23 @@ import { findLatestBuild, parseElectronApp } from 'electron-playwright-helpers';
 // full dev node_modules. It MUST run against the packaged build: a dev-mode
 // launch would resolve the missing module from node_modules and hide the bug.
 test('packaged app boots without crashing', async () => {
-  const app = parseElectronApp(findLatestBuild('release'));
+  const buildPath = findLatestBuild('release');
+  if (!buildPath) {
+    throw new Error("No packaged build found under 'release/'. Run `pnpm exec electron-builder --dir` first.");
+  }
+  const app = parseElectronApp(buildPath);
   const electronApp = await electron.launch({
     executablePath: app.executable,
     args: ['--no-sandbox'], // required on Linux CI runners
   });
   try {
-    // A startup crash (missing module) never opens a window -> this rejects.
-    const window = await electronApp.firstWindow({ timeout: 30_000 });
-    expect((await window.title()).length).toBeGreaterThan(0);
+    // A missing-module crash throws at require time and never opens a window, so
+    // firstWindow() rejects (no explicit timeout -> bounded by the test timeout).
+    // Then wait for the renderer to reach the app UI. toHaveURL auto-retries,
+    // which avoids a race on slow headless runners where the window opens before
+    // index.html has finished loading (a title/content check would flake there).
+    const window = await electronApp.firstWindow();
+    await expect(window).toHaveURL(/index\.html/);
   } finally {
     await electronApp.close();
   }

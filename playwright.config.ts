@@ -6,6 +6,9 @@ import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: './e2e',
   timeout: 60_000,
+  // Headroom for auto-retrying assertions (e.g. toHaveURL) while the packaged
+  // app finishes loading its renderer on a slow headless CI runner.
+  expect: { timeout: 15_000 },
   workers: 1,
   reporter: 'list',
 });
