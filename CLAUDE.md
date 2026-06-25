@@ -256,7 +256,8 @@ Pre-v2 folders use `<sanitized-title>_<timestamp>/` with `summary.md` (YAML fron
 1. **Service-layer unit tests** with `node --test` — primary; covers logic and external-tool assumptions
 2. **CLI as adb-style integration test** — see `cli.test.ts`. Drive the compiled CLI as a subprocess with `LISTENER_DATA_PATH` (sandboxed temp) + `LISTENER_TEST_MODE` (Gemini stub). Catches what unit tests can't: argument parsing, IPC/handler wiring, full pipeline flow (resolve refs → readTranscription → concat → transcribe → save). Free, offline, deterministic.
 3. **Interactive verification** — see below. For UX/visual changes or paid-API happy paths, where automation is heavy.
-4. **Playwright Electron** — heaviest; reserve for GUI-only behaviors that can't be reached via CLI.
+4. **Packaged-app boot smoke** (`e2e/smoke.spec.ts`, Playwright `_electron`) — launches the electron-builder *packaged* build and asserts it reaches its first window; runs in the `package-check` CI job (`electron-builder --dir --linux` + xvfb). This is the ONLY tier that catches packaging regressions (electron-builder dropping a transitive dep from `app.asar`); the unit/CLI tiers run against the full dev `node_modules` and cannot see them. Must run on the packaged build — a dev-mode launch resolves the missing module and hides the bug.
+5. **Playwright Electron (full GUI)** — heaviest; reserve for GUI-only behaviors that can't be reached via CLI.
 
 #### Interactive verification (between unit tests and Playwright)
 
@@ -322,6 +323,7 @@ Recording starts silently — never bring the window to foreground (no `show()`/
 - Package name: `listener-ai`. Only the CLI portion is published to npm (Electron app ships via GitHub Releases).
 - `THIRD_PARTY_NOTICES.md` is shipped in npm and Electron artifacts for direct third-party notices.
 - Electron-only runtime deps (`electron-updater`, `@notionhq/client`) live in `optionalDependencies` — honest semantics for a package serving both Electron and CLI users. `build.files` includes `node_modules/**/*`, so they are still bundled in Electron builds.
+- **electron-builder must stay `>= 26.14.0`** (currently `^26.15.5`). Its pnpm dependency collector before 26.14.0 silently drops a direct dependency's *transitive* subtree from the packaged `app.asar` under pnpm 11 + `nodeLinker: hoisted` — the build exits 0, but the app crashes at launch with `Cannot find module`. This shipped in v2.12.1 (`gaxios`, a transitive dep of `google-auth-library`). `build.files`'s `node_modules/**/*` glob does NOT override the collector — electron-builder still prunes to the prod-dep graph it computes. The `package-check` CI job (a packaged-app boot smoke, see Tests) guards against regressions; never downgrade below 26.14.0.
 - `package.json.files` whitelists the exact compiled JS shipped to npm plus `THIRD_PARTY_NOTICES.md`: `dist/cli.js`, `aiProvider.js`, `codexOAuth.js`, `dataPath.js`, `configService.js`, `geminiService.js`, `googleOAuth.js`, `openaiCodexClient.js`, `outputService.js`, `searchService.js`, `agentService.js`, `audioFormats.js`, `services/ffmpegManager.js`, `services/audioConcatService.js`, `services/googleDriveService.js`, `services/syncEngine.js`. When adding a new module imported by any of these, append it to the whitelist or `npm install -g listener-ai` will fail with `Cannot find module`.
 
 ## Future Enhancements (Optional)

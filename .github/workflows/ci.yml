@@ -39,3 +39,54 @@ jobs:
 
       - name: Test
         run: pnpm run test
+
+  # Package an unpacked build and smoke-launch it to assert the packaged app
+  # actually starts. Catches the whole class of "packaged app won't boot"
+  # regressions -- e.g. electron-builder dropping a transitive dependency from
+  # app.asar after a pnpm / electron / electron-builder bump (the bug that shipped
+  # in 2.12.1: "Cannot find module 'gaxios'") -- which the unit suite misses
+  # because it runs against the full dev node_modules.
+  package-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 11.5.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Cache electron-builder downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: ${{ runner.os }}-electron-builder-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-electron-builder-
+
+      - name: Package unpacked build
+        run: pnpm exec electron-builder --dir --linux
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Install Electron runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          pnpm exec playwright install-deps chromium
+
+      - name: Smoke-test that the packaged app launches
+        run: xvfb-run --auto-servernum -- pnpm run test:e2e
