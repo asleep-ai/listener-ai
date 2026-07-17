@@ -78,6 +78,18 @@ export class TranscriptionApiError extends Error {
   }
 }
 
+// Thrown when the provider processed the audio fine but produced no usable
+// speech (silence, noise-only input). Distinct from TranscriptionApiError so
+// callers can branch: whole-file transcription surfaces it as a friendly
+// "no speech found" error, while per-segment and live-snippet callers treat
+// it as an empty result instead of failing the whole run (issue #182).
+export class EmptyTranscriptionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EmptyTranscriptionError';
+  }
+}
+
 export interface DiarizedSegment {
   speaker?: string;
   text?: string;
@@ -182,8 +194,13 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
   }
 
   const payload = (await response.json()) as { text?: unknown };
-  if (typeof payload.text !== 'string' || payload.text.trim().length === 0) {
+  if (typeof payload.text !== 'string') {
     throw new Error('OpenAI transcription response missing text');
+  }
+  if (payload.text.trim().length === 0) {
+    // Well-formed response with no speech content -- silence/noise input,
+    // not a broken API. Typed so callers can decide per context.
+    throw new EmptyTranscriptionError('OpenAI transcription returned no speech');
   }
   return payload.text;
 }
@@ -196,7 +213,7 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
 // 30+ "참가자1: ..." stubs.
 export function formatDiarizedSegments(segments?: DiarizedSegment[]): string {
   if (!segments || segments.length === 0) {
-    throw new Error('OpenAI diarized transcription returned no segments');
+    throw new EmptyTranscriptionError('OpenAI diarized transcription returned no segments');
   }
 
   const speakerIdx = new Map<string, number>();
@@ -226,7 +243,9 @@ export function formatDiarizedSegments(segments?: DiarizedSegment[]): string {
   if (activeLabel !== undefined) lines.push(`${activeLabel}: ${activeBuffer}`);
 
   if (lines.length === 0) {
-    throw new Error('OpenAI diarized transcription had segments but no usable text');
+    throw new EmptyTranscriptionError(
+      'OpenAI diarized transcription had segments but no usable text',
+    );
   }
   return lines.join('\n\n');
 }

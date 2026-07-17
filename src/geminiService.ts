@@ -14,10 +14,16 @@ import { mimeTypeForExtension } from './audioFormats';
 import { type CodexOAuthCredentials } from './codexOAuth';
 import { CodexOAuthHolder } from './codexOAuthHolder';
 import {
+  EmptyTranscriptionError,
   OPENAI_TRANSCRIPTION_EXTENSIONS,
   TranscriptionApiError,
   transcribeCodexAudio,
 } from './codexTranscription';
+import {
+  NO_SPEECH_SENTINEL,
+  applyTranscriptQualityGate,
+  stripNoSpeechSentinel,
+} from './transcriptQuality';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
 import { type Context, completeSimple, extractFinalText, getModel } from './piAiClient';
 import { FFmpegManager } from './services/ffmpegManager';
@@ -41,6 +47,14 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
     };
     signal?.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+// Quality-retry thunks map a typed "no speech" outcome to an empty string:
+// an empty context-cleared retry is evidence the first (flagged) result was
+// hallucinated over silence, and the gate accepts a clean empty retry.
+function emptyTranscriptionAsBlank(error: unknown): string {
+  if (error instanceof EmptyTranscriptionError) return '';
+  throw error;
 }
 
 // Append a section to the summary prompt instructing Gemini to enrich each
@@ -148,6 +162,14 @@ export interface TranscriptionOptions {
    */
   transcriptionPrompt?: string;
   includeGlossary?: boolean;
+  /**
+   * When false, a transcript flagged by the repetition/hallucination
+   * analyzer is kept as-is instead of triggering the single context-cleared
+   * quality retry. Live snippet callers disable this: re-sending the same
+   * low-signal 12s blob would burn quota without new evidence (issue #182).
+   * Defaults to true.
+   */
+  qualityRetry?: boolean;
   /**
    * Cancellation signal. The pipeline checks `signal.aborted` at every stage
    * boundary and forwards it to the underlying provider SDKs (pi-ai, Gemini
@@ -264,6 +286,14 @@ export function annotateTranscriptionError(
   provider: AiProvider,
 ): TranscriptionError {
   const rawMessage = error instanceof Error ? error.message : String(error);
+  // Provider handled the audio but found no speech -- a user-facing state
+  // (silent/noise-only recording), not a failure of the pipeline.
+  if (error instanceof EmptyTranscriptionError) {
+    return new TranscriptionError(
+      { userMessage: 'No intelligible speech was found in this recording.', rawMessage },
+      { cause: error },
+    );
+  }
   // Structured upstream error from `transcribeCodexAudio` -- prefer the
   // `errorCode` / `status` fields over substring matching on `rawMessage`.
   if (error instanceof TranscriptionApiError) {
@@ -336,6 +366,10 @@ function friendlyMessageForApiError(error: TranscriptionApiError, provider: AiPr
   return `Failed to transcribe audio (HTTP ${status}).`;
 }
 
+// No example dialogue on purpose: transcript-like sample text in the prompt
+// is a hallucination seed on silent/low-signal audio (the model can echo the
+// example instead of the audio -- issue #182). The no-speech sentinel gives
+// silence a defined output so the model doesn't have to invent one.
 const DEFAULT_TRANSCRIPT_PROMPT = `Please transcribe this audio recording with proper speaker identification.
 
 Format requirements:
@@ -344,20 +378,27 @@ Format requirements:
 3. Format: 참가자X: [what they said]
 4. Add a blank line between different speakers
 
-Example format:
-참가자1: 안녕하세요, 오늘 회의를 시작하겠습니다.
-
-참가자2: 네, 준비됐습니다.
-
-참가자1: 첫 번째 안건은...
-
 IMPORTANT:
 - You MUST identify and differentiate between speakers
 - Each speaker turn MUST start on a new line
 - Add blank line between different speakers
 - DO NOT include timestamps
 - Keep the transcription in the original spoken language
+- Transcribe only speech that actually occurs in the audio; never fill gaps or repeat content that is not actually repeated
+- If the audio contains no intelligible speech at all, return exactly ${NO_SPEECH_SENTINEL}
 - Return ONLY the transcription text, no JSON formatting`;
+
+// Context-cleared prompt for the single bounded quality retry (issue #182):
+// no glossary, no positional prefix, no format examples -- so a retry after a
+// suspected repetition/hallucination loop starts from a minimal grounding
+// instruction instead of re-feeding the context that may have seeded it.
+const QUALITY_RETRY_TRANSCRIPT_PROMPT = `Transcribe the speech in this audio exactly as spoken.
+
+- Keep the original spoken language.
+- Label distinguishable speakers as 참가자1, 참가자2, etc., one turn per line.
+- Transcribe only speech that actually occurs in the audio; never fill gaps or repeat content that is not actually repeated.
+- If there is no clearly intelligible speech, return exactly ${NO_SPEECH_SENTINEL}.
+- Return only the transcript text.`;
 
 export interface GeminiServiceOptions {
   provider?: AiProvider;
@@ -660,22 +701,37 @@ export class GeminiService {
     audioFilePath: string,
     opts: { signal?: AbortSignal } = {},
   ): Promise<string> {
-    const result = await this.transcribeAudio(audioFilePath, undefined, undefined, undefined, {
-      transcriptOnly: true,
-      includeGlossary: false,
-      transcriptionPrompt: `Please transcribe this short live meeting audio snippet.
+    let result: TranscriptionResult;
+    try {
+      result = await this.transcribeAudio(audioFilePath, undefined, undefined, undefined, {
+        transcriptOnly: true,
+        includeGlossary: false,
+        // No bounded quality retry for live snippets: re-sending the same
+        // 12s low-signal blob can't produce new evidence. The live session
+        // layer suppresses duplicates and marks flagged finals instead.
+        qualityRetry: false,
+        transcriptionPrompt: `Please transcribe this short live meeting audio snippet.
 
 Requirements:
 - Keep the original spoken language.
 - Preserve proper nouns and technical terms.
 - Do not infer names, company names, or terms from context. Write them only when clearly spoken.
-- If there is no clearly intelligible speech, return exactly [NO_SPEECH].
+- If there is no clearly intelligible speech, return exactly ${NO_SPEECH_SENTINEL}.
 - If speakers are distinguishable, prefix turns with 참가자1, 참가자2, etc.
 - Return only transcript text. Do not summarize and do not add commentary.`,
-      signal: opts.signal,
-    });
-    const transcript = result.transcript.trim();
-    return transcript === '[NO_SPEECH]' ? '' : transcript;
+        signal: opts.signal,
+      });
+    } catch (error) {
+      // A silent snippet is normal during a live session (pauses, breaks) --
+      // map the typed no-speech error to an empty result instead of surfacing
+      // an error toast every 12 seconds. The error may arrive wrapped by
+      // annotateTranscriptionError, so walk the cause chain.
+      for (let cause: unknown = error; cause; cause = (cause as Error).cause) {
+        if (cause instanceof EmptyTranscriptionError) return '';
+      }
+      throw error;
+    }
+    return stripNoSpeechSentinel(result.transcript);
   }
 
   async translateText(
@@ -934,6 +990,7 @@ Requirements:
           signal,
           costSession,
           options.includeGlossary !== false,
+          options.qualityRetry !== false,
         );
       } else {
         // Get transcript for short audio
@@ -946,6 +1003,7 @@ Requirements:
           signal,
           costSession,
           options.includeGlossary !== false,
+          options.qualityRetry !== false,
         );
       }
 
@@ -1075,6 +1133,7 @@ Return as JSON:
     signal?: AbortSignal,
     session?: CostSession,
     includeGlossary = true,
+    qualityRetry = true,
   ): Promise<string> {
     try {
       const stats = await fs.promises.stat(audioFilePath);
@@ -1086,22 +1145,39 @@ Return as JSON:
 
       const transcriptPrompt = `${includeGlossary ? this.buildGlossaryBlock() : ''}${customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT}`;
       if (this.provider === 'codex') {
-        const text = await transcribeCodexAudio({
-          getToken: () => this.getCodexToken(),
-          audioFilePath,
-          model: this.codexTranscriptionModel,
-          // `prompt` is dropped inside transcribeCodexAudio when the
-          // diarize model is active. Keep passing it -- the helper picks
-          // the right shape per model.
-          prompt: transcriptPrompt,
-          // Intentionally NOT passing `language: 'ko'`. Whisper-derived
-          // transcription auto-detects from the first ~30s, which handles
-          // bilingual/code-switched meetings (Korean primary, English
-          // acronyms/quotes) better than forcing a single language.
-          signal,
+        const runCodex = async (prompt: string): Promise<string> => {
+          const text = await transcribeCodexAudio({
+            getToken: () => this.getCodexToken(),
+            audioFilePath,
+            model: this.codexTranscriptionModel,
+            // `prompt` is dropped inside transcribeCodexAudio when the
+            // diarize model is active. Keep passing it -- the helper picks
+            // the right shape per model.
+            prompt,
+            // Intentionally NOT passing `language: 'ko'`. Whisper-derived
+            // transcription auto-detects from the first ~30s, which handles
+            // bilingual/code-switched meetings (Korean primary, English
+            // acronyms/quotes) better than forcing a single language.
+            signal,
+          });
+          recordCodexSttUsage(session, this.codexTranscriptionModel, audioSeconds);
+          return text;
+        };
+        const gated = await applyTranscriptQualityGate({
+          text: stripNoSpeechSentinel(await runCodex(transcriptPrompt)),
+          label: 'short audio (codex)',
+          retry: qualityRetry
+            ? () =>
+                runCodex(QUALITY_RETRY_TRANSCRIPT_PROMPT)
+                  .then(stripNoSpeechSentinel)
+                  .catch(emptyTranscriptionAsBlank)
+            : undefined,
+          log: (message) => console.error(message),
         });
-        recordCodexSttUsage(session, this.codexTranscriptionModel, audioSeconds);
-        return text;
+        if (!gated.text.trim()) {
+          throw new EmptyTranscriptionError('Transcription produced no speech content');
+        }
+        return gated.text;
       }
 
       const ai = this.gemini();
@@ -1151,67 +1227,65 @@ Return as JSON:
         progressCallback(50, 'Transcribing audio...');
       }
 
-      let result: Awaited<ReturnType<typeof ai.models.generateContent>>;
-      if (fileUri) {
-        const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
-
-        result = await ai.models.generateContent({
-          model: this.flashModel,
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  fileData: {
-                    fileUri: fileUri,
-                    mimeType: mimeType,
-                  },
-                },
-                { text: transcriptPrompt },
-              ],
-            },
-          ],
-          config: {
-            temperature: 0.2,
-            maxOutputTokens: 32768,
-            abortSignal: signal,
-          },
-        });
-      } else {
-        const audioData = await fs.promises.readFile(audioFilePath);
-        const base64Audio = audioData.toString('base64');
-        const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
-
-        result = await ai.models.generateContent({
-          model: this.flashModel,
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: mimeType,
-                    data: base64Audio,
-                  },
-                },
-                { text: transcriptPrompt },
-              ],
-            },
-          ],
-          config: {
-            temperature: 0.2,
-            maxOutputTokens: 32768,
-            abortSignal: signal,
-          },
-        });
+      const runGemini = (prompt: string): Promise<string> =>
+        this.generateGeminiTranscript(audioFilePath, fileUri, prompt, signal, session);
+      const gated = await applyTranscriptQualityGate({
+        text: stripNoSpeechSentinel(await runGemini(transcriptPrompt)),
+        label: 'short audio (gemini)',
+        retry: qualityRetry
+          ? () => runGemini(QUALITY_RETRY_TRANSCRIPT_PROMPT).then(stripNoSpeechSentinel)
+          : undefined,
+        log: (message) => console.error(message),
+      });
+      if (!gated.text.trim()) {
+        throw new EmptyTranscriptionError('Transcription produced no speech content');
       }
-
-      recordGeminiUsage(session, this.flashModel, result.usageMetadata);
-      return result.text || '';
+      return gated.text;
     } catch (error) {
       console.error('Error transcribing short audio:', error);
       throw error;
     }
+  }
+
+  // Single Gemini generateContent transcription call. Shared by the first
+  // attempt and the context-cleared quality retry so both go through the
+  // exact same request shape (inline data under 20MB, files API above).
+  private async generateGeminiTranscript(
+    audioFilePath: string,
+    fileUri: string | null,
+    promptText: string,
+    signal?: AbortSignal,
+    session?: CostSession,
+  ): Promise<string> {
+    const ai = this.gemini();
+    const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
+    let mediaPart:
+      | { fileData: { fileUri: string; mimeType: string } }
+      | { inlineData: { mimeType: string; data: string } };
+    if (fileUri) {
+      mediaPart = { fileData: { fileUri, mimeType } };
+    } else {
+      const audioData = await fs.promises.readFile(audioFilePath);
+      mediaPart = { inlineData: { mimeType, data: audioData.toString('base64') } };
+    }
+
+    const result = await ai.models.generateContent({
+      model: this.flashModel,
+      contents: [
+        {
+          role: 'user',
+          parts: [mediaPart, { text: promptText }],
+        },
+      ],
+      config: {
+        temperature: 0.2,
+        maxOutputTokens: 32768,
+        abortSignal: signal,
+      },
+    });
+
+    recordGeminiUsage(session, this.flashModel, result.usageMetadata);
+    return result.text || '';
   }
 
   // Format time in HH:MM:SS format
@@ -1243,6 +1317,58 @@ Return as JSON:
     return `${includeGlossary ? this.buildGlossaryBlock() : ''}${positional}${body}`;
   }
 
+  // One raw provider transcription call for a segment file. Shared by the
+  // first attempt and the context-cleared quality retry.
+  private async transcribeSegmentRaw(
+    segmentFile: string,
+    promptText: string,
+    segmentSeconds: number,
+    signal?: AbortSignal,
+    session?: CostSession,
+  ): Promise<string> {
+    if (this.provider === 'codex') {
+      const transcript = await transcribeCodexAudio({
+        getToken: () => this.getCodexToken(),
+        audioFilePath: segmentFile,
+        model: this.codexTranscriptionModel,
+        prompt: promptText,
+        signal,
+      });
+      recordCodexSttUsage(session, this.codexTranscriptionModel, segmentSeconds);
+      return transcript;
+    }
+
+    const audioData = await fs.promises.readFile(segmentFile);
+    const base64Audio = audioData.toString('base64');
+    const mimeType = mimeTypeForExtension(path.extname(segmentFile));
+
+    const result = await this.gemini().models.generateContent({
+      model: this.flashModel,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                mimeType: mimeType,
+                data: base64Audio,
+              },
+            },
+            { text: promptText },
+          ],
+        },
+      ],
+      config: {
+        temperature: 0.2,
+        maxOutputTokens: 32768,
+        abortSignal: signal,
+      },
+    });
+
+    recordGeminiUsage(session, this.flashModel, result.usageMetadata);
+    return result.text || '';
+  }
+
   // Transcribe a single segment with retry logic
   private async transcribeSingleSegment(
     segmentFile: string,
@@ -1254,7 +1380,8 @@ Return as JSON:
     signal?: AbortSignal,
     session?: CostSession,
     includeGlossary = true,
-  ): Promise<{ index: number; content: string }> {
+    qualityRetry = true,
+  ): Promise<{ index: number; content: string; empty?: boolean }> {
     const maxRetries = 3;
     let lastError: any = null;
     let attemptsMade = 0;
@@ -1265,6 +1392,7 @@ Return as JSON:
       includeGlossary,
     );
     const segmentSeconds = Math.max(0, segmentEndTime - segmentStartTime);
+    const segmentHeader = this.createSegmentHeader(segmentIndex, segmentStartTime, segmentEndTime);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       attemptsMade = attempt;
@@ -1274,71 +1402,58 @@ Return as JSON:
           `Starting transcription for segment ${segmentIndex + 1}/${totalSegments} (attempt ${attempt}/${maxRetries})...`,
         );
 
-        if (this.provider === 'codex') {
-          const transcript = await transcribeCodexAudio({
-            getToken: () => this.getCodexToken(),
-            audioFilePath: segmentFile,
-            model: this.codexTranscriptionModel,
-            prompt: segmentPrompt,
+        const raw = stripNoSpeechSentinel(
+          await this.transcribeSegmentRaw(
+            segmentFile,
+            segmentPrompt,
+            segmentSeconds,
             signal,
-          });
-          recordCodexSttUsage(session, this.codexTranscriptionModel, segmentSeconds);
-          console.error(`Completed transcription for segment ${segmentIndex + 1}/${totalSegments}`);
-          return {
-            index: segmentIndex,
-            content:
-              this.createSegmentHeader(segmentIndex, segmentStartTime, segmentEndTime) + transcript,
-          };
-        }
-
-        const audioData = await fs.promises.readFile(segmentFile);
-        const base64Audio = audioData.toString('base64');
-        const mimeType = mimeTypeForExtension(path.extname(segmentFile));
-
-        const result = await this.gemini().models.generateContent({
-          model: this.flashModel,
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: mimeType,
-                    data: base64Audio,
-                  },
-                },
-                { text: segmentPrompt },
-              ],
-            },
-          ],
-          config: {
-            temperature: 0.2,
-            maxOutputTokens: 32768,
-            abortSignal: signal,
-          },
-        });
-
-        recordGeminiUsage(session, this.flashModel, result.usageMetadata);
-        const transcript = result.text || '';
+            session,
+          ),
+        );
 
         console.error(`Completed transcription for segment ${segmentIndex + 1}/${totalSegments}`);
 
-        // Add segment time range header
-        const segmentHeader = this.createSegmentHeader(
-          segmentIndex,
-          segmentStartTime,
-          segmentEndTime,
-        );
+        // Repetition/hallucination gate (issue #182): flagged output gets one
+        // context-cleared retry; a still-flagged retry keeps the first result.
+        const gated = await applyTranscriptQualityGate({
+          text: raw,
+          label: `segment ${segmentIndex + 1}/${totalSegments}`,
+          retry: qualityRetry
+            ? () =>
+                this.transcribeSegmentRaw(
+                  segmentFile,
+                  QUALITY_RETRY_TRANSCRIPT_PROMPT,
+                  segmentSeconds,
+                  signal,
+                  session,
+                )
+                  .then(stripNoSpeechSentinel)
+                  .catch(emptyTranscriptionAsBlank)
+            : undefined,
+          log: (message) => console.error(message),
+        });
 
         return {
           index: segmentIndex,
-          content: segmentHeader + transcript,
+          content: segmentHeader + gated.text,
+          empty: gated.text.trim().length === 0,
         };
       } catch (segmentError) {
         // Abort surfaces here too; don't burn through retries when the caller
         // cancelled. Re-throw so getSegmentedTranscript's Promise.all rejects
         // immediately.
         if (signal?.aborted) throw segmentError;
+
+        // A silent segment is a normal part of long recordings (breaks,
+        // empty tails) -- keep the time-range header, emit no text, and
+        // don't fail or retry the segment.
+        if (segmentError instanceof EmptyTranscriptionError) {
+          console.error(
+            `Segment ${segmentIndex + 1}/${totalSegments} contained no intelligible speech; leaving it empty.`,
+          );
+          return { index: segmentIndex, content: segmentHeader, empty: true };
+        }
         lastError = segmentError;
         console.error(
           `Error transcribing segment ${segmentIndex + 1} (attempt ${attempt}/${maxRetries}):`,
@@ -1394,6 +1509,7 @@ Return as JSON:
     signal?: AbortSignal,
     session?: CostSession,
     includeGlossary = true,
+    qualityRetry = true,
   ): Promise<string> {
     // Track segments outside the try so the finally can clean them up on
     // abort / mid-pipeline failure too. Without this, cancelled transcribes
@@ -1439,6 +1555,7 @@ Return as JSON:
           combinedSignal,
           session,
           includeGlossary,
+          qualityRetry,
         ).catch((err) => {
           aborter.abort();
           throw err;
@@ -1465,7 +1582,7 @@ Return as JSON:
       // retries (or hits a non-retryable status) throws from
       // transcribeSingleSegment, which rejects Promise.all -- so if we
       // reach the next line, every segment succeeded.
-      let segmentResults: { index: number; content: string }[];
+      let segmentResults: { index: number; content: string; empty?: boolean }[];
       try {
         segmentResults = await Promise.all(progressTrackedPromises);
       } finally {
@@ -1488,6 +1605,13 @@ Return as JSON:
       // Update progress
       if (progressCallback) {
         progressCallback(80, 'All segments transcribed, merging results...');
+      }
+
+      // A recording where EVERY segment came back silent has no speech at
+      // all -- surface the same friendly no-speech error the short path
+      // uses instead of saving a note of bare segment headers.
+      if (segmentResults.length > 0 && segmentResults.every((result) => result.empty)) {
+        throw new EmptyTranscriptionError('All segments produced no speech content');
       }
 
       // Extract transcripts in order

@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
+import { EmptyTranscriptionError } from './codexTranscription';
 import { GeminiService } from './geminiService';
 import { findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
@@ -166,3 +167,169 @@ describe(
     });
   },
 );
+
+// Repetition/hallucination quality gate wiring (issue #182). The analyzer
+// itself is covered in transcriptQuality.test.ts; here we lock in how
+// transcribeSingleSegment drives it: sentinel stripping, one context-cleared
+// retry on flagged output, retry disabled for live-snippet callers, and a
+// silent segment resolving to an empty (not failed) segment.
+describe('GeminiService transcribeSingleSegment quality gate', () => {
+  type SegmentHelpers = {
+    transcribeSegmentRaw(
+      segmentFile: string,
+      promptText: string,
+      segmentSeconds: number,
+      signal?: AbortSignal,
+      session?: unknown,
+    ): Promise<string>;
+    transcribeSingleSegment(
+      segmentFile: string,
+      segmentIndex: number,
+      totalSegments: number,
+      segmentStartTime: number,
+      segmentEndTime: number,
+      customPrompt?: string,
+      signal?: AbortSignal,
+      session?: unknown,
+      includeGlossary?: boolean,
+      qualityRetry?: boolean,
+    ): Promise<{ index: number; content: string; empty?: boolean }>;
+  };
+
+  const loopText = Array(5).fill('참가자1: 시청해주셔서 감사합니다.').join('\n');
+  const cleanText = '참가자1: 오늘 회의를 시작하겠습니다.';
+
+  function makeGatedService(outputs: (string | Error)[]): {
+    service: SegmentHelpers;
+    prompts: string[];
+  } {
+    const prompts: string[] = [];
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as SegmentHelpers;
+    let call = 0;
+    service.transcribeSegmentRaw = async (_file, promptText) => {
+      prompts.push(promptText);
+      const output = outputs[Math.min(call, outputs.length - 1)];
+      call++;
+      if (output instanceof Error) throw output;
+      return output;
+    };
+    return { service, prompts };
+  }
+
+  it('replaces a flagged segment with the clean context-cleared retry result', async () => {
+    const { service, prompts } = makeGatedService([loopText, cleanText]);
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(prompts.length, 2, 'flagged output must trigger exactly one retry');
+    assert.match(prompts[0], /Audio segment 1 of 2/);
+    assert.doesNotMatch(prompts[1], /Audio segment/, 'retry prompt must drop positional context');
+    assert.doesNotMatch(
+      prompts[1],
+      /proper nouns, names, and terms/,
+      'retry prompt must drop glossary',
+    );
+    assert.ok(result.content.includes(cleanText));
+    assert.ok(!result.content.includes('시청해주셔서'));
+  });
+
+  it('keeps flagged output without retrying when qualityRetry is disabled', async () => {
+    const { service, prompts } = makeGatedService([loopText, cleanText]);
+    const result = await service.transcribeSingleSegment(
+      '/tmp/seg.webm',
+      0,
+      2,
+      0,
+      300,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      false,
+    );
+
+    assert.equal(prompts.length, 1);
+    assert.ok(result.content.includes('시청해주셔서'));
+  });
+
+  it('does not retry clean output', async () => {
+    const { service, prompts } = makeGatedService([cleanText]);
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 1, 3, 300, 600);
+
+    assert.equal(prompts.length, 1);
+    assert.ok(result.content.includes(cleanText));
+    assert.equal(result.empty, false);
+  });
+
+  it('resolves the no-speech sentinel to an empty segment', async () => {
+    const { service, prompts } = makeGatedService(['[NO_SPEECH]']);
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(prompts.length, 1);
+    assert.equal(result.empty, true);
+    assert.match(result.content, /^\[Segment 1: /);
+  });
+
+  it('treats a typed empty-transcription error as a silent segment, not a failure', async () => {
+    const { service, prompts } = makeGatedService([new EmptyTranscriptionError('no segments')]);
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 2, 4, 600, 900);
+
+    assert.equal(prompts.length, 1, 'a silent segment must not burn provider retries');
+    assert.equal(result.empty, true);
+    assert.equal(result.index, 2);
+  });
+
+  it('keeps the first result when the quality retry is still flagged', async () => {
+    const otherLoop = `참가자1: ${Array(12).fill('자막').join(' ')}`;
+    const { service, prompts } = makeGatedService([loopText, otherLoop]);
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 1, 0, 300);
+
+    assert.equal(prompts.length, 2);
+    assert.ok(result.content.includes('시청해주셔서'), 'first result is retained');
+    assert.ok(!result.content.includes('자막'));
+  });
+});
+
+// transcribeLiveSnippet maps the typed no-speech error to '' so a silent 12s
+// live chunk is a clean no-op instead of a renderer error toast.
+describe('GeminiService.transcribeLiveSnippet empty handling', () => {
+  it('returns an empty string when transcription reports no speech', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    });
+    const originalTranscribeAudio = service.transcribeAudio.bind(service);
+    service.transcribeAudio = async () => {
+      throw new EmptyTranscriptionError('OpenAI diarized transcription returned no segments');
+    };
+    try {
+      assert.equal(await service.transcribeLiveSnippet('/tmp/silent.webm'), '');
+    } finally {
+      service.transcribeAudio = originalTranscribeAudio;
+    }
+  });
+
+  it('returns an empty string when the no-speech error arrives wrapped', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    });
+    const originalTranscribeAudio = service.transcribeAudio.bind(service);
+    service.transcribeAudio = async () => {
+      throw new Error('wrapped', { cause: new EmptyTranscriptionError('no speech') });
+    };
+    try {
+      assert.equal(await service.transcribeLiveSnippet('/tmp/silent.webm'), '');
+    } finally {
+      service.transcribeAudio = originalTranscribeAudio;
+    }
+  });
+});

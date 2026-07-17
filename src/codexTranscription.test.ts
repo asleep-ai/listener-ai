@@ -3,15 +3,22 @@
 //   - Re-label OpenAI speaker ids onto our 참가자N convention
 //   - Merge consecutive segments from the same speaker onto one line
 //   - Empty-string segments are skipped
-//   - No segments / no usable text throws (so the renderer sees an error,
-//     not a blank transcript that gets quietly saved)
+//   - No segments / no usable text throws the typed EmptyTranscriptionError:
+//     whole-file callers surface it as a "no speech found" error (never a
+//     blank transcript quietly saved), while per-segment and live-snippet
+//     callers convert it to an empty result (issue #182)
 
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { formatDiarizedSegments, isDiarizeModel, transcribeCodexAudio } from './codexTranscription';
+import {
+  EmptyTranscriptionError,
+  formatDiarizedSegments,
+  isDiarizeModel,
+  transcribeCodexAudio,
+} from './codexTranscription';
 
 describe('isDiarizeModel', () => {
   it('matches the diarize model id', () => {
@@ -82,6 +89,11 @@ describe('formatDiarizedSegments', () => {
     assert.throws(() => formatDiarizedSegments(undefined), /no segments/);
   });
 
+  it('throws the typed EmptyTranscriptionError for empty responses so callers can branch', () => {
+    assert.throws(() => formatDiarizedSegments([]), EmptyTranscriptionError);
+    assert.throws(() => formatDiarizedSegments([{ text: '   ' }]), EmptyTranscriptionError);
+  });
+
   it('throws when segments are present but all empty', () => {
     assert.throws(
       () =>
@@ -140,6 +152,72 @@ describe('transcribeCodexAudio signal propagation', () => {
         signal: controller.signal,
       }),
       (err: unknown) => (err as { name?: unknown } | null)?.name === 'AbortError',
+    );
+  });
+});
+
+// Silence vs malformed-response distinction on the non-diarize path: an empty
+// `text` string is a well-formed "no speech" outcome (typed error), while a
+// missing/non-string `text` stays a generic malformed-response error.
+describe('transcribeCodexAudio empty responses', () => {
+  const originalFetch = globalThis.fetch;
+  let audioPath = '';
+
+  beforeEach(() => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-empty-'));
+    audioPath = path.join(dir, 'clip.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (audioPath) fs.rmSync(path.dirname(audioPath), { recursive: true, force: true });
+  });
+
+  function stubFetchJson(payload: unknown): void {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch;
+  }
+
+  it('throws EmptyTranscriptionError when text is present but empty', async () => {
+    stubFetchJson({ text: '   ' });
+    await assert.rejects(
+      transcribeCodexAudio({
+        getToken: async () => 'fake-token',
+        audioFilePath: audioPath,
+        model: 'gpt-4o-transcribe',
+      }),
+      EmptyTranscriptionError,
+    );
+  });
+
+  it('keeps the generic error when text is missing entirely (malformed response)', async () => {
+    stubFetchJson({});
+    await assert.rejects(
+      transcribeCodexAudio({
+        getToken: async () => 'fake-token',
+        audioFilePath: audioPath,
+        model: 'gpt-4o-transcribe',
+      }),
+      (err: unknown) =>
+        err instanceof Error &&
+        !(err instanceof EmptyTranscriptionError) &&
+        /missing text/.test(err.message),
+    );
+  });
+
+  it('throws EmptyTranscriptionError for a diarize response with no segments', async () => {
+    stubFetchJson({ segments: [] });
+    await assert.rejects(
+      transcribeCodexAudio({
+        getToken: async () => 'fake-token',
+        audioFilePath: audioPath,
+        model: 'gpt-4o-transcribe-diarize',
+      }),
+      EmptyTranscriptionError,
     );
   });
 });
