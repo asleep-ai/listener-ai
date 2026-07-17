@@ -12,9 +12,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  analyzeAssembledTranscript,
   analyzeTranscriptQuality,
   applyTranscriptQualityGate,
   normalizeForComparison,
+  normalizeTranscriptQualityNotes,
   stripNoSpeechSentinel,
 } from './transcriptQuality';
 
@@ -262,6 +264,68 @@ describe('applyTranscriptQualityGate', () => {
     assert.ok(logs.length > 0);
     for (const line of logs) {
       assert.ok(!line.includes('감사합니다'), `log leaked transcript text: ${line}`);
+    }
+  });
+});
+
+describe('analyzeAssembledTranscript', () => {
+  const header = (n: number, from: string, to: string) => `[Segment ${n}: ${from} ~ ${to}]`;
+
+  it('accepts a clean assembled multi-segment transcript', () => {
+    const assembled = [
+      `${header(1, '00:00:00', '00:05:00')}\n\n참가자1: 오늘 회의에서는 2분기 마케팅 전략을 논의하겠습니다.`,
+      `${header(2, '00:05:00', '00:10:00')}\n\n참가자2: 온보딩 개선이 필요해 보입니다.`,
+    ].join('\n\n---\n\n');
+    assert.equal(analyzeAssembledTranscript(assembled).flagged, false);
+  });
+
+  it('does not false-flag adjacent headers left by empty (silent) segments', () => {
+    const assembled = [
+      `${header(1, '00:00:00', '00:05:00')}`,
+      `${header(2, '00:05:00', '00:10:00')}`,
+      `${header(3, '00:10:00', '00:15:00')}`,
+      `${header(4, '00:15:00', '00:20:00')}\n\n참가자1: 이제 시작하겠습니다.`,
+    ].join('\n\n---\n\n');
+    assert.equal(analyzeAssembledTranscript(assembled).flagged, false);
+  });
+
+  it('flags a hallucination loop spanning a segment boundary', () => {
+    const loopLine = '참가자1: 시청해주셔서 감사합니다.';
+    const assembled = [
+      `${header(1, '00:00:00', '00:05:00')}\n\n참가자1: 마지막 안건입니다.\n\n${loopLine}\n\n${loopLine}`,
+      `${header(2, '00:05:00', '00:10:00')}\n\n${loopLine}\n\n참가자2: 다음 주에 뵙겠습니다.`,
+    ].join('\n\n---\n\n');
+    const report = analyzeAssembledTranscript(assembled);
+    assert.equal(report.flagged, true);
+    assert.ok(report.reasons.includes('consecutive-duplicate-lines'));
+  });
+});
+
+describe('normalizeTranscriptQualityNotes', () => {
+  it('keeps trimmed string notes and drops empties', () => {
+    assert.deepEqual(
+      normalizeTranscriptQualityNotes(['  구간 A가 반복됩니다.  ', '', '   ', '구간 B 의심.']),
+      ['구간 A가 반복됩니다.', '구간 B 의심.'],
+    );
+  });
+
+  it('returns empty for non-array shapes', () => {
+    assert.deepEqual(normalizeTranscriptQualityNotes(undefined), []);
+    assert.deepEqual(normalizeTranscriptQualityNotes('문장 하나'), []);
+    assert.deepEqual(normalizeTranscriptQualityNotes({ note: 'x' }), []);
+  });
+
+  it('stringifies object items instead of dropping them', () => {
+    const [note] = normalizeTranscriptQualityNotes([{ section: '결말부', issue: '반복' }]);
+    assert.ok(note.includes('결말부'));
+    assert.ok(note.includes('반복'));
+  });
+
+  it('bounds count and per-note length so meta.json cannot bloat', () => {
+    const notes = normalizeTranscriptQualityNotes(Array(50).fill('가'.repeat(1000)));
+    assert.equal(notes.length, 10);
+    for (const note of notes) {
+      assert.ok(note.length <= 303);
     }
   });
 });

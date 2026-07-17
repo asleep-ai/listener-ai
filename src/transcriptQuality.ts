@@ -232,6 +232,56 @@ export function analyzeTranscriptQuality(text: string): TranscriptQualityReport 
   };
 }
 
+// Final-stage analysis of the ASSEMBLED multi-segment transcript. Strips the
+// batch scaffolding first: `[Segment N: HH:MM:SS ~ HH:MM:SS]` headers and
+// `---` separators would otherwise sit adjacent when segments are empty and
+// false-flag as near-duplicate lines. Running the analyzer across the joined
+// text is what catches cross-segment repetition (the same hallucinated block
+// ending segment N and opening segment N+1) that per-segment gating cannot
+// see (issue #182 H3).
+export function analyzeAssembledTranscript(transcript: string): TranscriptQualityReport {
+  const body = transcript
+    .split(/\r?\n/)
+    .filter((line) => {
+      const trimmed = line.trim();
+      return trimmed !== '---' && !/^\[Segment \d+: [0-9:]+ ~ [0-9:]+\]$/.test(trimmed);
+    })
+    .join('\n');
+  return analyzeTranscriptQuality(body);
+}
+
+const MAX_QUALITY_NOTES = 10;
+const MAX_QUALITY_NOTE_CHARS = 300;
+
+// Normalize the summary model's optional `transcriptQualityNotes` JSON field
+// into a bounded string list. The prompt asks for short Korean sentences, but
+// models sometimes return objects or nest unexpectedly -- tolerate that
+// without letting a malformed response bloat meta.json.
+export function normalizeTranscriptQualityNotes(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const notes: string[] = [];
+  for (const item of raw) {
+    if (notes.length >= MAX_QUALITY_NOTES) break;
+    let text: string;
+    if (typeof item === 'string') {
+      text = item.trim();
+    } else if (item && typeof item === 'object') {
+      try {
+        text = JSON.stringify(item);
+      } catch {
+        continue;
+      }
+    } else {
+      continue;
+    }
+    if (!text) continue;
+    notes.push(
+      text.length > MAX_QUALITY_NOTE_CHARS ? `${text.slice(0, MAX_QUALITY_NOTE_CHARS)}...` : text,
+    );
+  }
+  return notes;
+}
+
 // Remove the [NO_SPEECH] sentinel the transcription prompts define for
 // silent audio. Tolerates the sentinel arriving as the whole output, as a
 // standalone line, or with stray punctuation around it -- but never touches

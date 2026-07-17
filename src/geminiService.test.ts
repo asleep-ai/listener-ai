@@ -333,3 +333,121 @@ describe('GeminiService.transcribeLiveSnippet empty handling', () => {
     }
   });
 });
+
+// Final-stage quality pass wiring (issue #182): after the batch transcript is
+// assembled, transcribeWithTwoSteps (a) runs the deterministic analyzer over
+// the joined text and (b) piggybacks a suspected-artifact review onto the
+// existing summary call. Both verdicts persist on the note via
+// customFields.transcriptQuality; the transcript itself is never modified.
+describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => {
+  type TwoStepHelpers = {
+    transcribeWithTwoSteps(
+      audioFilePath: string,
+      duration: number,
+      progressCallback?: (percent: number, message: string) => void,
+      customSummaryPrompt?: string,
+      liveNotes?: undefined,
+      options?: { signal?: AbortSignal },
+    ): Promise<{
+      transcript: string;
+      summary: string;
+      customFields?: Record<string, unknown>;
+    }>;
+    getShortAudioTranscript(...args: unknown[]): Promise<string>;
+    generateSummary(promptText: string, transcript: string, ...rest: unknown[]): Promise<string>;
+  };
+
+  function makeTwoStepService(opts: { transcript: string; summaryJson: string }): {
+    service: TwoStepHelpers;
+    summaryPrompts: string[];
+  } {
+    const summaryPrompts: string[] = [];
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as TwoStepHelpers;
+    service.getShortAudioTranscript = async () => opts.transcript;
+    service.generateSummary = async (promptText) => {
+      summaryPrompts.push(promptText);
+      return opts.summaryJson;
+    };
+    return { service, summaryPrompts };
+  }
+
+  function makeAudioStub(name: string): string {
+    const filePath = path.join(workDir, name);
+    fs.writeFileSync(filePath, Buffer.alloc(64, 1));
+    return filePath;
+  }
+
+  it('persists analyzer verdict and model notes on customFields for a loop transcript', async () => {
+    const loopTranscript = Array(5).fill('참가자1: 시청해주셔서 감사합니다.').join('\n\n');
+    const { service, summaryPrompts } = makeTwoStepService({
+      transcript: loopTranscript,
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+        transcriptQualityNotes: ['후반부에 동일 문장이 반복됩니다.'],
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('loop.webm'), 10);
+
+    assert.ok(
+      summaryPrompts[0].includes('transcriptQualityNotes'),
+      'summary prompt must request the artifact review',
+    );
+    const quality = result.customFields?.transcriptQuality as
+      | { analyzer?: { reasons: string[] }; modelNotes?: string[] }
+      | undefined;
+    assert.ok(quality, 'transcriptQuality must be persisted');
+    assert.ok(quality.analyzer?.reasons.includes('consecutive-duplicate-lines'));
+    assert.deepEqual(quality.modelNotes, ['후반부에 동일 문장이 반복됩니다.']);
+    assert.equal(result.transcript, loopTranscript, 'transcript itself is never modified');
+  });
+
+  it('adds no transcriptQuality field for a clean transcript with no model notes', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 오늘 회의를 시작하겠습니다.\n\n참가자2: 네, 준비되었습니다.',
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: ['a'],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('clean.webm'), 10);
+
+    assert.equal(result.customFields, undefined);
+  });
+
+  it('keeps model notes even when the analyzer sees nothing (semantic-only catch)', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 오늘 회의를 시작하겠습니다.',
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+        transcriptQualityNotes: ['도입부 문장이 맥락과 무관한 상투구로 보입니다.'],
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('semantic.webm'), 10);
+
+    const quality = result.customFields?.transcriptQuality as
+      | { analyzer?: unknown; modelNotes?: string[] }
+      | undefined;
+    assert.ok(quality);
+    assert.equal(quality.analyzer, undefined);
+    assert.deepEqual(quality.modelNotes, ['도입부 문장이 맥락과 무관한 상투구로 보입니다.']);
+  });
+});

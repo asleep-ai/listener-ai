@@ -21,7 +21,9 @@ import {
 } from './codexTranscription';
 import {
   NO_SPEECH_SENTINEL,
+  analyzeAssembledTranscript,
   applyTranscriptQualityGate,
+  normalizeTranscriptQualityNotes,
   stripNoSpeechSentinel,
 } from './transcriptQuality';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
@@ -387,6 +389,18 @@ IMPORTANT:
 - Transcribe only speech that actually occurs in the audio; never fill gaps or repeat content that is not actually repeated
 - If the audio contains no intelligible speech at all, return exactly ${NO_SPEECH_SENTINEL}
 - Return ONLY the transcription text, no JSON formatting`;
+
+// Final-stage model review, piggybacked on the existing summary call (issue
+// #182): the summary model already reads the entire assembled transcript, so
+// asking it to also flag suspected transcription artifacts costs zero extra
+// API calls. Text-only judgment cannot verify audio grounding, so the output
+// is notes-only -- it never edits the transcript.
+const TRANSCRIPT_QUALITY_PROMPT_BLOCK = `Additionally, before summarizing, review the transcript for transcription artifacts: sections where the same sentence or phrase repeats verbatim many times, boilerplate unrelated to the surrounding discussion (e.g. broadcast closing phrases on silence), or content that clearly breaks the flow of the meeting. These can be speech-to-text errors, not real speech.
+
+- If any exist, add a "transcriptQualityNotes" array to the JSON response. Each item is one short Korean sentence describing the suspicious section and why it looks like a transcription artifact.
+- If there are none, omit the field.
+- Never rewrite or remove transcript content based on this review.
+- Base the summary, key points, and action items only on content you judge to be genuine speech; do not summarize suspected artifacts as if they were discussion content.`;
 
 // Context-cleared prompt for the single bounded quality retry (issue #182):
 // no glossary, no positional prefix, no format examples -- so a retry after a
@@ -1009,6 +1023,18 @@ Requirements:
 
       signal?.throwIfAborted();
 
+      // Final-stage analyzer pass over the ASSEMBLED transcript: catches
+      // cross-segment repetition the per-segment gate cannot see. Detection
+      // only -- the transcript is never modified here; the report is logged
+      // (metrics only) and persisted on the saved note below.
+      const assembledQuality = analyzeAssembledTranscript(fullTranscript);
+      if (assembledQuality.flagged) {
+        console.error(
+          `[transcript-quality] assembled transcript flagged (${assembledQuality.reasons.join(', ')}; ` +
+            `normalizedLength=${assembledQuality.metrics.normalizedLength})`,
+        );
+      }
+
       if (options.transcriptOnly) {
         if (progressCallback) {
           progressCallback(100, 'Transcript ready');
@@ -1042,7 +1068,11 @@ Return as JSON:
 
       const enrichableNotes = (liveNotes ?? []).filter((n) => (n.text ?? '').trim().length > 0);
       const highlightsBlock = buildHighlightsPromptBlock(enrichableNotes);
-      const summaryPrompt = highlightsBlock ? `${basePrompt}\n\n${highlightsBlock}` : basePrompt;
+      // Same additive pattern as the highlights block: appended to custom
+      // summary prompts too, since the shared parser tolerates the extra key.
+      const summaryPrompt = [basePrompt, highlightsBlock, TRANSCRIPT_QUALITY_PROMPT_BLOCK]
+        .filter(Boolean)
+        .join('\n\n');
 
       const summaryText = await this.generateSummary(
         summaryPrompt,
@@ -1066,9 +1096,11 @@ Return as JSON:
         'actionItems',
         'emoji',
         'highlights',
+        'transcriptQualityNotes',
       ]);
       const customFields: Record<string, unknown> = {};
       let rawHighlights: unknown;
+      let rawQualityNotes: unknown;
 
       // Pi-ai's unified API doesn't pass through Gemini's responseMimeType
       // knob, so models can wrap the JSON in ```json``` fences or add leading
@@ -1083,6 +1115,7 @@ Return as JSON:
         const parsed = JSON.parse(stripJsonFences(summaryText));
         summaryData = parsed;
         rawHighlights = (parsed as { highlights?: unknown }).highlights;
+        rawQualityNotes = (parsed as { transcriptQualityNotes?: unknown }).transcriptQualityNotes;
 
         // Extract custom fields (any keys not in the known set)
         for (const [key, value] of Object.entries(parsed)) {
@@ -1100,6 +1133,26 @@ Return as JSON:
       }
 
       const highlights = mergeHighlights(liveNotes, rawHighlights);
+
+      // Persist the final-stage quality picture on the note (meta.json
+      // customFields) when either detector saw something: the deterministic
+      // analyzer verdict on the assembled transcript, and the summary
+      // model's suspected-artifact notes. Marking only -- the transcript
+      // itself is stored untouched.
+      const modelQualityNotes = normalizeTranscriptQualityNotes(rawQualityNotes);
+      if (assembledQuality.flagged || modelQualityNotes.length > 0) {
+        customFields.transcriptQuality = {
+          ...(assembledQuality.flagged
+            ? {
+                analyzer: {
+                  reasons: assembledQuality.reasons,
+                  metrics: assembledQuality.metrics,
+                },
+              }
+            : {}),
+          ...(modelQualityNotes.length > 0 ? { modelNotes: modelQualityNotes } : {}),
+        };
+      }
 
       if (progressCallback) {
         progressCallback(95, 'Finalizing results...');
