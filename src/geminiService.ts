@@ -625,14 +625,20 @@ export class GeminiService {
     return extractFinalText(response);
   }
 
+  // Observability follows the `[codex-transcribe] -> / <-` arrow style:
+  // model id, sizes, and latency only -- never transcript text.
   private async cleanTranscriptWithModel(
     transcript: string,
     signal?: AbortSignal,
   ): Promise<{ text: string; removedChars: number }> {
     if (!transcript.trim()) return { text: transcript, removedChars: 0 };
 
+    const modelId = this.provider === 'codex' ? this.codexModel : this.flashModel;
+    const startedAt = Date.now();
+    console.error(
+      `[transcript-quality] model cleanup -> model=${modelId} inputChars=${transcript.length}`,
+    );
     try {
-      const modelId = this.provider === 'codex' ? this.codexModel : this.flashModel;
       const response = await this.completeTextTask(
         TRANSCRIPT_CLEANUP_SYSTEM_PROMPT,
         `Transcript to clean:\n${transcript}`,
@@ -644,19 +650,28 @@ export class GeminiService {
           signal,
         },
       );
+      const elapsed = Date.now() - startedAt;
       const fenced = response.match(/^```(?:\w+)?\r?\n([\s\S]*?)(?:\r?\n)?```\s*$/);
       const cleaned = (fenced ? fenced[1] : response).trimEnd();
-      if (!cleaned) return { text: transcript, removedChars: 0 };
+      if (!cleaned) {
+        console.error(
+          `[transcript-quality] model cleanup <- ${elapsed}ms empty response; keeping original`,
+        );
+        return { text: transcript, removedChars: 0 };
+      }
 
       const removedChars = Math.max(0, transcript.length - cleaned.length);
-      if (removedChars > 0) {
-        console.error(`[transcript-quality] model cleanup removed ${removedChars} chars`);
-      }
+      console.error(
+        `[transcript-quality] model cleanup <- ${elapsed}ms outputChars=${cleaned.length} ` +
+          `removedChars=${removedChars}${removedChars === 0 ? ' (unchanged)' : ''}${fenced ? ' (stripped fence)' : ''}`,
+      );
       return { text: cleaned, removedChars };
     } catch (error) {
       if (signal?.aborted) throw error;
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`[transcript-quality] model cleanup failed: ${message}`);
+      console.error(
+        `[transcript-quality] model cleanup <- failed after ${Date.now() - startedAt}ms: ${message}`,
+      );
       return { text: transcript, removedChars: 0 };
     }
   }
