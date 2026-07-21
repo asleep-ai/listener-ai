@@ -17,6 +17,7 @@ import {
   applyTranscriptQualityGate,
   normalizeForComparison,
   normalizeTranscriptQualityNotes,
+  reconcileOverlappingSegments,
   stripNoSpeechSentinel,
 } from './transcriptQuality';
 
@@ -327,5 +328,83 @@ describe('normalizeTranscriptQualityNotes', () => {
     for (const note of notes) {
       assert.ok(note.length <= 303);
     }
+  });
+});
+
+// Overlap-backed boundary reconciliation: segments are cut with head
+// overlap, so duplicated text at a boundary is evidence, not coincidence.
+// Removal is anchored at the boundary and bounded to a small window; every
+// ambiguous case must remove nothing.
+describe('reconcileOverlappingSegments', () => {
+  it('drops the duplicated boundary line despite spacing/punctuation variants', () => {
+    const prev =
+      '참가자1: 마지막 안건을 정리하겠습니다.\n\n참가자2: 다음 주 일정은 공유드린 대로 진행하겠습니다.';
+    const next =
+      '참가자2: 다음주 일정은 공유드린 대로 진행하겠습니다!\n\n참가자1: 좋습니다. 회의를 마치겠습니다.';
+    const { bodies, removedPerBoundary } = reconcileOverlappingSegments([prev, next]);
+
+    assert.equal(bodies[0], prev, 'earlier segment is never modified');
+    assert.equal(bodies[1], '참가자1: 좋습니다. 회의를 마치겠습니다.');
+    assert.ok(removedPerBoundary[0] > 0);
+    const joined = bodies.join('\n\n');
+    assert.equal(joined.match(/일정은 공유드린 대로/g)?.length, 1, 'phrase appears exactly once');
+  });
+
+  it('drops a multi-line overlap run', () => {
+    const shared = '참가자1: 예산안은 다음 분기에 다시 검토하기로 했습니다.';
+    const shared2 = '참가자2: 네, 그때까지 자료를 준비해 두겠습니다.';
+    const prev = `참가자1: 이제 마무리하겠습니다.\n\n${shared}\n\n${shared2}`;
+    const next = `${shared}\n\n${shared2}\n\n참가자1: 이상으로 회의를 마칩니다.`;
+    const { bodies, removedPerBoundary } = reconcileOverlappingSegments([prev, next]);
+
+    assert.equal(bodies[1], '참가자1: 이상으로 회의를 마칩니다.');
+    assert.ok(removedPerBoundary[0] > 0);
+  });
+
+  it('removes nothing between unrelated segments', () => {
+    const prev = '참가자1: 첫 번째 안건은 여기까지입니다.';
+    const next = '참가자2: 두 번째 안건을 시작하겠습니다.';
+    const { bodies, removedPerBoundary } = reconcileOverlappingSegments([prev, next]);
+
+    assert.deepEqual(bodies, [prev, next]);
+    assert.deepEqual(removedPerBoundary, [0]);
+  });
+
+  it('never touches repeated content away from the boundary (anchored matching)', () => {
+    // The same sentence appears deep inside both segments, but the lines
+    // actually adjacent to the boundary differ -- anchored matching can
+    // therefore never reach the repeated line, and it must survive twice.
+    const repeated = '참가자2: 회의록은 노션에 정리해 두겠습니다.';
+    const prev = [
+      repeated,
+      '참가자1: 이어서 예산 항목을 검토하겠습니다.',
+      '참가자3: 자료는 미리 공유드린 문서를 참고해 주세요.',
+    ].join('\n\n');
+    const next = [
+      '참가자1: 다음으로 채용 계획입니다.',
+      '참가자3: 두 팀 모두 한 명씩 충원 예정입니다.',
+      repeated,
+    ].join('\n\n');
+    const { bodies, removedPerBoundary } = reconcileOverlappingSegments([prev, next]);
+
+    assert.deepEqual(bodies, [prev, next]);
+    assert.deepEqual(removedPerBoundary, [0]);
+    assert.equal(bodies.join('\n\n').match(/노션에 정리해/g)?.length, 2);
+  });
+
+  it('is a no-op around empty (silent) segment bodies', () => {
+    const text = '참가자1: 안건을 공유드립니다.';
+    const { bodies, removedPerBoundary } = reconcileOverlappingSegments(['', text, '']);
+
+    assert.deepEqual(bodies, ['', text, '']);
+    assert.deepEqual(removedPerBoundary, [0, 0]);
+  });
+
+  it('drops a half-line tail when the overlap cut a turn mid-sentence', () => {
+    const prev = '참가자1: 오늘 논의된 내용은 다음 회의에서 다시 확인하고 공유하겠습니다.';
+    const next = '다시 확인하고 공유하겠습니다.\n\n참가자2: 알겠습니다.';
+    const { bodies } = reconcileOverlappingSegments([prev, next]);
+
+    assert.equal(bodies[1], '참가자2: 알겠습니다.');
   });
 });

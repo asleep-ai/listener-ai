@@ -24,6 +24,7 @@ import {
   analyzeAssembledTranscript,
   applyTranscriptQualityGate,
   normalizeTranscriptQualityNotes,
+  reconcileOverlappingSegments,
   stripNoSpeechSentinel,
 } from './transcriptQuality';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
@@ -57,6 +58,43 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
 function emptyTranscriptionAsBlank(error: unknown): string {
   if (error instanceof EmptyTranscriptionError) return '';
   throw error;
+}
+
+// Peak level below which audio is treated as digital silence and never sent
+// to a transcription provider (issue #182 H1: silence admission is the root
+// seed of hallucination loops). The mic chain applies +12dB gain, so real
+// speech -- even quiet speakers -- peaks far above this. Only a measured
+// peak counts: when volumedetect cannot run or parse we FAIL OPEN and
+// transcribe normally.
+const SILENT_SEGMENT_MAX_VOLUME_DB = -50;
+
+// Head overlap for long-file segmentation. Each segment after the first
+// starts this many seconds early so speech spanning a boundary is fully
+// contained in (at least) one segment and transcribed twice -- the evidence
+// reconcileOverlappingSegments uses to drop the duplicate at join time.
+// Capped at a quarter of the segment length so the size-based smaller Codex
+// segments keep a sane audio-to-overlap ratio.
+const SEGMENT_OVERLAP_SECONDS = 15;
+
+// Pure segmentation plan: start offset + length per segment (length omitted
+// for the last segment -- it runs to EOF). Exported for direct unit testing;
+// splitAudioIntoSegments turns each entry into one ffmpeg `-ss/-t` cut.
+export function computeSegmentPlan(
+  duration: number,
+  segmentDuration: number,
+): Array<{ start: number; length?: number }> {
+  const overlap = Math.min(SEGMENT_OVERLAP_SECONDS, Math.floor(segmentDuration / 4));
+  const count = Math.max(1, Math.ceil(duration / segmentDuration));
+  const plan: Array<{ start: number; length?: number }> = [];
+  for (let i = 0; i < count; i++) {
+    const start = i === 0 ? 0 : i * segmentDuration - overlap;
+    if (i === count - 1) {
+      plan.push({ start });
+    } else {
+      plan.push({ start, length: (i + 1) * segmentDuration - start });
+    }
+  }
+  return plan;
 }
 
 // Append a section to the summary prompt instructing Gemini to enrich each
@@ -824,6 +862,39 @@ Requirements:
     }
   }
 
+  // Measure the peak level (dBFS) of a file via ffmpeg's volumedetect
+  // filter. Returns null whenever the measurement cannot be trusted
+  // (missing binary, unparseable output) -- callers FAIL OPEN on null and
+  // transcribe normally, so this gate can only ever skip provably silent
+  // audio, never real speech.
+  private async measureMaxVolumeDb(
+    audioFilePath: string,
+    signal?: AbortSignal,
+  ): Promise<number | null> {
+    try {
+      const ffmpegPath = await this.getFFmpegPath();
+      const { stderr } = await execFileAsync(
+        ffmpegPath,
+        ['-i', audioFilePath, '-af', 'volumedetect', '-f', 'null', '-'],
+        { signal },
+      ).catch((error: unknown) => {
+        if (signal?.aborted) throw error;
+        // ffmpeg can exit non-zero while still printing the stats we need.
+        const execError = error as { stdout?: string; stderr?: string };
+        return { stdout: execError.stdout || '', stderr: execError.stderr || '' };
+      });
+
+      // Pure digital silence can report `-inf dB` depending on the build.
+      const match = /max_volume:\s*(-?)(inf|\d+(?:\.\d+)?)\s*dB/i.exec(stderr || '');
+      if (!match) return null;
+      const magnitude = match[2].toLowerCase() === 'inf' ? Infinity : Number.parseFloat(match[2]);
+      return match[1] === '-' ? -magnitude : magnitude;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return null;
+    }
+  }
+
   // List existing `<base>_segment_NNN.<ext>` files for an audio path. Used by
   // both the split step (collecting newly written segments) and the cleanup
   // step (sweeping leftovers when ffmpeg was killed mid-split). Optional
@@ -849,19 +920,22 @@ Requirements:
     }
   }
 
-  // Split audio file into segments
+  // Split audio file into segments with head overlap (see computeSegmentPlan)
   private async splitAudioIntoSegments(
     audioFilePath: string,
     segmentDuration = 300,
-    // re-encode segments instead of `-c copy`. ffmpeg's segment muxer can
-    // only cut at keyframes when copying, and webm-opus has near-zero
-    // keyframes by default -- so `-c copy -segment_time 300` silently
-    // produces 30+ minute segments that blow past gpt-4o-transcribe's
-    // 1400-second per-request limit. Caller passes `reencode: true` for
-    // the Codex transcription path; Gemini's API is tolerant of long
-    // inputs and stays on the faster `-c copy` path.
+    // Historical knob from the pre-overlap implementation (Codex passed
+    // true, Gemini false). The overlapped plan path now ALWAYS re-encodes:
+    // measured on webm-opus, `-ss/-t -c copy` extraction cuts wildly wrong
+    // (a 5s request produced an 8s file) because copy mode cannot use
+    // ffmpeg's accurate_seek -- and reconciliation depends on cut accuracy.
+    // Only the legacy no-duration fallback still honors this flag.
     reencode = false,
     signal?: AbortSignal,
+    // Total duration in seconds. Required for the overlapped per-segment
+    // plan; when unknown (<= 0, i.e. ffprobe failed upstream) we fall back
+    // to the legacy single-invocation segment muxer without overlap.
+    duration = 0,
   ): Promise<string[]> {
     const outputDir = path.dirname(audioFilePath);
     const baseName = path.basename(audioFilePath, path.extname(audioFilePath));
@@ -872,36 +946,69 @@ Requirements:
     // an imported `.mp3`/`.m4a`/`.wav` source as `.mp3` makes ffmpeg pick
     // the MP3 muxer and reject the opus stream. `.webm` is in OpenAI's
     // supported transcription extensions, so the segments still upload.
-    const segmentExt = reencode ? '.webm' : ext;
-    const segmentPath = path.join(outputDir, `${baseName}_segment_%03d${segmentExt}`);
+    const planReencodes = duration > 0;
+    const segmentExt = reencode || planReencodes ? '.webm' : ext;
 
     // Get the bundled FFmpeg path
     const ffmpegPath = await this.getFFmpegPath();
 
     try {
-      const codecArgs = reencode ? ['-c:a', 'libopus', '-b:a', '48k'] : ['-c', 'copy'];
-      // Split audio into segments. `-reset_timestamps 1` makes each segment
-      // start at PTS 0 and gives it its own container duration. Without it,
-      // webm output keeps the source file's total duration in the header --
-      // and OpenAI rejects the request based on the header value even when
-      // the actual encoded audio is short (`audio duration N seconds is
-      // longer than 1400` errors on small last-segment files).
-      await execFileAsync(
-        ffmpegPath,
-        [
-          '-i',
-          audioFilePath,
-          '-f',
-          'segment',
-          '-segment_time',
-          String(segmentDuration),
-          '-reset_timestamps',
-          '1',
-          ...codecArgs,
-          segmentPath,
-        ],
-        { signal },
-      );
+      if (duration > 0) {
+        // One ffmpeg invocation per planned segment. `-ss` before `-i` with
+        // re-encoding uses ffmpeg's default accurate_seek, giving
+        // sample-accurate cuts (copy mode cannot: measured on webm-opus it
+        // produced a wildly wrong cut). Every segment after the first
+        // starts SEGMENT_OVERLAP_SECONDS early so boundary speech is
+        // transcribed twice -- the evidence reconcileOverlappingSegments
+        // needs to safely drop the duplicate at join time (issue #182 H3).
+        const plan = computeSegmentPlan(duration, segmentDuration);
+        for (const [i, part] of plan.entries()) {
+          signal?.throwIfAborted();
+          const segmentPath = path.join(
+            outputDir,
+            `${baseName}_segment_${String(i).padStart(3, '0')}${segmentExt}`,
+          );
+          await execFileAsync(
+            ffmpegPath,
+            [
+              '-y',
+              '-ss',
+              String(part.start),
+              '-i',
+              audioFilePath,
+              ...(part.length !== undefined ? ['-t', String(part.length)] : []),
+              '-c:a',
+              'libopus',
+              '-b:a',
+              '48k',
+              segmentPath,
+            ],
+            { signal },
+          );
+        }
+      } else {
+        // Legacy fallback (unknown duration): the segment muxer with
+        // `-reset_timestamps 1` so each segment starts at PTS 0 and carries
+        // its own container duration. No overlap in this mode.
+        const codecArgs = reencode ? ['-c:a', 'libopus', '-b:a', '48k'] : ['-c', 'copy'];
+        const segmentPattern = path.join(outputDir, `${baseName}_segment_%03d${segmentExt}`);
+        await execFileAsync(
+          ffmpegPath,
+          [
+            '-i',
+            audioFilePath,
+            '-f',
+            'segment',
+            '-segment_time',
+            String(segmentDuration),
+            '-reset_timestamps',
+            '1',
+            ...codecArgs,
+            segmentPattern,
+          ],
+          { signal },
+        );
+      }
 
       // Find all created segment files. Match on the EXTENSION WE TOLD
       // FFMPEG TO WRITE -- when re-encoding, that's `.webm` regardless of
@@ -1196,6 +1303,17 @@ Return as JSON:
         progressCallback(20, 'Processing audio file...');
       }
 
+      // Energy gate: provably silent audio never reaches a provider (issue
+      // #182 H1). Whole-file callers surface the typed error as a friendly
+      // "no speech" message; live snippets map it to an empty result.
+      const maxVolumeDb = await this.measureMaxVolumeDb(audioFilePath, signal);
+      if (maxVolumeDb !== null && maxVolumeDb < SILENT_SEGMENT_MAX_VOLUME_DB) {
+        console.error(
+          `[transcript-quality] audio is silent (max_volume ${maxVolumeDb} dB); skipping transcription`,
+        );
+        throw new EmptyTranscriptionError('Audio contains no signal above the silence floor');
+      }
+
       const transcriptPrompt = `${includeGlossary ? this.buildGlossaryBlock() : ''}${customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT}`;
       if (this.provider === 'codex') {
         const runCodex = async (prompt: string): Promise<string> => {
@@ -1434,7 +1552,7 @@ Return as JSON:
     session?: CostSession,
     includeGlossary = true,
     qualityRetry = true,
-  ): Promise<{ index: number; content: string; empty?: boolean }> {
+  ): Promise<{ index: number; header: string; body: string; empty: boolean }> {
     const maxRetries = 3;
     let lastError: any = null;
     let attemptsMade = 0;
@@ -1446,6 +1564,18 @@ Return as JSON:
     );
     const segmentSeconds = Math.max(0, segmentEndTime - segmentStartTime);
     const segmentHeader = this.createSegmentHeader(segmentIndex, segmentStartTime, segmentEndTime);
+
+    // Energy gate: provably silent segments never reach a provider. Cheap
+    // local decode, and the strongest possible evidence -- no audio signal
+    // means any transcript would be hallucinated (issue #182 H1).
+    const maxVolumeDb = await this.measureMaxVolumeDb(segmentFile, signal);
+    if (maxVolumeDb !== null && maxVolumeDb < SILENT_SEGMENT_MAX_VOLUME_DB) {
+      console.error(
+        `[transcript-quality] segment ${segmentIndex + 1}/${totalSegments} is silent ` +
+          `(max_volume ${maxVolumeDb} dB); skipping transcription`,
+      );
+      return { index: segmentIndex, header: segmentHeader, body: '', empty: true };
+    }
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       attemptsMade = attempt;
@@ -1489,7 +1619,8 @@ Return as JSON:
 
         return {
           index: segmentIndex,
-          content: segmentHeader + gated.text,
+          header: segmentHeader,
+          body: gated.text,
           empty: gated.text.trim().length === 0,
         };
       } catch (segmentError) {
@@ -1505,7 +1636,7 @@ Return as JSON:
           console.error(
             `Segment ${segmentIndex + 1}/${totalSegments} contained no intelligible speech; leaving it empty.`,
           );
-          return { index: segmentIndex, content: segmentHeader, empty: true };
+          return { index: segmentIndex, header: segmentHeader, body: '', empty: true };
         }
         lastError = segmentError;
         console.error(
@@ -1579,6 +1710,7 @@ Return as JSON:
         segmentDuration,
         this.provider === 'codex',
         signal,
+        duration,
       );
 
       signal?.throwIfAborted();
@@ -1635,7 +1767,7 @@ Return as JSON:
       // retries (or hits a non-retryable status) throws from
       // transcribeSingleSegment, which rejects Promise.all -- so if we
       // reach the next line, every segment succeeded.
-      let segmentResults: { index: number; content: string; empty?: boolean }[];
+      let segmentResults: { index: number; header: string; body: string; empty: boolean }[];
       try {
         segmentResults = await Promise.all(progressTrackedPromises);
       } finally {
@@ -1667,11 +1799,25 @@ Return as JSON:
         throw new EmptyTranscriptionError('All segments produced no speech content');
       }
 
-      // Extract transcripts in order
-      const segmentTranscripts = segmentResults.map((result) => result.content);
+      // Boundary reconciliation: segments were cut with head overlap, so the
+      // same boundary speech appears at the tail of segment N and the head
+      // of segment N+1. Drop the evidenced duplicate from the later segment
+      // before joining. Logs carry char counts only, never transcript text.
+      const { bodies: reconciledBodies, removedPerBoundary } = reconcileOverlappingSegments(
+        segmentResults.map((result) => result.body),
+      );
+      removedPerBoundary.forEach((removed, i) => {
+        if (removed > 0) {
+          console.error(
+            `[transcript-quality] boundary ${i + 1}/${i + 2}: removed ${removed} overlap chars`,
+          );
+        }
+      });
 
       // Merge all transcripts with clear segment breaks
-      return segmentTranscripts.join('\n\n---\n\n');
+      return segmentResults
+        .map((result, i) => result.header + reconciledBodies[i])
+        .join('\n\n---\n\n');
     } catch (error) {
       console.error('Error in segmented transcription:', error);
       throw error;

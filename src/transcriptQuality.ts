@@ -250,6 +250,106 @@ export function analyzeAssembledTranscript(transcript: string): TranscriptQualit
   return analyzeTranscriptQuality(body);
 }
 
+// Boundary reconciliation for head-overlapped batch segments (issue #182
+// root mitigation). Segments after the first are cut with a few seconds of
+// audio overlap, so the same speech near a boundary is transcribed twice --
+// that duplication is EVIDENCE, which makes deleting the second copy safe in
+// a way that text-similarity dedupe without overlap never is. Matching is
+// anchored at the boundary and bounded to a small window; when in doubt,
+// nothing is removed.
+const MAX_BOUNDARY_OVERLAP_CHARS = 400;
+const BOUNDARY_LINE_SIMILARITY = 0.85;
+const MIN_BOUNDARY_MATCH_CHARS = 10;
+const MIN_BOUNDARY_LINE_CHARS = 4;
+
+function splitTurns(body: string): string[] {
+  return body
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+// Number of lines from one side of a boundary that can plausibly belong to
+// the audio overlap: accumulate normalized chars until the window budget is
+// exhausted. Matching never looks past this window, so legitimately repeated
+// speech deep inside a segment is untouchable by design.
+function overlapWindowLines(normalizedLines: string[], fromEnd: boolean): number {
+  let window = 0;
+  let acc = 0;
+  for (let i = 0; i < normalizedLines.length; i++) {
+    const length = normalizedLines[fromEnd ? normalizedLines.length - 1 - i : i].length;
+    // Strict budget: a line only joins the window if it fits entirely. The
+    // boundary-adjacent line always counts, though -- a single long turn
+    // crossing the cut must stay reconcilable.
+    if (window > 0 && acc + length > MAX_BOUNDARY_OVERLAP_CHARS) break;
+    acc += length;
+    window++;
+  }
+  return window;
+}
+
+function reconcileBoundary(prevBody: string, nextBody: string): { next: string; removed: number } {
+  if (!prevBody.trim() || !nextBody.trim()) return { next: nextBody, removed: 0 };
+  const prevLines = splitTurns(prevBody);
+  const nextLines = splitTurns(nextBody);
+  const prevNorm = prevLines.map(normalizeForComparison);
+  const nextNorm = nextLines.map(normalizeForComparison);
+
+  // Largest run of next's leading lines that near-matches prev's trailing
+  // lines in order. Anchored: line j of the run must match line j -- a stray
+  // match deeper in either segment can never trigger removal.
+  const maxK = Math.min(overlapWindowLines(prevNorm, true), overlapWindowLines(nextNorm, false));
+  for (let k = maxK; k >= 1; k--) {
+    let matchedChars = 0;
+    let allMatch = true;
+    for (let j = 0; j < k; j++) {
+      const prevLine = prevNorm[prevNorm.length - k + j];
+      const nextLine = nextNorm[j];
+      if (
+        prevLine.length < MIN_BOUNDARY_LINE_CHARS ||
+        nextLine.length < MIN_BOUNDARY_LINE_CHARS ||
+        bigramSimilarity(prevLine, nextLine) < BOUNDARY_LINE_SIMILARITY
+      ) {
+        allMatch = false;
+        break;
+      }
+      matchedChars += nextLine.length;
+    }
+    if (allMatch && matchedChars >= MIN_BOUNDARY_MATCH_CHARS) {
+      return { next: nextLines.slice(k).join('\n\n'), removed: matchedChars };
+    }
+  }
+
+  // Half-line case: the overlap cut a turn mid-sentence, so next's first
+  // line is the tail of prev's last line. Require an exact normalized
+  // suffix -- similarity alone is too weak evidence for a partial line.
+  const lastPrev = prevNorm[prevNorm.length - 1] ?? '';
+  const firstNext = nextNorm[0] ?? '';
+  if (firstNext.length >= MIN_BOUNDARY_MATCH_CHARS && lastPrev.endsWith(firstNext)) {
+    return { next: nextLines.slice(1).join('\n\n'), removed: firstNext.length };
+  }
+
+  return { next: nextBody, removed: 0 };
+}
+
+// Reconcile every adjacent segment pair. Removals only ever trim the HEAD of
+// the later segment (the earlier segment's version of the overlap is kept),
+// so boundary b+1 -> b+2 correctly sees b+1's already-trimmed head while its
+// tail -- the input to the next comparison -- is never modified.
+export function reconcileOverlappingSegments(bodies: string[]): {
+  bodies: string[];
+  removedPerBoundary: number[];
+} {
+  const out = [...bodies];
+  const removedPerBoundary: number[] = [];
+  for (let b = 0; b + 1 < out.length; b++) {
+    const { next, removed } = reconcileBoundary(out[b], out[b + 1]);
+    out[b + 1] = next;
+    removedPerBoundary.push(removed);
+  }
+  return { bodies: out, removedPerBoundary };
+}
+
 const MAX_QUALITY_NOTES = 10;
 const MAX_QUALITY_NOTE_CHARS = 300;
 

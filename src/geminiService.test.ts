@@ -1,9 +1,10 @@
+import { execFile } from 'child_process';
 import * as fs from 'fs';
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
 import { EmptyTranscriptionError } from './codexTranscription';
-import { GeminiService } from './geminiService';
+import { GeminiService, computeSegmentPlan } from './geminiService';
 import { findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
 const ffmpegPath = findFfmpegSync();
@@ -193,7 +194,8 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       session?: unknown,
       includeGlossary?: boolean,
       qualityRetry?: boolean,
-    ): Promise<{ index: number; content: string; empty?: boolean }>;
+    ): Promise<{ index: number; header: string; body: string; empty: boolean }>;
+    measureMaxVolumeDb(audioFilePath: string, signal?: AbortSignal): Promise<number | null>;
   };
 
   const loopText = Array(5).fill('참가자1: 시청해주셔서 감사합니다.').join('\n');
@@ -210,6 +212,9 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       proModel: 'gemini-test-pro',
       flashModel: 'gemini-test-flash',
     }) as unknown as SegmentHelpers;
+    // Fail-open volume measurement: these tests exercise the text gate, not
+    // the energy gate, and must not shell out to a real ffmpeg binary.
+    service.measureMaxVolumeDb = async () => null;
     let call = 0;
     service.transcribeSegmentRaw = async (_file, promptText) => {
       prompts.push(promptText);
@@ -233,8 +238,8 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       /proper nouns, names, and terms/,
       'retry prompt must drop glossary',
     );
-    assert.ok(result.content.includes(cleanText));
-    assert.ok(!result.content.includes('시청해주셔서'));
+    assert.ok(result.body.includes(cleanText));
+    assert.ok(!result.body.includes('시청해주셔서'));
   });
 
   it('keeps flagged output without retrying when qualityRetry is disabled', async () => {
@@ -253,7 +258,7 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     );
 
     assert.equal(prompts.length, 1);
-    assert.ok(result.content.includes('시청해주셔서'));
+    assert.ok(result.body.includes('시청해주셔서'));
   });
 
   it('does not retry clean output', async () => {
@@ -261,7 +266,7 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     const result = await service.transcribeSingleSegment('/tmp/seg.webm', 1, 3, 300, 600);
 
     assert.equal(prompts.length, 1);
-    assert.ok(result.content.includes(cleanText));
+    assert.ok(result.body.includes(cleanText));
     assert.equal(result.empty, false);
   });
 
@@ -271,7 +276,8 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
 
     assert.equal(prompts.length, 1);
     assert.equal(result.empty, true);
-    assert.match(result.content, /^\[Segment 1: /);
+    assert.equal(result.body, '');
+    assert.match(result.header, /^\[Segment 1: /);
   });
 
   it('treats a typed empty-transcription error as a silent segment, not a failure', async () => {
@@ -289,8 +295,8 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 1, 0, 300);
 
     assert.equal(prompts.length, 2);
-    assert.ok(result.content.includes('시청해주셔서'), 'first result is retained');
-    assert.ok(!result.content.includes('자막'));
+    assert.ok(result.body.includes('시청해주셔서'), 'first result is retained');
+    assert.ok(!result.body.includes('자막'));
   });
 });
 
@@ -451,3 +457,143 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     assert.deepEqual(quality.modelNotes, ['도입부 문장이 맥락과 무관한 상투구로 보입니다.']);
   });
 });
+
+// Segmentation plan for overlapped cutting (issue #182 boundary root fix):
+// segment 0 starts at zero, every later segment starts early by the overlap
+// (capped at a quarter of the segment length), the last segment runs to EOF.
+describe('computeSegmentPlan', () => {
+  it('plans a 310s file as one full segment plus an overlapped tail', () => {
+    assert.deepEqual(computeSegmentPlan(310, 300), [{ start: 0, length: 300 }, { start: 285 }]);
+  });
+
+  it('plans a 650s file with overlapped middles', () => {
+    assert.deepEqual(computeSegmentPlan(650, 300), [
+      { start: 0, length: 300 },
+      { start: 285, length: 315 },
+      { start: 585 },
+    ]);
+  });
+
+  it('caps the overlap for small segment durations', () => {
+    // floor(2/4) = 0 -> tiny segments cut back-to-back without overlap.
+    assert.deepEqual(computeSegmentPlan(5, 2), [
+      { start: 0, length: 2 },
+      { start: 2, length: 2 },
+      { start: 4 },
+    ]);
+  });
+});
+
+describe(
+  'GeminiService overlapped segmentation and silence gate (real ffmpeg)',
+  { skip: !ffmpegPath ? 'ffmpeg not installed' : undefined },
+  () => {
+    type EnergyHelpers = {
+      transcribeSegmentRaw(...args: unknown[]): Promise<string>;
+      transcribeSingleSegment(
+        segmentFile: string,
+        segmentIndex: number,
+        totalSegments: number,
+        segmentStartTime: number,
+        segmentEndTime: number,
+      ): Promise<{ index: number; header: string; body: string; empty: boolean }>;
+      measureMaxVolumeDb(audioFilePath: string): Promise<number | null>;
+      splitAudioIntoSegments(
+        audioFilePath: string,
+        segmentDuration: number,
+        reencode: boolean,
+        signal: undefined,
+        duration: number,
+      ): Promise<string[]>;
+      getAudioDuration(audioFilePath: string): Promise<number>;
+    };
+
+    function makeEnergyService(): EnergyHelpers {
+      return new GeminiService({
+        apiKey: 'test-key',
+        dataPath: workDir,
+        proModel: 'gemini-test-pro',
+        flashModel: 'gemini-test-flash',
+      }) as unknown as EnergyHelpers;
+    }
+
+    async function makeFixture(name: string, source: string, seconds: number): Promise<string> {
+      const filePath = path.join(workDir, name);
+      await new Promise<void>((resolve, reject) => {
+        execFile(
+          ffmpegPath!,
+          ['-y', '-f', 'lavfi', '-i', source, '-t', String(seconds), '-c:a', 'libopus', filePath],
+          (err) => (err ? reject(err) : resolve()),
+        );
+      });
+      return filePath;
+    }
+
+    it('cuts overlapped segments matching the plan durations', async () => {
+      const audioPath = await makeFixture('overlap-src.webm', 'sine=frequency=440', 10);
+      const service = makeEnergyService();
+      // segmentDuration 4 -> overlap min(15, 1) = 1 -> plan [{0,4},{3,5},{7}].
+      const segments = await service.splitAudioIntoSegments(audioPath, 4, false, undefined, 10);
+
+      assert.deepEqual(
+        segments.map((p) => path.basename(p)),
+        [
+          'overlap-src_segment_000.webm',
+          'overlap-src_segment_001.webm',
+          'overlap-src_segment_002.webm',
+        ],
+      );
+      const durations = [];
+      for (const segment of segments) {
+        durations.push(await service.getAudioDuration(segment));
+      }
+      const expected = [4, 5, 3];
+      durations.forEach((actual, i) => {
+        assert.ok(
+          Math.abs(actual - expected[i]) <= 0.8,
+          `segment ${i} duration ${actual}s should be ~${expected[i]}s`,
+        );
+      });
+      for (const segment of segments) fs.unlinkSync(segment);
+    });
+
+    it('skips provider calls for a digitally silent segment', async () => {
+      const audioPath = await makeFixture('silent.webm', 'anullsrc=r=48000:cl=mono', 2);
+      const service = makeEnergyService();
+      let rawCalls = 0;
+      service.transcribeSegmentRaw = async () => {
+        rawCalls++;
+        return 'should not be called';
+      };
+
+      const result = await service.transcribeSingleSegment(audioPath, 0, 1, 0, 2);
+
+      assert.equal(rawCalls, 0, 'silent audio must never reach a provider');
+      assert.equal(result.empty, true);
+      assert.equal(result.body, '');
+    });
+
+    it('still transcribes audio with real signal', async () => {
+      const audioPath = await makeFixture('tone.webm', 'sine=frequency=440', 2);
+      const service = makeEnergyService();
+      let rawCalls = 0;
+      service.transcribeSegmentRaw = async () => {
+        rawCalls++;
+        return '참가자1: 오늘 회의를 시작하겠습니다.';
+      };
+
+      const result = await service.transcribeSingleSegment(audioPath, 0, 1, 0, 2);
+
+      assert.equal(rawCalls, 1);
+      assert.equal(result.empty, false);
+    });
+
+    it('fails open (null) when volume cannot be measured', async () => {
+      const service = makeEnergyService();
+      assert.equal(
+        await service.measureMaxVolumeDb(path.join(workDir, 'does-not-exist.webm')),
+        null,
+      );
+    });
+  },
+);
