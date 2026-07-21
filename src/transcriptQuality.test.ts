@@ -6,8 +6,9 @@
 //     high-compression repetition.
 //   - Legitimate speech repetition is NOT flagged: confirmations (네, 네),
 //     stutters, emphasis, short chants, code-switching, and clean prose.
-// The gate on top never deletes silently: one bounded context-cleared retry,
-// and a still-flagged retry keeps the FIRST result marked uncertain.
+// The gate on top never deletes silently: ordered bounded context-cleared
+// retries stop at the first clean rung, while exhaustion keeps the FIRST
+// result marked uncertain.
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
@@ -168,15 +169,18 @@ describe('applyTranscriptQualityGate', () => {
     const result = await applyTranscriptQualityGate({
       text: cleanText,
       label: 'test',
-      retry: async () => {
-        retries++;
-        return cleanText;
-      },
+      retries: [
+        async () => {
+          retries++;
+          return cleanText;
+        },
+      ],
       log: () => {},
     });
     assert.equal(result.text, cleanText);
     assert.equal(result.flagged, false);
     assert.equal(result.retried, false);
+    assert.equal(result.retriesAttempted, 0);
     assert.equal(retries, 0);
   });
 
@@ -184,7 +188,7 @@ describe('applyTranscriptQualityGate', () => {
     const result = await applyTranscriptQualityGate({
       text: loopText,
       label: 'test',
-      retry: async () => cleanText,
+      retries: [async () => cleanText],
       log: () => {},
     });
     assert.equal(result.text, cleanText);
@@ -196,7 +200,7 @@ describe('applyTranscriptQualityGate', () => {
     const result = await applyTranscriptQualityGate({
       text: loopText,
       label: 'test',
-      retry: async () => '',
+      retries: [async () => ''],
       log: () => {},
     });
     assert.equal(result.text, '');
@@ -208,7 +212,7 @@ describe('applyTranscriptQualityGate', () => {
     const result = await applyTranscriptQualityGate({
       text: loopText,
       label: 'test',
-      retry: async () => otherLoop,
+      retries: [async () => otherLoop],
       log: () => {},
     });
     assert.equal(result.text, loopText);
@@ -220,9 +224,11 @@ describe('applyTranscriptQualityGate', () => {
     const result = await applyTranscriptQualityGate({
       text: loopText,
       label: 'test',
-      retry: async () => {
-        throw new Error('rate limited');
-      },
+      retries: [
+        async () => {
+          throw new Error('rate limited');
+        },
+      ],
       log: () => {},
     });
     assert.equal(result.text, loopText);
@@ -234,10 +240,12 @@ describe('applyTranscriptQualityGate', () => {
     await applyTranscriptQualityGate({
       text: loopText,
       label: 'test',
-      retry: async () => {
-        retries++;
-        return loopText;
-      },
+      retries: [
+        async () => {
+          retries++;
+          return loopText;
+        },
+      ],
       log: () => {},
     });
     assert.equal(retries, 1);
@@ -259,13 +267,116 @@ describe('applyTranscriptQualityGate', () => {
     await applyTranscriptQualityGate({
       text: loopText,
       label: 'segment 1/2',
-      retry: async () => loopText,
+      retries: [async () => loopText],
       log: (message) => logs.push(message),
     });
     assert.ok(logs.length > 0);
     for (const line of logs) {
       assert.ok(!line.includes('감사합니다'), `log leaked transcript text: ${line}`);
     }
+  });
+
+  it('uses a clean first rung without invoking the second rung', async () => {
+    const calls = [0, 0];
+    const result = await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'test',
+      retries: [
+        async () => {
+          calls[0]++;
+          return cleanText;
+        },
+        async () => {
+          calls[1]++;
+          return '참가자2: 호출되면 안 됩니다.';
+        },
+      ],
+      log: () => {},
+    });
+
+    assert.equal(result.text, cleanText);
+    assert.deepEqual(calls, [1, 0]);
+    assert.equal(result.retriesAttempted, 1);
+  });
+
+  it('uses a clean second rung after the first rung is still flagged', async () => {
+    const result = await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'test',
+      retries: [async () => loopText, async () => cleanText],
+      log: () => {},
+    });
+
+    assert.equal(result.text, cleanText);
+    assert.equal(result.flagged, false);
+    assert.equal(result.retriesAttempted, 2);
+  });
+
+  it('keeps the first result when both rungs are flagged', async () => {
+    const otherLoop = `참가자1: ${Array(12).fill('자막').join(' ')}`;
+    const result = await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'test',
+      retries: [async () => otherLoop, async () => otherLoop],
+      log: () => {},
+    });
+
+    assert.equal(result.text, loopText);
+    assert.equal(result.flagged, true);
+    assert.equal(result.retriesAttempted, 2);
+  });
+
+  it('skips a throwing first rung and uses a clean second rung', async () => {
+    const result = await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'test',
+      retries: [
+        async () => {
+          throw new Error('rate limited');
+        },
+        async () => cleanText,
+      ],
+      log: () => {},
+    });
+
+    assert.equal(result.text, cleanText);
+    assert.equal(result.flagged, false);
+    assert.equal(result.retriesAttempted, 2);
+  });
+
+  it('invokes both rungs at most once each', async () => {
+    const calls = [0, 0];
+    await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'test',
+      retries: [
+        async () => {
+          calls[0]++;
+          return loopText;
+        },
+        async () => {
+          calls[1]++;
+          return loopText;
+        },
+      ],
+      log: () => {},
+    });
+
+    assert.deepEqual(calls, [1, 1]);
+  });
+
+  it('treats an empty retries array like no retries', async () => {
+    const result = await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'test',
+      retries: [],
+      log: () => {},
+    });
+
+    assert.equal(result.text, loopText);
+    assert.equal(result.flagged, true);
+    assert.equal(result.retried, false);
+    assert.equal(result.retriesAttempted, 0);
   });
 });
 

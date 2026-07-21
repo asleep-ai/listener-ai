@@ -401,12 +401,14 @@ export interface QualityGateInput {
   /** Tag for log lines, e.g. "segment 3/10". Never include transcript text. */
   label: string;
   /**
-   * Single bounded quality retry with prior/context text cleared. Invoked at
-   * most once, only when the first result is flagged. Errors inside the
-   * thunk keep the first result. Omit to disable retrying (live chunks must
-   * not blindly resend the same low-signal audio).
+   * Ordered bounded quality retries with prior/context text cleared. Rungs run
+   * in order, at most once each, until the first clean result wins (including
+   * empty text as silence evidence). A throwing rung is logged and skipped.
+   * If every rung is flagged or failed, the first result is kept and marked
+   * uncertain. Omit or pass an empty array to disable retrying (live chunks
+   * must not blindly resend the same low-signal audio).
    */
-  retry?: () => Promise<string>;
+  retries?: Array<() => Promise<string>>;
   log?: (message: string) => void;
 }
 
@@ -416,22 +418,29 @@ export interface QualityGateResult {
   flagged: boolean;
   reasons: string[];
   retried: boolean;
+  retriesAttempted: number;
 }
 
 // Bounded accept/retry policy on top of the analyzer:
 //   clean first        -> accept
 //   flagged, no retry  -> keep first, mark uncertain
-//   flagged + retry    -> clean retry (including empty = "audio was silent")
-//                         replaces the first; a still-flagged retry keeps the
-//                         FIRST result and marks it uncertain. Never more
-//                         than one retry, never silent deletion.
+//   flagged + retries  -> first clean retry (including empty = "audio was
+//                         silent") replaces the first; if all rungs are
+//                         flagged or fail, keep the FIRST result uncertain.
+//                         Never more attempts than rungs, never silent deletion.
 export async function applyTranscriptQualityGate(
   input: QualityGateInput,
 ): Promise<QualityGateResult> {
   const log = input.log ?? ((message: string) => console.warn(message));
   const first = analyzeTranscriptQuality(input.text);
   if (!first.flagged) {
-    return { text: input.text, flagged: false, reasons: [], retried: false };
+    return {
+      text: input.text,
+      flagged: false,
+      reasons: [],
+      retried: false,
+      retriesAttempted: 0,
+    };
   }
   const describe = (report: TranscriptQualityReport): string =>
     `${report.reasons.join(', ')}; normalizedLength=${report.metrics.normalizedLength}, ` +
@@ -440,31 +449,61 @@ export async function applyTranscriptQualityGate(
     `compression=${report.metrics.textCompressionRatio.toFixed(2)}`;
   log(`[transcript-quality] ${input.label}: flagged (${describe(first)})`);
 
-  if (!input.retry) {
+  if (!input.retries?.length) {
     log(`[transcript-quality] ${input.label}: no retry available; keeping flagged text`);
-    return { text: input.text, flagged: true, reasons: first.reasons, retried: false };
+    return {
+      text: input.text,
+      flagged: true,
+      reasons: first.reasons,
+      retried: false,
+      retriesAttempted: 0,
+    };
   }
 
-  let retryText: string;
-  try {
-    retryText = await input.retry();
-  } catch (error) {
+  const totalRetries = input.retries.length;
+  for (let index = 0; index < totalRetries; index++) {
+    const attempt = index + 1;
+    let retryText: string;
+    try {
+      retryText = await input.retries[index]();
+    } catch (error) {
+      const nextStep = attempt < totalRetries ? 'trying next rung' : 'no rungs remain';
+      log(
+        `[transcript-quality] ${input.label}: retry ${attempt}/${totalRetries} failed (${
+          error instanceof Error ? error.message : String(error)
+        }); ${nextStep}`,
+      );
+      continue;
+    }
+
+    const retryReport = analyzeTranscriptQuality(retryText);
+    if (!retryReport.flagged) {
+      log(
+        `[transcript-quality] ${input.label}: retry ${attempt}/${totalRetries} is clean; ` +
+          'using retry result',
+      );
+      return {
+        text: retryText,
+        flagged: false,
+        reasons: [],
+        retried: true,
+        retriesAttempted: attempt,
+      };
+    }
     log(
-      `[transcript-quality] ${input.label}: quality retry failed (${
-        error instanceof Error ? error.message : String(error)
-      }); keeping first result`,
+      `[transcript-quality] ${input.label}: retry ${attempt}/${totalRetries} still flagged (` +
+        `${describe(retryReport)})`,
     );
-    return { text: input.text, flagged: true, reasons: first.reasons, retried: true };
-  }
-
-  const second = analyzeTranscriptQuality(retryText);
-  if (!second.flagged) {
-    log(`[transcript-quality] ${input.label}: retry is clean; using retry result`);
-    return { text: retryText, flagged: false, reasons: [], retried: true };
   }
   log(
-    `[transcript-quality] ${input.label}: retry still flagged (${describe(second)}); ` +
+    `[transcript-quality] ${input.label}: all retries exhausted; ` +
       'keeping first result marked uncertain',
   );
-  return { text: input.text, flagged: true, reasons: first.reasons, retried: true };
+  return {
+    text: input.text,
+    flagged: true,
+    reasons: first.reasons,
+    retried: true,
+    retriesAttempted: totalRetries,
+  };
 }

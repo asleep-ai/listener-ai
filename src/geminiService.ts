@@ -454,9 +454,11 @@ const QUALITY_RETRY_TRANSCRIPT_PROMPT = `Transcribe the speech in this audio exa
 - If there is no clearly intelligible speech, return exactly ${NO_SPEECH_SENTINEL}.
 - Return only the transcript text.`;
 
-// Whisper's fallback ladder raises temperature to break self-reinforcing
-// repetition loops -- our single bounded retry uses one mid-high step.
-const QUALITY_RETRY_TEMPERATURE = 0.7;
+// Whisper's fallback ladder compressed to two points -- the low rung keeps
+// recovered speech accurate when it is enough to break the loop, while the
+// high rung maximizes escape probability. Bounded at two extra calls per
+// flagged transcript.
+const QUALITY_RETRY_TEMPERATURES = [0.4, 0.8] as const;
 
 export interface GeminiServiceOptions {
   provider?: AiProvider;
@@ -1398,11 +1400,13 @@ Return as JSON:
         const gated = await applyTranscriptQualityGate({
           text: stripNoSpeechSentinel(await runCodex(transcriptPrompt)),
           label: 'short audio (codex)',
-          retry: qualityRetry
-            ? () =>
-                runCodex(QUALITY_RETRY_TRANSCRIPT_PROMPT, QUALITY_RETRY_TEMPERATURE)
-                  .then(stripNoSpeechSentinel)
-                  .catch(emptyTranscriptionAsBlank)
+          retries: qualityRetry
+            ? QUALITY_RETRY_TEMPERATURES.map(
+                (temperature) => () =>
+                  runCodex(QUALITY_RETRY_TRANSCRIPT_PROMPT, temperature)
+                    .then(stripNoSpeechSentinel)
+                    .catch(emptyTranscriptionAsBlank),
+              )
             : undefined,
           log: (message) => console.error(message),
         });
@@ -1464,11 +1468,11 @@ Return as JSON:
       const gated = await applyTranscriptQualityGate({
         text: stripNoSpeechSentinel(await runGemini(transcriptPrompt)),
         label: 'short audio (gemini)',
-        retry: qualityRetry
-          ? () =>
-              runGemini(QUALITY_RETRY_TRANSCRIPT_PROMPT, QUALITY_RETRY_TEMPERATURE).then(
-                stripNoSpeechSentinel,
-              )
+        retries: qualityRetry
+          ? QUALITY_RETRY_TEMPERATURES.map(
+              (temperature) => () =>
+                runGemini(QUALITY_RETRY_TRANSCRIPT_PROMPT, temperature).then(stripNoSpeechSentinel),
+            )
           : undefined,
         log: (message) => console.error(message),
       });
@@ -1667,23 +1671,26 @@ Return as JSON:
 
         console.error(`Completed transcription for segment ${segmentIndex + 1}/${totalSegments}`);
 
-        // Repetition/hallucination gate (issue #182): flagged output gets one
-        // context-cleared retry; a still-flagged retry keeps the first result.
+        // Repetition/hallucination gate (issue #182): flagged output gets a
+        // context-cleared retry ladder; if every rung is flagged or fails, the
+        // first result is kept.
         const gated = await applyTranscriptQualityGate({
           text: raw,
           label: `segment ${segmentIndex + 1}/${totalSegments}`,
-          retry: qualityRetry
-            ? () =>
-                this.transcribeSegmentRaw(
-                  segmentFile,
-                  QUALITY_RETRY_TRANSCRIPT_PROMPT,
-                  segmentSeconds,
-                  signal,
-                  session,
-                  QUALITY_RETRY_TEMPERATURE,
-                )
-                  .then(stripNoSpeechSentinel)
-                  .catch(emptyTranscriptionAsBlank)
+          retries: qualityRetry
+            ? QUALITY_RETRY_TEMPERATURES.map(
+                (temperature) => () =>
+                  this.transcribeSegmentRaw(
+                    segmentFile,
+                    QUALITY_RETRY_TRANSCRIPT_PROMPT,
+                    segmentSeconds,
+                    signal,
+                    session,
+                    temperature,
+                  )
+                    .then(stripNoSpeechSentinel)
+                    .catch(emptyTranscriptionAsBlank),
+              )
             : undefined,
           log: (message) => console.error(message),
         });

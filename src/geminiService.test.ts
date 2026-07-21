@@ -238,20 +238,31 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
   }
 
   it('replaces a flagged segment with the clean context-cleared retry result', async () => {
+    const { service, prompts, temperatures } = makeGatedService([loopText, loopText, cleanText]);
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(prompts.length, 3, 'flagged output must advance through both retry rungs');
+    assert.match(prompts[0], /Audio segment 1 of 2/);
+    for (const prompt of prompts.slice(1)) {
+      assert.doesNotMatch(prompt, /Audio segment/, 'retry prompt must drop positional context');
+      assert.doesNotMatch(
+        prompt,
+        /proper nouns, names, and terms/,
+        'retry prompt must drop glossary',
+      );
+    }
+    assert.deepEqual(temperatures, [undefined, 0.4, 0.8]);
+    assert.ok(result.body.includes(cleanText));
+    assert.ok(!result.body.includes('시청해주셔서'));
+  });
+
+  it('stops after the low-temperature rung produces clean output', async () => {
     const { service, prompts, temperatures } = makeGatedService([loopText, cleanText]);
     const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
 
-    assert.equal(prompts.length, 2, 'flagged output must trigger exactly one retry');
-    assert.match(prompts[0], /Audio segment 1 of 2/);
-    assert.doesNotMatch(prompts[1], /Audio segment/, 'retry prompt must drop positional context');
-    assert.doesNotMatch(
-      prompts[1],
-      /proper nouns, names, and terms/,
-      'retry prompt must drop glossary',
-    );
-    assert.deepEqual(temperatures, [undefined, 0.7]);
+    assert.equal(prompts.length, 2);
+    assert.deepEqual(temperatures, [undefined, 0.4]);
     assert.ok(result.body.includes(cleanText));
-    assert.ok(!result.body.includes('시청해주셔서'));
   });
 
   it('keeps flagged output without retrying when qualityRetry is disabled', async () => {
@@ -303,10 +314,10 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
 
   it('keeps the first result when the quality retry is still flagged', async () => {
     const otherLoop = `참가자1: ${Array(12).fill('자막').join(' ')}`;
-    const { service, prompts } = makeGatedService([loopText, otherLoop]);
+    const { service, prompts } = makeGatedService([loopText, otherLoop, otherLoop]);
     const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 1, 0, 300);
 
-    assert.equal(prompts.length, 2);
+    assert.equal(prompts.length, 3);
     assert.ok(result.body.includes('시청해주셔서'), 'first result is retained');
     assert.ok(!result.body.includes('자막'));
   });
