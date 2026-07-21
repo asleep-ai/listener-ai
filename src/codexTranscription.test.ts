@@ -221,3 +221,55 @@ describe('transcribeCodexAudio empty responses', () => {
     );
   });
 });
+
+describe('transcribeCodexAudio temperature', () => {
+  const originalFetch = globalThis.fetch;
+  let audioPath = '';
+  let requestBody: FormData | undefined;
+
+  beforeEach(() => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-temperature-'));
+    audioPath = path.join(dir, 'clip.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    requestBody = undefined;
+    globalThis.fetch = (async (_input, init) => {
+      requestBody = init?.body as FormData;
+      const payload =
+        requestBody.get('model') === 'gpt-4o-transcribe-diarize'
+          ? { segments: [{ speaker: 'A', text: 'transcript', start: 0, end: 1 }] }
+          : { text: 'transcript' };
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (audioPath) fs.rmSync(path.dirname(audioPath), { recursive: true, force: true });
+  });
+
+  async function transcribe(model: string, temperature?: number): Promise<FormData> {
+    await transcribeCodexAudio({
+      getToken: async () => 'fake-token',
+      audioFilePath: audioPath,
+      model,
+      temperature,
+    });
+    assert.ok(requestBody);
+    return requestBody;
+  }
+
+  it('includes temperature for non-diarize models when set', async () => {
+    assert.equal((await transcribe('gpt-4o-transcribe', 0.7)).get('temperature'), '0.7');
+  });
+
+  it('omits temperature for non-diarize models when unset', async () => {
+    assert.equal((await transcribe('gpt-4o-transcribe')).get('temperature'), null);
+  });
+
+  it('omits temperature for the diarize model', async () => {
+    assert.equal((await transcribe('gpt-4o-transcribe-diarize', 0.7)).get('temperature'), null);
+  });
+});

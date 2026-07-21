@@ -454,6 +454,10 @@ const QUALITY_RETRY_TRANSCRIPT_PROMPT = `Transcribe the speech in this audio exa
 - If there is no clearly intelligible speech, return exactly ${NO_SPEECH_SENTINEL}.
 - Return only the transcript text.`;
 
+// Whisper's fallback ladder raises temperature to break self-reinforcing
+// repetition loops -- our single bounded retry uses one mid-high step.
+const QUALITY_RETRY_TEMPERATURE = 0.7;
+
 export interface GeminiServiceOptions {
   provider?: AiProvider;
   apiKey?: string;
@@ -1372,7 +1376,7 @@ Return as JSON:
 
       const transcriptPrompt = `${includeGlossary ? this.buildGlossaryBlock() : ''}${customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT}`;
       if (this.provider === 'codex') {
-        const runCodex = async (prompt: string): Promise<string> => {
+        const runCodex = async (prompt: string, temperature?: number): Promise<string> => {
           const text = await transcribeCodexAudio({
             getToken: () => this.getCodexToken(),
             audioFilePath,
@@ -1381,6 +1385,7 @@ Return as JSON:
             // diarize model is active. Keep passing it -- the helper picks
             // the right shape per model.
             prompt,
+            temperature,
             // Intentionally NOT passing `language: 'ko'`. Whisper-derived
             // transcription auto-detects from the first ~30s, which handles
             // bilingual/code-switched meetings (Korean primary, English
@@ -1395,7 +1400,7 @@ Return as JSON:
           label: 'short audio (codex)',
           retry: qualityRetry
             ? () =>
-                runCodex(QUALITY_RETRY_TRANSCRIPT_PROMPT)
+                runCodex(QUALITY_RETRY_TRANSCRIPT_PROMPT, QUALITY_RETRY_TEMPERATURE)
                   .then(stripNoSpeechSentinel)
                   .catch(emptyTranscriptionAsBlank)
             : undefined,
@@ -1454,13 +1459,16 @@ Return as JSON:
         progressCallback(50, 'Transcribing audio...');
       }
 
-      const runGemini = (prompt: string): Promise<string> =>
-        this.generateGeminiTranscript(audioFilePath, fileUri, prompt, signal, session);
+      const runGemini = (prompt: string, temperature?: number): Promise<string> =>
+        this.generateGeminiTranscript(audioFilePath, fileUri, prompt, signal, session, temperature);
       const gated = await applyTranscriptQualityGate({
         text: stripNoSpeechSentinel(await runGemini(transcriptPrompt)),
         label: 'short audio (gemini)',
         retry: qualityRetry
-          ? () => runGemini(QUALITY_RETRY_TRANSCRIPT_PROMPT).then(stripNoSpeechSentinel)
+          ? () =>
+              runGemini(QUALITY_RETRY_TRANSCRIPT_PROMPT, QUALITY_RETRY_TEMPERATURE).then(
+                stripNoSpeechSentinel,
+              )
           : undefined,
         log: (message) => console.error(message),
       });
@@ -1483,6 +1491,7 @@ Return as JSON:
     promptText: string,
     signal?: AbortSignal,
     session?: CostSession,
+    temperature = 0.2,
   ): Promise<string> {
     const ai = this.gemini();
     const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
@@ -1505,7 +1514,7 @@ Return as JSON:
         },
       ],
       config: {
-        temperature: 0.2,
+        temperature,
         maxOutputTokens: 32768,
         abortSignal: signal,
       },
@@ -1552,6 +1561,10 @@ Return as JSON:
     segmentSeconds: number,
     signal?: AbortSignal,
     session?: CostSession,
+    // Undefined on first attempts: codex then omits the field entirely
+    // (provider default, exactly as before) and gemini falls back to 0.2.
+    // Only the quality retry passes an explicit raised value.
+    temperature?: number,
   ): Promise<string> {
     if (this.provider === 'codex') {
       const transcript = await transcribeCodexAudio({
@@ -1559,6 +1572,7 @@ Return as JSON:
         audioFilePath: segmentFile,
         model: this.codexTranscriptionModel,
         prompt: promptText,
+        temperature,
         signal,
       });
       recordCodexSttUsage(session, this.codexTranscriptionModel, segmentSeconds);
@@ -1586,7 +1600,7 @@ Return as JSON:
         },
       ],
       config: {
-        temperature: 0.2,
+        temperature: temperature ?? 0.2,
         maxOutputTokens: 32768,
         abortSignal: signal,
       },
@@ -1666,6 +1680,7 @@ Return as JSON:
                   segmentSeconds,
                   signal,
                   session,
+                  QUALITY_RETRY_TEMPERATURE,
                 )
                   .then(stripNoSpeechSentinel)
                   .catch(emptyTranscriptionAsBlank)

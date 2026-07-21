@@ -105,6 +105,7 @@ export interface TranscribeCodexAudioParams {
   prompt?: string;
   /** ISO 639-1 language code (e.g. "ko"). Improves accuracy when set. */
   language?: string;
+  temperature?: number;
   /** Cancellation signal. Forwarded into the fetch so the in-flight upload
    *  aborts immediately. Two callers fire this: the user-driven cancel button
    *  in the renderer, and the segment-loop's sibling controller that fails
@@ -128,6 +129,7 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
     form.append('language', params.language);
   }
   if (diarize) {
+    // The diarize model has a restricted parameter surface -- omit temperature.
     // Required for the diarize model. `chunking_strategy=auto` lets OpenAI
     // split long audio internally while keeping speaker identity coherent
     // across chunks -- so we can hand it a whole 50-minute meeting (subject
@@ -136,6 +138,9 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
     form.append('chunking_strategy', 'auto');
   } else if (params.prompt?.trim()) {
     form.append('prompt', params.prompt.trim());
+  }
+  if (!diarize && params.temperature !== undefined) {
+    form.append('temperature', String(params.temperature));
   }
   form.append(
     'file',
@@ -148,7 +153,9 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
   console.log(
     `[codex-transcribe] -> ${path.basename(params.audioFilePath)} ${sizeMB}MB model=${model}${
       diarize ? ' diarize=true' : params.prompt ? ` prompt=${params.prompt.length}chars` : ''
-    }${params.language ? ` lang=${params.language}` : ''}`,
+    }${params.language ? ` lang=${params.language}` : ''}${
+      params.temperature !== undefined ? ` temp=${params.temperature}` : ''
+    }`,
   );
 
   const response = await fetch(`${OPENAI_API_BASE_URL}/audio/transcriptions`, {

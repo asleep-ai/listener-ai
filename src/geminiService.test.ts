@@ -182,6 +182,7 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       segmentSeconds: number,
       signal?: AbortSignal,
       session?: unknown,
+      temperature?: number,
     ): Promise<string>;
     transcribeSingleSegment(
       segmentFile: string,
@@ -204,8 +205,10 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
   function makeGatedService(outputs: (string | Error)[]): {
     service: SegmentHelpers;
     prompts: string[];
+    temperatures: (number | undefined)[];
   } {
     const prompts: string[] = [];
+    const temperatures: (number | undefined)[] = [];
     const service = new GeminiService({
       apiKey: 'test-key',
       dataPath: workDir,
@@ -216,18 +219,26 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     // the energy gate, and must not shell out to a real ffmpeg binary.
     service.measureMaxVolumeDb = async () => null;
     let call = 0;
-    service.transcribeSegmentRaw = async (_file, promptText) => {
+    service.transcribeSegmentRaw = async (
+      _file,
+      promptText,
+      _seconds,
+      _signal,
+      _session,
+      temperature,
+    ) => {
       prompts.push(promptText);
+      temperatures.push(temperature);
       const output = outputs[Math.min(call, outputs.length - 1)];
       call++;
       if (output instanceof Error) throw output;
       return output;
     };
-    return { service, prompts };
+    return { service, prompts, temperatures };
   }
 
   it('replaces a flagged segment with the clean context-cleared retry result', async () => {
-    const { service, prompts } = makeGatedService([loopText, cleanText]);
+    const { service, prompts, temperatures } = makeGatedService([loopText, cleanText]);
     const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
 
     assert.equal(prompts.length, 2, 'flagged output must trigger exactly one retry');
@@ -238,6 +249,7 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       /proper nouns, names, and terms/,
       'retry prompt must drop glossary',
     );
+    assert.deepEqual(temperatures, [undefined, 0.7]);
     assert.ok(result.body.includes(cleanText));
     assert.ok(!result.body.includes('시청해주셔서'));
   });
