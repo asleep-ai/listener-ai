@@ -428,17 +428,19 @@ IMPORTANT:
 - If the audio contains no intelligible speech at all, return exactly ${NO_SPEECH_SENTINEL}
 - Return ONLY the transcription text, no JSON formatting`;
 
-// Final-stage model review, piggybacked on the existing summary call (issue
+// Final-stage model notes, piggybacked on the existing summary call (issue
 // #182): the summary model already reads the entire assembled transcript, so
 // asking it to also flag suspected transcription artifacts costs zero extra
-// API calls. Text-only judgment cannot verify audio grounding, so the output
-// is notes-only -- it never edits the transcript.
+// API calls. Text-only judgment cannot verify audio grounding, so its output
+// is advisory metadata alongside the separate cleanup pass.
 const TRANSCRIPT_QUALITY_PROMPT_BLOCK = `Additionally, before summarizing, review the transcript for transcription artifacts: sections where the same sentence or phrase repeats verbatim many times, boilerplate unrelated to the surrounding discussion (e.g. broadcast closing phrases on silence), or content that clearly breaks the flow of the meeting. These can be speech-to-text errors, not real speech.
 
 - If any exist, add a "transcriptQualityNotes" array to the JSON response. Each item is one short Korean sentence describing the suspicious section and why it looks like a transcription artifact.
 - If there are none, omit the field.
 - Never rewrite or remove transcript content based on this review.
 - Base the summary, key points, and action items only on content you judge to be genuine speech; do not summarize suspected artifacts as if they were discussion content.`;
+
+const TRANSCRIPT_CLEANUP_SYSTEM_PROMPT = `You are a transcript post-processor for speech-to-text output. STT models sometimes emit artifacts: the same sentence or phrase repeated verbatim many times in a row, boilerplate unrelated to the conversation (e.g. broadcast closing phrases emitted over silence), or looping word sequences. Remove ONLY such artifacts and return the rest of the transcript EXACTLY as-is. Rules: (1) Keep legitimate repetition: confirmations like '네, 네', stutters, chants, emphasis. (2) Never rephrase, summarize, translate, reorder, or fix grammar/spacing — copy non-artifact text verbatim, including speaker labels (참가자N:), segment headers like [Segment 1: 00:00:00 ~ 00:05:00], blank lines, and --- separators. (3) When a phrase loops, keep its first occurrence and delete the copies. (4) If nothing is an artifact, return the transcript unchanged. Return ONLY the transcript text — no commentary, no code fences.`;
 
 // Context-cleared prompt for the single bounded quality retry (issue #182):
 // no glossary, no positional prefix, no format examples -- so a retry after a
@@ -621,6 +623,42 @@ export class GeminiService {
       { kind: 'agent' },
     );
     return extractFinalText(response);
+  }
+
+  private async cleanTranscriptWithModel(
+    transcript: string,
+    signal?: AbortSignal,
+  ): Promise<{ text: string; removedChars: number }> {
+    if (!transcript.trim()) return { text: transcript, removedChars: 0 };
+
+    try {
+      const modelId = this.provider === 'codex' ? this.codexModel : this.flashModel;
+      const response = await this.completeTextTask(
+        TRANSCRIPT_CLEANUP_SYSTEM_PROMPT,
+        `Transcript to clean:\n${transcript}`,
+        {
+          modelId,
+          temperature: 0,
+          reasoning: 'low',
+          maxTokens: 32768,
+          signal,
+        },
+      );
+      const fenced = response.match(/^```(?:\w+)?\r?\n([\s\S]*?)(?:\r?\n)?```\s*$/);
+      const cleaned = (fenced ? fenced[1] : response).trimEnd();
+      if (!cleaned) return { text: transcript, removedChars: 0 };
+
+      const removedChars = Math.max(0, transcript.length - cleaned.length);
+      if (removedChars > 0) {
+        console.error(`[transcript-quality] model cleanup removed ${removedChars} chars`);
+      }
+      return { text: cleaned, removedChars };
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[transcript-quality] model cleanup failed: ${message}`);
+      return { text: transcript, removedChars: 0 };
+    }
   }
 
   private async prepareAudioForProvider(
@@ -1131,9 +1169,8 @@ Requirements:
       signal?.throwIfAborted();
 
       // Final-stage analyzer pass over the ASSEMBLED transcript: catches
-      // cross-segment repetition the per-segment gate cannot see. Detection
-      // only -- the transcript is never modified here; the report is logged
-      // (metrics only) and persisted on the saved note below.
+      // cross-segment repetition the per-segment gate cannot see. Its raw
+      // verdict is logged (metrics only) and persisted on the saved note.
       const assembledQuality = analyzeAssembledTranscript(fullTranscript);
       if (assembledQuality.flagged) {
         console.error(
@@ -1148,6 +1185,9 @@ Requirements:
         }
         return attachCost(transcriptOnlyResult(fullTranscript), costSession);
       }
+
+      const cleanup = await this.cleanTranscriptWithModel(fullTranscript, signal);
+      fullTranscript = cleanup.text;
 
       // Step 2: Generate summary, key points, action items from transcript
       if (progressCallback) {
@@ -1242,12 +1282,10 @@ Return as JSON:
       const highlights = mergeHighlights(liveNotes, rawHighlights);
 
       // Persist the final-stage quality picture on the note (meta.json
-      // customFields) when either detector saw something: the deterministic
-      // analyzer verdict on the assembled transcript, and the summary
-      // model's suspected-artifact notes. Marking only -- the transcript
-      // itself is stored untouched.
+      // customFields) when the analyzer, summary review, or cleanup reports
+      // an artifact.
       const modelQualityNotes = normalizeTranscriptQualityNotes(rawQualityNotes);
-      if (assembledQuality.flagged || modelQualityNotes.length > 0) {
+      if (assembledQuality.flagged || modelQualityNotes.length > 0 || cleanup.removedChars > 0) {
         customFields.transcriptQuality = {
           ...(assembledQuality.flagged
             ? {
@@ -1258,6 +1296,9 @@ Return as JSON:
               }
             : {}),
           ...(modelQualityNotes.length > 0 ? { modelNotes: modelQualityNotes } : {}),
+          ...(cleanup.removedChars > 0
+            ? { modelCleanup: { removedChars: cleanup.removedChars } }
+            : {}),
         };
       }
 
