@@ -1,20 +1,21 @@
 # Transcription Quality Pipeline
 
-Ground truth for how a recording becomes a saved transcript, and where each
-repetition/hallucination ("repeat curse") guard sits. Covers the batch path
-(recording finished → note saved) built for issue #182. Source of truth for
-behavior; when code and this document disagree, fix one of them.
+Ground truth for how a recording becomes a saved transcript and where each
+repetition/hallucination ("repeat curse") guard sits. It covers the issue #182
+batch path from finished recording to saved note. When code and this document
+disagree, fix one of them.
 
 ## Batch pipeline
 
 ```
 audio file
-  │ 0. duration probe (ffmpeg)
+  │ 0. entry: duration probe (ffmpeg)
   │ 1. segmentation (long files): head-overlapped plan, re-encoded cuts
-  │ 2. per-segment: transcribe → analyzer → escalating retry ladder
+  │ 2. per-segment: transcribe → analyzer → retry ladder
   │ 3. assembly: boundary reconciliation → join
   │ 4. assembled-transcript analyzer (cross-segment loops)
   │ 5. summary call (+ piggybacked quality notes)
+  │ 6. persistence: transcript + optional quality metadata
   ▼
 saved note (meta.json carries transcriptQuality verdicts)
 ```
@@ -27,21 +28,22 @@ merge) converge on `GeminiService.transcribeAudio` → `transcribeWithTwoSteps`
 
 ### 1. Segmentation (duration > 300s, or Codex files > 24 MB)
 
-`computeSegmentPlan`: every segment after the first starts
-`SEGMENT_OVERLAP_SECONDS` (15s, capped at segmentDuration/4) early, so
-boundary speech is transcribed twice on purpose. Cuts are one ffmpeg
-`-ss/-t` invocation per segment, always re-encoded (libopus 48k → `.webm`):
-stream-copy extraction on webm-opus measured wildly wrong (a 5s request
-produced an 8s file) and reconciliation depends on cut accuracy. Unknown
-duration (ffprobe failed) falls back to the legacy no-overlap segment muxer.
-Segment headers keep nominal (non-overlapped) time ranges.
+`computeSegmentPlan` starts every segment after the first
+`SEGMENT_OVERLAP_SECONDS` early (15s, capped at segmentDuration/4), so boundary
+speech is deliberately transcribed twice. Each cut uses one ffmpeg `-ss/-t`
+invocation and is always re-encoded (libopus 48k → `.webm`). Stream-copy
+extraction on webm-opus was badly inaccurate: a 5s request produced an 8s
+file, while boundary reconciliation depends on accurate cuts. If ffprobe
+cannot determine the duration, the pipeline falls back to the legacy
+no-overlap segment muxer. Segment headers retain nominal, non-overlapped time
+ranges.
 
-### 2. Per-segment transcription + quality gate
+### 2. Per-segment transcription, analyzer, and retry ladder
 
-Each segment is transcribed independently (no cross-segment text
-conditioning — Whisper-style long-form error propagation cannot occur by
-construction). The raw text is stripped of the `[NO_SPEECH]` sentinel, then
-analyzed (`src/transcriptQuality.ts`):
+Each segment is transcribed independently. There is no cross-segment text
+conditioning, so Whisper-style long-form error propagation cannot occur by
+construction. The `[NO_SPEECH]` sentinel is stripped from the raw text before
+the analyzer runs (`src/transcriptQuality.ts`):
 
 | Detector | Catches |
 |---|---|
@@ -53,17 +55,17 @@ analyzed (`src/transcriptQuality.ts`):
 Thresholds are conservative: confirmations (`네, 네`), stutters, emphasis,
 and short chants never flag.
 
-Flagged output triggers the **escalating retry ladder**
+Flagged output triggers the **retry ladder**
 (`QUALITY_RETRY_TEMPERATURES = [0.4, 0.8]`): a context-cleared prompt (no
-glossary, no positional prefix, no examples) re-transcribes the SAME audio,
-first at temperature 0.4, then 0.8 if still flagged. Rationale: low
-temperature is what locks a decoder into a self-reinforcing loop (Whisper's
-escalating fallback, compressed to two rungs — the low rung preserves
-recovered-speech accuracy when it suffices). The first analyzer-clean rung
-wins (empty counts as silence evidence); a throwing rung is skipped; if every
-rung fails, the FIRST result is kept and marked uncertain. Detection never
-deletes text on its own. Provider/network errors use a separate 3-attempt
-backoff retry, unrelated to this ladder.
+glossary, positional prefix, or examples) re-transcribes the same audio at
+temperature 0.4, then 0.8 if the first rung is still flagged. Low temperature
+can lock a decoder into a self-reinforcing loop; this is Whisper's escalating
+fallback compressed to two rungs, with the low rung preserving recovered
+speech accuracy when it succeeds. The first analyzer-clean rung wins, and an
+empty result counts as silence evidence. A throwing rung is skipped. If every
+rung fails, the first result is kept and marked uncertain. The analyzer never
+deletes text. Provider or network errors use a separate three-attempt backoff,
+unrelated to the retry ladder.
 
 Production calibration (2026-07-21/22, real 1h Korean meetings): 0.2 retries
 failed to recover looped segments; the ladder recovered 5 of 6 flagged
@@ -72,27 +74,28 @@ after 0.4 itself looped).
 
 ### 3. Assembly + boundary reconciliation
 
-`reconcileOverlappingSegments`: because segment N and N+1 transcribed the
-same overlap audio, matching text at the boundary is evidence-backed and safe
-to drop from the LATER segment's head. Matching is anchored at the boundary,
-bounded to a ~400-normalized-char window, per-line bigram similarity ≥ 0.85
-(plus an exact-suffix half-line case), and removes nothing when unsure.
-Repetition deep inside a segment is unreachable by design.
+`reconcileOverlappingSegments` performs boundary reconciliation. Because
+segments N and N+1 transcribed the same overlap audio, matching boundary text
+is evidence-backed and safe to drop from the later segment's head. Boundary
+reconciliation is anchored at the boundary, limited to a
+~400-normalized-character window, and uses per-line bigram similarity ≥ 0.85
+plus an exact-suffix half-line case. It removes nothing when unsure and cannot
+reach repetition deep inside a segment by design.
 
 ### 4. Assembled-transcript analyzer
 
-`analyzeAssembledTranscript` re-runs the analyzer over the joined text with
-segment headers/`---` separators stripped (adjacent headers from silent
-segments would false-flag). This is what sees cross-segment loops. Verdict is
-logged (metrics only) and persisted.
+`analyzeAssembledTranscript` runs the analyzer again over the joined text,
+after stripping segment headers and `---` separators. Adjacent headers from
+silent segments would otherwise false-flag. This pass detects cross-segment
+loops, then logs and persists the verdict using metrics only.
 
 ### 5. Summary + piggybacked review
 
-The summary call (the provider's large model) additionally returns a
-`transcriptQualityNotes` JSON array — short Korean descriptions of sections
-that look like transcription artifacts. Notes only: the model is instructed
-to keep suspected artifacts out of the summary but never rewrite the
-transcript. Zero extra API calls.
+The summary call to the provider's large model also returns a
+`transcriptQualityNotes` JSON array: short Korean descriptions of sections
+that look like transcription artifacts. These are notes only. The model keeps
+suspected artifacts out of the summary but never rewrites the transcript.
+This adds no API calls.
 
 > **Removed stages (both by user decision, 2026-07-22 — do not reintroduce
 > without a new decision):**
@@ -100,7 +103,7 @@ transcript. Zero extra API calls.
 >   artifacts deleted): removed after a production incident — asked to clean
 >   a transcript at temperature 0, the cleanup model itself entered a
 >   repetition loop and returned 61,318 chars for a 20,349-char input.
->   Audio-level retries + marking are the retained strategy.
+>   The audio-level retry ladder and marking are the retained strategy.
 > - *Pre-upload energy gate* (ffmpeg volumedetect skip below −50 dBFS):
 >   removed to keep the pipeline simple. Silent audio now reaches the
 >   provider and resolves through the `[NO_SPEECH]` sentinel / empty-response
@@ -108,10 +111,10 @@ transcript. Zero extra API calls.
 
 ### 6. Persistence
 
-`meta.json` → `customFields.transcriptQuality = { analyzer?, modelNotes? }`,
-written only when something was found. The transcript itself is stored as
-transcribed (post-ladder, post-reconciliation); flagged-but-unrecovered text
-is kept and marked, never silently deleted.
+`meta.json` → `customFields.transcriptQuality = { analyzer?, modelNotes? }` is
+written only when something was found. The transcript is stored after the
+retry ladder and boundary reconciliation. Flagged but unrecovered text is
+kept and marked, never silently deleted.
 
 ## Provider matrix
 
@@ -137,13 +140,15 @@ The main quality investment is the batch pipeline above; live captions get:
   provider stuck on silence emits every window. No fuzzy dedupe: without
   timestamp/audio evidence, deletion is unsafe.
 - Flagged finals are kept and carry `segment.quality = { flagged, reasons }`.
-- Live snippets never auto-retry (`qualityRetry: false`) — re-sending the
-  same low-signal 12s blob buys no new evidence. A silent snippet resolves to `''`
-  via the no-speech semantics after the provider call.
+- Live snippets never run the retry ladder (`qualityRetry: false`) — re-sending
+  the same low-signal 12s blob buys no new evidence. A silent snippet resolves
+  to `''` via the no-speech semantics after the provider call.
 
 ## Observability
 
 All quality logs are metrics-only — transcript text never appears in logs.
+While the retry ladder runs, the UI progress message shows
+`quality retry N/M`, so long-running segments remain explainable.
 
 ```
 [transcript-quality] segment 7/12: flagged (repeated-ngram-loop; normalizedLength=…, blockRepeats=…, compression=…)

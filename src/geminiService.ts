@@ -1260,6 +1260,9 @@ Return as JSON:
     try {
       const stats = await fs.promises.stat(audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
+      const reportQualityRetry = (rung: number, totalRungs: number): void => {
+        progressCallback?.(50, `Re-transcribing audio (quality retry ${rung}/${totalRungs})...`);
+      };
 
       if (progressCallback) {
         progressCallback(20, 'Processing audio file...');
@@ -1290,12 +1293,12 @@ Return as JSON:
           text: stripNoSpeechSentinel(await runCodex(transcriptPrompt)),
           label: 'short audio (codex)',
           retries: qualityRetry
-            ? QUALITY_RETRY_TEMPERATURES.map(
-                (temperature) => () =>
-                  runCodex(QUALITY_RETRY_TRANSCRIPT_PROMPT, temperature)
-                    .then(stripNoSpeechSentinel)
-                    .catch(emptyTranscriptionAsBlank),
-              )
+            ? QUALITY_RETRY_TEMPERATURES.map((temperature, index) => () => {
+                reportQualityRetry(index + 1, QUALITY_RETRY_TEMPERATURES.length);
+                return runCodex(QUALITY_RETRY_TRANSCRIPT_PROMPT, temperature)
+                  .then(stripNoSpeechSentinel)
+                  .catch(emptyTranscriptionAsBlank);
+              })
             : undefined,
           log: (message) => console.error(message),
         });
@@ -1358,10 +1361,12 @@ Return as JSON:
         text: stripNoSpeechSentinel(await runGemini(transcriptPrompt)),
         label: 'short audio (gemini)',
         retries: qualityRetry
-          ? QUALITY_RETRY_TEMPERATURES.map(
-              (temperature) => () =>
-                runGemini(QUALITY_RETRY_TRANSCRIPT_PROMPT, temperature).then(stripNoSpeechSentinel),
-            )
+          ? QUALITY_RETRY_TEMPERATURES.map((temperature, index) => () => {
+              reportQualityRetry(index + 1, QUALITY_RETRY_TEMPERATURES.length);
+              return runGemini(QUALITY_RETRY_TRANSCRIPT_PROMPT, temperature).then(
+                stripNoSpeechSentinel,
+              );
+            })
           : undefined,
         log: (message) => console.error(message),
       });
@@ -1515,6 +1520,7 @@ Return as JSON:
     session?: CostSession,
     includeGlossary = true,
     qualityRetry = true,
+    onQualityRetry?: (rung: number, totalRungs: number) => void,
   ): Promise<{ index: number; header: string; body: string; empty: boolean }> {
     const maxRetries = 3;
     let lastError: any = null;
@@ -1555,19 +1561,19 @@ Return as JSON:
           text: raw,
           label: `segment ${segmentIndex + 1}/${totalSegments}`,
           retries: qualityRetry
-            ? QUALITY_RETRY_TEMPERATURES.map(
-                (temperature) => () =>
-                  this.transcribeSegmentRaw(
-                    segmentFile,
-                    QUALITY_RETRY_TRANSCRIPT_PROMPT,
-                    segmentSeconds,
-                    signal,
-                    session,
-                    temperature,
-                  )
-                    .then(stripNoSpeechSentinel)
-                    .catch(emptyTranscriptionAsBlank),
-              )
+            ? QUALITY_RETRY_TEMPERATURES.map((temperature, index) => () => {
+                onQualityRetry?.(index + 1, QUALITY_RETRY_TEMPERATURES.length);
+                return this.transcribeSegmentRaw(
+                  segmentFile,
+                  QUALITY_RETRY_TRANSCRIPT_PROMPT,
+                  segmentSeconds,
+                  signal,
+                  session,
+                  temperature,
+                )
+                  .then(stripNoSpeechSentinel)
+                  .catch(emptyTranscriptionAsBlank);
+              })
             : undefined,
           log: (message) => console.error(message),
         });
@@ -1681,6 +1687,7 @@ Return as JSON:
       // in-flight segment.
       const aborter = new AbortController();
       const combinedSignal = signal ? AbortSignal.any([signal, aborter.signal]) : aborter.signal;
+      let completedCount = 0;
 
       const transcriptionPromises = segmentFiles.map((segmentFile, i) => {
         const segmentStartTime = i * segmentDuration;
@@ -1696,6 +1703,13 @@ Return as JSON:
           session,
           includeGlossary,
           qualityRetry,
+          (rung, totalRungs) => {
+            const progress = 20 + (completedCount / segmentFiles.length) * 60;
+            progressCallback?.(
+              progress,
+              `Re-transcribing segment ${i + 1} of ${segmentFiles.length} (quality retry ${rung}/${totalRungs})...`,
+            );
+          },
         ).catch((err) => {
           aborter.abort();
           throw err;
@@ -1703,7 +1717,6 @@ Return as JSON:
       });
 
       // Track progress of concurrent transcriptions
-      let completedCount = 0;
       const progressTrackedPromises = transcriptionPromises.map((promise) =>
         promise.then((result) => {
           completedCount++;

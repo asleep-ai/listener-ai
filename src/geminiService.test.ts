@@ -195,6 +195,7 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       session?: unknown,
       includeGlossary?: boolean,
       qualityRetry?: boolean,
+      onQualityRetry?: (rung: number, totalRungs: number) => void,
     ): Promise<{ index: number; header: string; body: string; empty: boolean }>;
   };
 
@@ -235,9 +236,26 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
 
   it('replaces a flagged segment with the clean context-cleared retry result', async () => {
     const { service, prompts, temperatures } = makeGatedService([loopText, loopText, cleanText]);
-    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+    const qualityRetryCalls: [number, number][] = [];
+    const result = await service.transcribeSingleSegment(
+      '/tmp/seg.webm',
+      0,
+      2,
+      0,
+      300,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      true,
+      (rung, totalRungs) => qualityRetryCalls.push([rung, totalRungs]),
+    );
 
     assert.equal(prompts.length, 3, 'flagged output must advance through both retry rungs');
+    assert.deepEqual(qualityRetryCalls, [
+      [1, 2],
+      [2, 2],
+    ]);
     assert.match(prompts[0], /Audio segment 1 of 2/);
     for (const prompt of prompts.slice(1)) {
       assert.doesNotMatch(prompt, /Audio segment/, 'retry prompt must drop positional context');
@@ -263,6 +281,7 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
 
   it('keeps flagged output without retrying when qualityRetry is disabled', async () => {
     const { service, prompts } = makeGatedService([loopText, cleanText]);
+    const qualityRetryCalls: [number, number][] = [];
     const result = await service.transcribeSingleSegment(
       '/tmp/seg.webm',
       0,
@@ -274,17 +293,33 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       undefined,
       true,
       false,
+      (rung, totalRungs) => qualityRetryCalls.push([rung, totalRungs]),
     );
 
     assert.equal(prompts.length, 1);
+    assert.deepEqual(qualityRetryCalls, []);
     assert.ok(result.body.includes('시청해주셔서'));
   });
 
   it('does not retry clean output', async () => {
     const { service, prompts } = makeGatedService([cleanText]);
-    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 1, 3, 300, 600);
+    const qualityRetryCalls: [number, number][] = [];
+    const result = await service.transcribeSingleSegment(
+      '/tmp/seg.webm',
+      1,
+      3,
+      300,
+      600,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      true,
+      (rung, totalRungs) => qualityRetryCalls.push([rung, totalRungs]),
+    );
 
     assert.equal(prompts.length, 1);
+    assert.deepEqual(qualityRetryCalls, []);
     assert.ok(result.body.includes(cleanText));
     assert.equal(result.empty, false);
   });
