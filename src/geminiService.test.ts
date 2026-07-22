@@ -196,7 +196,6 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       includeGlossary?: boolean,
       qualityRetry?: boolean,
     ): Promise<{ index: number; header: string; body: string; empty: boolean }>;
-    measureMaxVolumeDb(audioFilePath: string, signal?: AbortSignal): Promise<number | null>;
   };
 
   const loopText = Array(5).fill('참가자1: 시청해주셔서 감사합니다.').join('\n');
@@ -215,9 +214,6 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       proModel: 'gemini-test-pro',
       flashModel: 'gemini-test-flash',
     }) as unknown as SegmentHelpers;
-    // Fail-open volume measurement: these tests exercise the text gate, not
-    // the energy gate, and must not shell out to a real ffmpeg binary.
-    service.measureMaxVolumeDb = async () => null;
     let call = 0;
     service.transcribeSegmentRaw = async (
       _file,
@@ -507,19 +503,10 @@ describe('computeSegmentPlan', () => {
 });
 
 describe(
-  'GeminiService overlapped segmentation and silence gate (real ffmpeg)',
+  'GeminiService overlapped segmentation (real ffmpeg)',
   { skip: !ffmpegPath ? 'ffmpeg not installed' : undefined },
   () => {
-    type EnergyHelpers = {
-      transcribeSegmentRaw(...args: unknown[]): Promise<string>;
-      transcribeSingleSegment(
-        segmentFile: string,
-        segmentIndex: number,
-        totalSegments: number,
-        segmentStartTime: number,
-        segmentEndTime: number,
-      ): Promise<{ index: number; header: string; body: string; empty: boolean }>;
-      measureMaxVolumeDb(audioFilePath: string): Promise<number | null>;
+    type SplitHelpers = {
       splitAudioIntoSegments(
         audioFilePath: string,
         segmentDuration: number,
@@ -530,13 +517,13 @@ describe(
       getAudioDuration(audioFilePath: string): Promise<number>;
     };
 
-    function makeEnergyService(): EnergyHelpers {
+    function makeSplitService(): SplitHelpers {
       return new GeminiService({
         apiKey: 'test-key',
         dataPath: workDir,
         proModel: 'gemini-test-pro',
         flashModel: 'gemini-test-flash',
-      }) as unknown as EnergyHelpers;
+      }) as unknown as SplitHelpers;
     }
 
     async function makeFixture(name: string, source: string, seconds: number): Promise<string> {
@@ -553,7 +540,7 @@ describe(
 
     it('cuts overlapped segments matching the plan durations', async () => {
       const audioPath = await makeFixture('overlap-src.webm', 'sine=frequency=440', 10);
-      const service = makeEnergyService();
+      const service = makeSplitService();
       // segmentDuration 4 -> overlap min(15, 1) = 1 -> plan [{0,4},{3,5},{7}].
       const segments = await service.splitAudioIntoSegments(audioPath, 4, false, undefined, 10);
 
@@ -577,45 +564,6 @@ describe(
         );
       });
       for (const segment of segments) fs.unlinkSync(segment);
-    });
-
-    it('skips provider calls for a digitally silent segment', async () => {
-      const audioPath = await makeFixture('silent.webm', 'anullsrc=r=48000:cl=mono', 2);
-      const service = makeEnergyService();
-      let rawCalls = 0;
-      service.transcribeSegmentRaw = async () => {
-        rawCalls++;
-        return 'should not be called';
-      };
-
-      const result = await service.transcribeSingleSegment(audioPath, 0, 1, 0, 2);
-
-      assert.equal(rawCalls, 0, 'silent audio must never reach a provider');
-      assert.equal(result.empty, true);
-      assert.equal(result.body, '');
-    });
-
-    it('still transcribes audio with real signal', async () => {
-      const audioPath = await makeFixture('tone.webm', 'sine=frequency=440', 2);
-      const service = makeEnergyService();
-      let rawCalls = 0;
-      service.transcribeSegmentRaw = async () => {
-        rawCalls++;
-        return '참가자1: 오늘 회의를 시작하겠습니다.';
-      };
-
-      const result = await service.transcribeSingleSegment(audioPath, 0, 1, 0, 2);
-
-      assert.equal(rawCalls, 1);
-      assert.equal(result.empty, false);
-    });
-
-    it('fails open (null) when volume cannot be measured', async () => {
-      const service = makeEnergyService();
-      assert.equal(
-        await service.measureMaxVolumeDb(path.join(workDir, 'does-not-exist.webm')),
-        null,
-      );
     });
   },
 );

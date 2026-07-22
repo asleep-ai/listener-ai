@@ -60,14 +60,6 @@ function emptyTranscriptionAsBlank(error: unknown): string {
   throw error;
 }
 
-// Peak level below which audio is treated as digital silence and never sent
-// to a transcription provider (issue #182 H1: silence admission is the root
-// seed of hallucination loops). The mic chain applies +12dB gain, so real
-// speech -- even quiet speakers -- peaks far above this. Only a measured
-// peak counts: when volumedetect cannot run or parse we FAIL OPEN and
-// transcribe normally.
-const SILENT_SEGMENT_MAX_VOLUME_DB = -50;
-
 // Head overlap for long-file segmentation. Each segment after the first
 // starts this many seconds early so speech spanning a boundary is fully
 // contained in (at least) one segment and transcribed twice -- the evidence
@@ -868,39 +860,6 @@ Requirements:
     }
   }
 
-  // Measure the peak level (dBFS) of a file via ffmpeg's volumedetect
-  // filter. Returns null whenever the measurement cannot be trusted
-  // (missing binary, unparseable output) -- callers FAIL OPEN on null and
-  // transcribe normally, so this gate can only ever skip provably silent
-  // audio, never real speech.
-  private async measureMaxVolumeDb(
-    audioFilePath: string,
-    signal?: AbortSignal,
-  ): Promise<number | null> {
-    try {
-      const ffmpegPath = await this.getFFmpegPath();
-      const { stderr } = await execFileAsync(
-        ffmpegPath,
-        ['-i', audioFilePath, '-af', 'volumedetect', '-f', 'null', '-'],
-        { signal },
-      ).catch((error: unknown) => {
-        if (signal?.aborted) throw error;
-        // ffmpeg can exit non-zero while still printing the stats we need.
-        const execError = error as { stdout?: string; stderr?: string };
-        return { stdout: execError.stdout || '', stderr: execError.stderr || '' };
-      });
-
-      // Pure digital silence can report `-inf dB` depending on the build.
-      const match = /max_volume:\s*(-?)(inf|\d+(?:\.\d+)?)\s*dB/i.exec(stderr || '');
-      if (!match) return null;
-      const magnitude = match[2].toLowerCase() === 'inf' ? Infinity : Number.parseFloat(match[2]);
-      return match[1] === '-' ? -magnitude : magnitude;
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      return null;
-    }
-  }
-
   // List existing `<base>_segment_NNN.<ext>` files for an audio path. Used by
   // both the split step (collecting newly written segments) and the cleanup
   // step (sweeping leftovers when ffmpeg was killed mid-split). Optional
@@ -1306,17 +1265,6 @@ Return as JSON:
         progressCallback(20, 'Processing audio file...');
       }
 
-      // Energy gate: provably silent audio never reaches a provider (issue
-      // #182 H1). Whole-file callers surface the typed error as a friendly
-      // "no speech" message; live snippets map it to an empty result.
-      const maxVolumeDb = await this.measureMaxVolumeDb(audioFilePath, signal);
-      if (maxVolumeDb !== null && maxVolumeDb < SILENT_SEGMENT_MAX_VOLUME_DB) {
-        console.error(
-          `[transcript-quality] audio is silent (max_volume ${maxVolumeDb} dB); skipping transcription`,
-        );
-        throw new EmptyTranscriptionError('Audio contains no signal above the silence floor');
-      }
-
       const transcriptPrompt = `${includeGlossary ? this.buildGlossaryBlock() : ''}${customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT}`;
       if (this.provider === 'codex') {
         const runCodex = async (prompt: string, temperature?: number): Promise<string> => {
@@ -1579,18 +1527,6 @@ Return as JSON:
     );
     const segmentSeconds = Math.max(0, segmentEndTime - segmentStartTime);
     const segmentHeader = this.createSegmentHeader(segmentIndex, segmentStartTime, segmentEndTime);
-
-    // Energy gate: provably silent segments never reach a provider. Cheap
-    // local decode, and the strongest possible evidence -- no audio signal
-    // means any transcript would be hallucinated (issue #182 H1).
-    const maxVolumeDb = await this.measureMaxVolumeDb(segmentFile, signal);
-    if (maxVolumeDb !== null && maxVolumeDb < SILENT_SEGMENT_MAX_VOLUME_DB) {
-      console.error(
-        `[transcript-quality] segment ${segmentIndex + 1}/${totalSegments} is silent ` +
-          `(max_volume ${maxVolumeDb} dB); skipping transcription`,
-      );
-      return { index: segmentIndex, header: segmentHeader, body: '', empty: true };
-    }
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       attemptsMade = attempt;
