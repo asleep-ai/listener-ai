@@ -580,6 +580,29 @@ describe('GeminiService LLM transcript cleanup', () => {
     });
   });
 
+  it('rejects a cleanup response that grew beyond its input (degenerate cleaner)', async () => {
+    const service = makeCleanupService();
+    const original = '참가자1: 오늘 회의를 시작하겠습니다.\n\n참가자2: 네, 준비되었습니다.';
+    service.completeTextTask = async () => `참가자1: ${'자막 '.repeat(2000)}`;
+
+    assert.deepEqual(await service.cleanTranscriptWithModel(original), {
+      text: original,
+      removedChars: 0,
+    });
+  });
+
+  it('rejects a cleanup response the analyzer flags as worse than its input', async () => {
+    const service = makeCleanupService();
+    const original =
+      '참가자1: 오늘 회의에서는 2분기 마케팅 전략을 논의하겠습니다.\n\n참가자2: 온보딩 개선이 필요해 보입니다.';
+    // Shorter than the input, but a pure loop -- the analyzer must veto it.
+    service.completeTextTask = async () => Array(4).fill('자막 자막 자막').join(' ').slice(0, 40);
+
+    const result = await service.cleanTranscriptWithModel(original);
+    assert.equal(result.text, original);
+    assert.equal(result.removedChars, 0);
+  });
+
   it('keeps the original transcript when the model request fails', async () => {
     const service = makeCleanupService();
     const original = '참가자1: 원본입니다.';

@@ -22,6 +22,7 @@ import {
 import {
   NO_SPEECH_SENTINEL,
   analyzeAssembledTranscript,
+  analyzeTranscriptQuality,
   applyTranscriptQualityGate,
   normalizeTranscriptQualityNotes,
   reconcileOverlappingSegments,
@@ -664,6 +665,37 @@ export class GeminiService {
           `[transcript-quality] model cleanup <- ${elapsed}ms empty response; keeping original`,
         );
         return { text: transcript, removedChars: 0 };
+      }
+
+      // The cleaner's contract is deletion-only, so a response longer than
+      // its input means the cleanup model itself degenerated (observed in
+      // production: a 20k-char input came back as a 61k-char single-line
+      // loop -- the cleaner caught the very disease it was treating).
+      if (cleaned.length > transcript.length * 1.02 + 64) {
+        console.error(
+          `[transcript-quality] model cleanup <- ${elapsed}ms REJECTED: output grew ` +
+            `(${transcript.length} -> ${cleaned.length} chars); keeping original`,
+        );
+        return { text: transcript, removedChars: 0 };
+      }
+
+      // A same-size-or-shorter response can still be a fresh loop -- gate the
+      // cleaner's own output through the analyzer and reject anything that
+      // looks worse than what it was asked to clean.
+      const cleanedReport = analyzeTranscriptQuality(cleaned);
+      if (cleanedReport.flagged) {
+        const originalReport = analyzeTranscriptQuality(transcript);
+        const worse =
+          !originalReport.flagged ||
+          cleanedReport.metrics.maxWordBlockRepeats > originalReport.metrics.maxWordBlockRepeats ||
+          cleanedReport.metrics.textCompressionRatio > originalReport.metrics.textCompressionRatio;
+        if (worse) {
+          console.error(
+            `[transcript-quality] model cleanup <- ${elapsed}ms REJECTED: output flagged ` +
+              `(${cleanedReport.reasons.join(', ')}); keeping original`,
+          );
+          return { text: transcript, removedChars: 0 };
+        }
       }
 
       const removedChars = Math.max(0, transcript.length - cleaned.length);
