@@ -364,9 +364,9 @@ describe('GeminiService.transcribeLiveSnippet empty handling', () => {
 });
 
 // Final-stage quality pass wiring (issue #182): after the batch transcript is
-// assembled, transcribeWithTwoSteps runs the deterministic analyzer, cleans
-// model-judged artifacts, and asks the summary model for quality notes. The
-// resulting quality actions persist via customFields.transcriptQuality.
+// assembled, transcribeWithTwoSteps runs the deterministic analyzer and asks
+// the summary model for quality notes. Both verdicts persist via
+// customFields.transcriptQuality.
 describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => {
   type TwoStepHelpers = {
     transcribeWithTwoSteps(
@@ -382,10 +382,6 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       customFields?: Record<string, unknown>;
     }>;
     getShortAudioTranscript(...args: unknown[]): Promise<string>;
-    cleanTranscriptWithModel(
-      transcript: string,
-      signal?: AbortSignal,
-    ): Promise<{ text: string; removedChars: number }>;
     generateSummary(promptText: string, transcript: string, ...rest: unknown[]): Promise<string>;
   };
 
@@ -401,10 +397,6 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       flashModel: 'gemini-test-flash',
     }) as unknown as TwoStepHelpers;
     service.getShortAudioTranscript = async () => opts.transcript;
-    service.cleanTranscriptWithModel = async (transcript) => ({
-      text: transcript,
-      removedChars: 0,
-    });
     service.generateSummary = async (promptText) => {
       summaryPrompts.push(promptText);
       return opts.summaryJson;
@@ -444,7 +436,7 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     assert.ok(quality, 'transcriptQuality must be persisted');
     assert.ok(quality.analyzer?.reasons.includes('consecutive-duplicate-lines'));
     assert.deepEqual(quality.modelNotes, ['후반부에 동일 문장이 반복됩니다.']);
-    assert.equal(result.transcript, loopTranscript, 'unchanged cleanup must preserve transcript');
+    assert.equal(result.transcript, loopTranscript, 'transcript is persisted unmodified');
   });
 
   it('adds no transcriptQuality field for a clean transcript with no model notes', async () => {
@@ -485,158 +477,6 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     assert.ok(quality);
     assert.equal(quality.analyzer, undefined);
     assert.deepEqual(quality.modelNotes, ['도입부 문장이 맥락과 무관한 상투구로 보입니다.']);
-  });
-
-  it('summarizes and returns cleaned text and persists the cleanup count', async () => {
-    const { service } = makeTwoStepService({
-      transcript: Array(5).fill('참가자1: 반복 문장입니다.').join('\n'),
-      summaryJson: JSON.stringify({
-        suggestedTitle: '제목',
-        summary: '요약',
-        keyPoints: [],
-        actionItems: [],
-        emoji: '📝',
-      }),
-    });
-    const cleanedTranscript = '참가자1: 정리된 전사입니다.';
-    let summaryTranscript = '';
-    service.cleanTranscriptWithModel = async () => ({ text: cleanedTranscript, removedChars: 42 });
-    service.generateSummary = async (_promptText, transcript) => {
-      summaryTranscript = transcript;
-      return JSON.stringify({
-        suggestedTitle: '제목',
-        summary: '요약',
-        keyPoints: [],
-        actionItems: [],
-        emoji: '📝',
-      });
-    };
-
-    const result = await service.transcribeWithTwoSteps(makeAudioStub('cleaned-loop.webm'), 10);
-
-    assert.equal(result.transcript, cleanedTranscript);
-    assert.equal(summaryTranscript, cleanedTranscript);
-    const quality = result.customFields?.transcriptQuality as {
-      modelCleanup?: { removedChars: number };
-    };
-    assert.equal(quality.modelCleanup?.removedChars, 42);
-  });
-
-  it('does not clean transcript-only output', async () => {
-    const rawTranscript = '참가자1: 원본 전사입니다.';
-    const { service } = makeTwoStepService({ transcript: rawTranscript, summaryJson: '{}' });
-    service.cleanTranscriptWithModel = async () => {
-      throw new Error('cleanup must not be called');
-    };
-
-    const result = await service.transcribeWithTwoSteps(
-      makeAudioStub('transcript-only.webm'),
-      10,
-      undefined,
-      undefined,
-      undefined,
-      { transcriptOnly: true },
-    );
-
-    assert.equal(result.transcript, rawTranscript);
-  });
-});
-
-describe('GeminiService LLM transcript cleanup', () => {
-  type CleanupHelpers = {
-    completeTextTask(
-      systemPrompt: string,
-      promptText: string,
-      opts: { temperature?: number },
-    ): Promise<string>;
-    cleanTranscriptWithModel(
-      transcript: string,
-      signal?: AbortSignal,
-    ): Promise<{ text: string; removedChars: number }>;
-  };
-
-  function makeCleanupService(): CleanupHelpers {
-    return new GeminiService({
-      apiKey: 'test-key',
-      dataPath: workDir,
-      proModel: 'gemini-test-pro',
-      flashModel: 'gemini-test-flash',
-    }) as unknown as CleanupHelpers;
-  }
-
-  it('returns model-cleaned text with the removed character count', async () => {
-    const service = makeCleanupService();
-    const original = '참가자1: 반복입니다.\n참가자1: 반복입니다.';
-    const cleaned = '참가자1: 반복입니다.';
-    service.completeTextTask = async (systemPrompt, _promptText, opts) => {
-      assert.match(systemPrompt, /post-processor/);
-      assert.equal(opts.temperature, 0);
-      return cleaned;
-    };
-
-    assert.deepEqual(await service.cleanTranscriptWithModel(original), {
-      text: cleaned,
-      removedChars: original.length - cleaned.length,
-    });
-  });
-
-  it('rejects a cleanup response that grew beyond its input (degenerate cleaner)', async () => {
-    const service = makeCleanupService();
-    const original = '참가자1: 오늘 회의를 시작하겠습니다.\n\n참가자2: 네, 준비되었습니다.';
-    service.completeTextTask = async () => `참가자1: ${'자막 '.repeat(2000)}`;
-
-    assert.deepEqual(await service.cleanTranscriptWithModel(original), {
-      text: original,
-      removedChars: 0,
-    });
-  });
-
-  it('rejects a cleanup response the analyzer flags as worse than its input', async () => {
-    const service = makeCleanupService();
-    const original =
-      '참가자1: 오늘 회의에서는 2분기 마케팅 전략을 논의하겠습니다.\n\n참가자2: 온보딩 개선이 필요해 보입니다.';
-    // Shorter than the input, but a pure loop -- the analyzer must veto it.
-    service.completeTextTask = async () => Array(4).fill('자막 자막 자막').join(' ').slice(0, 40);
-
-    const result = await service.cleanTranscriptWithModel(original);
-    assert.equal(result.text, original);
-    assert.equal(result.removedChars, 0);
-  });
-
-  it('keeps the original transcript when the model request fails', async () => {
-    const service = makeCleanupService();
-    const original = '참가자1: 원본입니다.';
-    service.completeTextTask = async () => {
-      throw new Error('network failed');
-    };
-
-    assert.deepEqual(await service.cleanTranscriptWithModel(original), {
-      text: original,
-      removedChars: 0,
-    });
-  });
-
-  it('keeps the original transcript when the model returns empty text', async () => {
-    const service = makeCleanupService();
-    const original = '참가자1: 원본입니다.';
-    service.completeTextTask = async () => '';
-
-    assert.deepEqual(await service.cleanTranscriptWithModel(original), {
-      text: original,
-      removedChars: 0,
-    });
-  });
-
-  it('strips a single wrapping code fence', async () => {
-    const service = makeCleanupService();
-    const original = '참가자1: 반복입니다.\n참가자1: 반복입니다.';
-    const cleaned = '참가자1: 반복입니다.';
-    service.completeTextTask = async () => `\`\`\`\n${cleaned}\n\`\`\``;
-
-    assert.deepEqual(await service.cleanTranscriptWithModel(original), {
-      text: cleaned,
-      removedChars: original.length - cleaned.length,
-    });
   });
 });
 
