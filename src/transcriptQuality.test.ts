@@ -126,6 +126,19 @@ describe('analyzeTranscriptQuality: loop shapes are flagged', () => {
     assert.ok(report.reasons.includes('repeated-ngram-loop'));
   });
 
+  it('flags a qualifying block even when a larger non-qualifying repeat count exists', () => {
+    const report = analyzeTranscriptQuality(
+      '네 네 네 네 네 이 영상은 자동 생성되었습니다 이 영상은 자동 생성되었습니다 이 영상은 자동 생성되었습니다 이 영상은 자동 생성되었습니다',
+    );
+    assert.equal(report.flagged, true);
+    assert.ok(report.reasons.includes('repeated-ngram-loop'));
+  });
+
+  it('does not flag five single-word repeats alone', () => {
+    const report = analyzeTranscriptQuality('네 네 네 네 네');
+    assert.equal(report.flagged, false);
+  });
+
   it('flags space-less Korean character loops behind a speaker label', () => {
     const report = analyzeTranscriptQuality('참가자1: 감사합니다감사합니다감사합니다감사합니다');
     assert.equal(report.flagged, true);
@@ -512,6 +525,16 @@ describe('reconcileOverlappingSegments', () => {
     assert.deepEqual(bodies, [prev, next]);
     assert.deepEqual(removedPerBoundary, [0]);
     assert.equal(bodies.join('\n\n').match(/다음 주 일정은 공유드린 대로 진행하고/g)?.length, 2);
+  });
+
+  it('keeps a later boundary line with post-overlap continuation', () => {
+    const prev =
+      '참가자1: 그래서 다음 주까지 초안을 공유드리고 피드백을 반영해서 최종본을 만들겠습니다';
+    const next = `${prev} 다음 안건입니다`;
+    const { bodies, removedPerBoundary } = reconcileOverlappingSegments([prev, next]);
+
+    assert.equal(bodies[1].split(/\r?\n/)[0], next);
+    assert.equal(removedPerBoundary[0], 0);
   });
 
   it('removes nothing between unrelated segments', () => {

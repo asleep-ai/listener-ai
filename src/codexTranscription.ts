@@ -219,7 +219,10 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
 // onto a single line so downstream consumers don't see one speaker split into
 // 30+ "참가자1: ..." stubs.
 export function formatDiarizedSegments(segments?: DiarizedSegment[]): string {
-  if (!segments || segments.length === 0) {
+  if (!segments) {
+    throw new Error('OpenAI diarized transcription response missing segments');
+  }
+  if (segments.length === 0) {
     throw new EmptyTranscriptionError('OpenAI diarized transcription returned no segments');
   }
 

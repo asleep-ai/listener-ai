@@ -84,13 +84,21 @@ describe('formatDiarizedSegments', () => {
     assert.equal(out, '참가자1: 첫 번째 두 번째');
   });
 
-  it('throws when no segments are returned (renderer must see an error)', () => {
-    assert.throws(() => formatDiarizedSegments([]), /no segments/);
-    assert.throws(() => formatDiarizedSegments(undefined), /no segments/);
+  it('throws a plain Error when the segments field is missing', () => {
+    assert.throws(
+      () => formatDiarizedSegments(undefined),
+      (err: unknown) =>
+        err instanceof Error &&
+        !(err instanceof EmptyTranscriptionError) &&
+        /missing segments/.test(err.message),
+    );
   });
 
-  it('throws the typed EmptyTranscriptionError for empty responses so callers can branch', () => {
+  it('throws the typed EmptyTranscriptionError for an empty segments array', () => {
     assert.throws(() => formatDiarizedSegments([]), EmptyTranscriptionError);
+  });
+
+  it('throws the typed EmptyTranscriptionError when segments have no usable text', () => {
     assert.throws(() => formatDiarizedSegments([{ text: '   ' }]), EmptyTranscriptionError);
   });
 

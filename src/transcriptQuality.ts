@@ -137,8 +137,13 @@ function maxConsecutiveDuplicateLines(lines: string[]): number {
 // Highest consecutive repeat count of any word block of period 1..4.
 // "빨리 빨리 빨리" -> period 1 repeated 3x. A period-4 block repeated 4x is
 // the issue's "same normalized 4-gram four consecutive times" criterion.
-function maxWordBlockRepeats(words: string[]): { period: number; repeats: number } {
+function maxWordBlockRepeats(words: string[]): {
+  period: number;
+  repeats: number;
+  flagged: boolean;
+} {
   let best = { period: 0, repeats: 1 };
+  let flagged = false;
   for (let period = 1; period <= WORD_BLOCK_MAX_PERIOD; period++) {
     for (let start = 0; start + period <= words.length; start++) {
       let repeats = 1;
@@ -155,12 +160,18 @@ function maxWordBlockRepeats(words: string[]): { period: number; repeats: number
         repeats++;
         next += period;
       }
+      if (
+        (period === WORD_BLOCK_MAX_PERIOD && repeats >= NGRAM_FLAG_REPEATS) ||
+        (period < WORD_BLOCK_MAX_PERIOD && repeats >= SHORT_BLOCK_FLAG_REPEATS)
+      ) {
+        flagged = true;
+      }
       if (repeats > best.repeats) best = { period, repeats };
       // Skip past this run; restarting inside it can't do better.
       if (repeats > 1) start = next - period;
     }
   }
-  return best;
+  return { ...best, flagged };
 }
 
 // Smallest-period check via the KMP failure function: detects space-less
@@ -206,16 +217,12 @@ export function analyzeTranscriptQuality(text: string): TranscriptQualityReport 
   if (duplicateLines >= CONSECUTIVE_DUPLICATE_LINE_FLAG) {
     reasons.push('consecutive-duplicate-lines');
   }
-  const blockFlagged =
-    blockRepeats.period === WORD_BLOCK_MAX_PERIOD
-      ? blockRepeats.repeats >= NGRAM_FLAG_REPEATS
-      : blockRepeats.period > 0 && blockRepeats.repeats >= SHORT_BLOCK_FLAG_REPEATS;
   const charLoop =
     hasCharPeriodLoop(normalized) ||
     text
       .split(/\r?\n+/)
       .some((line) => hasCharPeriodLoop(normalizeForComparison(stripSpeakerLabel(line))));
-  if (blockFlagged || charLoop) {
+  if (blockRepeats.flagged || charLoop) {
     reasons.push('repeated-ngram-loop');
   }
   if (compressionRatio >= COMPRESSION_FLAG_RATIO) {
@@ -310,10 +317,10 @@ function reconcileBoundary(prevBody: string, nextBody: string): { next: string; 
       if (
         prevLine.length < MIN_BOUNDARY_LINE_CHARS ||
         nextLine.length < MIN_BOUNDARY_LINE_CHARS ||
-        // Removal is only evidence-backed for text the earlier segment could
-        // also have transcribed. A meaningfully longer later line carries
-        // post-overlap continuation that must survive.
-        nextLine.length > prevLine.length * 1.1 + 8 ||
+        // Normalization already strips whitespace and punctuation, so the same
+        // overlap audio has near-equal lengths. Meaningfully longer text carries
+        // continuation and must survive; when unsure, keep the duplicate.
+        nextLine.length > prevLine.length + 2 ||
         bigramSimilarity(prevLine, nextLine) < BOUNDARY_LINE_SIMILARITY
       ) {
         allMatch = false;
