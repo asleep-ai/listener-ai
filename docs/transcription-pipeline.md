@@ -35,8 +35,9 @@ invocation and is always re-encoded (libopus 48k → `.webm`). Stream-copy
 extraction on webm-opus was badly inaccurate: a 5s request produced an 8s
 file, while boundary reconciliation depends on accurate cuts. If ffprobe
 cannot determine the duration, the pipeline falls back to the legacy
-no-overlap segment muxer. Segment headers retain nominal, non-overlapped time
-ranges.
+no-overlap segment muxer. Boundary reconciliation is skipped entirely for
+that fallback because matching text is not overlap evidence. Segment headers
+retain nominal, non-overlapped time ranges.
 
 ### 2. Per-segment transcription, analyzer, and retry ladder
 
@@ -123,7 +124,7 @@ kept and marked, never silently deleted.
 | Transcription call | `generateContent` on `geminiFlashModel` (inline ≤ 20 MB, files API above) | `POST /v1/audio/transcriptions` | same endpoint, `diarized_json` + `chunking_strategy=auto` |
 | Prompt (glossary, instructions, `[NO_SPEECH]`) | sent | sent | **not sent** — model rejects `prompt` |
 | First-attempt temperature | 0.2 | provider default (field omitted) | provider default |
-| Retry ladder temperatures | 0.4 → 0.8 via `config.temperature` | 0.4 → 0.8 via `temperature` form field | **no temperature knob** — ladder rungs are effectively identical resends relying on provider nondeterminism |
+| Retry ladder temperatures | 0.4 → 0.8 via `config.temperature` | 0.4 → 0.8 via `temperature` form field | **no temperature knob** — one re-roll relying on provider nondeterminism |
 | Empty result semantics | `text === ''` → `EmptyTranscriptionError` | empty `text` → `EmptyTranscriptionError`; missing `text` → malformed-response error | zero/all-empty segments → `EmptyTranscriptionError` |
 | Speaker labels | prompted `참가자N` | none (plain text) | provider speakers re-labeled to `참가자N` |
 | Segmentation trigger | > 300s | > 300s or > 24 MB (size-shrunk segment length) | same |

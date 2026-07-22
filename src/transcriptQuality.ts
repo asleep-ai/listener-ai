@@ -6,9 +6,9 @@
 // paths (per-final marking, duplicate suppression).
 //
 // Design constraints, in order:
-//   1. Never delete text on detection alone. Callers may retry once with a
-//      context-cleared prompt and keep whichever result is clean; when both
-//      are flagged the FIRST result is kept and marked uncertain.
+//   1. Never delete text on detection alone. Callers may use a bounded
+//      context-cleared retry ladder and keep the first clean result; when all
+//      results are flagged the FIRST result is kept and marked uncertain.
 //   2. Legitimate repetition (stutters, `네, 네` confirmations, chants,
 //      emphasis) must survive. Thresholds are deliberately conservative and
 //      detection only ever triggers a bounded retry or a flag -- both leave
@@ -33,7 +33,9 @@ const WORD_BLOCK_MAX_PERIOD = 4;
 const NGRAM_FLAG_REPEATS = 4; // period-4 blocks (the issue's 4-gram rule)
 const SHORT_BLOCK_FLAG_REPEATS = 6; // period 1-3 blocks need more repeats
 const CHAR_PERIOD_MIN_LENGTH = 12;
-const CHAR_PERIOD_MIN_REPEATS = 3;
+// A genuine triple emphasis can be 15+ characters; decoder loops repeat far
+// more, so require four complete periods before treating this shape as a loop.
+const CHAR_PERIOD_MIN_REPEATS = 4;
 // Local text-compression metric (deflate over normalized text). This is NOT
 // the Whisper provider compression_ratio; hosted APIs don't expose one, so
 // we measure our own. Natural prose stays well under 4x at this length.
@@ -84,7 +86,7 @@ function normalizeKeepSpaces(text: string): string {
 
 // Strip a leading speaker label ("참가자1:", "Speaker 2:") before per-line
 // loop checks so the label doesn't mask a purely periodic payload.
-function stripSpeakerLabel(line: string): string {
+export function stripSpeakerLabel(line: string): string {
   return line.replace(/^\s*(?:참가자|speaker)\s*\d+\s*[:：]\s*/iu, '');
 }
 
@@ -308,6 +310,10 @@ function reconcileBoundary(prevBody: string, nextBody: string): { next: string; 
       if (
         prevLine.length < MIN_BOUNDARY_LINE_CHARS ||
         nextLine.length < MIN_BOUNDARY_LINE_CHARS ||
+        // Removal is only evidence-backed for text the earlier segment could
+        // also have transcribed. A meaningfully longer later line carries
+        // post-overlap continuation that must survive.
+        nextLine.length > prevLine.length * 1.1 + 8 ||
         bigramSimilarity(prevLine, nextLine) < BOUNDARY_LINE_SIMILARITY
       ) {
         allMatch = false;
@@ -467,11 +473,15 @@ export async function applyTranscriptQualityGate(
     try {
       retryText = await input.retries[index]();
     } catch (error) {
+      if (error && typeof error === 'object' && 'name' in error && error.name === 'AbortError') {
+        throw error;
+      }
       const nextStep = attempt < totalRetries ? 'trying next rung' : 'no rungs remain';
+      const message = error instanceof Error ? error.message : String(error);
       log(
-        `[transcript-quality] ${input.label}: retry ${attempt}/${totalRetries} failed (${
-          error instanceof Error ? error.message : String(error)
-        }); ${nextStep}`,
+        `[transcript-quality] ${input.label}: retry ${attempt}/${totalRetries} failed (${String(
+          message,
+        ).slice(0, 200)}); ${nextStep}`,
       );
       continue;
     }

@@ -16,7 +16,11 @@ import {
   type StreamingLiveSttProvider,
 } from './liveSttProvider';
 import { recordUsage, type RecordInput } from './services/usageTracker';
-import { analyzeTranscriptQuality, normalizeForComparison } from './transcriptQuality';
+import {
+  analyzeTranscriptQuality,
+  normalizeForComparison,
+  stripSpeakerLabel,
+} from './transcriptQuality';
 
 export interface LiveTranscriptSegment {
   id: string;
@@ -665,10 +669,16 @@ export class LiveSessionService {
   // the chain immediately.
   private shouldSuppressDuplicateFinal(session: LiveSessionState, transcript: string): boolean {
     const normalized = normalizeForComparison(transcript);
+    // Keep speaker labels in the equality key so different speakers never
+    // cross-dedupe. Exclude labels only from the length floor: labels must not
+    // turn genuine short acknowledgements into suppressible content.
+    const contentLength = normalizeForComparison(
+      transcript.split(/\r?\n/).map(stripSpeakerLabel).join('\n'),
+    ).length;
     const now = this.opts.now?.() ?? Date.now();
     const prev = session.lastFinal;
     session.lastFinal = { normalized, atMs: now };
-    if (!prev || normalized.length < LIVE_DUPLICATE_MIN_CHARS) return false;
+    if (!prev || contentLength < LIVE_DUPLICATE_MIN_CHARS) return false;
     const suppress = prev.normalized === normalized && now - prev.atMs <= LIVE_DUPLICATE_WINDOW_MS;
     if (suppress) {
       // Metrics only -- never log transcript text.

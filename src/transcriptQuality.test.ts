@@ -132,6 +132,11 @@ describe('analyzeTranscriptQuality: loop shapes are flagged', () => {
     assert.ok(report.reasons.includes('repeated-ngram-loop'));
   });
 
+  it('accepts a genuine triple emphasis behind a speaker label', () => {
+    const report = analyzeTranscriptQuality('참가자1: 감사합니다감사합니다감사합니다');
+    assert.equal(report.flagged, false);
+  });
+
   it('flags long repetitive text via the local compression metric', () => {
     const report = analyzeTranscriptQuality(Array(40).fill('구독과 좋아요 부탁드립니다').join(' '));
     assert.equal(report.flagged, true);
@@ -344,6 +349,30 @@ describe('applyTranscriptQualityGate', () => {
     assert.equal(result.retriesAttempted, 2);
   });
 
+  it('rethrows an abort without invoking the next rung', async () => {
+    const abortError = new DOMException('Aborted', 'AbortError');
+    let secondCalls = 0;
+
+    await assert.rejects(
+      applyTranscriptQualityGate({
+        text: loopText,
+        label: 'test',
+        retries: [
+          async () => {
+            throw abortError;
+          },
+          async () => {
+            secondCalls++;
+            return cleanText;
+          },
+        ],
+        log: () => {},
+      }),
+      (error) => error === abortError,
+    );
+    assert.equal(secondCalls, 0);
+  });
+
   it('invokes both rungs at most once each', async () => {
     const calls = [0, 0];
     await applyTranscriptQualityGate({
@@ -470,6 +499,19 @@ describe('reconcileOverlappingSegments', () => {
 
     assert.equal(bodies[1], '참가자1: 이상으로 회의를 마칩니다.');
     assert.ok(removedPerBoundary[0] > 0);
+  });
+
+  it('keeps a duplicated boundary line that carries new continuation text', () => {
+    const shared =
+      '참가자2: 다음 주 일정은 공유드린 대로 진행하고 담당자별 준비 자료와 검토 결과도 회의 전날까지 모두 전달하겠습니다.';
+    const continuation = ' 그리고 다음 안건은 예산 조정입니다';
+    const prev = `참가자1: 마지막 안건을 정리하겠습니다.\n\n${shared}`;
+    const next = `${shared}${continuation}\n\n참가자1: 자료를 확인하겠습니다.`;
+    const { bodies, removedPerBoundary } = reconcileOverlappingSegments([prev, next]);
+
+    assert.deepEqual(bodies, [prev, next]);
+    assert.deepEqual(removedPerBoundary, [0]);
+    assert.equal(bodies.join('\n\n').match(/다음 주 일정은 공유드린 대로 진행하고/g)?.length, 2);
   });
 
   it('removes nothing between unrelated segments', () => {

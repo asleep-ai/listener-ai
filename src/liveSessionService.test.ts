@@ -716,7 +716,7 @@ describe('LiveSessionService duplicate suppression and quality flags', () => {
 
   it('keeps different consecutive finals and short repeated acknowledgements', async () => {
     const { service } = makeChunkedService({
-      transcripts: ['참가자1: 안건을 공유드립니다.', '네.', '네.'],
+      transcripts: ['참가자1: 안건을 공유드립니다.', '참가자1: 맞아요.', '참가자1: 맞아요.'],
     });
     const session = await service.start({ title: 'Acks', translate: false });
 
@@ -724,7 +724,7 @@ describe('LiveSessionService duplicate suppression and quality flags', () => {
     assert.ok(await pushChunk(service, session.sessionId, 12_000));
     assert.ok(
       await pushChunk(service, session.sessionId, 24_000),
-      'short acknowledgements below the length floor are never suppressed',
+      'speaker labels must not push short acknowledgements above the length floor',
     );
     assert.equal(service.snapshot()?.segments.length, 3);
   });

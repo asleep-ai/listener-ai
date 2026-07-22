@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
 import { EmptyTranscriptionError } from './codexTranscription';
-import { GeminiService, computeSegmentPlan } from './geminiService';
+import { GeminiService, computeSegmentPlan, segmentOverlapSeconds } from './geminiService';
 import { findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
 const ffmpegPath = findFfmpegSync();
@@ -171,8 +171,8 @@ describe(
 
 // Repetition/hallucination quality gate wiring (issue #182). The analyzer
 // itself is covered in transcriptQuality.test.ts; here we lock in how
-// transcribeSingleSegment drives it: sentinel stripping, one context-cleared
-// retry on flagged output, retry disabled for live-snippet callers, and a
+// transcribeSingleSegment drives it: sentinel stripping, a bounded context-cleared
+// retry ladder on flagged output, retry disabled for live-snippet callers, and a
 // silent segment resolving to an empty (not failed) segment.
 describe('GeminiService transcribeSingleSegment quality gate', () => {
   type SegmentHelpers = {
@@ -351,6 +351,43 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     assert.equal(prompts.length, 3);
     assert.ok(result.body.includes('시청해주셔서'), 'first result is retained');
     assert.ok(!result.body.includes('자막'));
+  });
+
+  it('uses one quality re-roll for the Codex diarize model', async () => {
+    const service = new GeminiService({
+      provider: 'codex',
+      codexOAuth: {
+        access: 'x',
+        refresh: 'y',
+        expires: Date.now() + 86_400_000,
+      },
+      dataPath: workDir,
+      proModel: 'm',
+      flashModel: 'm',
+    }) as unknown as SegmentHelpers;
+    let rawCalls = 0;
+    service.transcribeSegmentRaw = async () => {
+      rawCalls++;
+      return loopText;
+    };
+    const qualityRetryCalls: [number, number][] = [];
+
+    await service.transcribeSingleSegment(
+      '/tmp/seg.webm',
+      0,
+      1,
+      0,
+      300,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      true,
+      (rung, totalRungs) => qualityRetryCalls.push([rung, totalRungs]),
+    );
+
+    assert.equal(rawCalls, 2);
+    assert.deepEqual(qualityRetryCalls, [[1, 1]]);
   });
 });
 
@@ -534,6 +571,15 @@ describe('computeSegmentPlan', () => {
       { start: 2, length: 2 },
       { start: 4 },
     ]);
+  });
+});
+
+describe('segmentOverlapSeconds', () => {
+  it('caps overlap at 15 seconds or one quarter of the segment', () => {
+    assert.equal(segmentOverlapSeconds(300), 15);
+    assert.equal(segmentOverlapSeconds(60), 15);
+    assert.equal(segmentOverlapSeconds(2), 0);
+    assert.equal(segmentOverlapSeconds(30), 7);
   });
 });
 

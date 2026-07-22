@@ -15,6 +15,7 @@ import { type CodexOAuthCredentials } from './codexOAuth';
 import { CodexOAuthHolder } from './codexOAuthHolder';
 import {
   EmptyTranscriptionError,
+  isDiarizeModel,
   OPENAI_TRANSCRIPTION_EXTENSIONS,
   TranscriptionApiError,
   transcribeCodexAudio,
@@ -68,6 +69,10 @@ function emptyTranscriptionAsBlank(error: unknown): string {
 // segments keep a sane audio-to-overlap ratio.
 const SEGMENT_OVERLAP_SECONDS = 15;
 
+export function segmentOverlapSeconds(segmentDuration: number): number {
+  return Math.min(SEGMENT_OVERLAP_SECONDS, Math.floor(segmentDuration / 4));
+}
+
 // Pure segmentation plan: start offset + length per segment (length omitted
 // for the last segment -- it runs to EOF). Exported for direct unit testing;
 // splitAudioIntoSegments turns each entry into one ffmpeg `-ss/-t` cut.
@@ -75,7 +80,7 @@ export function computeSegmentPlan(
   duration: number,
   segmentDuration: number,
 ): Array<{ start: number; length?: number }> {
-  const overlap = Math.min(SEGMENT_OVERLAP_SECONDS, Math.floor(segmentDuration / 4));
+  const overlap = segmentOverlapSeconds(segmentDuration);
   const count = Math.max(1, Math.ceil(duration / segmentDuration));
   const plan: Array<{ start: number; length?: number }> = [];
   for (let i = 0; i < count; i++) {
@@ -196,8 +201,8 @@ export interface TranscriptionOptions {
   includeGlossary?: boolean;
   /**
    * When false, a transcript flagged by the repetition/hallucination
-   * analyzer is kept as-is instead of triggering the single context-cleared
-   * quality retry. Live snippet callers disable this: re-sending the same
+   * analyzer is kept as-is instead of triggering the bounded context-cleared
+   * quality retry ladder. Live snippet callers disable this: re-sending the same
    * low-signal 12s blob would burn quota without new evidence (issue #182).
    * Defaults to true.
    */
@@ -432,7 +437,7 @@ const TRANSCRIPT_QUALITY_PROMPT_BLOCK = `Additionally, before summarizing, revie
 - Never rewrite or remove transcript content based on this review.
 - Base the summary, key points, and action items only on content you judge to be genuine speech; do not summarize suspected artifacts as if they were discussion content.`;
 
-// Context-cleared prompt for the single bounded quality retry (issue #182):
+// Context-cleared prompt for the bounded quality retry ladder (issue #182):
 // no glossary, no positional prefix, no format examples -- so a retry after a
 // suspected repetition/hallucination loop starts from a minimal grounding
 // instruction instead of re-feeding the context that may have seeded it.
@@ -1289,12 +1294,18 @@ Return as JSON:
           recordCodexSttUsage(session, this.codexTranscriptionModel, audioSeconds);
           return text;
         };
+        // The diarize model accepts neither prompt nor temperature, so two
+        // ladder rungs would be byte-identical requests. Keep one re-roll and
+        // rely on provider nondeterminism instead.
+        const retryTemperatures = isDiarizeModel(this.codexTranscriptionModel)
+          ? [undefined]
+          : [...QUALITY_RETRY_TEMPERATURES];
         const gated = await applyTranscriptQualityGate({
           text: stripNoSpeechSentinel(await runCodex(transcriptPrompt)),
           label: 'short audio (codex)',
           retries: qualityRetry
-            ? QUALITY_RETRY_TEMPERATURES.map((temperature, index) => () => {
-                reportQualityRetry(index + 1, QUALITY_RETRY_TEMPERATURES.length);
+            ? retryTemperatures.map((temperature, index) => () => {
+                reportQualityRetry(index + 1, retryTemperatures.length);
                 return runCodex(QUALITY_RETRY_TRANSCRIPT_PROMPT, temperature)
                   .then(stripNoSpeechSentinel)
                   .catch(emptyTranscriptionAsBlank);
@@ -1557,12 +1568,18 @@ Return as JSON:
         // Repetition/hallucination gate (issue #182): flagged output gets a
         // context-cleared retry ladder; if every rung is flagged or fails, the
         // first result is kept.
+        // The diarize model ignores both retry controls, so its bounded ladder
+        // is a single provider-nondeterministic re-roll.
+        const retryTemperatures =
+          this.provider === 'codex' && isDiarizeModel(this.codexTranscriptionModel)
+            ? [undefined]
+            : [...QUALITY_RETRY_TEMPERATURES];
         const gated = await applyTranscriptQualityGate({
           text: raw,
           label: `segment ${segmentIndex + 1}/${totalSegments}`,
           retries: qualityRetry
-            ? QUALITY_RETRY_TEMPERATURES.map((temperature, index) => () => {
-                onQualityRetry?.(index + 1, QUALITY_RETRY_TEMPERATURES.length);
+            ? retryTemperatures.map((temperature, index) => () => {
+                onQualityRetry?.(index + 1, retryTemperatures.length);
                 return this.transcribeSegmentRaw(
                   segmentFile,
                   QUALITY_RETRY_TRANSCRIPT_PROMPT,
@@ -1767,20 +1784,22 @@ Return as JSON:
         throw new EmptyTranscriptionError('All segments produced no speech content');
       }
 
-      // Boundary reconciliation: segments were cut with head overlap, so the
-      // same boundary speech appears at the tail of segment N and the head
-      // of segment N+1. Drop the evidenced duplicate from the later segment
-      // before joining. Logs carry char counts only, never transcript text.
-      const { bodies: reconciledBodies, removedPerBoundary } = reconcileOverlappingSegments(
-        segmentResults.map((result) => result.body),
-      );
-      removedPerBoundary.forEach((removed, i) => {
-        if (removed > 0) {
-          console.error(
-            `[transcript-quality] boundary ${i + 1}/${i + 2}: removed ${removed} overlap chars`,
-          );
-        }
-      });
+      const segmentBodies = segmentResults.map((result) => result.body);
+      let reconciledBodies = segmentBodies;
+      // Matching text is deletion evidence only when the cuts actually
+      // overlapped. The unknown-duration legacy muxer and zero-overlap tiny
+      // segments must be joined unchanged.
+      if (duration > 0 && segmentOverlapSeconds(segmentDuration) > 0) {
+        const reconciled = reconcileOverlappingSegments(segmentBodies);
+        reconciledBodies = reconciled.bodies;
+        reconciled.removedPerBoundary.forEach((removed, i) => {
+          if (removed > 0) {
+            console.error(
+              `[transcript-quality] boundary ${i + 1}/${i + 2}: removed ${removed} overlap chars`,
+            );
+          }
+        });
+      }
 
       // Merge all transcripts with clear segment breaks
       return segmentResults
