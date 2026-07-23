@@ -21,6 +21,7 @@
     "dist/geminiService.js",
     "dist/googleOAuth.js",
     "dist/liveSessionService.js",
+    "dist/transcriptQuality.js",
     "dist/liveSttProvider.js",
     "dist/openAiRealtimeClient.js",
     "dist/piAiClient.js",

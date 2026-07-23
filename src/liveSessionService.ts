@@ -16,6 +16,11 @@ import {
   type StreamingLiveSttProvider,
 } from './liveSttProvider';
 import { recordUsage, type RecordInput } from './services/usageTracker';
+import {
+  analyzeTranscriptQuality,
+  normalizeForComparison,
+  stripSpeakerLabel,
+} from './transcriptQuality';
 
 export interface LiveTranscriptSegment {
   id: string;
@@ -26,6 +31,12 @@ export interface LiveTranscriptSegment {
   translationError?: string;
   final: boolean;
   createdAt: string;
+  /**
+   * Set when the repetition/hallucination analyzer flagged this final
+   * (issue #182). The text is kept -- deletion without audio evidence is
+   * unsafe -- but consumers can render or weigh it as uncertain.
+   */
+  quality?: { flagged: boolean; reasons: string[] };
 }
 
 export interface LiveSessionStartResult {
@@ -107,7 +118,18 @@ type LiveSessionState = {
   realtimeClient: LiveRealtimeClientConfig | null;
   usageModelId: string | null;
   usageRecorded: boolean;
+  lastFinal?: { normalized: string; atMs: number };
 };
+
+// Exact-duplicate suppression for live finals (issue #182): a provider stuck
+// on silence/noise can emit the same phrase once per commit/window. Only a
+// final whose normalized text EXACTLY matches the immediately previous final
+// within this window is dropped -- fuzzy dedupe without timestamp/audio
+// evidence risks deleting real speech, so it is intentionally not done here.
+const LIVE_DUPLICATE_WINDOW_MS = 30_000;
+// Very short finals ("네", "맞아요") legitimately repeat in conversation;
+// only suppress duplicates long enough to be unlikely as natural echoes.
+const LIVE_DUPLICATE_MIN_CHARS = 6;
 
 function asBuffer(data: ArrayBuffer | Uint8Array): Buffer {
   if (data instanceof Uint8Array) {
@@ -514,6 +536,10 @@ export class LiveSessionService {
       if (!transcript) return null;
       if (this.session !== session) throw new Error('Live session was replaced.');
       if (!session.active || session.abortController.signal.aborted) return null;
+      // Duplicate check before translation so a suppressed chunk doesn't
+      // spend a translation call either.
+      if (this.shouldSuppressDuplicateFinal(session, transcript)) return null;
+      const quality = this.qualityForFinal(transcript);
 
       let translation: string | undefined;
       let translationError: string | undefined;
@@ -546,6 +572,7 @@ export class LiveSessionService {
         translationError,
         final: true,
         createdAt: new Date().toISOString(),
+        quality,
       };
       session.segments.push(segment);
       session.segments.sort((a, b) => a.offsetMs - b.offsetMs);
@@ -636,6 +663,44 @@ export class LiveSessionService {
     });
   }
 
+  // Sliding exact-duplicate guard. Records every final (suppressed or not)
+  // as the new comparison point so a continuous provider loop stays
+  // suppressed after its first occurrence, and any different text resets
+  // the chain immediately.
+  private shouldSuppressDuplicateFinal(session: LiveSessionState, transcript: string): boolean {
+    const normalized = normalizeForComparison(transcript);
+    // Keep speaker labels in the equality key so different speakers never
+    // cross-dedupe. Exclude labels only from the length floor: labels must not
+    // turn genuine short acknowledgements into suppressible content.
+    const contentLength = normalizeForComparison(
+      transcript.split(/\r?\n/).map(stripSpeakerLabel).join('\n'),
+    ).length;
+    const now = this.opts.now?.() ?? Date.now();
+    const prev = session.lastFinal;
+    session.lastFinal = { normalized, atMs: now };
+    if (!prev || contentLength < LIVE_DUPLICATE_MIN_CHARS) return false;
+    const suppress = prev.normalized === normalized && now - prev.atMs <= LIVE_DUPLICATE_WINDOW_MS;
+    if (suppress) {
+      // Metrics only -- never log transcript text.
+      console.warn(
+        `[live-quality] suppressed exact-duplicate live final (${normalized.length} chars, ${
+          now - prev.atMs
+        }ms after previous)`,
+      );
+    }
+    return suppress;
+  }
+
+  private qualityForFinal(transcript: string): LiveTranscriptSegment['quality'] {
+    const report = analyzeTranscriptQuality(transcript);
+    if (!report.flagged) return undefined;
+    console.warn(
+      `[live-quality] final transcript flagged (${report.reasons.join(', ')}; ` +
+        `${report.metrics.normalizedLength} chars) -- kept and marked uncertain`,
+    );
+    return { flagged: true, reasons: report.reasons };
+  }
+
   private async handleFinalTranscript(
     session: LiveSessionState,
     event: {
@@ -650,6 +715,7 @@ export class LiveSessionService {
     if (this.session !== session || !session.active || !transcript) return;
     session.interimTranscript = '';
     session.interimTranslation = '';
+    if (this.shouldSuppressDuplicateFinal(session, transcript)) return;
     const segment: LiveTranscriptSegment = {
       id: `${session.id}_${++session.nextSegmentId}`,
       offsetMs:
@@ -662,6 +728,7 @@ export class LiveSessionService {
       translation: event.translation?.trim() || undefined,
       final: true,
       createdAt: new Date().toISOString(),
+      quality: this.qualityForFinal(transcript),
     };
     session.segments.push(segment);
     session.segments.sort((a, b) => a.offsetMs - b.offsetMs);

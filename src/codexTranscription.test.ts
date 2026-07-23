@@ -3,15 +3,22 @@
 //   - Re-label OpenAI speaker ids onto our 참가자N convention
 //   - Merge consecutive segments from the same speaker onto one line
 //   - Empty-string segments are skipped
-//   - No segments / no usable text throws (so the renderer sees an error,
-//     not a blank transcript that gets quietly saved)
+//   - No segments / no usable text throws the typed EmptyTranscriptionError:
+//     whole-file callers surface it as a "no speech found" error (never a
+//     blank transcript quietly saved), while per-segment and live-snippet
+//     callers convert it to an empty result (issue #182)
 
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { formatDiarizedSegments, isDiarizeModel, transcribeCodexAudio } from './codexTranscription';
+import {
+  EmptyTranscriptionError,
+  formatDiarizedSegments,
+  isDiarizeModel,
+  transcribeCodexAudio,
+} from './codexTranscription';
 
 describe('isDiarizeModel', () => {
   it('matches the diarize model id', () => {
@@ -77,9 +84,22 @@ describe('formatDiarizedSegments', () => {
     assert.equal(out, '참가자1: 첫 번째 두 번째');
   });
 
-  it('throws when no segments are returned (renderer must see an error)', () => {
-    assert.throws(() => formatDiarizedSegments([]), /no segments/);
-    assert.throws(() => formatDiarizedSegments(undefined), /no segments/);
+  it('throws a plain Error when the segments field is missing', () => {
+    assert.throws(
+      () => formatDiarizedSegments(undefined),
+      (err: unknown) =>
+        err instanceof Error &&
+        !(err instanceof EmptyTranscriptionError) &&
+        /missing segments/.test(err.message),
+    );
+  });
+
+  it('throws the typed EmptyTranscriptionError for an empty segments array', () => {
+    assert.throws(() => formatDiarizedSegments([]), EmptyTranscriptionError);
+  });
+
+  it('throws the typed EmptyTranscriptionError when segments have no usable text', () => {
+    assert.throws(() => formatDiarizedSegments([{ text: '   ' }]), EmptyTranscriptionError);
   });
 
   it('throws when segments are present but all empty', () => {
@@ -141,5 +161,123 @@ describe('transcribeCodexAudio signal propagation', () => {
       }),
       (err: unknown) => (err as { name?: unknown } | null)?.name === 'AbortError',
     );
+  });
+});
+
+// Silence vs malformed-response distinction on the non-diarize path: an empty
+// `text` string is a well-formed "no speech" outcome (typed error), while a
+// missing/non-string `text` stays a generic malformed-response error.
+describe('transcribeCodexAudio empty responses', () => {
+  const originalFetch = globalThis.fetch;
+  let audioPath = '';
+
+  beforeEach(() => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-empty-'));
+    audioPath = path.join(dir, 'clip.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (audioPath) fs.rmSync(path.dirname(audioPath), { recursive: true, force: true });
+  });
+
+  function stubFetchJson(payload: unknown): void {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch;
+  }
+
+  it('throws EmptyTranscriptionError when text is present but empty', async () => {
+    stubFetchJson({ text: '   ' });
+    await assert.rejects(
+      transcribeCodexAudio({
+        getToken: async () => 'fake-token',
+        audioFilePath: audioPath,
+        model: 'gpt-4o-transcribe',
+      }),
+      EmptyTranscriptionError,
+    );
+  });
+
+  it('keeps the generic error when text is missing entirely (malformed response)', async () => {
+    stubFetchJson({});
+    await assert.rejects(
+      transcribeCodexAudio({
+        getToken: async () => 'fake-token',
+        audioFilePath: audioPath,
+        model: 'gpt-4o-transcribe',
+      }),
+      (err: unknown) =>
+        err instanceof Error &&
+        !(err instanceof EmptyTranscriptionError) &&
+        /missing text/.test(err.message),
+    );
+  });
+
+  it('throws EmptyTranscriptionError for a diarize response with no segments', async () => {
+    stubFetchJson({ segments: [] });
+    await assert.rejects(
+      transcribeCodexAudio({
+        getToken: async () => 'fake-token',
+        audioFilePath: audioPath,
+        model: 'gpt-4o-transcribe-diarize',
+      }),
+      EmptyTranscriptionError,
+    );
+  });
+});
+
+describe('transcribeCodexAudio temperature', () => {
+  const originalFetch = globalThis.fetch;
+  let audioPath = '';
+  let requestBody: FormData | undefined;
+
+  beforeEach(() => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-temperature-'));
+    audioPath = path.join(dir, 'clip.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    requestBody = undefined;
+    globalThis.fetch = (async (_input, init) => {
+      requestBody = init?.body as FormData;
+      const payload =
+        requestBody.get('model') === 'gpt-4o-transcribe-diarize'
+          ? { segments: [{ speaker: 'A', text: 'transcript', start: 0, end: 1 }] }
+          : { text: 'transcript' };
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (audioPath) fs.rmSync(path.dirname(audioPath), { recursive: true, force: true });
+  });
+
+  async function transcribe(model: string, temperature?: number): Promise<FormData> {
+    await transcribeCodexAudio({
+      getToken: async () => 'fake-token',
+      audioFilePath: audioPath,
+      model,
+      temperature,
+    });
+    assert.ok(requestBody);
+    return requestBody;
+  }
+
+  it('includes temperature for non-diarize models when set', async () => {
+    assert.equal((await transcribe('gpt-4o-transcribe', 0.7)).get('temperature'), '0.7');
+  });
+
+  it('omits temperature for non-diarize models when unset', async () => {
+    assert.equal((await transcribe('gpt-4o-transcribe')).get('temperature'), null);
+  });
+
+  it('omits temperature for the diarize model', async () => {
+    assert.equal((await transcribe('gpt-4o-transcribe-diarize', 0.7)).get('temperature'), null);
   });
 });

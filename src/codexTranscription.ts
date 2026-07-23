@@ -78,6 +78,18 @@ export class TranscriptionApiError extends Error {
   }
 }
 
+// Thrown when the provider processed the audio fine but produced no usable
+// speech (silence, noise-only input). Distinct from TranscriptionApiError so
+// callers can branch: whole-file transcription surfaces it as a friendly
+// "no speech found" error, while per-segment and live-snippet callers treat
+// it as an empty result instead of failing the whole run (issue #182).
+export class EmptyTranscriptionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EmptyTranscriptionError';
+  }
+}
+
 export interface DiarizedSegment {
   speaker?: string;
   text?: string;
@@ -93,6 +105,7 @@ export interface TranscribeCodexAudioParams {
   prompt?: string;
   /** ISO 639-1 language code (e.g. "ko"). Improves accuracy when set. */
   language?: string;
+  temperature?: number;
   /** Cancellation signal. Forwarded into the fetch so the in-flight upload
    *  aborts immediately. Two callers fire this: the user-driven cancel button
    *  in the renderer, and the segment-loop's sibling controller that fails
@@ -116,6 +129,7 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
     form.append('language', params.language);
   }
   if (diarize) {
+    // The diarize model has a restricted parameter surface -- omit temperature.
     // Required for the diarize model. `chunking_strategy=auto` lets OpenAI
     // split long audio internally while keeping speaker identity coherent
     // across chunks -- so we can hand it a whole 50-minute meeting (subject
@@ -124,6 +138,9 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
     form.append('chunking_strategy', 'auto');
   } else if (params.prompt?.trim()) {
     form.append('prompt', params.prompt.trim());
+  }
+  if (!diarize && params.temperature !== undefined) {
+    form.append('temperature', String(params.temperature));
   }
   form.append(
     'file',
@@ -136,7 +153,9 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
   console.log(
     `[codex-transcribe] -> ${path.basename(params.audioFilePath)} ${sizeMB}MB model=${model}${
       diarize ? ' diarize=true' : params.prompt ? ` prompt=${params.prompt.length}chars` : ''
-    }${params.language ? ` lang=${params.language}` : ''}`,
+    }${params.language ? ` lang=${params.language}` : ''}${
+      params.temperature !== undefined ? ` temp=${params.temperature}` : ''
+    }`,
   );
 
   const response = await fetch(`${OPENAI_API_BASE_URL}/audio/transcriptions`, {
@@ -182,8 +201,13 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
   }
 
   const payload = (await response.json()) as { text?: unknown };
-  if (typeof payload.text !== 'string' || payload.text.trim().length === 0) {
+  if (typeof payload.text !== 'string') {
     throw new Error('OpenAI transcription response missing text');
+  }
+  if (payload.text.trim().length === 0) {
+    // Well-formed response with no speech content -- silence/noise input,
+    // not a broken API. Typed so callers can decide per context.
+    throw new EmptyTranscriptionError('OpenAI transcription returned no speech');
   }
   return payload.text;
 }
@@ -195,8 +219,11 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
 // onto a single line so downstream consumers don't see one speaker split into
 // 30+ "참가자1: ..." stubs.
 export function formatDiarizedSegments(segments?: DiarizedSegment[]): string {
-  if (!segments || segments.length === 0) {
-    throw new Error('OpenAI diarized transcription returned no segments');
+  if (!segments) {
+    throw new Error('OpenAI diarized transcription response missing segments');
+  }
+  if (segments.length === 0) {
+    throw new EmptyTranscriptionError('OpenAI diarized transcription returned no segments');
   }
 
   const speakerIdx = new Map<string, number>();
@@ -226,7 +253,9 @@ export function formatDiarizedSegments(segments?: DiarizedSegment[]): string {
   if (activeLabel !== undefined) lines.push(`${activeLabel}: ${activeBuffer}`);
 
   if (lines.length === 0) {
-    throw new Error('OpenAI diarized transcription had segments but no usable text');
+    throw new EmptyTranscriptionError(
+      'OpenAI diarized transcription had segments but no usable text',
+    );
   }
   return lines.join('\n\n');
 }

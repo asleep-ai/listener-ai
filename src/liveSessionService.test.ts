@@ -636,6 +636,152 @@ describe('LiveSessionService', () => {
   });
 });
 
+// Issue #182 guards: exact-duplicate live finals inside a short temporal
+// window are suppressed (a provider stuck on silence emits the same phrase
+// every window), while different text, expired windows, and short natural
+// acknowledgements always pass through. Flagged-but-kept finals carry a
+// `quality` marker instead of being deleted.
+describe('LiveSessionService duplicate suppression and quality flags', () => {
+  function makeChunkedService(opts: { transcripts: string[]; now?: () => number }): {
+    service: LiveSessionService;
+    calls: () => number;
+  } {
+    let call = 0;
+    const fakeGemini = {
+      async transcribeLiveSnippet(): Promise<string> {
+        const text = opts.transcripts[Math.min(call, opts.transcripts.length - 1)];
+        call++;
+        return text;
+      },
+      async translateText(): Promise<string> {
+        return '번역';
+      },
+    };
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => fakeGemini as unknown as GeminiService,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: chunkedConfig,
+      now: opts.now,
+    });
+    return { service, calls: () => call };
+  }
+
+  function pushChunk(
+    service: LiveSessionService,
+    sessionId: string,
+    offsetMs: number,
+  ): ReturnType<LiveSessionService['processAudioChunk']> {
+    return service.processAudioChunk({
+      sessionId,
+      audioData: makeAudioBytes(),
+      mimeType: 'audio/webm',
+      offsetMs,
+      durationMs: 12_000,
+      translate: false,
+    });
+  }
+
+  it('suppresses an exact duplicate chunked final within the temporal window', async () => {
+    const { service } = makeChunkedService({
+      transcripts: ['참가자1: 시청해주셔서 감사합니다.'],
+    });
+    const session = await service.start({ title: 'Loop', translate: false });
+
+    const first = await pushChunk(service, session.sessionId, 0);
+    const second = await pushChunk(service, session.sessionId, 12_000);
+
+    assert.ok(first, 'first occurrence must be kept');
+    assert.equal(second, null, 'exact duplicate within window must be suppressed');
+    assert.equal(service.snapshot()?.segments.length, 1);
+  });
+
+  it('keeps an identical final again once the temporal window has expired', async () => {
+    let nowMs = 0;
+    const { service } = makeChunkedService({
+      transcripts: ['참가자1: 다음 안건으로 넘어가겠습니다.'],
+      now: () => nowMs,
+    });
+    const session = await service.start({ title: 'Window', translate: false });
+
+    const first = await pushChunk(service, session.sessionId, 0);
+    nowMs = 31_000;
+    const second = await pushChunk(service, session.sessionId, 31_000);
+
+    assert.ok(first);
+    assert.ok(second, 'duplicate outside the 30s window must be kept');
+    assert.equal(service.snapshot()?.segments.length, 2);
+  });
+
+  it('keeps different consecutive finals and short repeated acknowledgements', async () => {
+    const { service } = makeChunkedService({
+      transcripts: ['참가자1: 안건을 공유드립니다.', '참가자1: 맞아요.', '참가자1: 맞아요.'],
+    });
+    const session = await service.start({ title: 'Acks', translate: false });
+
+    assert.ok(await pushChunk(service, session.sessionId, 0));
+    assert.ok(await pushChunk(service, session.sessionId, 12_000));
+    assert.ok(
+      await pushChunk(service, session.sessionId, 24_000),
+      'speaker labels must not push short acknowledgements above the length floor',
+    );
+    assert.equal(service.snapshot()?.segments.length, 3);
+  });
+
+  it('suppresses duplicate streaming finals through receiveFinalTranscript', async () => {
+    const events: LiveSessionEvent[] = [];
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: chunkedConfig,
+      emitEvent: (event) => events.push(event),
+    });
+    const session = await service.start({ title: 'Streaming', translate: false });
+
+    service.receiveFinalTranscript({
+      sessionId: session.sessionId,
+      text: 'Speaker: Thank you for watching.',
+      offsetMs: 1_000,
+    });
+    service.receiveFinalTranscript({
+      sessionId: session.sessionId,
+      text: 'Speaker: Thank you for watching.',
+      offsetMs: 3_000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(service.snapshot()?.segments.length, 1);
+    assert.equal(events.filter((event) => event.type === 'segment').length, 1);
+  });
+
+  it('marks a flagged repetition-loop final as uncertain instead of deleting it', async () => {
+    const loopText = Array(5).fill('참가자1: 시청해주셔서 감사합니다.').join('\n');
+    const { service } = makeChunkedService({ transcripts: [loopText] });
+    const session = await service.start({ title: 'Flagged', translate: false });
+
+    const segment = await pushChunk(service, session.sessionId, 0);
+
+    assert.ok(segment, 'flagged text is kept, not dropped');
+    assert.equal(segment.quality?.flagged, true);
+    assert.ok((segment.quality?.reasons.length ?? 0) > 0);
+  });
+
+  it('leaves clean finals unmarked', async () => {
+    const { service } = makeChunkedService({
+      transcripts: ['참가자1: 오늘 회의를 시작하겠습니다.'],
+    });
+    const session = await service.start({ title: 'Clean', translate: false });
+
+    const segment = await pushChunk(service, session.sessionId, 0);
+
+    assert.ok(segment);
+    assert.equal(segment.quality, undefined);
+  });
+});
+
 describe('GeminiService live snippets', () => {
   it('does not apply knownWords to live snippet prompts and drops the no-speech sentinel', async () => {
     const service = new GeminiService({
