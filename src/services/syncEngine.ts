@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { isSupportedAudioExtension, mimeTypeForFile } from '../audioFormats';
 import { reportError } from '../sentry';
+import { telemetryHash } from '../sentryScrub';
 import {
   type DriveFile,
   type GoogleDriveClient,
@@ -382,7 +383,7 @@ export class SyncEngine {
         reportError(err, {
           operation: 'drive.sync.meeting',
           severity: 'error',
-          extra: { meeting: name },
+          extra: { meetingHash: telemetryHash(name) },
         });
       }
     }
@@ -456,7 +457,7 @@ export class SyncEngine {
         reportError(err, {
           operation: 'drive.tombstone',
           severity: 'warning',
-          extra: { meeting: meetingName },
+          extra: { meetingHash: telemetryHash(meetingName) },
         });
       }
     }
@@ -512,7 +513,7 @@ export class SyncEngine {
       reportError(err, {
         operation: 'drive.tombstone',
         severity: 'warning',
-        extra: { meeting: name },
+        extra: { meetingHash: telemetryHash(name) },
       });
     }
   }
@@ -817,7 +818,7 @@ export class SyncEngine {
         reportError(err, {
           operation: 'drive.file',
           severity: 'warning',
-          extra: { meeting: meetingName },
+          extra: { meetingHash: telemetryHash(meetingName) },
         });
         // Continue draining the loop: the result should still record every
         // file-level error so the UI can surface them, even though the rename
@@ -955,7 +956,7 @@ export class SyncEngine {
         reportError(err, {
           operation: 'drive.file',
           severity: 'warning',
-          extra: { meeting: meetingName },
+          extra: { meetingHash: telemetryHash(meetingName) },
         });
       }
     }

@@ -7,7 +7,22 @@
 // never leave the machine on an event. See sentry.ts for how these run inside
 // `beforeSend` / `beforeBreadcrumb`.
 
+import { createHash } from 'node:crypto';
 import type { Event } from '@sentry/electron/main';
+
+/**
+ * Opaque, stable identifier for telemetry. Use for values that are useful to
+ * correlate events (e.g. which meeting keeps failing to sync) but must never
+ * leave the machine in the clear. Meeting folder names embed the AI-generated
+ * title (`<ts24>_<sanitized-title>`), i.e. meeting content -- sending them raw
+ * would break the privacy guarantee, and the scrubber can't catch them (an
+ * innocent-looking key holding title-derived text). Same input -> same short
+ * hash, so repeated failures still cluster in Sentry while the original value
+ * stays unrecoverable.
+ */
+export function telemetryHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 12);
+}
 
 // Keys whose values are credentials/secrets. Mirrors the redaction lists in
 // main.ts (SENSITIVE_LOG_KEY_RE) and renderer-logger.ts.

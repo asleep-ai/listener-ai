@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { redactString, scrubDeep, scrubEvent } from './sentryScrub';
+import { redactString, scrubDeep, scrubEvent, telemetryHash } from './sentryScrub';
 
 describe('redactString', () => {
   it('redacts Bearer tokens', () => {
@@ -101,5 +101,24 @@ describe('scrubEvent', () => {
       (event.contexts as Record<string, Record<string, unknown>>).creds.refreshToken,
       '[REDACTED]',
     );
+  });
+});
+
+describe('telemetryHash', () => {
+  const title = '2026-07-23T09-00-00.000Z_Q4-layoffs-planning';
+
+  it('is deterministic for the same input', () => {
+    assert.equal(telemetryHash(title), telemetryHash(title));
+  });
+
+  it('does not leak the original value (no substring of the title)', () => {
+    const h = telemetryHash(title);
+    assert.ok(!h.includes('layoffs'));
+    assert.ok(!h.includes('Q4'));
+    assert.match(h, /^[0-9a-f]{12}$/);
+  });
+
+  it('separates distinct inputs', () => {
+    assert.notEqual(telemetryHash(title), telemetryHash(title + '-2'));
   });
 });
