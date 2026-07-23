@@ -627,6 +627,21 @@ describe('GeminiService transcript quality judge', () => {
     assert.equal('fileData' in request.contents[0].parts[0], false);
   });
 
+  it('parses a judge response wrapped in a ```json``` fence', async () => {
+    const service = makeJudgeService();
+    service.ai = {
+      models: {
+        generateContent: async () => ({
+          text: '```json\n{"looped":true,"reason":"loop"}\n```',
+        }),
+      },
+    };
+
+    const verdict = await service.judgeTranscriptQuality('참가자1: 검사할 세그먼트입니다.');
+
+    assert.deepEqual(verdict, { flagged: true, reason: 'loop' });
+  });
+
   it('rejects malformed Gemini judge JSON with a plain Error', async () => {
     for (const responseText of ['not json', '{}', '{"looped":"true","reason":"bad type"}']) {
       const service = makeJudgeService();
@@ -796,7 +811,10 @@ describe('GeminiService transcript quality judge', () => {
     const cleaned = await service.cleanupTranscriptQuality(transcript, controller.signal);
 
     assert.equal(cleaned, '참가자1: 실제 발화입니다.');
-    assert.match(call!.systemPrompt, /Return the SAME transcript with only the loop artifacts removed/);
+    assert.match(
+      call!.systemPrompt,
+      /Return the SAME transcript with only the loop artifacts removed/,
+    );
     assert.doesNotMatch(call!.systemPrompt, /참가자1/);
     assert.equal(
       call!.promptText,

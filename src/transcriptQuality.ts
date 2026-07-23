@@ -607,8 +607,7 @@ export async function applyTranscriptQualityGate(
       const cleanedText = await input.cleanup(input.text);
       if (cleanedText.length > input.text.length) {
         log(
-          `[transcript-quality] ${input.label}: cleanup rejected (grew); ` +
-            'keeping first result',
+          `[transcript-quality] ${input.label}: cleanup rejected (grew); ` + 'keeping first result',
         );
       } else {
         const cleanedVerdict = await verdictFor(cleanedText);

@@ -552,7 +552,9 @@ describe('applyTranscriptQualityGate', () => {
     assert.equal(result.flagged, true);
     assert.equal(result.cleaned, undefined);
     assert.equal(judgeCalls, 2, 'grown cleanup must be rejected before another judge call');
-    assert.ok(logs.includes('[transcript-quality] test: cleanup rejected (grew); keeping first result'));
+    assert.ok(
+      logs.includes('[transcript-quality] test: cleanup rejected (grew); keeping first result'),
+    );
   });
 
   it('rejects cleanup output that is still flagged', async () => {
