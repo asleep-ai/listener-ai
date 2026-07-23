@@ -41,6 +41,7 @@ import {
   updateTranscriptionStatus,
 } from './outputService';
 import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
+import { initMainSentry, reportError, setSentryEnabled } from './sentry';
 import { autoUpdaterService } from './services/autoUpdaterService';
 import { FFmpegManager } from './services/ffmpegManager';
 import { FileHandlerService } from './services/fileHandlerService';
@@ -201,6 +202,18 @@ let mainWindow: BrowserWindow | null = null;
 const audioRecorder = new SimpleAudioRecorder();
 const systemAudioService = new SystemAudioService();
 const configService = new ConfigService();
+
+// Error tracking. Init as early as possible (userData path is already set at
+// L104) so native crashes and uncaught exceptions in main are captured. The
+// SDK's default integrations arm the uncaught-exception / unhandled-rejection
+// nets and native minidumps for free; `crashReportingEnabled` is opt-out
+// (default ON). No-op without a DSN or in tests. Renderer errors forward here.
+initMainSentry({
+  enabled: configService.getCrashReportingEnabled(),
+  release: `listener-ai@${app.getVersion()}`,
+  environment: app.isPackaged ? 'production' : 'development',
+});
+
 const ffmpegManager = new FFmpegManager();
 const menuBarManager = new MenuBarManager();
 const fileHandlerService = new FileHandlerService();
@@ -211,6 +224,13 @@ let geminiService: GeminiService | null = null;
 let notionService: NotionService | null = null;
 let slackService: SlackService | null = null;
 let agentService: AgentService | null = null;
+
+// High-frequency IPC handlers (per-chunk audio streaming) only report the
+// first failure per app session to Sentry -- without a latch, a stuck stream
+// emitting a chunk every ~100ms-1s would flood the crash-reporting backend.
+let reportedRecordingChunkError = false;
+let reportedLiveProcessChunkError = false;
+let reportedLivePcmChunkError = false;
 
 function serializeTranscriptionError(error: unknown): TranscriptionErrorPayload {
   if (error instanceof TranscriptionError) return error.toPayload();
@@ -386,6 +406,7 @@ function registerGlobalShortcut() {
     }
   } catch (error) {
     console.error('Error registering global shortcut:', error);
+    reportError(error, { operation: 'shortcut.register', severity: 'warning' });
   }
 }
 
@@ -573,6 +594,11 @@ function createWindow() {
     if (isMainFrame && !isInPlace) rejectAllPendingConfirms();
   });
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    reportError(new Error(`Renderer process gone: ${details.reason}`), {
+      operation: 'renderer.crash',
+      severity: 'fatal',
+      extra: { reason: details.reason, exitCode: details.exitCode },
+    });
     rejectAllPendingConfirms();
     // Close the recording file handle so the partial file is flushed and left on disk
     // instead of corrupted or locked open. User keeps whatever audio was streamed so far.
@@ -593,6 +619,7 @@ function createWindow() {
             }
           } catch (err) {
             console.error('Failed to finalize partial recording:', err);
+            reportError(err, { operation: 'recording.finalizeOnCrash', severity: 'error' });
           }
         })(),
       );
@@ -887,6 +914,7 @@ app.on('before-quit', async (event) => {
       }
     } catch (err) {
       console.error('Failed to finalize recording on quit:', err);
+      reportError(err, { operation: 'recording.finalizeOnQuit', severity: 'error' });
     }
     app.quit();
     return;
@@ -959,6 +987,9 @@ ipcMain.handle('download-ffmpeg', async () => {
     });
     return { success: true, path: ffmpegPath };
   } catch (error) {
+    if (!(error instanceof Error) || error.message !== 'Download cancelled') {
+      reportError(error, { operation: 'ffmpeg.download', severity: 'error' });
+    }
     return {
       success: false,
       error: error instanceof Error ? error.message : String(error),
@@ -1029,7 +1060,10 @@ ipcMain.handle('start-recording', async (_, payload: { title: string; mimeType: 
               .then((r) => {
                 if (r.success) fireStoppedNotificationOnce();
               })
-              .catch((err) => console.error('Force-stop failed:', err));
+              .catch((err) => {
+                console.error('Force-stop failed:', err);
+                reportError(err, { operation: 'recording.forceStop', severity: 'warning' });
+              });
           }, 10_000);
         },
         maxMinutes * 60 * 1000,
@@ -1053,6 +1087,7 @@ ipcMain.handle('start-recording', async (_, payload: { title: string; mimeType: 
     return result;
   } catch (error) {
     console.error('Error starting recording:', error);
+    reportError(error, { operation: 'recording.start', severity: 'error' });
     const errorMessage = error instanceof Error ? error.message : String(error);
     return { success: false, error: errorMessage };
   }
@@ -1066,6 +1101,10 @@ ipcMain.on('recording-chunk', (_event, data: ArrayBuffer | Uint8Array) => {
     audioRecorder.appendChunk(Buffer.from(data as ArrayBuffer));
   } catch (error) {
     console.error('Invalid chunk payload:', error);
+    if (!reportedRecordingChunkError) {
+      reportedRecordingChunkError = true;
+      reportError(error, { operation: 'recording.appendChunk', severity: 'warning' });
+    }
   }
 });
 
@@ -1092,6 +1131,7 @@ ipcMain.handle('stop-recording', async (_, opts?: { liveNotes?: unknown }) => {
             await metadataService.saveMetadata(result.filePath, { liveNotes });
           } catch (err) {
             console.error('Failed to persist live notes to metadata:', err);
+            reportError(err, { operation: 'recording.saveLiveNotes', severity: 'warning' });
           }
         }
       }
@@ -1099,6 +1139,7 @@ ipcMain.handle('stop-recording', async (_, opts?: { liveNotes?: unknown }) => {
     return result;
   } catch (error) {
     console.error('Error stopping recording:', error);
+    reportError(error, { operation: 'recording.stop', severity: 'error' });
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -1134,6 +1175,7 @@ ipcMain.handle('abort-recording', async () => {
     return { success: true };
   } catch (error) {
     console.error('Error aborting recording:', error);
+    reportError(error, { operation: 'recording.abort', severity: 'warning' });
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -1182,6 +1224,9 @@ function applyConfigSideEffects(changed: Partial<AppConfig>): void {
   }
   if (changed.slackWebhookUrl !== undefined) {
     slackService = null; // re-init lazily on next send
+  }
+  if (changed.crashReportingEnabled !== undefined) {
+    setSentryEnabled(changed.crashReportingEnabled);
   }
   if (changed.googleDriveEnabled !== undefined || changed.googleOAuth !== undefined) {
     refreshGoogleSyncTimer();
@@ -1247,6 +1292,7 @@ ipcMain.handle('save-config', async (_, config: Partial<AppConfig>) => {
     };
   } catch (error) {
     console.error('Error saving config:', error);
+    reportError(error, { operation: 'config.save', severity: 'error' });
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -1323,6 +1369,7 @@ ipcMain.handle('codex-oauth-login', async () => {
       return { success: false as const, error: 'Sign-in cancelled.', cancelled: true as const };
     }
     console.error('Codex OAuth login failed:', error);
+    reportError(error, { operation: 'codex.oauthLogin', severity: 'error' });
     return {
       success: false as const,
       error: error instanceof Error ? error.message : String(error),
@@ -1355,6 +1402,7 @@ ipcMain.handle('codex-oauth-clear', async () => {
     return { success: true, config: configService.getAllConfig() };
   } catch (error) {
     console.error('Codex OAuth clear failed:', error);
+    reportError(error, { operation: 'codex.oauthClear', severity: 'warning' });
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -1465,13 +1513,20 @@ ipcMain.handle(
           });
         } catch (error) {
           console.error('Failed to persist Notion URL to transcription:', error);
+          reportError(error, { operation: 'notion.persistUrl', severity: 'warning' });
         }
+      } else if (!result.success) {
+        reportError(new Error('Notion upload reported failure'), {
+          operation: 'notion.upload',
+          severity: 'error',
+        });
       }
 
       notificationService.notifyUploadComplete(data.title);
       return result;
     } catch (error) {
       console.error('Error uploading to Notion:', error);
+      reportError(error, { operation: 'notion.upload', severity: 'error' });
       notificationService.notifyUploadFailed('Upload failed. Check the app for details.');
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -1527,12 +1582,18 @@ ipcMain.handle(
           });
         } catch (error) {
           console.error('Failed to persist Slack status to transcription:', error);
+          reportError(error, { operation: 'slack.persistStatus', severity: 'warning' });
         }
+      }
+
+      if (!result.success) {
+        reportError(new Error(result.error), { operation: 'slack.send', severity: 'error' });
       }
 
       return result;
     } catch (error) {
       console.error('Error sending to Slack:', error);
+      reportError(error, { operation: 'slack.send', severity: 'error' });
       const message = error instanceof Error ? error.message : String(error);
       return { success: false, error: message };
     }
@@ -1600,6 +1661,7 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
     // Old format or missing folder fallback: inline data in metadata
     return { success: true, data: metadata };
   } catch (error) {
+    reportError(error, { operation: 'metadata.get', severity: 'warning' });
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -1611,6 +1673,7 @@ ipcMain.handle('get-usage-summary', async (_, opts?: { month?: string }) => {
     const summary: UsageSummaryResult = summarizeUsage(range);
     return { success: true, month, summary };
   } catch (error) {
+    reportError(error, { operation: 'usage.summary', severity: 'warning' });
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -1620,6 +1683,7 @@ ipcMain.handle('save-metadata', async (_, filePath: string, metadata: any) => {
     await metadataService.saveMetadata(filePath, metadata);
     return { success: true };
   } catch (error) {
+    reportError(error, { operation: 'metadata.save', severity: 'error' });
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -1694,6 +1758,7 @@ ipcMain.handle(
 
       return { success: true, hits };
     } catch (error) {
+      reportError(error, { operation: 'search.transcriptions', severity: 'warning' });
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
@@ -1758,6 +1823,7 @@ ipcMain.handle('get-recordings', async () => {
     return { success: true, recordings };
   } catch (error) {
     console.error('Error getting recordings:', error);
+    reportError(error, { operation: 'recordings.list', severity: 'warning' });
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -1802,12 +1868,20 @@ ipcMain.handle('system-audio-start', async (event) => {
       }
     },
     onError: (err) => {
+      reportError(err, { operation: 'systemAudio.start', severity: 'warning' });
       if (!event.sender.isDestroyed()) {
         event.sender.send('system-audio-error', { message: err.message });
       }
     },
   });
   if (result.ok) return { success: true, format: SYSTEM_AUDIO_FORMAT };
+  if (result.reason === 'error') {
+    reportError(new Error(result.message ?? 'System audio start failed'), {
+      operation: 'systemAudio.start',
+      severity: 'warning',
+      extra: { reason: result.reason },
+    });
+  }
   return { success: false, reason: result.reason, message: result.message };
 });
 
@@ -1831,6 +1905,7 @@ ipcMain.handle('live-session-start', async (_, opts?: { title?: string; translat
     return { success: true, session };
   } catch (error) {
     console.error('live-session-start failed:', error);
+    reportError(error, { operation: 'liveSession.start', severity: 'error' });
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -1847,6 +1922,7 @@ ipcMain.handle(
       return { success: true, session };
     } catch (error) {
       console.error('live-session-realtime-failed failed:', error);
+      reportError(error, { operation: 'liveSession.realtimeFallback', severity: 'warning' });
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
@@ -1880,6 +1956,10 @@ ipcMain.handle(
       return { success: true, segment, snapshot: liveSessionService.snapshot() };
     } catch (error) {
       console.error('live-session-process-chunk failed:', error);
+      if (!reportedLiveProcessChunkError) {
+        reportedLiveProcessChunkError = true;
+        reportError(error, { operation: 'liveSession.processChunk', severity: 'warning' });
+      }
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
@@ -1936,6 +2016,7 @@ ipcMain.handle(
       return { success: true };
     } catch (error) {
       console.error('live-session-final failed:', error);
+      reportError(error, { operation: 'liveSession.final', severity: 'warning' });
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
@@ -1968,6 +2049,10 @@ ipcMain.on(
       });
     } catch (error) {
       console.error('live-session-pcm-chunk failed:', error);
+      if (!reportedLivePcmChunkError) {
+        reportedLivePcmChunkError = true;
+        reportError(error, { operation: 'liveSession.pcmChunk', severity: 'warning' });
+      }
     }
   },
 );
@@ -1978,6 +2063,7 @@ ipcMain.handle('live-session-stop', async (_, sessionId?: string) => {
     return { success: true, snapshot: await liveSessionService.stop(sessionId) };
   } catch (error) {
     console.error('live-session-stop failed:', error);
+    reportError(error, { operation: 'liveSession.stop', severity: 'warning' });
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -1998,6 +2084,7 @@ ipcMain.handle(
       };
     } catch (error) {
       console.error('live-session-set-translate failed:', error);
+      reportError(error, { operation: 'liveSession.setTranslate', severity: 'warning' });
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
@@ -2019,6 +2106,7 @@ ipcMain.handle(
       return { success: true, result };
     } catch (error) {
       console.error('live-session-ask failed:', error);
+      reportError(error, { operation: 'liveSession.ask', severity: 'error' });
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
@@ -2081,6 +2169,7 @@ ipcMain.handle(
       return { success: true, result };
     } catch (error) {
       console.error('agent-chat failed:', error);
+      reportError(error, { operation: 'agent.chat', severity: 'error' });
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   },

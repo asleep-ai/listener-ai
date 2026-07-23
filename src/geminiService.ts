@@ -20,6 +20,7 @@ import {
 } from './codexTranscription';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
 import { type Context, completeSimple, extractFinalText, getModel } from './piAiClient';
+import { reportError } from './sentry';
 import { FFmpegManager } from './services/ffmpegManager';
 import { type CostSession, type CostSnapshot, createCostSession } from './services/usageTracker';
 
@@ -1034,6 +1035,7 @@ Return as JSON:
         }
       } catch (e) {
         console.error('Error parsing summary JSON:', e);
+        reportError(e, { operation: 'summary.parse', severity: 'warning' });
         // Try to extract manually
         const summaryMatch = summaryText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
         if (summaryMatch) {

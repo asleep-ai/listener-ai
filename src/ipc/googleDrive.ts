@@ -6,6 +6,7 @@ import {
   resolveGoogleAccessToken,
 } from '../googleOAuth';
 import { getTranscriptionsDir } from '../outputService';
+import { reportError } from '../sentry';
 import { GoogleDriveClient } from '../services/googleDriveService';
 import { SyncEngine, type SyncProgressEvent, type SyncResult } from '../services/syncEngine';
 import type { IpcContext } from './types';
@@ -119,6 +120,7 @@ async function runGoogleSync(): Promise<SyncResult | undefined> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('Google Drive sync failed:', error);
+    reportError(error, { operation: 'drive.sync', severity: 'error' });
     broadcastGoogleSyncStatus('error', { error: message });
     return undefined;
   } finally {
@@ -215,6 +217,7 @@ export function register(ctx: IpcContext): void {
         return { success: false as const, error: 'Sign-in cancelled.', cancelled: true as const };
       }
       console.error('Google OAuth login failed:', error);
+      reportError(error, { operation: 'oauth.google.login', severity: 'error' });
       return {
         success: false as const,
         error: error instanceof Error ? error.message : String(error),
@@ -245,6 +248,7 @@ export function register(ctx: IpcContext): void {
       return { success: true, config: ctx.configService.getAllConfig() };
     } catch (error) {
       console.error('Google OAuth clear failed:', error);
+      reportError(error, { operation: 'oauth.google.clear', severity: 'warning' });
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   });

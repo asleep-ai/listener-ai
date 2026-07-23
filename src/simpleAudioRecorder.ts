@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { extensionForMimeType } from './audioFormats';
+import { reportError } from './sentry';
 
 // Lazy-load electron so unit tests (which inject recordingsDir) don't trigger a
 // module-load failure outside the Electron runtime.
@@ -116,6 +117,7 @@ export class SimpleAudioRecorder {
       } catch (error) {
         this.appendError = error instanceof Error ? error : new Error(String(error));
         console.error('Failed to append recording chunk:', this.appendError);
+        reportError(this.appendError, { operation: 'recording.append', severity: 'warning' });
       }
     });
   }
