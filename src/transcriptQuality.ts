@@ -7,12 +7,12 @@
 //
 // Design constraints, in order:
 //   1. Never delete text on detection alone. Callers may use a bounded
-//      context-cleared retry ladder and keep the first clean result; when all
-//      results are flagged the FIRST result is kept and marked uncertain.
+//      context-cleared retry ladder, then one exhaustion cleanup whose output
+//      is accepted only when it never grows and the normal verdict is clean.
+//      Otherwise the FIRST result is kept and marked uncertain.
 //   2. Legitimate repetition (stutters, `네, 네` confirmations, chants,
 //      emphasis) must survive. Thresholds are deliberately conservative and
-//      detection only ever triggers a bounded retry or a flag -- both leave
-//      real speech in place.
+//      cleanup must preserve every piece of genuine speech.
 //   3. Korean-aware: comparisons strip whitespace entirely so spacing
 //      variants of the same phrase compare equal, and loop detection works
 //      on character periods too (Korean loops often contain no spaces).
@@ -423,11 +423,18 @@ export interface QualityGateInput {
    * Ordered bounded quality retries with prior/context text cleared. Rungs run
    * in order, at most once each, until the first clean result wins (including
    * empty text as silence evidence). A throwing rung is logged and skipped.
-   * If every rung is flagged or failed, the first result is kept and marked
-   * uncertain. Omit or pass an empty array to disable retrying (live chunks
-   * must not blindly resend the same low-signal audio).
+   * If every rung stays flagged, the optional cleanup gets one last chance.
+   * Failed rungs or rejected/failed cleanup keep the first result uncertain.
+   * Omit or pass an empty array to disable retrying (live chunks must not
+   * blindly resend the same low-signal audio).
    */
   retries?: Array<() => Promise<string>>;
+  /**
+   * Last-resort text cleanup after configured retries are exhausted. Receives
+   * the first result, never a retry result. The gate accepts its output only
+   * when it does not grow and the normal verdict path considers it clean.
+   */
+  cleanup?: (text: string) => Promise<string>;
   log?: (message: string) => void;
 }
 
@@ -438,6 +445,8 @@ export interface QualityGateResult {
   reasons: string[];
   retried: boolean;
   retriesAttempted: number;
+  /** Present only when an exhaustion cleanup was accepted. */
+  cleaned?: boolean;
 }
 
 type QualityVerdictSource = 'judge' | 'analyzer' | 'empty';
@@ -456,7 +465,7 @@ function isAbortError(error: unknown): boolean {
 }
 
 function cappedQualityErrorMessage(error: unknown, transcriptText: string): string {
-  let message = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+  let message = error instanceof Error ? error.message : String(error);
   const transcriptFragments = new Set(
     [transcriptText, ...transcriptText.split(/\r?\n/)]
       .map((fragment) => fragment.trim())
@@ -473,9 +482,9 @@ function cappedQualityErrorMessage(error: unknown, transcriptText: string): stri
 //   clean first        -> accept
 //   flagged, no retry  -> keep first, mark uncertain
 //   flagged + retries  -> first clean retry (including empty = "audio was
-//                         silent") replaces the first; if all rungs are
-//                         flagged or fail, keep the FIRST result uncertain.
-//                         Never more attempts than rungs, never silent deletion.
+//                         silent") replaces the first; if all rungs stay
+//                         flagged, one guarded cleanup may replace the FIRST
+//                         result. Otherwise keep the FIRST result uncertain.
 export async function applyTranscriptQualityGate(
   input: QualityGateInput,
 ): Promise<QualityGateResult> {
@@ -548,6 +557,7 @@ export async function applyTranscriptQualityGate(
   }
 
   const totalRetries = input.retries.length;
+  let allRetriesFlagged = true;
   for (let index = 0; index < totalRetries; index++) {
     const attempt = index + 1;
     let retryText: string;
@@ -555,6 +565,7 @@ export async function applyTranscriptQualityGate(
       retryText = await input.retries[index]();
     } catch (error) {
       if (isAbortError(error)) throw error;
+      allRetriesFlagged = false;
       const nextStep = attempt < totalRetries ? 'trying next rung' : 'no rungs remain';
       const message = error instanceof Error ? error.message : String(error);
       log(
@@ -591,10 +602,49 @@ export async function applyTranscriptQualityGate(
         `${retryVerdict.source} (${describe(retryVerdict.report, retryVerdict.source)})`,
     );
   }
-  log(
-    `[transcript-quality] ${input.label}: all retries exhausted; ` +
-      'keeping first result marked uncertain',
-  );
+  if (input.cleanup && allRetriesFlagged) {
+    try {
+      const cleanedText = await input.cleanup(input.text);
+      if (cleanedText.length > input.text.length) {
+        log(
+          `[transcript-quality] ${input.label}: cleanup rejected (grew); ` +
+            'keeping first result',
+        );
+      } else {
+        const cleanedVerdict = await verdictFor(cleanedText);
+        if (!cleanedVerdict.flagged) {
+          log(
+            `[transcript-quality] ${input.label}: cleanup accepted ` +
+              `(removed ${input.text.length - cleanedText.length} chars)`,
+          );
+          return {
+            text: cleanedText,
+            flagged: false,
+            reasons: [],
+            retried: true,
+            retriesAttempted: totalRetries,
+            cleaned: true,
+          };
+        }
+        log(
+          `[transcript-quality] ${input.label}: cleanup rejected (still flagged); ` +
+            'keeping first result',
+        );
+      }
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      const message = cappedQualityErrorMessage(error, input.text);
+      log(
+        `[transcript-quality] ${input.label}: cleanup failed (${message}); ` +
+          'keeping first result',
+      );
+    }
+  } else {
+    log(
+      `[transcript-quality] ${input.label}: all retries exhausted; ` +
+        'keeping first result marked uncertain',
+    );
+  }
   return {
     text: input.text,
     flagged: true,

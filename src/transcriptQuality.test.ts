@@ -387,6 +387,7 @@ describe('applyTranscriptQualityGate', () => {
   });
 
   it('keeps the first result when the retry throws', async () => {
+    let cleanupCalls = 0;
     const result = await applyTranscriptQualityGate({
       text: loopText,
       label: 'test',
@@ -395,10 +396,15 @@ describe('applyTranscriptQualityGate', () => {
           throw new Error('rate limited');
         },
       ],
+      cleanup: async () => {
+        cleanupCalls++;
+        return cleanText;
+      },
       log: () => {},
     });
     assert.equal(result.text, loopText);
     assert.equal(result.flagged, true);
+    assert.equal(cleanupCalls, 0);
   });
 
   it('invokes the retry at most once', async () => {
@@ -442,8 +448,9 @@ describe('applyTranscriptQualityGate', () => {
     }
   });
 
-  it('uses a clean first rung without invoking the second rung', async () => {
+  it('uses a clean first rung without invoking the second rung or cleanup', async () => {
     const calls = [0, 0];
+    let cleanupCalls = 0;
     const result = await applyTranscriptQualityGate({
       text: loopText,
       label: 'test',
@@ -457,11 +464,16 @@ describe('applyTranscriptQualityGate', () => {
           return '참가자2: 호출되면 안 됩니다.';
         },
       ],
+      cleanup: async () => {
+        cleanupCalls++;
+        return cleanText;
+      },
       log: () => {},
     });
 
     assert.equal(result.text, cleanText);
     assert.deepEqual(calls, [1, 0]);
+    assert.equal(cleanupCalls, 0);
     assert.equal(result.retriesAttempted, 1);
   });
 
@@ -490,6 +502,141 @@ describe('applyTranscriptQualityGate', () => {
     assert.equal(result.text, loopText);
     assert.equal(result.flagged, true);
     assert.equal(result.retriesAttempted, 2);
+  });
+
+  it('accepts a shorter judged-clean cleanup after retry exhaustion', async () => {
+    const cleanedText = '참가자1: 실제 발화입니다.';
+    const cleanedInputs: string[] = [];
+    const logs: string[] = [];
+    const result = await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'segment 1/2',
+      judge: async (text) => ({
+        flagged: text !== cleanedText,
+        reason: text === cleanedText ? 'natural speech' : 'repeated line loop',
+      }),
+      retries: [async () => loopText],
+      cleanup: async (text) => {
+        cleanedInputs.push(text);
+        return cleanedText;
+      },
+      log: (message) => logs.push(message),
+    });
+
+    assert.deepEqual(cleanedInputs, [loopText]);
+    assert.equal(result.text, cleanedText);
+    assert.equal(result.flagged, false);
+    assert.deepEqual(result.reasons, []);
+    assert.equal(result.retried, true);
+    assert.equal(result.retriesAttempted, 1);
+    assert.equal(result.cleaned, true);
+    assert.ok(logs.some((line) => line.includes('cleanup accepted (removed ')));
+  });
+
+  it('rejects cleanup output that grows', async () => {
+    let judgeCalls = 0;
+    const logs: string[] = [];
+    const result = await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'test',
+      judge: async () => {
+        judgeCalls++;
+        return { flagged: true, reason: 'repeated line loop' };
+      },
+      retries: [async () => loopText],
+      cleanup: async () => `${loopText}\n참가자2: 추가된 내용입니다.`,
+      log: (message) => logs.push(message),
+    });
+
+    assert.equal(result.text, loopText);
+    assert.equal(result.flagged, true);
+    assert.equal(result.cleaned, undefined);
+    assert.equal(judgeCalls, 2, 'grown cleanup must be rejected before another judge call');
+    assert.ok(logs.includes('[transcript-quality] test: cleanup rejected (grew); keeping first result'));
+  });
+
+  it('rejects cleanup output that is still flagged', async () => {
+    const shorterLoop = Array(8).fill('자막').join(' ');
+    const logs: string[] = [];
+    const result = await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'test',
+      judge: async () => ({ flagged: true, reason: 'repeated phrase block' }),
+      retries: [async () => loopText],
+      cleanup: async () => shorterLoop,
+      log: (message) => logs.push(message),
+    });
+
+    assert.ok(shorterLoop.length <= loopText.length);
+    assert.equal(result.text, loopText);
+    assert.equal(result.flagged, true);
+    assert.equal(result.cleaned, undefined);
+    assert.ok(
+      logs.includes(
+        '[transcript-quality] test: cleanup rejected (still flagged); keeping first result',
+      ),
+    );
+  });
+
+  it('accepts empty cleanup as clean silence', async () => {
+    let judgeCalls = 0;
+    const result = await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'test',
+      judge: async () => {
+        judgeCalls++;
+        return { flagged: true, reason: 'repeated line loop' };
+      },
+      retries: [async () => loopText],
+      cleanup: async () => '',
+      log: () => {},
+    });
+
+    assert.equal(result.text, '');
+    assert.equal(result.flagged, false);
+    assert.equal(result.cleaned, true);
+    assert.equal(judgeCalls, 2, 'empty cleanup must not invoke the judge');
+  });
+
+  it('keeps the first result and caps a redacted cleanup failure', async () => {
+    const longTranscript = `참가자1: ${Array(100).fill('기밀발화').join(' ')}`;
+    const logs: string[] = [];
+    const result = await applyTranscriptQualityGate({
+      text: longTranscript,
+      label: 'test',
+      retries: [async () => longTranscript],
+      cleanup: async () => {
+        throw new Error(`cleanup provider echoed ${longTranscript} ${'x'.repeat(300)}`);
+      },
+      log: (message) => logs.push(message),
+    });
+
+    assert.equal(result.text, longTranscript);
+    assert.equal(result.flagged, true);
+    assert.equal(result.cleaned, undefined);
+    const cleanupLog = logs.find((line) => line.includes('cleanup failed'));
+    assert.ok(cleanupLog);
+    assert.doesNotMatch(cleanupLog, /기밀발화/);
+    const errorMessage = cleanupLog.match(/cleanup failed \((.*)\); keeping first result/)?.[1];
+    assert.ok(errorMessage);
+    assert.ok(errorMessage.length <= 200);
+  });
+
+  it('rethrows a cleanup AbortError', async () => {
+    const abortError = new DOMException('Aborted', 'AbortError');
+
+    await assert.rejects(
+      applyTranscriptQualityGate({
+        text: loopText,
+        label: 'test',
+        retries: [async () => loopText],
+        cleanup: async () => {
+          throw abortError;
+        },
+        log: () => {},
+      }),
+      (error) => error === abortError,
+    );
   });
 
   it('skips a throwing first rung and uses a clean second rung', async () => {
@@ -555,11 +702,16 @@ describe('applyTranscriptQualityGate', () => {
     assert.deepEqual(calls, [1, 1]);
   });
 
-  it('treats an empty retries array like no retries', async () => {
+  it('treats an empty retries array like no retries and does not invoke cleanup', async () => {
+    let cleanupCalls = 0;
     const result = await applyTranscriptQualityGate({
       text: loopText,
       label: 'test',
       retries: [],
+      cleanup: async () => {
+        cleanupCalls++;
+        return cleanText;
+      },
       log: () => {},
     });
 
@@ -567,6 +719,7 @@ describe('applyTranscriptQualityGate', () => {
     assert.equal(result.flagged, true);
     assert.equal(result.retried, false);
     assert.equal(result.retriesAttempted, 0);
+    assert.equal(cleanupCalls, 0);
   });
 });
 
