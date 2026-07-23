@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     knownWords?: string[];
     summaryPrompt?: string;
     recordSystemAudio?: boolean;
+    crashReportingEnabled?: boolean;
     audioDeviceId?: string;
     slackWebhookUrl?: string;
     slackAutoShare?: boolean;

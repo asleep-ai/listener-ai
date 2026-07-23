@@ -63,6 +63,9 @@ export interface AppConfig {
   recordingReminderMinutes?: number;
   minRecordingSeconds?: number;
   recordSystemAudio?: boolean;
+  // Crash/error reporting to Sentry. Opt-out: defaults to ON. Only togglable via
+  // settings UI / CLI, never by the agent (not in agentService WRITABLE keys).
+  crashReportingEnabled?: boolean;
   audioDeviceId?: string;
   lastSeenVersion?: string;
   slackWebhookUrl?: string;
@@ -538,6 +541,17 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  // Opt-out: absence means ON. `?? true` (not `|| false`) so the default is
+  // enabled and only an explicit `false` disables reporting.
+  getCrashReportingEnabled(): boolean {
+    return this.config.crashReportingEnabled ?? true;
+  }
+
+  setCrashReportingEnabled(enabled: boolean): void {
+    this.setKey('crashReportingEnabled', enabled);
+    this.saveConfig();
+  }
+
   getAudioDeviceId(): string | undefined {
     return this.config.audioDeviceId;
   }
@@ -647,6 +661,7 @@ export class ConfigService {
       recordingReminderMinutes: this.getRecordingReminderMinutes(),
       minRecordingSeconds: this.getMinRecordingSeconds(),
       recordSystemAudio: this.getRecordSystemAudio(),
+      crashReportingEnabled: this.getCrashReportingEnabled(),
       audioDeviceId: this.getAudioDeviceId(),
       lastSeenVersion: this.getLastSeenVersion(),
       slackWebhookUrl: this.getSlackWebhookUrl(),

@@ -15,6 +15,9 @@ const path = require('node:path');
 
 const clientId = (process.env.LISTENER_GOOGLE_OAUTH_CLIENT_ID || '').trim();
 const clientSecret = (process.env.LISTENER_GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
+// Sentry DSN is safe to embed publicly -- it only permits sending events, not
+// reading data. Absent value => src/sentry.ts skips init and stays silent.
+const sentryDsn = (process.env.SENTRY_DSN || '').trim();
 
 const distDir = path.join(__dirname, '..', 'dist');
 fs.mkdirSync(distDir, { recursive: true });
@@ -25,6 +28,7 @@ const content = `// AUTO-GENERATED at build time. Do not edit. Do not commit.
 module.exports = {
   googleOAuthClientId: ${JSON.stringify(clientId)},
   googleOAuthClientSecret: ${JSON.stringify(clientSecret)},
+  sentryDsn: ${JSON.stringify(sentryDsn)},
 };
 `;
 

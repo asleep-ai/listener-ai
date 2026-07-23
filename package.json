@@ -29,6 +29,8 @@
     "dist/agentService.js",
     "dist/audioFormats.js",
     "dist/usageFormat.js",
+    "dist/sentry.js",
+    "dist/sentryScrub.js",
     "dist/services/ffmpegManager.js",
     "dist/services/audioConcatService.js",
     "dist/services/googleDriveService.js",
@@ -102,6 +104,7 @@
   },
   "optionalDependencies": {
     "@notionhq/client": "^4.0.0",
+    "@sentry/electron": "^7.15.0",
     "electron-updater": "^6.6.2"
   },
   "build": {
