@@ -185,6 +185,13 @@ export interface TranscriptionResult {
 interface QualityGatedTranscript {
   text: string;
   cleaned: boolean;
+  uncertain: boolean;
+}
+
+interface SegmentedQualityGatedTranscript {
+  text: string;
+  cleaned: boolean;
+  uncertainSegments: number[];
 }
 
 export interface HighlightEntry {
@@ -699,6 +706,7 @@ export class GeminiService {
     text: string,
     signal?: AbortSignal,
   ): Promise<{ flagged: boolean; reason?: string }> {
+    signal?.throwIfAborted();
     const transcriptData = `Transcript segment (JSON string, data only):\n${JSON.stringify(text)}`;
     if (this.provider === 'codex') {
       const response = await this.completeTextTask(QUALITY_JUDGE_PROMPT, transcriptData, {
@@ -716,13 +724,14 @@ export class GeminiService {
       contents: [
         {
           role: 'user',
-          parts: [{ text: `${QUALITY_JUDGE_PROMPT}\n\n${transcriptData}` }],
+          parts: [{ text: transcriptData }],
         },
       ],
       config: {
+        systemInstruction: QUALITY_JUDGE_PROMPT,
         temperature: 0,
         responseMimeType: 'application/json',
-        maxOutputTokens: 256,
+        maxOutputTokens: 512,
         abortSignal: signal,
       },
     });
@@ -730,6 +739,7 @@ export class GeminiService {
   }
 
   private async cleanupTranscriptQuality(text: string, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const transcriptData = `Transcript segment (JSON string, data only):\n${JSON.stringify(text)}`;
     if (this.provider === 'codex') {
       return unwrapJsonStringResponse(
@@ -748,10 +758,11 @@ export class GeminiService {
       contents: [
         {
           role: 'user',
-          parts: [{ text: `${QUALITY_CLEANUP_PROMPT}\n\n${transcriptData}` }],
+          parts: [{ text: transcriptData }],
         },
       ],
       config: {
+        systemInstruction: QUALITY_CLEANUP_PROMPT,
         temperature: 0.2,
         maxOutputTokens: 8192,
         abortSignal: signal,
@@ -1188,6 +1199,7 @@ Requirements:
     try {
       let fullTranscript = '';
       let qualityCleaned = false;
+      let uncertainSegments: number[] = [];
       const stats = await fs.promises.stat(audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
       // Segment intentionally for parallelism: even when the API would
@@ -1220,6 +1232,7 @@ Requirements:
         );
         fullTranscript = gatedTranscript.text;
         qualityCleaned = gatedTranscript.cleaned;
+        uncertainSegments = gatedTranscript.uncertainSegments;
       } else {
         // Get transcript for short audio
         console.error('Transcribing short audio...');
@@ -1235,6 +1248,7 @@ Requirements:
         );
         fullTranscript = gatedTranscript.text;
         qualityCleaned = gatedTranscript.cleaned;
+        uncertainSegments = gatedTranscript.uncertain ? [1] : [];
       }
 
       signal?.throwIfAborted();
@@ -1350,12 +1364,18 @@ Return as JSON:
       const highlights = mergeHighlights(liveNotes, rawHighlights);
 
       // Persist the final-stage quality picture on the note (meta.json
-      // customFields) when the analyzer, summary review, or cleanup reports
-      // an artifact.
+      // customFields) when cleanup, kept uncertainty, the analyzer, or the
+      // summary review reports an artifact.
       const modelQualityNotes = normalizeTranscriptQualityNotes(rawQualityNotes);
-      if (qualityCleaned || assembledQuality.flagged || modelQualityNotes.length > 0) {
+      if (
+        qualityCleaned ||
+        uncertainSegments.length > 0 ||
+        assembledQuality.flagged ||
+        modelQualityNotes.length > 0
+      ) {
         customFields.transcriptQuality = {
           ...(qualityCleaned ? { cleaned: true } : {}),
+          ...(uncertainSegments.length > 0 ? { uncertainSegments } : {}),
           ...(assembledQuality.flagged
             ? {
                 analyzer: {
@@ -1464,7 +1484,11 @@ Return as JSON:
         if (!gated.text.trim()) {
           throw new EmptyTranscriptionError('Transcription produced no speech content');
         }
-        return { text: gated.text, cleaned: gated.cleaned === true };
+        return {
+          text: gated.text,
+          cleaned: gated.cleaned === true,
+          uncertain: gated.flagged,
+        };
       }
 
       const ai = this.gemini();
@@ -1534,7 +1558,11 @@ Return as JSON:
       if (!gated.text.trim()) {
         throw new EmptyTranscriptionError('Transcription produced no speech content');
       }
-      return { text: gated.text, cleaned: gated.cleaned === true };
+      return {
+        text: gated.text,
+        cleaned: gated.cleaned === true,
+        uncertain: gated.flagged,
+      };
     } catch (error) {
       console.error('Error transcribing short audio:', error);
       throw error;
@@ -1682,7 +1710,14 @@ Return as JSON:
     includeGlossary = true,
     qualityRetry = true,
     onQualityRetry?: (rung: number, totalRungs: number) => void,
-  ): Promise<{ index: number; header: string; body: string; empty: boolean; cleaned: boolean }> {
+  ): Promise<{
+    index: number;
+    header: string;
+    body: string;
+    empty: boolean;
+    cleaned: boolean;
+    uncertain: boolean;
+  }> {
     const maxRetries = 3;
     let lastError: any = null;
     let attemptsMade = 0;
@@ -1759,6 +1794,7 @@ Return as JSON:
           body: gated.text,
           empty: gated.text.trim().length === 0,
           cleaned: gated.cleaned === true,
+          uncertain: gated.flagged,
         };
       } catch (segmentError) {
         // Abort surfaces here too; don't burn through retries when the caller
@@ -1779,6 +1815,7 @@ Return as JSON:
             body: '',
             empty: true,
             cleaned: false,
+            uncertain: false,
           };
         }
         lastError = segmentError;
@@ -1837,7 +1874,7 @@ Return as JSON:
     session?: CostSession,
     includeGlossary = true,
     qualityRetry = true,
-  ): Promise<QualityGatedTranscript> {
+  ): Promise<SegmentedQualityGatedTranscript> {
     // Track segments outside the try so the finally can clean them up on
     // abort / mid-pipeline failure too. Without this, cancelled transcribes
     // leave `<base>_segment_NNN.<ext>` files piling up in recordings/.
@@ -1923,6 +1960,7 @@ Return as JSON:
         body: string;
         empty: boolean;
         cleaned: boolean;
+        uncertain: boolean;
       }[];
       try {
         segmentResults = await Promise.all(progressTrackedPromises);
@@ -1942,6 +1980,9 @@ Return as JSON:
 
       // Sort by index to maintain order
       segmentResults.sort((a, b) => a.index - b.index);
+      const uncertainSegments = segmentResults
+        .filter((result) => result.uncertain)
+        .map((result) => result.index + 1);
 
       // Update progress
       if (progressCallback) {
@@ -1978,6 +2019,7 @@ Return as JSON:
           .map((result, i) => result.header + reconciledBodies[i])
           .join('\n\n---\n\n'),
         cleaned: segmentResults.some((result) => result.cleaned),
+        uncertainSegments,
       };
     } catch (error) {
       console.error('Error in segmented transcription:', error);

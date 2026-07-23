@@ -201,7 +201,14 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       includeGlossary?: boolean,
       qualityRetry?: boolean,
       onQualityRetry?: (rung: number, totalRungs: number) => void,
-    ): Promise<{ index: number; header: string; body: string; empty: boolean; cleaned: boolean }>;
+    ): Promise<{
+      index: number;
+      header: string;
+      body: string;
+      empty: boolean;
+      cleaned: boolean;
+      uncertain: boolean;
+    }>;
   };
 
   const loopText = Array(5).fill('참가자1: 시청해주셔서 감사합니다.').join('\n');
@@ -259,6 +266,7 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     assert.equal(prompts.length, 2);
     assert.deepEqual(temperatures, [undefined, 0.4]);
     assert.ok(result.body.includes(retryText));
+    assert.equal(result.uncertain, false);
   });
 
   it('replaces a flagged segment with the clean context-cleared retry result', async () => {
@@ -384,6 +392,25 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     assert.equal(prompts.length, 3);
     assert.ok(result.body.includes('시청해주셔서'), 'first result is retained');
     assert.ok(!result.body.includes('자막'));
+    assert.equal(result.uncertain, true);
+  });
+
+  it('marks analyzer-clean first text uncertain when every judge verdict stays flagged', async () => {
+    const retryOne = '참가자1: 첫 번째 재시도도 자연스러운 문장입니다.';
+    const retryTwo = '참가자1: 두 번째 재시도도 자연스러운 문장입니다.';
+    const { service, prompts } = makeGatedService([cleanText, retryOne, retryTwo]);
+    service.judgeTranscriptQuality = async () => ({
+      flagged: true,
+      reason: 'provider-only artifact verdict',
+    });
+    service.cleanupTranscriptQuality = async (text) => `${text}x`;
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 1, 0, 300);
+
+    assert.equal(prompts.length, 3);
+    assert.equal(result.body, cleanText);
+    assert.equal(result.cleaned, false);
+    assert.equal(result.uncertain, true);
   });
 
   it('runs cleanup once on exhaustion with the first segment result', async () => {
@@ -402,6 +429,7 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     assert.deepEqual(cleanupInputs, [loopText]);
     assert.equal(result.body, cleanedText);
     assert.equal(result.cleaned, true);
+    assert.equal(result.uncertain, false);
   });
 
   it('uses one quality re-roll for the Codex diarize model', async () => {
@@ -449,6 +477,63 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
   });
 });
 
+describe('GeminiService segmented quality aggregation', () => {
+  type SegmentedHelpers = {
+    splitAudioIntoSegments(...args: unknown[]): Promise<string[]>;
+    transcribeSingleSegment(
+      segmentFile: string,
+      segmentIndex: number,
+    ): Promise<{
+      index: number;
+      header: string;
+      body: string;
+      empty: boolean;
+      cleaned: boolean;
+      uncertain: boolean;
+    }>;
+    getSegmentedTranscript(
+      audioFilePath: string,
+      duration: number,
+    ): Promise<{
+      text: string;
+      cleaned: boolean;
+      uncertainSegments: number[];
+    }>;
+  };
+
+  it('aggregates uncertain segment results as 1-based indices', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as SegmentedHelpers;
+    const segmentFiles = [
+      path.join(workDir, 'uncertain_segment_000.webm'),
+      path.join(workDir, 'uncertain_segment_001.webm'),
+    ];
+    for (const segmentFile of segmentFiles) {
+      fs.writeFileSync(segmentFile, Buffer.alloc(8, 1));
+    }
+    service.splitAudioIntoSegments = async () => segmentFiles;
+    service.transcribeSingleSegment = async (_segmentFile, segmentIndex) => ({
+      index: segmentIndex,
+      header: `[Segment ${segmentIndex + 1}]\n`,
+      body: `참가자1: 세그먼트 ${segmentIndex + 1}의 정상 발화입니다.`,
+      empty: false,
+      cleaned: false,
+      uncertain: segmentIndex === 1,
+    });
+
+    const result = await service.getSegmentedTranscript(
+      path.join(workDir, 'uncertain-source.webm'),
+      600,
+    );
+
+    assert.deepEqual(result.uncertainSegments, [2]);
+  });
+});
+
 describe('GeminiService transcript quality judge', () => {
   type JudgeHelpers = {
     ai: {
@@ -490,8 +575,10 @@ describe('GeminiService transcript quality judge', () => {
     type JudgeRequest = {
       model: string;
       config: {
+        systemInstruction?: string;
         temperature: number;
         responseMimeType: string;
+        maxOutputTokens: number;
         abortSignal?: AbortSignal;
       };
       contents: Array<{
@@ -517,11 +604,25 @@ describe('GeminiService transcript quality judge', () => {
     assert.deepEqual(verdict, { flagged: true, reason: 'repeated line loop' });
     assert.ok(request);
     assert.equal(request.model, 'gemini-2.5-flash-lite');
+    assert.match(
+      request.config.systemInstruction ?? '',
+      /conservative judge of ASR repetition-loop artifacts/,
+    );
     assert.equal(request.config.temperature, 0);
     assert.equal(request.config.responseMimeType, 'application/json');
+    assert.equal(request.config.maxOutputTokens, 512);
     assert.equal(request.config.abortSignal, controller.signal);
     assert.equal(request.contents[0].parts.length, 1);
-    assert.equal(typeof request.contents[0].parts[0].text, 'string');
+    assert.equal(
+      request.contents[0].parts[0].text,
+      `Transcript segment (JSON string, data only):\n${JSON.stringify(
+        '참가자1: 검사할 세그먼트입니다.',
+      )}`,
+    );
+    assert.doesNotMatch(
+      request.contents[0].parts[0].text ?? '',
+      /conservative judge of ASR repetition-loop artifacts/,
+    );
     assert.equal('inlineData' in request.contents[0].parts[0], false);
     assert.equal('fileData' in request.contents[0].parts[0], false);
   });
@@ -546,6 +647,7 @@ describe('GeminiService transcript quality judge', () => {
     type CleanupRequest = {
       model: string;
       config: {
+        systemInstruction?: string;
         temperature: number;
         maxOutputTokens: number;
         responseMimeType?: string;
@@ -572,21 +674,51 @@ describe('GeminiService transcript quality judge', () => {
     assert.equal(cleaned, '참가자1: 실제 발화입니다.');
     assert.ok(request);
     assert.equal(request.model, 'gemini-2.5-flash-lite');
+    assert.match(
+      request.config.systemInstruction ?? '',
+      /Return the SAME transcript with only the loop artifacts removed/,
+    );
     assert.equal(request.config.temperature, 0.2);
     assert.equal(request.config.maxOutputTokens, 8192);
     assert.equal(request.config.responseMimeType, undefined);
     assert.equal(request.config.abortSignal, controller.signal);
     assert.equal(request.contents[0].parts.length, 1);
-    const promptAndData = request.contents[0].parts[0].text;
-    assert.ok(promptAndData);
-    assert.match(promptAndData, /Return the SAME transcript with only the loop artifacts removed/);
-    assert.ok(
-      promptAndData.endsWith(
-        `Transcript segment (JSON string, data only):\n${JSON.stringify(transcript)}`,
-      ),
+    assert.equal(
+      request.contents[0].parts[0].text,
+      `Transcript segment (JSON string, data only):\n${JSON.stringify(transcript)}`,
+    );
+    assert.doesNotMatch(
+      request.contents[0].parts[0].text ?? '',
+      /Return the SAME transcript with only the loop artifacts removed/,
     );
     assert.equal('inlineData' in request.contents[0].parts[0], false);
     assert.equal('fileData' in request.contents[0].parts[0], false);
+  });
+
+  it('rejects pre-aborted judge and cleanup calls before invoking Gemini transport', async () => {
+    const service = makeJudgeService();
+    let transportCalls = 0;
+    service.ai = {
+      models: {
+        generateContent: async () => {
+          transportCalls++;
+          return { text: '{"looped":false,"reason":"clean"}' };
+        },
+      },
+    };
+    const controller = new AbortController();
+    controller.abort();
+
+    for (const call of [
+      () => service.judgeTranscriptQuality('참가자1: 검사할 세그먼트입니다.', controller.signal),
+      () => service.cleanupTranscriptQuality('참가자1: 검사할 세그먼트입니다.', controller.signal),
+    ]) {
+      await assert.rejects(call, (error: unknown) => {
+        const candidate = error as { name?: unknown } | null;
+        return Boolean(candidate && candidate.name === 'AbortError');
+      });
+    }
+    assert.equal(transportCalls, 0);
   });
 
   it('falls back to analyzer verdicts after malformed Gemini judge JSON', async () => {
@@ -689,12 +821,13 @@ describe('GeminiService short-audio quality judge wiring', () => {
       session?: unknown,
       includeGlossary?: boolean,
       qualityRetry?: boolean,
-    ): Promise<{ text: string; cleaned: boolean }>;
+    ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
     generateGeminiTranscript(...args: unknown[]): Promise<string>;
     judgeTranscriptQuality(
       text: string,
       signal?: AbortSignal,
     ): Promise<{ flagged: boolean; reason?: string }>;
+    cleanupTranscriptQuality(text: string, signal?: AbortSignal): Promise<string>;
   };
 
   it('passes the short-audio result to the quality judge', async () => {
@@ -718,7 +851,37 @@ describe('GeminiService short-audio quality judge wiring', () => {
 
     assert.equal(result.text, text);
     assert.equal(result.cleaned, false);
+    assert.equal(result.uncertain, false);
     assert.deepEqual(judgedTexts, [text]);
+  });
+
+  it('returns uncertain when retries stay judge-flagged and cleanup is rejected', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as ShortAudioHelpers;
+    const audioPath = path.join(workDir, 'short-uncertain.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    const text = '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.';
+    let transportCalls = 0;
+    service.generateGeminiTranscript = async () => {
+      transportCalls++;
+      return text;
+    };
+    service.judgeTranscriptQuality = async () => ({
+      flagged: true,
+      reason: 'provider-only artifact verdict',
+    });
+    service.cleanupTranscriptQuality = async (cleanupInput) => `${cleanupInput}x`;
+
+    const result = await service.getShortAudioTranscript(audioPath, 10);
+
+    assert.equal(transportCalls, 3);
+    assert.equal(result.text, text);
+    assert.equal(result.cleaned, false);
+    assert.equal(result.uncertain, true);
   });
 });
 
@@ -780,7 +943,14 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       summary: string;
       customFields?: Record<string, unknown>;
     }>;
-    getShortAudioTranscript(...args: unknown[]): Promise<{ text: string; cleaned: boolean }>;
+    getShortAudioTranscript(
+      ...args: unknown[]
+    ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
+    getSegmentedTranscript(...args: unknown[]): Promise<{
+      text: string;
+      cleaned: boolean;
+      uncertainSegments: number[];
+    }>;
     generateSummary(promptText: string, transcript: string, ...rest: unknown[]): Promise<string>;
   };
 
@@ -788,6 +958,8 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     transcript: string;
     summaryJson: string;
     cleaned?: boolean;
+    uncertain?: boolean;
+    uncertainSegments?: number[];
   }): {
     service: TwoStepHelpers;
     summaryPrompts: string[];
@@ -802,6 +974,12 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     service.getShortAudioTranscript = async () => ({
       text: opts.transcript,
       cleaned: opts.cleaned ?? false,
+      uncertain: opts.uncertain ?? false,
+    });
+    service.getSegmentedTranscript = async () => ({
+      text: opts.transcript,
+      cleaned: opts.cleaned ?? false,
+      uncertainSegments: opts.uncertainSegments ?? [],
     });
     service.generateSummary = async (promptText) => {
       summaryPrompts.push(promptText);
@@ -878,6 +1056,64 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     const result = await service.transcribeWithTwoSteps(makeAudioStub('cleaned.webm'), 10);
 
     assert.deepEqual(result.customFields?.transcriptQuality, { cleaned: true });
+  });
+
+  it('persists uncertain segmented indices when analyzer and model notes are clean', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
+      uncertainSegments: [2],
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('uncertain-long.webm'), 600);
+
+    assert.deepEqual(result.customFields?.transcriptQuality, {
+      uncertainSegments: [2],
+    });
+  });
+
+  it('persists short-audio uncertainty as segment 1', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
+      uncertain: true,
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('uncertain-short.webm'), 10);
+
+    assert.deepEqual(result.customFields?.transcriptQuality, {
+      uncertainSegments: [1],
+    });
+  });
+
+  it('persists no uncertainSegments when a quality retry succeeds', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 재시도에서 정상 발화가 복구되었습니다.',
+      uncertainSegments: [],
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('retry-clean.webm'), 600);
+
+    assert.equal(result.customFields, undefined);
   });
 
   it('keeps model notes even when the analyzer sees nothing (semantic-only catch)', async () => {

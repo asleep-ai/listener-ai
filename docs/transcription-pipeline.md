@@ -133,8 +133,8 @@ This adds no API calls.
 ### 6. Persistence
 
 `meta.json` →
-`customFields.transcriptQuality = { cleaned?, analyzer?, modelNotes? }` is
-written only when cleanup was accepted or another quality finding exists.
+`customFields.transcriptQuality = { cleaned?, uncertainSegments?, analyzer?, modelNotes? }` is
+written only when cleanup was accepted, uncertain text was kept, or another quality finding exists.
 The transcript is stored after the retry/cleanup gate and boundary
 reconciliation. Flagged but unrecovered text is kept and marked.
 
