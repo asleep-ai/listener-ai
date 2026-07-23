@@ -202,6 +202,148 @@ describe('applyTranscriptQualityGate', () => {
     assert.equal(retries, 0);
   });
 
+  it('uses a judge flag to trigger retries when the analyzer passes', async () => {
+    let judgeCalls = 0;
+    let retryCalls = 0;
+    const result = await applyTranscriptQualityGate({
+      text: cleanText,
+      label: 'test',
+      judge: async () => ({
+        flagged: judgeCalls++ === 0,
+        reason: 'repeated phrase block',
+      }),
+      retries: [
+        async () => {
+          retryCalls++;
+          return '참가자1: 재시도에서 정상 발화가 복구되었습니다.';
+        },
+      ],
+      log: () => {},
+    });
+
+    assert.equal(result.text, '참가자1: 재시도에서 정상 발화가 복구되었습니다.');
+    assert.equal(result.retried, true);
+    assert.equal(retryCalls, 1);
+    assert.equal(judgeCalls, 2);
+  });
+
+  it('uses a clean judge verdict without retrying analyzer-flagged text', async () => {
+    let retryCalls = 0;
+    const result = await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'test',
+      judge: async () => ({ flagged: false, reason: 'natural repetition' }),
+      retries: [
+        async () => {
+          retryCalls++;
+          return cleanText;
+        },
+      ],
+      log: () => {},
+    });
+
+    assert.equal(result.text, loopText);
+    assert.equal(result.flagged, false);
+    assert.equal(result.retried, false);
+    assert.equal(retryCalls, 0);
+  });
+
+  it('falls back to the analyzer and logs when the judge fails', async () => {
+    const logs: string[] = [];
+    const result = await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'segment 1/2',
+      judge: async () => {
+        throw new Error('judge unavailable');
+      },
+      log: (message) => logs.push(message),
+    });
+
+    assert.equal(result.flagged, true);
+    assert.ok(
+      logs.includes(
+        '[transcript-quality] segment 1/2: judge failed (judge unavailable); falling back to analyzer',
+      ),
+    );
+    assert.ok(logs.some((line) => line.includes('flagged by analyzer')));
+  });
+
+  it('caps judge failure messages and redacts transcript text', async () => {
+    const logs: string[] = [];
+    await applyTranscriptQualityGate({
+      text: cleanText,
+      label: 'test',
+      judge: async () => {
+        throw new Error(`provider rejected ${cleanText} ${'x'.repeat(250)}`);
+      },
+      log: (message) => logs.push(message),
+    });
+
+    assert.equal(logs.length, 1);
+    assert.doesNotMatch(logs[0], /오늘 회의를/);
+    const errorMessage = logs[0].match(/judge failed \((.*)\); falling back/)?.[1];
+    assert.ok(errorMessage);
+    assert.equal(errorMessage.length, 200);
+  });
+
+  it('rethrows a judge AbortError immediately', async () => {
+    const abortError = new DOMException('Aborted', 'AbortError');
+    let retryCalls = 0;
+
+    await assert.rejects(
+      applyTranscriptQualityGate({
+        text: cleanText,
+        label: 'test',
+        judge: async () => {
+          throw abortError;
+        },
+        retries: [
+          async () => {
+            retryCalls++;
+            return cleanText;
+          },
+        ],
+        log: () => {},
+      }),
+      (error) => error === abortError,
+    );
+    assert.equal(retryCalls, 0);
+  });
+
+  it('uses the judge verdict when accepting a retry result', async () => {
+    const retryLoop = `참가자1: ${Array(12).fill('자막').join(' ')}`;
+    let judgeCalls = 0;
+    const result = await applyTranscriptQualityGate({
+      text: cleanText,
+      label: 'test',
+      judge: async () => ({ flagged: judgeCalls++ === 0, reason: 'loop verdict' }),
+      retries: [async () => retryLoop],
+      log: () => {},
+    });
+
+    assert.equal(result.text, retryLoop);
+    assert.equal(result.flagged, false);
+    assert.equal(result.retried, true);
+    assert.equal(judgeCalls, 2);
+  });
+
+  it('treats empty text as clean without invoking the judge', async () => {
+    let judgeCalls = 0;
+    const result = await applyTranscriptQualityGate({
+      text: '  \n\t ',
+      label: 'test',
+      judge: async () => {
+        judgeCalls++;
+        return { flagged: true, reason: 'must not run' };
+      },
+      log: () => {},
+    });
+
+    assert.equal(result.flagged, false);
+    assert.equal(result.text, '  \n\t ');
+    assert.equal(judgeCalls, 0);
+  });
+
   it('replaces a flagged first result with a clean retry', async () => {
     const result = await applyTranscriptQualityGate({
       text: loopText,
@@ -215,14 +357,20 @@ describe('applyTranscriptQualityGate', () => {
   });
 
   it('accepts an empty retry as evidence of silence', async () => {
+    let judgeCalls = 0;
     const result = await applyTranscriptQualityGate({
       text: loopText,
       label: 'test',
+      judge: async () => {
+        judgeCalls++;
+        return { flagged: true, reason: 'repeated line loop' };
+      },
       retries: [async () => ''],
       log: () => {},
     });
     assert.equal(result.text, '');
     assert.equal(result.flagged, false);
+    assert.equal(judgeCalls, 1, 'only the non-empty first result should be judged');
   });
 
   it('keeps the FIRST result marked uncertain when the retry is still flagged', async () => {

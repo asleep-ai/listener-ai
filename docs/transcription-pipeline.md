@@ -11,7 +11,8 @@ disagree, fix one of them.
 audio file
   │ 0. entry: duration probe (ffmpeg)
   │ 1. segmentation (long files): head-overlapped plan, re-encoded cuts
-  │ 2. per-segment: transcribe → analyzer → retry ladder
+  │ 2. per-segment: transcribe → small-model judge → retry ladder
+  │                  analyzer supplies metrics + fallback verdict
   │ 3. assembly: boundary reconciliation → join
   │ 4. assembled-transcript analyzer (cross-segment loops)
   │ 5. summary call (+ piggybacked quality notes)
@@ -39,12 +40,18 @@ no-overlap segment muxer. Boundary reconciliation is skipped entirely for
 that fallback because matching text is not overlap evidence. Segment headers
 retain nominal, non-overlapped time ranges.
 
-### 2. Per-segment transcription, analyzer, and retry ladder
+### 2. Per-segment transcription, judge, and retry ladder
 
 Each segment is transcribed independently. There is no cross-segment text
 conditioning, so Whisper-style long-form error propagation cannot occur by
-construction. The `[NO_SPEECH]` sentinel is stripped from the raw text before
-the analyzer runs (`src/transcriptQuality.ts`):
+construction. The `[NO_SPEECH]` sentinel is stripped from the raw text first.
+For every non-empty first result and retry result, one small-model call judges
+whether the segment contains an ASR repetition loop. Empty text is clean
+silence evidence and never calls the judge. The deterministic analyzer still
+runs on every result for metrics and becomes the verdict fallback if the judge
+call fails. Abort errors are never converted into fallback verdicts.
+
+The analyzer (`src/transcriptQuality.ts`) measures:
 
 | Detector | Catches |
 |---|---|
@@ -53,18 +60,18 @@ the analyzer runs (`src/transcriptQuality.ts`):
 | KMP smallest-period check | space-less character loops (`감사합니다감사합니다…`) |
 | Local deflate compression ratio (≥ 4 over 200+ chars) | long low-entropy repetition (NOT a provider compression_ratio) |
 
-Thresholds are conservative: confirmations (`네, 네`), stutters, emphasis,
-and short chants never flag.
+Thresholds are conservative because they remain the fail-open fallback:
+confirmations (`네, 네`), stutters, emphasis, and short chants never flag.
 
-Flagged output triggers the **retry ladder**
+Judge-flagged output triggers the **retry ladder**
 (`QUALITY_RETRY_TEMPERATURES = [0.4, 0.8]`): a context-cleared prompt (no
 glossary, positional prefix, or examples) re-transcribes the same audio at
 temperature 0.4, then 0.8 if the first rung is still flagged. Low temperature
 can lock a decoder into a self-reinforcing loop; this is Whisper's escalating
 fallback compressed to two rungs, with the low rung preserving recovered
-speech accuracy when it succeeds. The first analyzer-clean rung wins, and an
+speech accuracy when it succeeds. The first judge-clean rung wins, and an
 empty result counts as silence evidence. A throwing rung is skipped. If every
-rung fails, the first result is kept and marked uncertain. The analyzer never
+rung fails, the first result is kept and marked uncertain. The gate never
 deletes text. Provider or network errors use a separate three-attempt backoff,
 unrelated to the retry ladder.
 
@@ -122,6 +129,7 @@ kept and marked, never silently deleted.
 | Stage | Gemini (default) | Codex — `gpt-4o-transcribe`, `whisper-1` | Codex — `gpt-4o-transcribe-diarize` (codex default) |
 |---|---|---|---|
 | Transcription call | `generateContent` on `geminiFlashModel` (inline ≤ 20 MB, files API above) | `POST /v1/audio/transcriptions` | same endpoint, `diarized_json` + `chunking_strategy=auto` |
+| Per-result quality judge | `gemini-2.5-flash-lite` via text-only `generateContent` | configured `codexModel` via pi-ai | configured `codexModel` via pi-ai |
 | Prompt (glossary, instructions, `[NO_SPEECH]`) | sent | sent | **not sent** — model rejects `prompt` |
 | First-attempt temperature | 0.2 | provider default (field omitted) | provider default |
 | Retry ladder temperatures | 0.4 → 0.8 via `config.temperature` | 0.4 → 0.8 via `temperature` form field | **no temperature knob** — one re-roll relying on provider nondeterminism |
@@ -129,8 +137,9 @@ kept and marked, never silently deleted.
 | Speaker labels | prompted `참가자N` | none (plain text) | provider speakers re-labeled to `참가자N` |
 | Segmentation trigger | > 300s | > 300s or > 24 MB (size-shrunk segment length) | same |
 
-Implication: the diarize model has the weakest guard surface (no prompt, no
-temperature), so it leans hardest on the analyzer and uncertainty marking.
+Implication: the diarize model has the weakest retry surface (no prompt, no
+temperature), so a judge-flagged result gets one provider-nondeterministic
+re-roll before uncertainty marking.
 
 ## Live path (light safety net by design)
 
@@ -141,20 +150,24 @@ The main quality investment is the batch pipeline above; live captions get:
   provider stuck on silence emits every window. No fuzzy dedupe: without
   timestamp/audio evidence, deletion is unsafe.
 - Flagged finals are kept and carry `segment.quality = { flagged, reasons }`.
-- Live snippets never run the retry ladder (`qualityRetry: false`) — re-sending
-  the same low-signal 12s blob buys no new evidence. A silent snippet resolves
-  to `''` via the no-speech semantics after the provider call.
+- Live snippets run neither the judge nor the retry ladder
+  (`qualityRetry: false`) — re-sending the same low-signal 12s blob buys no new
+  evidence. A silent snippet resolves to `''` via the no-speech semantics after
+  the provider call.
 
 ## Observability
 
-All quality logs are metrics-only — transcript text never appears in logs.
-While the retry ladder runs, the UI progress message shows
-`quality retry N/M`, so long-running segments remain explainable.
+Quality logs contain only metrics, reasons, counts, and capped error messages —
+transcript text never appears in logs. While the retry ladder runs, the UI
+progress message shows `quality retry N/M`, so long-running segments remain
+explainable.
 
 ```
-[transcript-quality] segment 7/12: flagged (repeated-ngram-loop; normalizedLength=…, blockRepeats=…, compression=…)
-[transcript-quality] segment 7/12: retry 1/2 still flagged (…)
-[transcript-quality] segment 7/12: retry 2/2 is clean; using retry result
+[transcript-quality] segment 7/12: flagged by judge (repeated-ngram-loop; normalizedLength=…, blockRepeats=…, compression=…)
+[transcript-quality] segment 7/12: retry 1/2 still flagged by judge (…)
+[transcript-quality] segment 7/12: retry 2/2 judged clean; using retry result
+[transcript-quality] segment 4/12: judge failed (request timed out); falling back to analyzer
+[transcript-quality] segment 4/12: flagged by analyzer (…)
 [transcript-quality] segment 3/12: all retries exhausted; keeping first result marked uncertain
 [transcript-quality] boundary 1/2: removed 142 overlap chars
 [transcript-quality] assembled transcript flagged (…)

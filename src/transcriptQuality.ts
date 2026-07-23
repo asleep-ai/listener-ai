@@ -414,6 +414,12 @@ export interface QualityGateInput {
   /** Tag for log lines, e.g. "segment 3/10". Never include transcript text. */
   label: string;
   /**
+   * Optional semantic repetition judge. When present, its verdict replaces
+   * the analyzer verdict for every non-empty result. The analyzer still runs
+   * for metrics and becomes the fail-open fallback when the judge fails.
+   */
+  judge?: (text: string) => Promise<{ flagged: boolean; reason?: string }>;
+  /**
    * Ordered bounded quality retries with prior/context text cleared. Rungs run
    * in order, at most once each, until the first clean result wins (including
    * empty text as silence evidence). A throwing rung is logged and skipped.
@@ -434,7 +440,36 @@ export interface QualityGateResult {
   retriesAttempted: number;
 }
 
-// Bounded accept/retry policy on top of the analyzer:
+type QualityVerdictSource = 'judge' | 'analyzer' | 'empty';
+
+interface QualityVerdict {
+  flagged: boolean;
+  reasons: string[];
+  source: QualityVerdictSource;
+  report: TranscriptQualityReport;
+}
+
+function isAbortError(error: unknown): boolean {
+  return Boolean(
+    error && typeof error === 'object' && 'name' in error && error.name === 'AbortError',
+  );
+}
+
+function cappedQualityErrorMessage(error: unknown, transcriptText: string): string {
+  let message = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+  const transcriptFragments = new Set(
+    [transcriptText, ...transcriptText.split(/\r?\n/)]
+      .map((fragment) => fragment.trim())
+      .filter(Boolean),
+  );
+  for (const fragment of transcriptFragments) {
+    message = message.split(fragment).join('[transcript redacted]');
+  }
+  return message.slice(0, 200);
+}
+
+// Bounded accept/retry policy on top of the optional judge (or analyzer
+// fallback):
 //   clean first        -> accept
 //   flagged, no retry  -> keep first, mark uncertain
 //   flagged + retries  -> first clean retry (including empty = "audio was
@@ -445,7 +480,48 @@ export async function applyTranscriptQualityGate(
   input: QualityGateInput,
 ): Promise<QualityGateResult> {
   const log = input.log ?? ((message: string) => console.warn(message));
-  const first = analyzeTranscriptQuality(input.text);
+  const describe = (report: TranscriptQualityReport, source: QualityVerdictSource): string => {
+    const reasons =
+      report.reasons.length > 0
+        ? report.reasons.join(', ')
+        : source === 'judge'
+          ? 'judge-loop-verdict'
+          : 'no-analyzer-reasons';
+    return (
+      `${reasons}; normalizedLength=${report.metrics.normalizedLength}, ` +
+      `duplicateLines=${report.metrics.maxConsecutiveDuplicateLines}, ` +
+      `blockRepeats=${report.metrics.maxWordBlockRepeats}, ` +
+      `compression=${report.metrics.textCompressionRatio.toFixed(2)}`
+    );
+  };
+  const verdictFor = async (text: string): Promise<QualityVerdict> => {
+    const report = analyzeTranscriptQuality(text);
+    if (!text.trim()) {
+      return { flagged: false, reasons: [], source: 'empty', report };
+    }
+    if (!input.judge) {
+      return { flagged: report.flagged, reasons: report.reasons, source: 'analyzer', report };
+    }
+    try {
+      const judged = await input.judge(text);
+      return {
+        flagged: judged.flagged,
+        reasons: judged.flagged ? [judged.reason?.trim() || 'quality-judge-loop'] : [],
+        source: 'judge',
+        report,
+      };
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      const message = cappedQualityErrorMessage(error, text);
+      log(
+        `[transcript-quality] ${input.label}: judge failed (${message}); ` +
+          'falling back to analyzer',
+      );
+      return { flagged: report.flagged, reasons: report.reasons, source: 'analyzer', report };
+    }
+  };
+
+  const first = await verdictFor(input.text);
   if (!first.flagged) {
     return {
       text: input.text,
@@ -455,12 +531,10 @@ export async function applyTranscriptQualityGate(
       retriesAttempted: 0,
     };
   }
-  const describe = (report: TranscriptQualityReport): string =>
-    `${report.reasons.join(', ')}; normalizedLength=${report.metrics.normalizedLength}, ` +
-    `duplicateLines=${report.metrics.maxConsecutiveDuplicateLines}, ` +
-    `blockRepeats=${report.metrics.maxWordBlockRepeats}, ` +
-    `compression=${report.metrics.textCompressionRatio.toFixed(2)}`;
-  log(`[transcript-quality] ${input.label}: flagged (${describe(first)})`);
+  log(
+    `[transcript-quality] ${input.label}: flagged by ${first.source} (` +
+      `${describe(first.report, first.source)})`,
+  );
 
   if (!input.retries?.length) {
     log(`[transcript-quality] ${input.label}: no retry available; keeping flagged text`);
@@ -480,9 +554,7 @@ export async function applyTranscriptQualityGate(
     try {
       retryText = await input.retries[index]();
     } catch (error) {
-      if (error && typeof error === 'object' && 'name' in error && error.name === 'AbortError') {
-        throw error;
-      }
+      if (isAbortError(error)) throw error;
       const nextStep = attempt < totalRetries ? 'trying next rung' : 'no rungs remain';
       const message = error instanceof Error ? error.message : String(error);
       log(
@@ -493,10 +565,17 @@ export async function applyTranscriptQualityGate(
       continue;
     }
 
-    const retryReport = analyzeTranscriptQuality(retryText);
-    if (!retryReport.flagged) {
+    const retryVerdict = await verdictFor(retryText);
+    if (!retryVerdict.flagged) {
+      const cleanDescription =
+        retryVerdict.source === 'judge'
+          ? 'judged clean'
+          : retryVerdict.source === 'empty'
+            ? 'is clean (empty)'
+            : 'is clean by analyzer';
       log(
-        `[transcript-quality] ${input.label}: retry ${attempt}/${totalRetries} is clean; ` +
+        `[transcript-quality] ${input.label}: retry ${attempt}/${totalRetries} ` +
+          `${cleanDescription}; ` +
           'using retry result',
       );
       return {
@@ -508,8 +587,8 @@ export async function applyTranscriptQualityGate(
       };
     }
     log(
-      `[transcript-quality] ${input.label}: retry ${attempt}/${totalRetries} still flagged (` +
-        `${describe(retryReport)})`,
+      `[transcript-quality] ${input.label}: retry ${attempt}/${totalRetries} still flagged by ` +
+        `${retryVerdict.source} (${describe(retryVerdict.report, retryVerdict.source)})`,
     );
   }
   log(

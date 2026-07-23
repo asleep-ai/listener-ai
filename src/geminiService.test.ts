@@ -176,6 +176,10 @@ describe(
 // silent segment resolving to an empty (not failed) segment.
 describe('GeminiService transcribeSingleSegment quality gate', () => {
   type SegmentHelpers = {
+    judgeTranscriptQuality(
+      text: string,
+      signal?: AbortSignal,
+    ): Promise<{ flagged: boolean; reason?: string }>;
     transcribeSegmentRaw(
       segmentFile: string,
       promptText: string,
@@ -231,8 +235,29 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       if (output instanceof Error) throw output;
       return output;
     };
+    service.judgeTranscriptQuality = async (text) => ({
+      flagged: text === loopText || text.includes('자막'),
+      reason: 'repeated phrase block',
+    });
     return { service, prompts, temperatures };
   }
+
+  it('passes each segment result to the quality judge', async () => {
+    const retryText = '참가자1: 재시도에서 정상 발화가 복구되었습니다.';
+    const { service, prompts, temperatures } = makeGatedService([cleanText, retryText]);
+    const judgedTexts: string[] = [];
+    service.judgeTranscriptQuality = async (text) => {
+      judgedTexts.push(text);
+      return { flagged: judgedTexts.length === 1, reason: 'repeated phrase block' };
+    };
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.deepEqual(judgedTexts, [cleanText, retryText]);
+    assert.equal(prompts.length, 2);
+    assert.deepEqual(temperatures, [undefined, 0.4]);
+    assert.ok(result.body.includes(retryText));
+  });
 
   it('replaces a flagged segment with the clean context-cleared retry result', async () => {
     const { service, prompts, temperatures } = makeGatedService([loopText, loopText, cleanText]);
@@ -282,6 +307,11 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
   it('keeps flagged output without retrying when qualityRetry is disabled', async () => {
     const { service, prompts } = makeGatedService([loopText, cleanText]);
     const qualityRetryCalls: [number, number][] = [];
+    let judgeCalls = 0;
+    service.judgeTranscriptQuality = async () => {
+      judgeCalls++;
+      return { flagged: true, reason: 'must not run' };
+    };
     const result = await service.transcribeSingleSegment(
       '/tmp/seg.webm',
       0,
@@ -297,6 +327,7 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     );
 
     assert.equal(prompts.length, 1);
+    assert.equal(judgeCalls, 0);
     assert.deepEqual(qualityRetryCalls, []);
     assert.ok(result.body.includes('시청해주셔서'));
   });
@@ -366,9 +397,14 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       flashModel: 'm',
     }) as unknown as SegmentHelpers;
     let rawCalls = 0;
+    const judgedTexts: string[] = [];
     service.transcribeSegmentRaw = async () => {
       rawCalls++;
       return loopText;
+    };
+    service.judgeTranscriptQuality = async (text) => {
+      judgedTexts.push(text);
+      return { flagged: true, reason: 'repeated line loop' };
     };
     const qualityRetryCalls: [number, number][] = [];
 
@@ -387,7 +423,192 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     );
 
     assert.equal(rawCalls, 2);
+    assert.deepEqual(judgedTexts, [loopText, loopText]);
     assert.deepEqual(qualityRetryCalls, [[1, 1]]);
+  });
+});
+
+describe('GeminiService transcript quality judge', () => {
+  type JudgeHelpers = {
+    ai: {
+      models: {
+        generateContent(input: unknown): Promise<{ text?: string }>;
+      };
+    };
+    judgeTranscriptQuality(
+      text: string,
+      signal?: AbortSignal,
+    ): Promise<{ flagged: boolean; reason?: string }>;
+    completeTextTask(
+      systemPrompt: string,
+      promptText: string,
+      opts?: Record<string, unknown>,
+    ): Promise<string>;
+    transcribeSegmentRaw(...args: unknown[]): Promise<string>;
+    transcribeSingleSegment(
+      segmentFile: string,
+      segmentIndex: number,
+      totalSegments: number,
+      segmentStartTime: number,
+      segmentEndTime: number,
+    ): Promise<{ body: string }>;
+  };
+
+  function makeJudgeService(): JudgeHelpers {
+    return new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as JudgeHelpers;
+  }
+
+  it('parses the Gemini judge JSON contract and forwards request options', async () => {
+    const service = makeJudgeService();
+    type JudgeRequest = {
+      model: string;
+      config: {
+        temperature: number;
+        responseMimeType: string;
+        abortSignal?: AbortSignal;
+      };
+      contents: Array<{
+        parts: Array<{ text?: string; inlineData?: unknown; fileData?: unknown }>;
+      }>;
+    };
+    let request: JudgeRequest | undefined;
+    service.ai = {
+      models: {
+        generateContent: async (input) => {
+          request = input as JudgeRequest;
+          return { text: '{"looped":true,"reason":"repeated line loop"}' };
+        },
+      },
+    };
+    const controller = new AbortController();
+
+    const verdict = await service.judgeTranscriptQuality(
+      '참가자1: 검사할 세그먼트입니다.',
+      controller.signal,
+    );
+
+    assert.deepEqual(verdict, { flagged: true, reason: 'repeated line loop' });
+    assert.ok(request);
+    assert.equal(request.model, 'gemini-2.5-flash-lite');
+    assert.equal(request.config.temperature, 0);
+    assert.equal(request.config.responseMimeType, 'application/json');
+    assert.equal(request.config.abortSignal, controller.signal);
+    assert.equal(request.contents[0].parts.length, 1);
+    assert.equal(typeof request.contents[0].parts[0].text, 'string');
+    assert.equal('inlineData' in request.contents[0].parts[0], false);
+    assert.equal('fileData' in request.contents[0].parts[0], false);
+  });
+
+  it('rejects malformed Gemini judge JSON with a plain Error', async () => {
+    for (const responseText of ['not json', '{}', '{"looped":"true","reason":"bad type"}']) {
+      const service = makeJudgeService();
+      service.ai = {
+        models: { generateContent: async () => ({ text: responseText }) },
+      };
+
+      await assert.rejects(
+        () => service.judgeTranscriptQuality('참가자1: 검사할 세그먼트입니다.'),
+        (error) =>
+          error instanceof Error && error.constructor === Error && error.name !== 'AbortError',
+      );
+    }
+  });
+
+  it('falls back to analyzer verdicts after malformed Gemini judge JSON', async () => {
+    const service = makeJudgeService();
+    service.ai = {
+      models: { generateContent: async () => ({ text: 'not json' }) },
+    };
+    const loopText = Array(5).fill('참가자1: 시청해주셔서 감사합니다.').join('\n');
+    const cleanText = '참가자1: 재시도에서 정상 발화가 복구되었습니다.';
+    let rawCalls = 0;
+    service.transcribeSegmentRaw = async () => (rawCalls++ === 0 ? loopText : cleanText);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 1, 0, 300);
+
+    assert.equal(rawCalls, 2);
+    assert.equal(result.body, cleanText);
+  });
+
+  it('uses completeTextTask with the configured Codex model', async () => {
+    const service = new GeminiService({
+      provider: 'codex',
+      codexOAuth: {
+        access: 'x',
+        refresh: 'y',
+        expires: Date.now() + 86_400_000,
+      },
+      dataPath: workDir,
+      proModel: 'unused-pro',
+      flashModel: 'unused-flash',
+      codexModel: 'gpt-test-judge',
+    }) as unknown as JudgeHelpers;
+    let call:
+      | { systemPrompt: string; promptText: string; opts?: Record<string, unknown> }
+      | undefined;
+    service.completeTextTask = async (systemPrompt, promptText, opts) => {
+      call = { systemPrompt, promptText, opts };
+      return '{"looped":false,"reason":"natural repetition"}';
+    };
+    const controller = new AbortController();
+
+    const verdict = await service.judgeTranscriptQuality('참가자1: 네, 네.', controller.signal);
+
+    assert.deepEqual(verdict, { flagged: false, reason: 'natural repetition' });
+    assert.match(call!.systemPrompt, /conservative judge of ASR repetition-loop artifacts/);
+    assert.match(call!.promptText, /참가자1: 네, 네/);
+    assert.equal(call!.opts?.modelId, 'gpt-test-judge');
+    assert.equal(call!.opts?.temperature, 0);
+    assert.equal(call!.opts?.reasoning, 'low');
+    assert.equal(call!.opts?.signal, controller.signal);
+  });
+});
+
+describe('GeminiService short-audio quality judge wiring', () => {
+  type ShortAudioHelpers = {
+    getShortAudioTranscript(
+      audioFilePath: string,
+      audioSeconds: number,
+      progressCallback?: (percent: number, message: string) => void,
+      customPrompt?: string,
+      signal?: AbortSignal,
+      session?: unknown,
+      includeGlossary?: boolean,
+      qualityRetry?: boolean,
+    ): Promise<string>;
+    generateGeminiTranscript(...args: unknown[]): Promise<string>;
+    judgeTranscriptQuality(
+      text: string,
+      signal?: AbortSignal,
+    ): Promise<{ flagged: boolean; reason?: string }>;
+  };
+
+  it('passes the short-audio result to the quality judge', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as ShortAudioHelpers;
+    const audioPath = path.join(workDir, 'short-judge.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    const text = '참가자1: 짧은 녹음의 정상 발화입니다.';
+    const judgedTexts: string[] = [];
+    service.generateGeminiTranscript = async () => text;
+    service.judgeTranscriptQuality = async (segmentText) => {
+      judgedTexts.push(segmentText);
+      return { flagged: false, reason: 'natural speech' };
+    };
+
+    const result = await service.getShortAudioTranscript(audioPath, 10);
+
+    assert.equal(result, text);
+    assert.deepEqual(judgedTexts, [text]);
   });
 });
 
