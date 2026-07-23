@@ -1,6 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { isSupportedAudioExtension, mimeTypeForFile } from '../audioFormats';
+import { reportError } from '../sentry';
+import { telemetryHash } from '../sentryScrub';
 import {
   type DriveFile,
   type GoogleDriveClient,
@@ -378,6 +380,11 @@ export class SyncEngine {
       } catch (err) {
         result.errors.push({ meeting: name, error: (err as Error).message });
         this.logger(`Failed to sync meeting "${name}": ${(err as Error).message}`);
+        reportError(err, {
+          operation: 'drive.sync.meeting',
+          severity: 'error',
+          extra: { meetingHash: telemetryHash(name) },
+        });
       }
     }
 
@@ -447,6 +454,11 @@ export class SyncEngine {
           meeting: meetingName,
           error: `tombstone apply: ${(err as Error).message}`,
         });
+        reportError(err, {
+          operation: 'drive.tombstone',
+          severity: 'warning',
+          extra: { meetingHash: telemetryHash(meetingName) },
+        });
       }
     }
   }
@@ -498,6 +510,11 @@ export class SyncEngine {
       this.logger(`Uploaded tombstone for locally-deleted "${name}".`);
     } catch (err) {
       result.errors.push({ meeting: name, error: (err as Error).message });
+      reportError(err, {
+        operation: 'drive.tombstone',
+        severity: 'warning',
+        extra: { meetingHash: telemetryHash(name) },
+      });
     }
   }
 
@@ -798,6 +815,11 @@ export class SyncEngine {
           file: remote.name,
           error: (err as Error).message,
         });
+        reportError(err, {
+          operation: 'drive.file',
+          severity: 'warning',
+          extra: { meetingHash: telemetryHash(meetingName) },
+        });
         // Continue draining the loop: the result should still record every
         // file-level error so the UI can surface them, even though the rename
         // will be skipped at the end.
@@ -930,6 +952,11 @@ export class SyncEngine {
           meeting: meetingName,
           file: filename,
           error: (err as Error).message,
+        });
+        reportError(err, {
+          operation: 'drive.file',
+          severity: 'warning',
+          extra: { meetingHash: telemetryHash(meetingName) },
         });
       }
     }

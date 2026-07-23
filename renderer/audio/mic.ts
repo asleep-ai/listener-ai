@@ -2,6 +2,7 @@
 // macOS Voice Isolation can't touch the signal.
 
 import { state } from '../state';
+import { reportError } from '../sentry';
 import { showToast } from '../ui/notifications';
 // stopRecording is called when a track ends (mic disconnect). recorder.ts owns it.
 import { stopRecording } from './recorder';
@@ -62,6 +63,7 @@ export async function switchMicDevice(newDeviceId: string): Promise<boolean> {
     newStream = await acquireMediaStream(newDeviceId);
   } catch (error) {
     console.warn('Mic switch failed, keeping current:', error);
+    reportError(error, { operation: 'recording.switch-mic', severity: 'warning' });
     showToast('Failed to switch mic — keeping current', 'error');
     return false;
   }

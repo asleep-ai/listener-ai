@@ -5,6 +5,7 @@
 // worklets via data URLs of the wrong MIME type). Keep the worklet authored as
 // `.js` and use Vite's `?url` import which transparently emits to the assets dir.
 import pcmWorkletUrl from './pcm-stream-processor.js?url';
+import { reportError } from '../sentry';
 
 // Request a loopback-audio stream via getDisplayMedia. Shape must match what
 // the main-process handler returns (video source + audio: 'loopback') on
@@ -62,6 +63,7 @@ export async function createSystemAudioSource(ctx: AudioContext): Promise<System
       await ctx.audioWorklet.addModule(pcmWorkletUrl);
     } catch (err) {
       console.error('Failed to load PCM worklet:', err);
+      reportError(err, { operation: 'recording.system-audio.worklet', severity: 'warning' });
       await window.electronAPI.stopSystemAudio();
       return { node: null, cleanup: async () => {} };
     }

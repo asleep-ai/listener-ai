@@ -121,6 +121,7 @@ export type ConfigPayload = {
   knownWords?: string[];
   summaryPrompt?: string;
   recordSystemAudio?: boolean;
+  crashReportingEnabled?: boolean;
   audioDeviceId?: string;
   slackWebhookUrl?: string;
   slackAutoShare?: boolean;

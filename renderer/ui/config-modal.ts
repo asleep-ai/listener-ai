@@ -34,6 +34,7 @@ let googleOAuthStatus: HTMLElement | null = null;
 let googleDriveEnabledInput: HTMLInputElement | null = null;
 let googleDriveSyncNowBtn: HTMLButtonElement | null = null;
 let googleDriveSyncStatusEl: HTMLElement | null = null;
+let crashReportingEnabledInput: HTMLInputElement | null = null;
 let notionApiKeyInput: HTMLInputElement | null = null;
 let notionDatabaseIdInput: HTMLInputElement | null = null;
 let slackWebhookUrlInput: HTMLInputElement | null = null;
@@ -328,6 +329,7 @@ export async function showConfigModal(): Promise<void> {
     slackAutoShare?: boolean;
     googleOAuthConfigured?: boolean;
     googleDriveEnabled?: boolean;
+    crashReportingEnabled?: boolean;
     globalShortcut?: string;
     knownWords?: string[];
     maxRecordingMinutes?: number | string;
@@ -374,6 +376,10 @@ export async function showConfigModal(): Promise<void> {
   );
   if (googleDriveEnabledInput) {
     googleDriveEnabledInput.checked = !!config.googleDriveEnabled;
+  }
+  if (crashReportingEnabledInput) {
+    // Opt-out: default ON, so only an explicit false leaves it unchecked.
+    crashReportingEnabledInput.checked = config.crashReportingEnabled !== false;
   }
   // Pull the current sync status (last synced, in-flight, current progress)
   // so the modal is accurate on open even if no event has fired since boot.
@@ -629,6 +635,9 @@ export function setupConfigModal(): void {
   ) as HTMLInputElement | null;
   googleDriveSyncNowBtn = document.getElementById('googleDriveSyncNow') as HTMLButtonElement | null;
   googleDriveSyncStatusEl = document.getElementById('googleDriveSyncStatus');
+  crashReportingEnabledInput = document.getElementById(
+    'crashReportingEnabled',
+  ) as HTMLInputElement | null;
   notionApiKeyInput = document.getElementById('notionApiKey') as HTMLInputElement | null;
   notionDatabaseIdInput = document.getElementById('notionDatabaseId') as HTMLInputElement | null;
   slackWebhookUrlInput = document.getElementById('slackWebhookUrl') as HTMLInputElement | null;
@@ -985,6 +994,7 @@ export function setupConfigModal(): void {
         slackWebhookUrl: slackWebhookUrl,
         slackAutoShare: slackAutoShare,
         googleDriveEnabled: !!googleDriveEnabledInput?.checked,
+        crashReportingEnabled: !!crashReportingEnabledInput?.checked,
         globalShortcut: globalShortcut,
         knownWords: knownWords,
         summaryPrompt: summaryPrompt || DEFAULT_SUMMARY_PROMPT,

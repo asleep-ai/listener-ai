@@ -11,11 +11,15 @@ import {
 } from '../ui/live-session';
 import { showNotification, showToast } from '../ui/notifications';
 import { refreshRecordingsList } from '../ui/recordings-list';
+import { reportError } from '../sentry';
 import { buildProcessedStream, cleanupAudioState, pickRecordingMimeType } from './graph';
 import { acquireMediaStream, attachTrackEndedHandlers } from './mic';
 import { createSystemAudioSource } from './system-audio';
 
 let stopRecordingInProgress = false;
+// ondataavailable fires ~once/sec; latch so a stuck chunk-forward failure
+// reports once per recording session instead of flooding Sentry.
+let reportedChunkForward = false;
 
 export async function startRecording(): Promise<void> {
   const { recordButton, statusIndicator, statusText, recordingTime, meetingTitle } = getDom();
@@ -40,6 +44,7 @@ export async function startRecording(): Promise<void> {
   } catch (error) {
     const name = error instanceof Error && error.name ? error.name : '';
     if (name === 'NotAllowedError' || name === 'SecurityError') {
+      reportError(error, { operation: 'recording.start.permission-denied', severity: 'warning' });
       if (
         confirm(
           'Microphone access is required to record audio.\n\nOpen System Settings to grant permission?',
@@ -48,10 +53,12 @@ export async function startRecording(): Promise<void> {
         await window.electronAPI.openMicrophoneSettings();
       }
     } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+      reportError(error, { operation: 'recording.start.no-device', severity: 'warning' });
       if (confirm('No microphone was detected.\n\nOpen System Settings to check input devices?')) {
         await window.electronAPI.openMicrophoneSettings();
       }
     } else {
+      reportError(error, { operation: 'recording.start.getusermedia', severity: 'error' });
       alert(
         `Failed to access microphone: ${error instanceof Error && error.message ? error.message : String(error)}`,
       );
@@ -97,6 +104,7 @@ export async function startRecording(): Promise<void> {
       : new MediaRecorder(state.processedStream, { audioBitsPerSecond: 64000 });
   } catch (error) {
     cleanupAudioState();
+    reportError(error, { operation: 'recording.start.init', severity: 'error' });
     alert(
       `Failed to initialize recorder: ${error instanceof Error && error.message ? error.message : String(error)}`,
     );
@@ -120,6 +128,7 @@ export async function startRecording(): Promise<void> {
   }
 
   state.chunkSendChain = Promise.resolve();
+  reportedChunkForward = false;
   state.mediaRecorder.ondataavailable = (event) => {
     if (!event.data || event.data.size === 0) return;
     const blob = event.data;
@@ -129,12 +138,17 @@ export async function startRecording(): Promise<void> {
         window.electronAPI.sendRecordingChunk(buf);
       } catch (err) {
         console.error('Failed to forward recording chunk:', err);
+        if (!reportedChunkForward) {
+          reportedChunkForward = true;
+          reportError(err, { operation: 'recording.chunk-forward', severity: 'warning' });
+        }
       }
     });
   };
   state.mediaRecorder.onerror = (event: Event) => {
     const err = (event as unknown as { error?: unknown }).error ?? event;
     console.error('MediaRecorder error:', err);
+    reportError(err, { operation: 'recording.mediarecorder-error', severity: 'error' });
     void stopLiveSessionCapture();
     cleanupAudioState();
     resetRecordingUI();
@@ -148,6 +162,7 @@ export async function startRecording(): Promise<void> {
   } catch (error) {
     await window.electronAPI.abortRecording().catch(() => {});
     cleanupAudioState();
+    reportError(error, { operation: 'recording.start.recorder-start', severity: 'error' });
     alert(
       `Failed to start recorder: ${error instanceof Error && error.message ? error.message : String(error)}`,
     );
@@ -301,6 +316,7 @@ export async function processAutoMode(
     if (error instanceof Error) {
       console.error('Error details:', error.message, error.stack);
     }
+    reportError(error, { operation: 'recording.auto-mode', severity: 'error' });
   } finally {
     state.isAutoModeProcessing = false;
     recordButton.disabled = false;
@@ -352,7 +368,8 @@ export async function stopRecording(): Promise<void> {
           await handleRecordingStopped(result.filePath, result.durationMs, liveNotesSnapshot);
           return;
         }
-      } catch {
+      } catch (error) {
+        reportError(error, { operation: 'recording.stop.finalize-inactive', severity: 'error' });
         // fall through to UI reset
       }
       resetRecordingUI();

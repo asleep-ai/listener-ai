@@ -20,6 +20,14 @@ import { setupReleaseNotes } from './ui/release-notes';
 import { setupSearch } from './ui/search';
 import { setupTranscriptionModal } from './ui/transcription-modal';
 import { setupUpdateBadge } from './ui/update-badge';
+import { initRendererSentry } from './sentry';
+
+// Initialize error tracking first so the earliest failures are captured. DSN,
+// release, opt-out gating, and PII scrubbing all live in the main process
+// (src/sentry.ts); this only hooks the renderer and forwards events there.
+// Sentry's own global handlers capture window.onerror / unhandledrejection, so
+// the app's existing handlers below can stay focused on the user-facing alert.
+initRendererSentry();
 
 // Global error handler -- shows a user-visible alert in production builds.
 window.addEventListener('error', (event) => {

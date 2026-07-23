@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { dialog, ipcMain } from 'electron';
 import { app } from 'electron';
+import { reportError } from '../sentry';
 import { getFileInfo } from './fileInfo';
 
 interface FileResult {
@@ -55,6 +56,7 @@ export class FileHandlerService {
           return { success: true, filePath: destPath };
         } catch (error) {
           console.error('Error saving audio file from base64:', error);
+          reportError(error, { operation: 'file.saveBase64', severity: 'warning' });
           return { success: false, error: error instanceof Error ? error.message : String(error) };
         }
       },
@@ -89,6 +91,7 @@ export class FileHandlerService {
           return { success: true, filePath: destPath };
         } catch (error) {
           console.error('Error copying audio file:', error);
+          reportError(error, { operation: 'file.copy', severity: 'warning' });
           return { success: false, error: error instanceof Error ? error.message : String(error) };
         }
       },
@@ -118,6 +121,7 @@ export class FileHandlerService {
         return { success: false, canceled: true };
       } catch (error) {
         console.error('Error opening file dialog:', error);
+        reportError(error, { operation: 'file.dialog', severity: 'warning' });
         return { success: false, error: error instanceof Error ? error.message : String(error) };
       }
     });
@@ -136,6 +140,7 @@ export class FileHandlerService {
         return { success: true, filePath: destPath };
       } catch (error) {
         console.error('Error saving audio file:', error);
+        reportError(error, { operation: 'file.save', severity: 'warning' });
         return { success: false, error: error instanceof Error ? error.message : String(error) };
       }
     });

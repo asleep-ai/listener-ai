@@ -110,6 +110,10 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           LISTENER_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.LISTENER_GOOGLE_OAUTH_CLIENT_ID }}
           LISTENER_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.LISTENER_GOOGLE_OAUTH_CLIENT_SECRET }}
+          # Sentry DSN is baked into the desktop build by write-build-constants.js.
+          # Safe to embed (send-only). Not passed to npm-publish -- the CLI ships
+          # no Sentry code, so the DSN must not land in the published package.
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v5

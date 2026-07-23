@@ -6,6 +6,7 @@ import { promisify } from 'util';
 import { app, dialog, ipcMain } from 'electron';
 import { extensionForMimeType } from '../audioFormats';
 import { formatTimestamp, sanitizeForPath, saveTranscription } from '../outputService';
+import { reportError } from '../sentry';
 import { concatAudioFiles } from '../services/audioConcatService';
 import { metadataService } from '../services/metadataService';
 import type { IpcContext } from './types';
@@ -69,6 +70,7 @@ export function register(ctx: IpcContext): void {
       return { success: true as const };
     } catch (error) {
       console.error('delete-meeting failed:', error);
+      reportError(error, { operation: 'meeting.delete', severity: 'warning' });
       return {
         success: false as const,
         error: error instanceof Error ? error.message : String(error),
@@ -152,6 +154,7 @@ export function register(ctx: IpcContext): void {
       return { success: true, path: destPath };
     } catch (error) {
       console.error('Error exporting M4A:', error);
+      reportError(error, { operation: 'recording.exportM4a', severity: 'warning' });
       // execFileAsync rejections carry stderr on the error object — surface it
       // so renderer-side toasts aren't reduced to "Command failed".
       const stderr = (error as { stderr?: string } | null)?.stderr;
@@ -287,6 +290,7 @@ export function register(ctx: IpcContext): void {
         ctx.maybeAutoSync();
       } catch (error) {
         console.error('Failed to save merged transcription files:', error);
+        reportError(error, { operation: 'recording.merge.save', severity: 'error' });
         const message = error instanceof Error ? error.message : String(error);
         ctx.notificationService.notifyTranscriptionFailed(
           'Merge failed: could not save the transcription.',
@@ -320,6 +324,7 @@ export function register(ctx: IpcContext): void {
       };
     } catch (error) {
       console.error('Error merging recordings:', error);
+      reportError(error, { operation: 'recording.merge', severity: 'error' });
       const stderr = (error as { stderr?: string } | null)?.stderr;
       const baseMessage = error instanceof Error ? error.message : String(error);
       const message = stderr ? `${baseMessage.split('\n')[0]} — ${stderr.trim()}` : baseMessage;

@@ -8,6 +8,7 @@
 
 import { switchMicDevice } from '../audio/mic';
 import { state } from '../state';
+import { reportError } from '../sentry';
 import { showToast } from './notifications';
 
 let audioDeviceIdSelect: HTMLSelectElement | null = null;
@@ -46,6 +47,7 @@ export async function populateAudioDevices(selectedId?: string): Promise<void> {
     select.value = selectedId && inputs.some((d) => d.deviceId === selectedId) ? selectedId : '';
   } catch (error) {
     console.warn('Failed to enumerate audio devices:', error);
+    reportError(error, { operation: 'mic.enumerate', severity: 'warning' });
   }
 }
 

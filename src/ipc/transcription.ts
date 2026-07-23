@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { app, ipcMain } from 'electron';
 import { saveTranscription } from '../outputService';
+import { reportError } from '../sentry';
 import { metadataService } from '../services/metadataService';
 import { notificationService } from '../services/notificationService';
 import type { IpcContext } from './types';
@@ -124,6 +125,7 @@ export function register(ctx: IpcContext): void {
         ctx.maybeAutoSync();
       } catch (error) {
         console.error('Failed to save transcription files:', error);
+        reportError(error, { operation: 'transcription.save', severity: 'warning' });
       }
 
       // Save metadata - slim if transcription files saved, inline fallback otherwise
@@ -186,6 +188,7 @@ export function register(ctx: IpcContext): void {
         return { success: false, cancelled: true as const };
       }
       console.error('Error transcribing audio:', error);
+      reportError(error, { operation: 'transcription', severity: 'error' });
       notificationService.notifyTranscriptionFailed(
         'Transcription failed. Check the app for details.',
       );

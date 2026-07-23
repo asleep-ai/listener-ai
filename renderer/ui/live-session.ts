@@ -5,6 +5,7 @@ import type {
   LiveTranscriptSegment,
 } from '../electronAPI';
 import type { LivePcmFrame } from '../audio/graph';
+import { reportError } from '../sentry';
 
 const FALLBACK_SNIPPET_MS = 12_000;
 const MIN_LIVE_BLOB_BYTES = 1024;
@@ -317,6 +318,14 @@ function resetRealtimeState(): void {
 function reportRealtimeError(error: unknown, details?: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   console.error('[live-realtime] error:', message, details ?? error);
+  const callDetails = getRealtimeErrorDetails(error);
+  reportError(error, {
+    operation: 'live.realtime',
+    severity: 'error',
+    extra: callDetails
+      ? { status: callDetails.status, requestId: callDetails.requestId }
+      : undefined,
+  });
   setStatus(message);
   appendChatMessage('error', message);
 }
