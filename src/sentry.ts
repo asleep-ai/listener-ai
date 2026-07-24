@@ -38,6 +38,31 @@ export interface ReportContext {
   severity?: ReportSeverity;
   /** Safe, non-PII metadata (ids, codes, counts). Scrubbed again before send. */
   extra?: Record<string, unknown>;
+  /**
+   * When set, collapse repeat reports of the same `operation` to at most one
+   * per this many ms (leading-edge). For high-frequency paths (per-chunk audio
+   * handlers) that would otherwise flood the backend when a stream gets stuck.
+   */
+  throttleMs?: number;
+}
+
+const throttleState = new Map<string, number>();
+
+/**
+ * Leading-edge throttle gate. Returns true if a report keyed by `key` is
+ * allowed at `now` (and records it); false while inside the window. Pure over
+ * the passed-in `state`/`now` so it can be unit-tested deterministically.
+ */
+export function throttleAllows(
+  state: Map<string, number>,
+  key: string,
+  windowMs: number,
+  now: number,
+): boolean {
+  const last = state.get(key);
+  if (last !== undefined && now - last < windowMs) return false;
+  state.set(key, now);
+  return true;
 }
 
 let enabled = false;
@@ -132,6 +157,12 @@ export function setSentryEnabled(next: boolean): void {
  */
 export function reportError(error: unknown, ctx: ReportContext): void {
   if (!enabled || !initialized || !sentry) return;
+  if (
+    ctx.throttleMs !== undefined &&
+    !throttleAllows(throttleState, ctx.operation, ctx.throttleMs, Date.now())
+  ) {
+    return;
+  }
   const s = sentry;
   s.withScope((scope) => {
     scope.setTag('operation', ctx.operation);

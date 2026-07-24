@@ -7,7 +7,7 @@ import {
 } from '../googleOAuth';
 import { getTranscriptionsDir } from '../outputService';
 import { reportError } from '../sentry';
-import { GoogleDriveClient } from '../services/googleDriveService';
+import { GoogleDriveClient, isTransientDriveError } from '../services/googleDriveService';
 import { SyncEngine, type SyncProgressEvent, type SyncResult } from '../services/syncEngine';
 import type { IpcContext } from './types';
 
@@ -120,7 +120,11 @@ async function runGoogleSync(): Promise<SyncResult | undefined> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('Google Drive sync failed:', error);
-    reportError(error, { operation: 'drive.sync', severity: 'error' });
+    // Transient Google 5xx/429 and offline drops are noise, not actionable --
+    // still surfaced to the user via the error status broadcast below.
+    if (!isTransientDriveError(error)) {
+      reportError(error, { operation: 'drive.sync', severity: 'error' });
+    }
     broadcastGoogleSyncStatus('error', { error: message });
     return undefined;
   } finally {

@@ -23,6 +23,12 @@ export type GoogleDriveClientOptions = {
   // Optional fetch override -- tests inject a stub here. Defaults to the
   // global fetch.
   fetchImpl?: typeof fetch;
+  // Max automatic retries for transient failures (5xx/429 and network drops)
+  // on idempotent requests. Defaults to DEFAULT_MAX_RETRIES; tests pass 0 to
+  // assert exact single-request behavior.
+  maxRetries?: number;
+  // Injectable backoff sleep (ms) -- tests pass an instant stub.
+  sleepImpl?: (ms: number) => Promise<void>;
 };
 
 export class GoogleDriveError extends Error {
@@ -36,20 +42,92 @@ export class GoogleDriveError extends Error {
   }
 }
 
+// Transient failures worth a silent retry and NOT worth a Sentry report:
+// Google-side 5xx, rate limiting, and request timeout. Everything else
+// (401/403 auth, 404 not-found, 400 bad-request) is a real, actionable error.
+const TRANSIENT_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ENOTFOUND',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'EPIPE',
+]);
+const DEFAULT_MAX_RETRIES = 2;
+const RETRY_BASE_DELAY_MS = 400;
+
+function isTransientNetworkError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === 'string' && TRANSIENT_NETWORK_CODES.has(code)) return true;
+  // undici surfaces offline/DNS/reset failures as `TypeError: fetch failed`
+  // with the underlying cause nested one level down.
+  if (err instanceof TypeError && /fetch failed/i.test(err.message)) return true;
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause && cause !== err) return isTransientNetworkError(cause);
+  return false;
+}
+
+/**
+ * True for failures that are transient and outside the user's control -- a
+ * Google 5xx/429 or a local network drop. Callers use this to skip Sentry
+ * reporting (these are noise, not actionable) while still logging and surfacing
+ * them in the sync result.
+ */
+export function isTransientDriveError(err: unknown): boolean {
+  if (err instanceof GoogleDriveError) return TRANSIENT_STATUSES.has(err.status);
+  return isTransientNetworkError(err);
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class GoogleDriveClient {
   private readonly getAccessToken: () => Promise<string>;
   private readonly fetchImpl: typeof fetch;
+  private readonly maxRetries: number;
+  private readonly sleepImpl: (ms: number) => Promise<void>;
 
   constructor(opts: GoogleDriveClientOptions) {
     this.getAccessToken = opts.getAccessToken;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.sleepImpl = opts.sleepImpl ?? defaultSleep;
   }
 
   private async authedFetch(url: string, init: RequestInit = {}): Promise<Response> {
-    const token = await this.getAccessToken();
-    const headers = new Headers(init.headers);
-    headers.set('Authorization', `Bearer ${token}`);
-    return await this.fetchImpl(url, { ...init, headers });
+    // Only idempotent methods retry -- re-sending a POST (createFolder /
+    // createFile) after a 5xx could duplicate a request the server actually
+    // processed. GET/PATCH/DELETE here are safe to repeat.
+    const method = (init.method ?? 'GET').toUpperCase();
+    const retryable = method !== 'POST';
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const token = await this.getAccessToken();
+        const headers = new Headers(init.headers);
+        headers.set('Authorization', `Bearer ${token}`);
+        const res = await this.fetchImpl(url, { ...init, headers });
+        if (retryable && attempt < this.maxRetries && TRANSIENT_STATUSES.has(res.status)) {
+          // Drain the body so undici can reuse the connection, then back off.
+          try {
+            await res.arrayBuffer();
+          } catch {
+            /* ignore drain failure */
+          }
+          await this.sleepImpl(RETRY_BASE_DELAY_MS * 2 ** attempt);
+          continue;
+        }
+        return res;
+      } catch (err) {
+        if (retryable && attempt < this.maxRetries && isTransientNetworkError(err)) {
+          await this.sleepImpl(RETRY_BASE_DELAY_MS * 2 ** attempt);
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 
   private async ensureOk(res: Response, context: string): Promise<void> {
