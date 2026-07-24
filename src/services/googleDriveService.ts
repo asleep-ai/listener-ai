@@ -23,6 +23,12 @@ export type GoogleDriveClientOptions = {
   // Optional fetch override -- tests inject a stub here. Defaults to the
   // global fetch.
   fetchImpl?: typeof fetch;
+  // Max automatic retries for transient failures (5xx/429 and network drops)
+  // on idempotent requests. Defaults to DEFAULT_MAX_RETRIES; tests pass 0 to
+  // assert exact single-request behavior.
+  maxRetries?: number;
+  // Injectable backoff sleep (ms) -- tests pass an instant stub.
+  sleepImpl?: (ms: number) => Promise<void>;
 };
 
 export class GoogleDriveError extends Error {
@@ -36,20 +42,139 @@ export class GoogleDriveError extends Error {
   }
 }
 
+// Transient failures worth a silent retry and NOT worth a Sentry report:
+// Google-side 5xx, rate limiting, and request timeout. Everything else
+// (401/403 auth, 404 not-found, 400 bad-request) is a real, actionable error.
+const TRANSIENT_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ENOTFOUND',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'EPIPE',
+]);
+// Drive signals quota / rate-limit with HTTP 403 (not 429) plus a usageLimits
+// `reason` (or, on the newer surface, `error.status: RESOURCE_EXHAUSTED`).
+// Those 403s are transient; auth/permission 403s (insufficientPermissions,
+// etc.) stay actionable. See Drive API "limits" docs.
+const RATE_LIMIT_403_REASONS = new Set([
+  'rateLimitExceeded',
+  'userRateLimitExceeded',
+  'dailyLimitExceeded',
+  'sharingRateLimitExceeded',
+]);
+const DEFAULT_MAX_RETRIES = 2;
+const RETRY_BASE_DELAY_MS = 400;
+
+function isTransientNetworkError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === 'string' && TRANSIENT_NETWORK_CODES.has(code)) return true;
+  // undici surfaces offline/DNS/reset failures as `TypeError: fetch failed`
+  // with the underlying cause nested one level down.
+  if (err instanceof TypeError && /fetch failed/i.test(err.message)) return true;
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause && cause !== err) return isTransientNetworkError(cause);
+  return false;
+}
+
+// Distinguish a Drive quota/rate-limit 403 from an auth/permission 403 by
+// parsing the error body. Malformed / non-JSON bodies are treated as
+// non-rate-limit (actionable) rather than swallowed.
+function isRateLimit403Body(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { status?: string; errors?: Array<{ reason?: string }> };
+    };
+    const error = parsed.error;
+    if (!error) return false;
+    if (error.status === 'RESOURCE_EXHAUSTED') return true;
+    return (error.errors ?? []).some(
+      (e) => typeof e.reason === 'string' && RATE_LIMIT_403_REASONS.has(e.reason),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True for failures that are transient and outside the user's control -- a
+ * Google 5xx/429/408, a 403 quota/rate-limit, or a local network drop. Callers
+ * use this to skip Sentry reporting (these are noise, not actionable) while
+ * still logging and surfacing them in the sync result.
+ */
+export function isTransientDriveError(err: unknown): boolean {
+  if (err instanceof GoogleDriveError) {
+    if (TRANSIENT_STATUSES.has(err.status)) return true;
+    if (err.status === 403) return isRateLimit403Body(err.responseBody);
+    return false;
+  }
+  return isTransientNetworkError(err);
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class GoogleDriveClient {
   private readonly getAccessToken: () => Promise<string>;
   private readonly fetchImpl: typeof fetch;
+  private readonly maxRetries: number;
+  private readonly sleepImpl: (ms: number) => Promise<void>;
 
   constructor(opts: GoogleDriveClientOptions) {
     this.getAccessToken = opts.getAccessToken;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.sleepImpl = opts.sleepImpl ?? defaultSleep;
   }
 
   private async authedFetch(url: string, init: RequestInit = {}): Promise<Response> {
-    const token = await this.getAccessToken();
-    const headers = new Headers(init.headers);
-    headers.set('Authorization', `Bearer ${token}`);
-    return await this.fetchImpl(url, { ...init, headers });
+    // Only idempotent methods retry -- re-sending a POST (createFolder /
+    // createFile) after a 5xx could duplicate a request the server actually
+    // processed. GET/PATCH/DELETE here are safe to repeat.
+    const method = (init.method ?? 'GET').toUpperCase();
+    const retryable = method !== 'POST';
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const token = await this.getAccessToken();
+        const headers = new Headers(init.headers);
+        headers.set('Authorization', `Bearer ${token}`);
+        const res = await this.fetchImpl(url, { ...init, headers });
+        if (retryable && attempt < this.maxRetries) {
+          if (TRANSIENT_STATUSES.has(res.status)) {
+            // Drain the body so undici can reuse the connection, then back off.
+            try {
+              await res.arrayBuffer();
+            } catch {
+              /* ignore drain failure */
+            }
+            await this.sleepImpl(RETRY_BASE_DELAY_MS * 2 ** attempt);
+            continue;
+          }
+          if (res.status === 403) {
+            // Drive returns 403 for quota / rate-limit; retry those but let
+            // auth/permission 403s fail fast. Reading the body to tell them
+            // apart consumes it, so rebuild the Response for the fail-fast
+            // path (ensureOk only needs status + body text).
+            const body = await res.text().catch(() => '');
+            if (isRateLimit403Body(body)) {
+              await this.sleepImpl(RETRY_BASE_DELAY_MS * 2 ** attempt);
+              continue;
+            }
+            return new Response(body, { status: res.status });
+          }
+        }
+        return res;
+      } catch (err) {
+        if (retryable && attempt < this.maxRetries && isTransientNetworkError(err)) {
+          await this.sleepImpl(RETRY_BASE_DELAY_MS * 2 ** attempt);
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 
   private async ensureOk(res: Response, context: string): Promise<void> {

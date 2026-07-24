@@ -225,12 +225,12 @@ let notionService: NotionService | null = null;
 let slackService: SlackService | null = null;
 let agentService: AgentService | null = null;
 
-// High-frequency IPC handlers (per-chunk audio streaming) only report the
-// first failure per app session to Sentry -- without a latch, a stuck stream
-// emitting a chunk every ~100ms-1s would flood the crash-reporting backend.
-let reportedRecordingChunkError = false;
-let reportedLiveProcessChunkError = false;
-let reportedLivePcmChunkError = false;
+// High-frequency IPC handlers (per-chunk audio streaming) throttle their Sentry
+// reports: a stuck stream emitting a chunk every ~100ms-1s would otherwise flood
+// the crash-reporting backend. `reportError`'s throttleMs collapses repeats of
+// the same operation to one report per window (leading-edge), so a fresh failure
+// episode is still visible without the flood.
+const CHUNK_ERROR_REPORT_THROTTLE_MS = 5 * 60_000;
 
 function serializeTranscriptionError(error: unknown): TranscriptionErrorPayload {
   if (error instanceof TranscriptionError) return error.toPayload();
@@ -1101,10 +1101,11 @@ ipcMain.on('recording-chunk', (_event, data: ArrayBuffer | Uint8Array) => {
     audioRecorder.appendChunk(Buffer.from(data as ArrayBuffer));
   } catch (error) {
     console.error('Invalid chunk payload:', error);
-    if (!reportedRecordingChunkError) {
-      reportedRecordingChunkError = true;
-      reportError(error, { operation: 'recording.appendChunk', severity: 'warning' });
-    }
+    reportError(error, {
+      operation: 'recording.appendChunk',
+      severity: 'warning',
+      throttleMs: CHUNK_ERROR_REPORT_THROTTLE_MS,
+    });
   }
 });
 
@@ -1956,10 +1957,11 @@ ipcMain.handle(
       return { success: true, segment, snapshot: liveSessionService.snapshot() };
     } catch (error) {
       console.error('live-session-process-chunk failed:', error);
-      if (!reportedLiveProcessChunkError) {
-        reportedLiveProcessChunkError = true;
-        reportError(error, { operation: 'liveSession.processChunk', severity: 'warning' });
-      }
+      reportError(error, {
+        operation: 'liveSession.processChunk',
+        severity: 'warning',
+        throttleMs: CHUNK_ERROR_REPORT_THROTTLE_MS,
+      });
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
@@ -2049,10 +2051,11 @@ ipcMain.on(
       });
     } catch (error) {
       console.error('live-session-pcm-chunk failed:', error);
-      if (!reportedLivePcmChunkError) {
-        reportedLivePcmChunkError = true;
-        reportError(error, { operation: 'liveSession.pcmChunk', severity: 'warning' });
-      }
+      reportError(error, {
+        operation: 'liveSession.pcmChunk',
+        severity: 'warning',
+        throttleMs: CHUNK_ERROR_REPORT_THROTTLE_MS,
+      });
     }
   },
 );

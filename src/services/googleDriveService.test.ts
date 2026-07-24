@@ -7,6 +7,7 @@ import { beforeEach, describe, it } from 'node:test';
 import {
   GoogleDriveClient,
   GoogleDriveError,
+  isTransientDriveError,
   LISTENER_DRIVE_FOLDER_NAME,
   uploadMeetingFolder,
 } from './googleDriveService';
@@ -70,9 +71,12 @@ let client: GoogleDriveClient;
 
 beforeEach(() => {
   fetchStub = new FetchStub();
+  // Retries disabled here so the per-request tests below can assert exact call
+  // counts; transient-retry behavior is covered in its own describe block.
   client = new GoogleDriveClient({
     getAccessToken: async () => 'test-access-token',
     fetchImpl: fetchStub.asFetch(),
+    maxRetries: 0,
   });
 });
 
@@ -463,5 +467,183 @@ describe('uploadMeetingFolder', () => {
     // Total calls: 2 finds for folders + 1 find + 1 PATCH for file = 4
     assert.equal(fetchStub.calls.length, 4);
     assert.equal(fetchStub.calls[3].method, 'PATCH');
+  });
+});
+
+describe('GoogleDriveClient transient retry', () => {
+  const instant = async () => {};
+
+  it('retries a transient 500 on an idempotent GET and then succeeds', async () => {
+    const stub = new FetchStub();
+    stub
+      .enqueue(500, { error: { message: 'internal' } })
+      .enqueue(200, { files: [{ id: 'f1', name: 'foo', mimeType: 'text/plain' }] });
+    const c = new GoogleDriveClient({
+      getAccessToken: async () => 't',
+      fetchImpl: stub.asFetch(),
+      maxRetries: 2,
+      sleepImpl: instant,
+    });
+
+    const result = await c.findFile({ name: 'foo' });
+
+    assert.equal(result?.id, 'f1');
+    assert.equal(stub.calls.length, 2, 'one retry after the transient 500');
+  });
+
+  it('gives up after maxRetries and throws the final GoogleDriveError', async () => {
+    const stub = new FetchStub();
+    stub.enqueue(503, { error: {} }).enqueue(503, { error: {} }).enqueue(503, { error: {} });
+    const c = new GoogleDriveClient({
+      getAccessToken: async () => 't',
+      fetchImpl: stub.asFetch(),
+      maxRetries: 2,
+      sleepImpl: instant,
+    });
+
+    await assert.rejects(
+      () => c.listFolder('folder'),
+      (err: unknown) => err instanceof GoogleDriveError && err.status === 503,
+    );
+    assert.equal(stub.calls.length, 3, 'initial attempt + 2 retries');
+  });
+
+  it('does not retry a non-transient 403', async () => {
+    const stub = new FetchStub();
+    stub.enqueue(403, { error: { message: 'denied' } });
+    const c = new GoogleDriveClient({
+      getAccessToken: async () => 't',
+      fetchImpl: stub.asFetch(),
+      maxRetries: 2,
+      sleepImpl: instant,
+    });
+
+    await assert.rejects(
+      () => c.findFile({ name: 'x' }),
+      (err: unknown) => err instanceof GoogleDriveError && err.status === 403,
+    );
+    assert.equal(stub.calls.length, 1);
+  });
+
+  it('does not retry a non-idempotent POST createFile on a 500', async () => {
+    // uploadFile: findFile (GET, 200 empty) then createFile (POST, 500).
+    const stub = new FetchStub();
+    stub.enqueue(200, { files: [] }).enqueue(500, { error: {} });
+    const c = new GoogleDriveClient({
+      getAccessToken: async () => 't',
+      fetchImpl: stub.asFetch(),
+      maxRetries: 2,
+      sleepImpl: instant,
+    });
+
+    await assert.rejects(
+      () =>
+        c.uploadFile({
+          name: 'a.md',
+          parentId: 'p',
+          content: 'x',
+          mimeType: 'text/markdown',
+        }),
+      (err: unknown) => err instanceof GoogleDriveError && err.status === 500,
+    );
+    // GET find (1) + POST create (1, not retried) = 2.
+    assert.equal(stub.calls.length, 2);
+  });
+
+  it('retries a transient network reject and then succeeds', async () => {
+    let n = 0;
+    const fetchImpl = (async () => {
+      n += 1;
+      if (n === 1) {
+        const e = new Error('getaddrinfo ENOTFOUND drive') as Error & { code: string };
+        e.code = 'ENOTFOUND';
+        throw e;
+      }
+      return new Response(JSON.stringify({ files: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    const c = new GoogleDriveClient({
+      getAccessToken: async () => 't',
+      fetchImpl,
+      maxRetries: 2,
+      sleepImpl: instant,
+    });
+
+    const result = await c.findFile({ name: 'x' });
+
+    assert.equal(result, undefined);
+    assert.equal(n, 2, 'one retry after the network drop');
+  });
+
+  it('retries a 403 quota/rate-limit and then succeeds', async () => {
+    const stub = new FetchStub();
+    stub
+      .enqueue(403, { error: { errors: [{ reason: 'userRateLimitExceeded' }] } })
+      .enqueue(200, { files: [] });
+    const c = new GoogleDriveClient({
+      getAccessToken: async () => 't',
+      fetchImpl: stub.asFetch(),
+      maxRetries: 2,
+      sleepImpl: instant,
+    });
+
+    const result = await c.findFile({ name: 'x' });
+
+    assert.equal(result, undefined);
+    assert.equal(stub.calls.length, 2, 'the 403 rate-limit is retried');
+  });
+});
+
+describe('isTransientDriveError', () => {
+  it('treats Google 5xx/429/408 as transient', () => {
+    for (const status of [408, 429, 500, 502, 503, 504]) {
+      assert.equal(isTransientDriveError(new GoogleDriveError(status, '', 'x')), true);
+    }
+  });
+
+  it('treats auth/not-found/bad-request as non-transient', () => {
+    for (const status of [400, 401, 403, 404]) {
+      assert.equal(isTransientDriveError(new GoogleDriveError(status, '', 'x')), false);
+    }
+  });
+
+  it('treats a 403 quota/rate-limit as transient but an auth 403 as not', () => {
+    const rateLimit = new GoogleDriveError(
+      403,
+      JSON.stringify({ error: { errors: [{ reason: 'userRateLimitExceeded' }] } }),
+      'x',
+    );
+    assert.equal(isTransientDriveError(rateLimit), true);
+
+    const exhausted = new GoogleDriveError(
+      403,
+      JSON.stringify({ error: { status: 'RESOURCE_EXHAUSTED' } }),
+      'x',
+    );
+    assert.equal(isTransientDriveError(exhausted), true);
+
+    const permission = new GoogleDriveError(
+      403,
+      JSON.stringify({ error: { errors: [{ reason: 'insufficientFilePermissions' }] } }),
+      'x',
+    );
+    assert.equal(isTransientDriveError(permission), false);
+
+    const opaque = new GoogleDriveError(403, 'not json', 'x');
+    assert.equal(isTransientDriveError(opaque), false);
+  });
+
+  it('treats network drops as transient', () => {
+    const reset = new Error('socket hang up') as Error & { code: string };
+    reset.code = 'ECONNRESET';
+    assert.equal(isTransientDriveError(reset), true);
+    assert.equal(isTransientDriveError(new TypeError('fetch failed')), true);
+  });
+
+  it('does not treat an ordinary error as transient', () => {
+    assert.equal(isTransientDriveError(new Error('boom')), false);
+    assert.equal(isTransientDriveError(undefined), false);
   });
 });
