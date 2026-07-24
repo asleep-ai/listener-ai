@@ -54,6 +54,16 @@ const TRANSIENT_NETWORK_CODES = new Set([
   'EAI_AGAIN',
   'EPIPE',
 ]);
+// Drive signals quota / rate-limit with HTTP 403 (not 429) plus a usageLimits
+// `reason` (or, on the newer surface, `error.status: RESOURCE_EXHAUSTED`).
+// Those 403s are transient; auth/permission 403s (insufficientPermissions,
+// etc.) stay actionable. See Drive API "limits" docs.
+const RATE_LIMIT_403_REASONS = new Set([
+  'rateLimitExceeded',
+  'userRateLimitExceeded',
+  'dailyLimitExceeded',
+  'sharingRateLimitExceeded',
+]);
 const DEFAULT_MAX_RETRIES = 2;
 const RETRY_BASE_DELAY_MS = 400;
 
@@ -69,14 +79,37 @@ function isTransientNetworkError(err: unknown): boolean {
   return false;
 }
 
+// Distinguish a Drive quota/rate-limit 403 from an auth/permission 403 by
+// parsing the error body. Malformed / non-JSON bodies are treated as
+// non-rate-limit (actionable) rather than swallowed.
+function isRateLimit403Body(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { status?: string; errors?: Array<{ reason?: string }> };
+    };
+    const error = parsed.error;
+    if (!error) return false;
+    if (error.status === 'RESOURCE_EXHAUSTED') return true;
+    return (error.errors ?? []).some(
+      (e) => typeof e.reason === 'string' && RATE_LIMIT_403_REASONS.has(e.reason),
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * True for failures that are transient and outside the user's control -- a
- * Google 5xx/429 or a local network drop. Callers use this to skip Sentry
- * reporting (these are noise, not actionable) while still logging and surfacing
- * them in the sync result.
+ * Google 5xx/429/408, a 403 quota/rate-limit, or a local network drop. Callers
+ * use this to skip Sentry reporting (these are noise, not actionable) while
+ * still logging and surfacing them in the sync result.
  */
 export function isTransientDriveError(err: unknown): boolean {
-  if (err instanceof GoogleDriveError) return TRANSIENT_STATUSES.has(err.status);
+  if (err instanceof GoogleDriveError) {
+    if (TRANSIENT_STATUSES.has(err.status)) return true;
+    if (err.status === 403) return isRateLimit403Body(err.responseBody);
+    return false;
+  }
   return isTransientNetworkError(err);
 }
 
@@ -109,15 +142,29 @@ export class GoogleDriveClient {
         const headers = new Headers(init.headers);
         headers.set('Authorization', `Bearer ${token}`);
         const res = await this.fetchImpl(url, { ...init, headers });
-        if (retryable && attempt < this.maxRetries && TRANSIENT_STATUSES.has(res.status)) {
-          // Drain the body so undici can reuse the connection, then back off.
-          try {
-            await res.arrayBuffer();
-          } catch {
-            /* ignore drain failure */
+        if (retryable && attempt < this.maxRetries) {
+          if (TRANSIENT_STATUSES.has(res.status)) {
+            // Drain the body so undici can reuse the connection, then back off.
+            try {
+              await res.arrayBuffer();
+            } catch {
+              /* ignore drain failure */
+            }
+            await this.sleepImpl(RETRY_BASE_DELAY_MS * 2 ** attempt);
+            continue;
           }
-          await this.sleepImpl(RETRY_BASE_DELAY_MS * 2 ** attempt);
-          continue;
+          if (res.status === 403) {
+            // Drive returns 403 for quota / rate-limit; retry those but let
+            // auth/permission 403s fail fast. Reading the body to tell them
+            // apart consumes it, so rebuild the Response for the fail-fast
+            // path (ensureOk only needs status + body text).
+            const body = await res.text().catch(() => '');
+            if (isRateLimit403Body(body)) {
+              await this.sleepImpl(RETRY_BASE_DELAY_MS * 2 ** attempt);
+              continue;
+            }
+            return new Response(body, { status: res.status });
+          }
         }
         return res;
       } catch (err) {

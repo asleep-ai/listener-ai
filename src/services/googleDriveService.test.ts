@@ -493,10 +493,7 @@ describe('GoogleDriveClient transient retry', () => {
 
   it('gives up after maxRetries and throws the final GoogleDriveError', async () => {
     const stub = new FetchStub();
-    stub
-      .enqueue(503, { error: {} })
-      .enqueue(503, { error: {} })
-      .enqueue(503, { error: {} });
+    stub.enqueue(503, { error: {} }).enqueue(503, { error: {} }).enqueue(503, { error: {} });
     const c = new GoogleDriveClient({
       getAccessToken: async () => 't',
       fetchImpl: stub.asFetch(),
@@ -579,6 +576,24 @@ describe('GoogleDriveClient transient retry', () => {
     assert.equal(result, undefined);
     assert.equal(n, 2, 'one retry after the network drop');
   });
+
+  it('retries a 403 quota/rate-limit and then succeeds', async () => {
+    const stub = new FetchStub();
+    stub
+      .enqueue(403, { error: { errors: [{ reason: 'userRateLimitExceeded' }] } })
+      .enqueue(200, { files: [] });
+    const c = new GoogleDriveClient({
+      getAccessToken: async () => 't',
+      fetchImpl: stub.asFetch(),
+      maxRetries: 2,
+      sleepImpl: instant,
+    });
+
+    const result = await c.findFile({ name: 'x' });
+
+    assert.equal(result, undefined);
+    assert.equal(stub.calls.length, 2, 'the 403 rate-limit is retried');
+  });
 });
 
 describe('isTransientDriveError', () => {
@@ -592,6 +607,32 @@ describe('isTransientDriveError', () => {
     for (const status of [400, 401, 403, 404]) {
       assert.equal(isTransientDriveError(new GoogleDriveError(status, '', 'x')), false);
     }
+  });
+
+  it('treats a 403 quota/rate-limit as transient but an auth 403 as not', () => {
+    const rateLimit = new GoogleDriveError(
+      403,
+      JSON.stringify({ error: { errors: [{ reason: 'userRateLimitExceeded' }] } }),
+      'x',
+    );
+    assert.equal(isTransientDriveError(rateLimit), true);
+
+    const exhausted = new GoogleDriveError(
+      403,
+      JSON.stringify({ error: { status: 'RESOURCE_EXHAUSTED' } }),
+      'x',
+    );
+    assert.equal(isTransientDriveError(exhausted), true);
+
+    const permission = new GoogleDriveError(
+      403,
+      JSON.stringify({ error: { errors: [{ reason: 'insufficientFilePermissions' }] } }),
+      'x',
+    );
+    assert.equal(isTransientDriveError(permission), false);
+
+    const opaque = new GoogleDriveError(403, 'not json', 'x');
+    assert.equal(isTransientDriveError(opaque), false);
   });
 
   it('treats network drops as transient', () => {
