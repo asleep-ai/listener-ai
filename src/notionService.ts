@@ -211,6 +211,8 @@ export class NotionService {
       // Add custom fields
       if (transcriptionResult.customFields) {
         for (const [key, value] of Object.entries(transcriptionResult.customFields)) {
+          if (key === 'transcriptQuality') continue;
+
           const label = camelToLabel(key);
 
           if (Array.isArray(value)) {
