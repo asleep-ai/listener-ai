@@ -41,7 +41,7 @@ Listener.AI is an Electron desktop application for recording meetings and produc
 ### 4. Notion Integration (BYOK)
 - User supplies `notionApiKey` + `notionDatabaseId`; the app writes structured pages into their own database
 - Long transcripts are split to respect Notion's block-size limits
-- Page contains: title (with "by L.AI" suffix), date, summary, key points, action items, transcript, emoji icon
+- Page contains: title (with "by L.AI" suffix), date, summary, key points, action items, transcript, emoji icon; internal `transcriptQuality` metadata is excluded
 
 ### 5. Local Search
 - Full-text search over stored transcriptions (`src/searchService.ts`)
