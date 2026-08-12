@@ -1317,7 +1317,7 @@ type PendingCodexLogin = {
 };
 let pendingCodexLogin: PendingCodexLogin | null = null;
 // server.close() in Node releases the listening socket via libuv on the next
-// tick, but `loginOpenAICodex` doesn't await its callback. Hold the slot for a
+// tick, but pi-ai's provider cleanup doesn't await its callback. Hold the slot for a
 // short cushion so a re-bind cannot race the kernel.
 const PORT_RELEASE_CUSHION_MS = 250;
 
@@ -1348,11 +1348,6 @@ ipcMain.handle('codex-oauth-login', async () => {
       openUrl: async (url) => {
         await shell.openExternal(url);
         sendProgress('browser-opened');
-      },
-      onPrompt: async (_prompt) => {
-        throw new Error(
-          'Codex OAuth manual callback is only supported from the CLI. Run `listener codex login` if browser sign-in does not complete.',
-        );
       },
       onProgress: (message) => {
         console.log(`Codex OAuth: ${message}`);

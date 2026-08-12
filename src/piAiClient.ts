@@ -35,11 +35,11 @@ export type {
 // discriminator -- we never read api-specific fields off the model.
 export type PiAiModel = Model<Api>;
 
-type PiAiModule = typeof import('@earendil-works/pi-ai');
+type PiAiModule = typeof import('@earendil-works/pi-ai/compat');
 
 let modulePromise: Promise<PiAiModule> | undefined;
 function loadPiAi(): Promise<PiAiModule> {
-  modulePromise ??= importEsm<PiAiModule>('@earendil-works/pi-ai');
+  modulePromise ??= importEsm<PiAiModule>('@earendil-works/pi-ai/compat');
   return modulePromise;
 }
 
@@ -57,26 +57,6 @@ export interface UsageContext {
   transcriptionRef?: string;
 }
 
-// Explicit overrides for model ids pi-ai's bundled registry doesn't carry yet.
-// Mirrors pi-ai's upstream main-branch entry shape so the next published
-// version transparently shadows what we have here (m.getModel() wins).
-// Add entries as Google releases new models ahead of pi-ai's catch-up cycle.
-const CUSTOM_GOOGLE_MODELS: Record<string, PiAiModel> = {
-  'gemini-3.5-flash': {
-    id: 'gemini-3.5-flash',
-    name: 'Gemini 3.5 Flash',
-    api: 'google-generative-ai',
-    provider: 'google',
-    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-    reasoning: true,
-    thinkingLevelMap: { off: null },
-    input: ['text', 'image'],
-    cost: { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 },
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  } as unknown as PiAiModel,
-};
-
 export async function getModel(provider: AiProvider, modelId: string): Promise<PiAiModel> {
   const m = await loadPiAi();
   const piId = toPiAiProvider(provider);
@@ -87,9 +67,6 @@ export async function getModel(provider: AiProvider, modelId: string): Promise<P
     | PiAiModel
     | undefined;
   if (registered) return registered;
-  if (provider === 'gemini' && CUSTOM_GOOGLE_MODELS[modelId]) {
-    return CUSTOM_GOOGLE_MODELS[modelId];
-  }
   throw new Error(`Unknown pi-ai model: ${piId}/${modelId}`);
 }
 

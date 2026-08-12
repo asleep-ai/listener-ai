@@ -311,7 +311,7 @@ export class GoogleDriveClient {
     const res = await this.authedFetch(url.toString(), {
       method: 'POST',
       headers: { 'Content-Type': contentType },
-      body,
+      body: new Uint8Array(body),
     });
     await this.ensureOk(res, `Drive createFile "${params.name}"`);
     return (await res.json()) as DriveFile;

@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { GoogleGenAI } from '@google/genai';
+import type { GoogleGenAI } from '@google/genai';
 import {
   type AiProvider,
   DEFAULT_CODEX_MODEL,
@@ -33,8 +33,16 @@ import { type Context, completeSimple, extractFinalText, getModel } from './piAi
 import { reportError } from './sentry';
 import { FFmpegManager } from './services/ffmpegManager';
 import { type CostSession, type CostSnapshot, createCostSession } from './services/usageTracker';
+import { importEsm } from './esmImport';
 
 const execFileAsync = promisify(execFile);
+type GoogleGenAiModule = typeof import('@google/genai');
+let googleGenAiPromise: Promise<GoogleGenAiModule> | undefined;
+
+function loadGoogleGenAi(): Promise<GoogleGenAiModule> {
+  googleGenAiPromise ??= importEsm<GoogleGenAiModule>('@google/genai');
+  return googleGenAiPromise;
+}
 
 // Promise-based sleep that rejects with AbortError if the signal fires during
 // the wait. Without this, polling loops swallow the cancel for up to one full
@@ -558,7 +566,7 @@ export interface GeminiServiceOptions {
 }
 
 export class GeminiService {
-  private ai?: GoogleGenAI;
+  private ai?: Promise<GoogleGenAI>;
   private geminiApiKey?: string;
   private codexAuth?: CodexOAuthHolder;
   private provider: AiProvider;
@@ -587,7 +595,9 @@ export class GeminiService {
       if (!options.apiKey) {
         throw new Error('Gemini API key is required for the Gemini provider.');
       }
-      this.ai = new GoogleGenAI({ apiKey: options.apiKey });
+      this.ai = loadGoogleGenAi().then(
+        ({ GoogleGenAI }) => new GoogleGenAI({ apiKey: options.apiKey }),
+      );
       this.geminiApiKey = options.apiKey;
     } else {
       this.codexAuth = new CodexOAuthHolder({
@@ -605,11 +615,11 @@ export class GeminiService {
     this.thinkingLevel = options.thinkingLevel ?? DEFAULT_GEMINI_THINKING_LEVEL;
   }
 
-  private gemini(): GoogleGenAI {
+  private async gemini(): Promise<GoogleGenAI> {
     if (!this.ai) {
       throw new Error('Gemini client is not configured for the selected AI provider.');
     }
-    return this.ai;
+    return await this.ai;
   }
 
   private async getCodexToken(): Promise<string> {
@@ -729,7 +739,9 @@ export class GeminiService {
       return parseQualityJudgeResponse(response);
     }
 
-    const result = await this.gemini().models.generateContent({
+    const result = await (
+      await this.gemini()
+    ).models.generateContent({
       model: GEMINI_QUALITY_JUDGE_MODEL,
       contents: [
         {
@@ -763,7 +775,9 @@ export class GeminiService {
       );
     }
 
-    const result = await this.gemini().models.generateContent({
+    const result = await (
+      await this.gemini()
+    ).models.generateContent({
       model: GEMINI_QUALITY_JUDGE_MODEL,
       contents: [
         {
@@ -1493,7 +1507,7 @@ Return as JSON:
         };
       }
 
-      const ai = this.gemini();
+      const ai = await this.gemini();
 
       // Use Files API for files over 20MB
       let fileUri: string | null = null;
@@ -1582,7 +1596,7 @@ Return as JSON:
     session?: CostSession,
     temperature = 0.2,
   ): Promise<string> {
-    const ai = this.gemini();
+    const ai = await this.gemini();
     const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
     let mediaPart:
       | { fileData: { fileUri: string; mimeType: string } }
@@ -1672,7 +1686,9 @@ Return as JSON:
     const base64Audio = audioData.toString('base64');
     const mimeType = mimeTypeForExtension(path.extname(segmentFile));
 
-    const result = await this.gemini().models.generateContent({
+    const result = await (
+      await this.gemini()
+    ).models.generateContent({
       model: this.flashModel,
       contents: [
         {

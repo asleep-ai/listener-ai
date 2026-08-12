@@ -10,10 +10,10 @@ import { afterEach, describe, it } from 'node:test';
 import { complete, completeSimple, getModel } from './piAiClient';
 import { importEsm } from './esmImport';
 
-type PiAiModule = typeof import('@earendil-works/pi-ai');
-const loadPiAi = (): Promise<PiAiModule> => importEsm<PiAiModule>('@earendil-works/pi-ai');
+type PiAiModule = typeof import('@earendil-works/pi-ai/compat');
+const loadPiAi = (): Promise<PiAiModule> => importEsm<PiAiModule>('@earendil-works/pi-ai/compat');
 
-let registration: import('@earendil-works/pi-ai').FauxProviderRegistration | undefined;
+let registration: import('@earendil-works/pi-ai/compat').FauxProviderRegistration | undefined;
 
 afterEach(() => {
   registration?.unregister();
@@ -104,12 +104,8 @@ describe('piAiClient.complete', () => {
   });
 });
 
-describe('piAiClient.getModel CUSTOM_GOOGLE_MODELS fallback', () => {
-  it('returns a synthesized entry for gemini-3.5-flash when pi-ai registry lacks it', async () => {
-    // pi-ai 0.74.0's registry doesn't have gemini-3.5-flash. We override via
-    // CUSTOM_GOOGLE_MODELS so the user-configured default keeps working. When
-    // pi-ai catches up, the registered entry wins and this test continues to
-    // pass (override happens to match upstream's shape).
+describe('piAiClient.getModel', () => {
+  it('returns the bundled gemini-3.5-flash model', async () => {
     const model = await getModel('gemini', 'gemini-3.5-flash');
 
     assert.equal(model.id, 'gemini-3.5-flash');

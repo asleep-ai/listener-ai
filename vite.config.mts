@@ -2,10 +2,12 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defineConfig, type Plugin } from 'vite';
 
+const configDir = import.meta.dirname;
+
 // Dev-only stub for `window.electronAPI` so the renderer boots in `vite dev`
 // without an Electron preload. Inert in production (apply: 'serve').
 const electronApiDevShim = (): Plugin => {
-  const shimPath = resolve(__dirname, 'renderer/dev-shim.html');
+  const shimPath = resolve(configDir, 'renderer/dev-shim.html');
   return {
     name: 'electron-api-dev-shim',
     apply: 'serve',
@@ -38,16 +40,16 @@ const extractScriptBody = (html: string): string => {
 // - base `./` so file:// URLs resolve relative paths in the packaged app.
 // - emit the AudioWorklet as a separate chunk via the `?worker&url` import.
 export default defineConfig({
-  root: resolve(__dirname, 'renderer'),
+  root: resolve(configDir, 'renderer'),
   base: './',
   plugins: [electronApiDevShim()],
   build: {
-    outDir: resolve(__dirname, 'dist/renderer'),
+    outDir: resolve(configDir, 'dist/renderer'),
     emptyOutDir: true,
     sourcemap: true,
     target: 'chrome120',
     rollupOptions: {
-      input: resolve(__dirname, 'renderer/index.html'),
+      input: resolve(configDir, 'renderer/index.html'),
     },
   },
   // Electron renderer reads files via file:// in production. Keep dev server

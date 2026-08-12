@@ -1,12 +1,11 @@
-import {
-  GoogleGenAI,
-  Modality,
-  type LiveConnectConfig,
-  type LiveConnectParameters,
-  type LiveServerMessage,
-  type Session,
+import type {
+  LiveConnectConfig,
+  LiveConnectParameters,
+  LiveServerMessage,
+  Session,
 } from '@google/genai';
 import WebSocket, { type RawData } from 'ws';
+import { importEsm } from './esmImport';
 import {
   DEFAULT_GEMINI_LIVE_TRANSCRIPTION_MODEL,
   DEFAULT_GEMINI_LIVE_TRANSLATION_MODEL,
@@ -63,6 +62,13 @@ const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime';
 const OPENAI_TRANSLATION_URL = 'wss://api.openai.com/v1/realtime/translations';
 const OPENAI_PCM_RATE = 24_000;
 const GEMINI_PCM_RATE = 16_000;
+type GoogleGenAiModule = typeof import('@google/genai');
+let googleGenAiPromise: Promise<GoogleGenAiModule> | undefined;
+
+function loadGoogleGenAi(): Promise<GoogleGenAiModule> {
+  googleGenAiPromise ??= importEsm<GoogleGenAiModule>('@google/genai');
+  return googleGenAiPromise;
+}
 
 export function resolveStreamingProvider(
   config: LiveSttProviderConfig,
@@ -527,6 +533,7 @@ export class GeminiLiveSession implements LiveSttSession {
     const apiKey = config.geminiApiKey?.trim();
     if (!apiKey) throw new Error('Gemini API key is not configured.');
     const translate = config.translate !== false;
+    const { GoogleGenAI, Modality } = await loadGoogleGenAi();
     const ai = new GoogleGenAI({ apiKey });
     const connectFn = deps.connect ?? ((params) => ai.live.connect(params));
     const sleepFn = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));

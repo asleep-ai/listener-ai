@@ -16,6 +16,6 @@
     "noEmit": true,
     "types": ["vite/client"]
   },
-  "include": ["renderer/**/*", "vite.config.ts"],
+  "include": ["renderer/**/*", "vite.config.mts"],
   "exclude": ["node_modules", "dist", "renderer/audio/pcm-stream-processor.js"]
 }

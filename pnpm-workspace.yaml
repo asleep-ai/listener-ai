@@ -16,7 +16,7 @@ shamefullyHoist: true
 enablePrePostScripts: true
 
 overrides:
-  js-yaml@>=4.0.0 <4.1.1: ^4.1.1
+  js-yaml@>=4.0.0 <4.3.1: ^4.3.1
 
 allowBuilds:
   '@google/genai': true

@@ -18,8 +18,8 @@ import { ConfigService } from './configService';
 import { importEsm } from './esmImport';
 import { makeTempDir, rmDir } from './test-helpers';
 
-type PiAiModule = typeof import('@earendil-works/pi-ai');
-const loadPiAi = (): Promise<PiAiModule> => importEsm<PiAiModule>('@earendil-works/pi-ai');
+type PiAiModule = typeof import('@earendil-works/pi-ai/compat');
+const loadPiAi = (): Promise<PiAiModule> => importEsm<PiAiModule>('@earendil-works/pi-ai/compat');
 
 let workDir: string;
 let configDir: string;
@@ -34,7 +34,7 @@ after(() => {
   rmDir(configDir);
 });
 
-let registration: import('@earendil-works/pi-ai').FauxProviderRegistration | undefined;
+let registration: import('@earendil-works/pi-ai/compat').FauxProviderRegistration | undefined;
 
 afterEach(() => {
   registration?.unregister();
@@ -46,7 +46,7 @@ afterEach(() => {
 // agent goes through pi-ai's `getModel('google', 'gemini-2.5-flash')` to pick
 // up a real Model object (with the matching api id), but the registered
 // dispatcher is faux, so no network call happens.
-async function setupFauxAsGoogle(): Promise<typeof import('@earendil-works/pi-ai')> {
+async function setupFauxAsGoogle(): Promise<typeof import('@earendil-works/pi-ai/compat')> {
   const pi = await loadPiAi();
   registration = pi.registerFauxProvider({ api: 'google-generative-ai', provider: 'google' });
   return pi;
