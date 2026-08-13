@@ -598,6 +598,10 @@ export class GeminiService {
       this.ai = loadGoogleGenAi().then(
         ({ GoogleGenAI }) => new GoogleGenAI({ apiKey: options.apiKey }),
       );
+      // Nobody awaits this.ai until the first API call; without a handler a
+      // module-load failure (packaging bug) would crash the process as an
+      // unhandled rejection instead of surfacing from that call.
+      this.ai.catch(() => {});
       this.geminiApiKey = options.apiKey;
     } else {
       this.codexAuth = new CodexOAuthHolder({
