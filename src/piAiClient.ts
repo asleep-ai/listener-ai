@@ -43,7 +43,12 @@ function loadPiAi(): Promise<PiAiModule> {
   return modulePromise;
 }
 
-import { type AiProvider, toPiAiProvider } from './aiProvider';
+import {
+  type AiProvider,
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_GEMINI_MODEL,
+  toPiAiProvider,
+} from './aiProvider';
 import { type CostSession, type UsageKind, recordUsage } from './services/usageTracker';
 
 /**
@@ -57,16 +62,34 @@ export interface UsageContext {
   transcriptionRef?: string;
 }
 
+const DEFAULT_MODEL_BY_PROVIDER: Record<AiProvider, string> = {
+  gemini: DEFAULT_GEMINI_MODEL,
+  codex: DEFAULT_CODEX_MODEL,
+};
+
 export async function getModel(provider: AiProvider, modelId: string): Promise<PiAiModel> {
   const m = await loadPiAi();
   const piId = toPiAiProvider(provider);
   // pi-ai's getModel is typed against literal model ids per provider; our
   // model strings come from user config. Cast is documented as the supported
   // path for non-literal ids ("Custom Models" in pi-ai's README).
-  const registered = m.getModel(piId as never, modelId as never) as unknown as
-    | PiAiModel
-    | undefined;
+  const lookup = (id: string) =>
+    m.getModel(piId as never, id as never) as unknown as PiAiModel | undefined;
+  const registered = lookup(modelId);
   if (registered) return registered;
+  // pi-ai bumps occasionally retire catalog entries (0.84 dropped several
+  // gpt-5.x ids). A configured id that vanished must not brick every summary
+  // and agent call -- fall back to the provider default and say so.
+  const fallbackId = DEFAULT_MODEL_BY_PROVIDER[provider];
+  if (fallbackId !== modelId) {
+    const fallback = lookup(fallbackId);
+    if (fallback) {
+      console.warn(
+        `[pi-ai] Unknown model ${piId}/${modelId}; falling back to ${fallbackId}. Update the configured model in Settings.`,
+      );
+      return fallback;
+    }
+  }
   throw new Error(`Unknown pi-ai model: ${piId}/${modelId}`);
 }
 

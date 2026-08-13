@@ -7,6 +7,7 @@
 
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
+import { DEFAULT_CODEX_MODEL } from './aiProvider';
 import { complete, completeSimple, getModel } from './piAiClient';
 import { importEsm } from './esmImport';
 
@@ -113,10 +114,14 @@ describe('piAiClient.getModel', () => {
     assert.equal((model as { reasoning: boolean }).reasoning, true);
   });
 
-  it('throws for unknown ids on the codex provider', async () => {
-    // No fallback for Codex -- token/scope plumbing requires a real registry
-    // entry, so unknown ids should surface loudly instead of silently failing
-    // at the network layer.
-    await assert.rejects(() => getModel('codex', 'gpt-vaporware-9.9'), /Unknown pi-ai model/);
+  it('falls back to the provider default for unknown ids', async () => {
+    // pi-ai bumps retire catalog entries (0.84 dropped several gpt-5.x ids).
+    // A stale configured id must not brick every summary/agent call: getModel
+    // degrades to the provider default -- a real registry entry, so the
+    // token/scope plumbing stays intact -- and warns.
+    const model = await getModel('codex', 'gpt-vaporware-9.9');
+
+    assert.equal(model.id, DEFAULT_CODEX_MODEL);
+    assert.equal((model as { provider: string }).provider, 'openai-codex');
   });
 });
