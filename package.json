@@ -2,6 +2,9 @@
   "name": "listener-ai",
   "version": "2.13.0",
   "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=22.19"
+  },
   "description": "A lightweight desktop application for recording and transcribing meetings with AI-powered notes.",
   "main": "dist/main.js",
   "bin": {
