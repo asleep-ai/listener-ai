@@ -1316,9 +1316,12 @@ type PendingCodexLogin = {
   done: Promise<void>;
 };
 let pendingCodexLogin: PendingCodexLogin | null = null;
-// server.close() in Node releases the listening socket via libuv on the next
-// tick, but pi-ai's provider cleanup doesn't await its callback. Hold the slot for a
-// short cushion so a re-bind cannot race the kernel.
+// On abort, pi-ai's login() rejects immediately while the provider closes the
+// loopback server on a detached promise chain -- and server.close() itself
+// releases the socket only on a later libuv tick. The cushion therefore counts
+// from the rejection, not from the actual close, and is the only spacing
+// between a cancelled attempt and the next bind on fixed port 1455. Heuristic,
+// not a guarantee.
 const PORT_RELEASE_CUSHION_MS = 250;
 
 ipcMain.handle('codex-oauth-login', async () => {
