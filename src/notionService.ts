@@ -15,6 +15,11 @@ export class NotionService {
   constructor(config: NotionConfig) {
     this.notion = new Client({
       auth: config.apiKey,
+      // @notionhq/client v5 defaults to Notion-Version 2025-09-03, whose
+      // data-source model deprecates the `database_id` page parent used below.
+      // Pin the previous API version so the SDK bump stays behavior-neutral;
+      // migrating to data_source_id parents is its own change.
+      notionVersion: '2022-06-28',
     });
     this.databaseId = config.databaseId;
   }
