@@ -198,23 +198,49 @@ test('GeminiLiveSession does not reconnect after the user closes the session', a
 });
 
 test('GeminiLiveSession coalesces a close that arrives during an in-flight reconnect', async () => {
+  const { connect, captures, callCount } = scriptConnect(['ok', 'ok', 'ok']);
+  // Park each reconnect iteration in its backoff sleep so the test can fire a
+  // re-entrant close from the established connection while reconnecting=true.
+  // That close must be coalesced (pendingReconnect) into exactly one more
+  // reconnect -- not dropped, and not spawning a second concurrent loop.
+  const sleepers: Array<() => void> = [];
+  const gatedSleep = (): Promise<void> => new Promise((resolve) => sleepers.push(resolve));
+
+  const { callbacks, events } = recordCallbacks();
+  await GeminiLiveSession.create(CONFIG, callbacks, { connect, sleep: gatedSleep });
+  captures[0].callbacks.onopen();
+  // First close starts the reconnect loop, which parks in its backoff sleep.
+  captures[0].callbacks.onclose();
+  // Re-entrant close while the loop is mid-flight: coalesce, don't drop.
+  captures[0].callbacks.onclose();
+  sleepers.shift()?.();
+  await flush();
+  sleepers.shift()?.();
+  await flush();
+
+  assert.equal(callCount(), 3, 'initial connect + first reconnect + coalesced second reconnect');
+  assert.ok(
+    !events.some((e) => e.type === 'error'),
+    'the coalesced close did not surface an error',
+  );
+});
+
+test('GeminiLiveSession retries when a reconnect attempt closes before setup completes', async () => {
   const captures: ConnectCapture[] = [];
   let calls = 0;
-  // On the first reconnect (2nd connect overall), the freshly opened socket
-  // closes again before handleDisconnect settles. That re-entrant close must be
-  // coalesced (pendingReconnect) into exactly one more reconnect -- not dropped,
-  // and not spawning a second concurrent loop.
+  // Reconnect attempt #1 opens but the socket drops before setupComplete, so
+  // its connect promise never settles (@google/genai 2.16 semantics). The
+  // attempt must fail via onclose and the loop must retry -- not treat the
+  // half-open socket as a live connection.
   const connect = (async (params: unknown) => {
     const idx = calls++;
     const session = new FakeSession();
     const p = params as ConnectCapture['params'] & { callbacks: ConnectCapture['callbacks'] };
     captures.push({ params: p, callbacks: p.callbacks, session });
-    // The first reconnect opens, then immediately drops again before
-    // handleDisconnect settles. Only an opened connection drives a reconnect, so
-    // fire onopen before onclose to exercise the pendingReconnect coalescing.
     if (idx === 1) {
       p.callbacks.onopen();
       p.callbacks.onclose();
+      return new Promise<FakeSession>(() => {});
     }
     return session;
   }) as never;
@@ -225,11 +251,8 @@ test('GeminiLiveSession coalesces a close that arrives during an in-flight recon
   captures[0].callbacks.onclose();
   await flush();
 
-  assert.equal(calls, 3, 'initial connect + first reconnect + coalesced second reconnect');
-  assert.ok(
-    !events.some((e) => e.type === 'error'),
-    'the coalesced close did not surface an error',
-  );
+  assert.equal(calls, 3, 'the mid-setup drop failed the attempt and a retry reconnected');
+  assert.ok(!events.some((e) => e.type === 'error'), 'no error surfaced; the retry recovered');
 });
 
 test('GeminiLiveSession fails create() on a pre-open close without a background reconnect', async () => {
@@ -255,11 +278,38 @@ test('GeminiLiveSession fails create() on a pre-open close without a background 
   const { callbacks } = recordCallbacks();
   await assert.rejects(
     GeminiLiveSession.create(CONFIG, callbacks, { connect, sleep: instantSleep }),
-    /closed before opening/,
+    /closed before the connection was established/,
   );
   await flush();
 
   assert.equal(calls, 1, 'a pre-open initial failure does not spawn a background reconnect');
+});
+
+test('GeminiLiveSession fails create() when the socket closes after open but before setup', async () => {
+  const captures: ConnectCapture[] = [];
+  let calls = 0;
+  // @google/genai 2.16 resolves connect() only after setupComplete and never
+  // settles it when the socket dies in between. create() must fail fast via
+  // the onclose (not the 15s connect timeout) and must not start a background
+  // reconnect on the instance the caller is about to discard.
+  const connect = (async (params: unknown) => {
+    calls++;
+    const session = new FakeSession();
+    const p = params as ConnectCapture['params'] & { callbacks: ConnectCapture['callbacks'] };
+    captures.push({ params: p, callbacks: p.callbacks, session });
+    p.callbacks.onopen();
+    p.callbacks.onclose();
+    return new Promise<FakeSession>(() => {});
+  }) as never;
+
+  const { callbacks } = recordCallbacks();
+  await assert.rejects(
+    GeminiLiveSession.create(CONFIG, callbacks, { connect, sleep: instantSleep }),
+    /closed before the connection was established/,
+  );
+  await flush();
+
+  assert.equal(calls, 1, 'a mid-setup failure does not spawn a background reconnect');
 });
 
 test('GeminiLiveSession ignores a late open/close from a timed-out reconnect attempt', async () => {
