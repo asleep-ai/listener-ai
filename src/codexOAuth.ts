@@ -13,6 +13,11 @@ type OAuthCredentials = {
 
 type OAuthPrompt = {
   message: string;
+  // Forwarded so interactive prompts (the CLI readline) can tear themselves
+  // down when the loopback wins the race or the user cancels; otherwise the
+  // pending stdin read keeps the process alive after a successful browser
+  // login.
+  signal?: AbortSignal;
 };
 
 class CodexLoginCancelledError extends Error {
@@ -40,19 +45,34 @@ type CodexProviderModule = typeof import('@earendil-works/pi-ai/providers/openai
 let corePromise: Promise<PiAiCoreModule> | undefined;
 let providerPromise: Promise<CodexProviderModule> | undefined;
 
-async function createCodexModels(credentials?: CodexOAuthCredentials) {
+async function createCodexRuntime() {
   corePromise ??= importEsm<PiAiCoreModule>('@earendil-works/pi-ai');
   providerPromise ??= importEsm<CodexProviderModule>(
     '@earendil-works/pi-ai/providers/openai-codex',
   );
   const [core, provider] = await Promise.all([corePromise, providerPromise]);
   const store = new core.InMemoryCredentialStore();
-  if (credentials) {
-    await store.modify('openai-codex', async () => ({ type: 'oauth', ...credentials }));
-  }
   const models = core.createModels({ credentials: store });
   models.setProvider(provider.openaiCodexProvider());
   return { models, store };
+}
+
+// One store + Models per process: pi-ai serializes token refresh through the
+// store's modify() lock, so callers sharing this runtime cannot double-refresh
+// a rotating refresh token (segment transcription calls getToken() through
+// Promise.all). A fresh store per call would make that lock protect nothing.
+let sharedRuntimePromise: ReturnType<typeof createCodexRuntime> | undefined;
+
+function getSharedCodexRuntime(): ReturnType<typeof createCodexRuntime> {
+  sharedRuntimePromise ??= createCodexRuntime();
+  return sharedRuntimePromise;
+}
+
+// Drop the shared runtime so the next resolve seeds the store from the
+// caller's credentials. Required when the grant itself changes (fresh login);
+// without it the store would keep refreshing the previous grant's tokens.
+export function resetCodexRuntime(): void {
+  sharedRuntimePromise = undefined;
 }
 
 export function getCodexOAuthEnvCredentials(): CodexOAuthCredentials | undefined {
@@ -174,7 +194,15 @@ export async function resolveCodexAccessToken(params: {
   const credentials = params.credentials ?? getCodexOAuthEnvCredentials();
   if (!credentials) return undefined;
 
-  const { models, store } = await createCodexModels(credentials);
+  const { models, store } = await getSharedCodexRuntime();
+  // Seed only an empty store. Within one process the store is always at least
+  // as fresh as any caller's copy (rotation lands in the store first; callers
+  // learn about it below via onCredentialsChanged), so overwriting it with
+  // caller credentials could resurrect an already-rotated refresh token.
+  const existing = await store.read('openai-codex');
+  if (existing?.type !== 'oauth') {
+    await store.modify('openai-codex', async () => ({ type: 'oauth', ...credentials }));
+  }
   const resolved = await models.getAuth('openai-codex');
   if (!resolved) return undefined;
 
@@ -209,7 +237,9 @@ export async function loginCodexOAuth(params: {
   onProgress?: (message: string) => void;
   signal?: AbortSignal;
 }): Promise<CodexOAuthCredentials> {
-  const { models } = await createCodexModels();
+  // Login runs on an ephemeral runtime so an in-flight login can't disturb the
+  // shared store other callers are refreshing against.
+  const { models } = await createCodexRuntime();
   const credential = await models.login('openai-codex', 'oauth', {
     signal: params.signal,
     prompt: async (prompt) => {
@@ -231,6 +261,9 @@ export async function loginCodexOAuth(params: {
   if (credential.type !== 'oauth') {
     throw new Error('Codex OAuth returned a non-OAuth credential.');
   }
+  // A fresh grant obsoletes whatever the shared store held; drop it so the
+  // next resolve re-seeds from the new credentials.
+  resetCodexRuntime();
   const { type: _type, ...credentials } = credential;
   return credentials as CodexOAuthCredentials;
 }
@@ -247,12 +280,17 @@ export async function runCodexOAuthPrompt(
 
   const signal =
     signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
-  if (!signal) return await new Promise<string>(() => {});
+  if (!signal) {
+    // No handler and nothing that could ever settle this prompt: fail loudly
+    // instead of installing a permanent hang. Unreachable today (pi-ai always
+    // attaches prompt.signal), kept as a tripwire for contract drift.
+    throw new Error('Codex OAuth prompt has no handler and no abort signal.');
+  }
   signal.throwIfAborted();
   let abortListener: (() => void) | undefined;
   try {
     return await Promise.race([
-      onPrompt ? onPrompt({ message: prompt.message }) : new Promise<string>(() => {}),
+      onPrompt ? onPrompt({ message: prompt.message, signal }) : new Promise<string>(() => {}),
       new Promise<never>((_resolve, reject) => {
         abortListener = () => reject(new CodexLoginCancelledError());
         signal.addEventListener('abort', abortListener, { once: true });
