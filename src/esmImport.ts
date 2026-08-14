@@ -5,7 +5,7 @@
 // literal `import()` survives untouched and stays an actual dynamic import.
 //
 // Use this for ESM-only dependencies such as `@earendil-works/pi-ai`, its
-// provider/compat subpaths, and `@google/genai`.
+// provider subpaths, and `@google/genai`.
 export const importEsm = (() => {
   const fn = new Function('specifier', 'return import(specifier)') as <T>(
     specifier: string,

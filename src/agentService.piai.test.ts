@@ -16,10 +16,11 @@ import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import { AgentService } from './agentService';
 import { ConfigService } from './configService';
 import { importEsm } from './esmImport';
+import { swapProviderForTest } from './piAiClient';
 import { makeTempDir, rmDir } from './test-helpers';
 
-type PiAiModule = typeof import('@earendil-works/pi-ai/compat');
-const loadPiAi = (): Promise<PiAiModule> => importEsm<PiAiModule>('@earendil-works/pi-ai/compat');
+type PiAiModule = typeof import('@earendil-works/pi-ai');
+const loadPiAi = (): Promise<PiAiModule> => importEsm<PiAiModule>('@earendil-works/pi-ai');
 
 let workDir: string;
 let configDir: string;
@@ -34,21 +35,27 @@ after(() => {
   rmDir(configDir);
 });
 
-let registration: import('@earendil-works/pi-ai/compat').FauxProviderRegistration | undefined;
+let registration: import('@earendil-works/pi-ai').FauxProviderHandle | undefined;
+let restoreProviders: (() => void) | undefined;
 
 afterEach(() => {
-  registration?.unregister();
+  restoreProviders?.();
+  restoreProviders = undefined;
   registration = undefined;
 });
 
-// Register the faux provider against the REAL `google-generative-ai` api id so
-// the API registry's google entry gets overwritten by faux's stream impl. The
-// agent goes through pi-ai's `getModel('google', 'gemini-2.5-flash')` to pick
-// up a real Model object (with the matching api id), but the registered
-// dispatcher is faux, so no network call happens.
-async function setupFauxAsGoogle(): Promise<typeof import('@earendil-works/pi-ai/compat')> {
+// Replace the google provider on piAiClient's shared Models with faux. The
+// faux provider owns the catalog too, so it must list the id the agent asks
+// for (`getModel('gemini', 'gemini-2.5-flash')`); dispatch then hits faux's
+// scripted stream impl and no network call happens.
+async function setupFauxAsGoogle(): Promise<typeof import('@earendil-works/pi-ai')> {
   const pi = await loadPiAi();
-  registration = pi.registerFauxProvider({ api: 'google-generative-ai', provider: 'google' });
+  registration = pi.fauxProvider({
+    api: 'google-generative-ai',
+    provider: 'google',
+    models: [{ id: 'gemini-2.5-flash' }],
+  });
+  restoreProviders = await swapProviderForTest(registration.provider);
   return pi;
 }
 

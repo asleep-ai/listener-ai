@@ -8,26 +8,43 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 import { DEFAULT_CODEX_MODEL } from './aiProvider';
-import { complete, completeSimple, getModel } from './piAiClient';
+import { complete, completeSimple, getModel, swapProviderForTest } from './piAiClient';
 import { importEsm } from './esmImport';
 
-type PiAiModule = typeof import('@earendil-works/pi-ai/compat');
-const loadPiAi = (): Promise<PiAiModule> => importEsm<PiAiModule>('@earendil-works/pi-ai/compat');
+type PiAiModule = typeof import('@earendil-works/pi-ai');
+const loadPiAi = (): Promise<PiAiModule> => importEsm<PiAiModule>('@earendil-works/pi-ai');
 
-let registration: import('@earendil-works/pi-ai/compat').FauxProviderRegistration | undefined;
+let restoreProviders: (() => void) | undefined;
 
 afterEach(() => {
-  registration?.unregister();
-  registration = undefined;
+  restoreProviders?.();
+  restoreProviders = undefined;
 });
+
+// Replace a provider on piAiClient's shared Models with a faux one. Unlike the
+// retired /compat registry, the faux provider owns the catalog too, so any id
+// the test resolves through getModel() must be listed in `models`.
+async function installFaux(options: {
+  api: string;
+  provider: string;
+  models?: { id: string; reasoning?: boolean }[];
+}) {
+  const pi = await loadPiAi();
+  const faux = pi.fauxProvider(options);
+  restoreProviders = await swapProviderForTest(faux.provider);
+  return { pi, faux };
+}
 
 describe('piAiClient.completeSimple', () => {
   it('forwards `reasoning` through to the provider', async () => {
-    const pi = await loadPiAi();
-    registration = pi.registerFauxProvider({ api: 'google-generative-ai', provider: 'google' });
+    const { pi, faux } = await installFaux({
+      api: 'google-generative-ai',
+      provider: 'google',
+      models: [{ id: 'gemini-3.5-flash', reasoning: true }],
+    });
 
     let captured: Record<string, unknown> | undefined;
-    registration.setResponses([
+    faux.setResponses([
       (_ctx, options) => {
         captured = options as Record<string, unknown>;
         return pi.fauxAssistantMessage('ok');
@@ -51,11 +68,14 @@ describe('piAiClient.completeSimple', () => {
   it('preserves arbitrary options on Gemini provider', async () => {
     // adjustOptionsForModel spreads everything for non-Codex providers; this
     // guards against a future change accidentally narrowing the passthrough.
-    const pi = await loadPiAi();
-    registration = pi.registerFauxProvider({ api: 'google-generative-ai', provider: 'google' });
+    const { pi, faux } = await installFaux({
+      api: 'google-generative-ai',
+      provider: 'google',
+      models: [{ id: 'gemini-3.5-flash', reasoning: true }],
+    });
 
     let captured: Record<string, unknown> | undefined;
-    registration.setResponses([
+    faux.setResponses([
       (_ctx, options) => {
         captured = options as Record<string, unknown>;
         return pi.fauxAssistantMessage('ok');
@@ -79,21 +99,20 @@ describe('piAiClient.complete', () => {
   it('strips temperature on Codex but forwards other options', async () => {
     // pi-ai's openai-codex-responses provider rejects sampling params; the
     // wrapper has to drop them. This pins that contract.
-    const pi = await loadPiAi();
-    registration = pi.registerFauxProvider({
+    const { pi, faux } = await installFaux({
       api: 'openai-codex-responses',
       provider: 'openai-codex',
     });
 
     let captured: Record<string, unknown> | undefined;
-    registration.setResponses([
+    faux.setResponses([
       (_ctx, options) => {
         captured = options as Record<string, unknown>;
         return pi.fauxAssistantMessage('ok');
       },
     ]);
 
-    const model = registration.getModel();
+    const model = faux.getModel();
     await complete(
       model,
       { messages: [{ role: 'user', content: 'hi', timestamp: Date.now() }] },
