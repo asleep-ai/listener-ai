@@ -311,7 +311,10 @@ export class GoogleDriveClient {
     const res = await this.authedFetch(url.toString(), {
       method: 'POST',
       headers: { 'Content-Type': contentType },
-      body,
+      // Cast, don't copy: `new Uint8Array(body)` would duplicate the whole
+      // multipart payload (metadata + audio) just to satisfy BodyInit's
+      // ArrayBuffer-backed typing. Same treatment as updateFileContent below.
+      body: body as BodyInit,
     });
     await this.ensureOk(res, `Drive createFile "${params.name}"`);
     return (await res.json()) as DriveFile;

@@ -19,7 +19,7 @@ When prices drift, update the date in the cell and re-cite from the provider's o
 
 **Google Gemini** — API key via Google AI Studio or Vertex AI. Free tier exists for AI Studio but is rate-limited and not for production. No announced end-of-life for 2.5 Flash or 2.5 Pro as of May 2026.
 
-**OpenAI Codex (ChatGPT subscription)** — OAuth via `@earendil-works/pi-ai/oauth`. Codex GUI usage on Plus/Pro plans is metered against shared 5-hour message-window allowances. Business/Enterprise plans switched to per-token credits aligned with API rates on 2026-04-02. The same models are also accessible directly via API key at the per-token prices below.
+**OpenAI Codex (ChatGPT subscription)** — OAuth via the `@earendil-works/pi-ai` OpenAI Codex provider. Codex GUI usage on Plus/Pro plans is metered against shared 5-hour message-window allowances. Business/Enterprise plans switched to per-token credits aligned with API rates on 2026-04-02. The same models are also accessible directly via API key at the per-token prices below.
 
 **OpenAI Transcription** — API key. Metered separately from the ChatGPT subscription. Listener.AI's OAuth flow currently passes the ChatGPT access token as the Bearer for `/v1/audio/transcriptions`, which OpenAI accepts. End-of-life: `whisper-1` is still available at the same per-minute rate as `gpt-4o-transcribe`.
 

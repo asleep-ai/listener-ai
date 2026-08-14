@@ -7,26 +7,44 @@
 
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
-import { complete, completeSimple, getModel } from './piAiClient';
+import { DEFAULT_CODEX_MODEL } from './aiProvider';
+import { complete, completeSimple, getModel, swapProviderForTest } from './piAiClient';
 import { importEsm } from './esmImport';
 
 type PiAiModule = typeof import('@earendil-works/pi-ai');
 const loadPiAi = (): Promise<PiAiModule> => importEsm<PiAiModule>('@earendil-works/pi-ai');
 
-let registration: import('@earendil-works/pi-ai').FauxProviderRegistration | undefined;
+let restoreProviders: (() => void) | undefined;
 
 afterEach(() => {
-  registration?.unregister();
-  registration = undefined;
+  restoreProviders?.();
+  restoreProviders = undefined;
 });
+
+// Replace a provider on piAiClient's shared Models with a faux one. Unlike the
+// retired /compat registry, the faux provider owns the catalog too, so any id
+// the test resolves through getModel() must be listed in `models`.
+async function installFaux(options: {
+  api: string;
+  provider: string;
+  models?: { id: string; reasoning?: boolean }[];
+}) {
+  const pi = await loadPiAi();
+  const faux = pi.fauxProvider(options);
+  restoreProviders = await swapProviderForTest(faux.provider);
+  return { pi, faux };
+}
 
 describe('piAiClient.completeSimple', () => {
   it('forwards `reasoning` through to the provider', async () => {
-    const pi = await loadPiAi();
-    registration = pi.registerFauxProvider({ api: 'google-generative-ai', provider: 'google' });
+    const { pi, faux } = await installFaux({
+      api: 'google-generative-ai',
+      provider: 'google',
+      models: [{ id: 'gemini-3.5-flash', reasoning: true }],
+    });
 
     let captured: Record<string, unknown> | undefined;
-    registration.setResponses([
+    faux.setResponses([
       (_ctx, options) => {
         captured = options as Record<string, unknown>;
         return pi.fauxAssistantMessage('ok');
@@ -50,11 +68,14 @@ describe('piAiClient.completeSimple', () => {
   it('preserves arbitrary options on Gemini provider', async () => {
     // adjustOptionsForModel spreads everything for non-Codex providers; this
     // guards against a future change accidentally narrowing the passthrough.
-    const pi = await loadPiAi();
-    registration = pi.registerFauxProvider({ api: 'google-generative-ai', provider: 'google' });
+    const { pi, faux } = await installFaux({
+      api: 'google-generative-ai',
+      provider: 'google',
+      models: [{ id: 'gemini-3.5-flash', reasoning: true }],
+    });
 
     let captured: Record<string, unknown> | undefined;
-    registration.setResponses([
+    faux.setResponses([
       (_ctx, options) => {
         captured = options as Record<string, unknown>;
         return pi.fauxAssistantMessage('ok');
@@ -78,21 +99,20 @@ describe('piAiClient.complete', () => {
   it('strips temperature on Codex but forwards other options', async () => {
     // pi-ai's openai-codex-responses provider rejects sampling params; the
     // wrapper has to drop them. This pins that contract.
-    const pi = await loadPiAi();
-    registration = pi.registerFauxProvider({
+    const { pi, faux } = await installFaux({
       api: 'openai-codex-responses',
       provider: 'openai-codex',
     });
 
     let captured: Record<string, unknown> | undefined;
-    registration.setResponses([
+    faux.setResponses([
       (_ctx, options) => {
         captured = options as Record<string, unknown>;
         return pi.fauxAssistantMessage('ok');
       },
     ]);
 
-    const model = registration.getModel();
+    const model = faux.getModel();
     await complete(
       model,
       { messages: [{ role: 'user', content: 'hi', timestamp: Date.now() }] },
@@ -104,12 +124,8 @@ describe('piAiClient.complete', () => {
   });
 });
 
-describe('piAiClient.getModel CUSTOM_GOOGLE_MODELS fallback', () => {
-  it('returns a synthesized entry for gemini-3.5-flash when pi-ai registry lacks it', async () => {
-    // pi-ai 0.74.0's registry doesn't have gemini-3.5-flash. We override via
-    // CUSTOM_GOOGLE_MODELS so the user-configured default keeps working. When
-    // pi-ai catches up, the registered entry wins and this test continues to
-    // pass (override happens to match upstream's shape).
+describe('piAiClient.getModel', () => {
+  it('returns the bundled gemini-3.5-flash model', async () => {
     const model = await getModel('gemini', 'gemini-3.5-flash');
 
     assert.equal(model.id, 'gemini-3.5-flash');
@@ -117,10 +133,14 @@ describe('piAiClient.getModel CUSTOM_GOOGLE_MODELS fallback', () => {
     assert.equal((model as { reasoning: boolean }).reasoning, true);
   });
 
-  it('throws for unknown ids on the codex provider', async () => {
-    // No fallback for Codex -- token/scope plumbing requires a real registry
-    // entry, so unknown ids should surface loudly instead of silently failing
-    // at the network layer.
-    await assert.rejects(() => getModel('codex', 'gpt-vaporware-9.9'), /Unknown pi-ai model/);
+  it('falls back to the provider default for unknown ids', async () => {
+    // pi-ai bumps retire catalog entries (0.84 dropped several gpt-5.x ids).
+    // A stale configured id must not brick every summary/agent call: getModel
+    // degrades to the provider default -- a real registry entry, so the
+    // token/scope plumbing stays intact -- and warns.
+    const model = await getModel('codex', 'gpt-vaporware-9.9');
+
+    assert.equal(model.id, DEFAULT_CODEX_MODEL);
+    assert.equal((model as { provider: string }).provider, 'openai-codex');
   });
 });

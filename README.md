@@ -50,6 +50,7 @@ npx listener-ai <audio-file>
 
 ### Prerequisites
 
+- **Node.js >= 22.19** (the `@earendil-works/pi-ai` dependency requires it)
 - **FFmpeg** installed on your system (`brew install ffmpeg` / `apt install ffmpeg`)
 - One of:
   - **Google Gemini API key** from [Google AI Studio](https://makersuite.google.com/app/apikey), or

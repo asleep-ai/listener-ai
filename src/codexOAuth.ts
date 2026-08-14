@@ -3,6 +3,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { importEsm } from './esmImport';
 
+import type { AuthPrompt } from '@earendil-works/pi-ai';
+
 type OAuthCredentials = {
   access: string;
   refresh: string;
@@ -11,20 +13,11 @@ type OAuthCredentials = {
 
 type OAuthPrompt = {
   message: string;
-};
-
-type CodexOAuthRuntime = {
-  getOAuthApiKey: (
-    providerId: 'openai-codex',
-    credentials: { 'openai-codex': CodexOAuthCredentials },
-  ) => Promise<{ apiKey?: string; newCredentials: CodexOAuthCredentials } | undefined>;
-  loginOpenAICodex: (params: {
-    originator: string;
-    onAuth: (info: { url: string }) => void;
-    onPrompt: (prompt: OAuthPrompt) => Promise<string>;
-    onProgress?: (message: string) => void;
-    onManualCodeInput?: () => Promise<string>;
-  }) => Promise<CodexOAuthCredentials>;
+  // Forwarded so interactive prompts (the CLI readline) can tear themselves
+  // down when the loopback wins the race or the user cancels; otherwise the
+  // pending stdin read keeps the process alive after a successful browser
+  // login.
+  signal?: AbortSignal;
 };
 
 class CodexLoginCancelledError extends Error {
@@ -46,11 +39,40 @@ export interface CodexOAuthCredentialSource {
   credentials: CodexOAuthCredentials;
 }
 
-let runtimePromise: Promise<CodexOAuthRuntime> | undefined;
+type PiAiCoreModule = typeof import('@earendil-works/pi-ai');
+type CodexProviderModule = typeof import('@earendil-works/pi-ai/providers/openai-codex');
 
-async function loadCodexOAuthRuntime(): Promise<CodexOAuthRuntime> {
-  runtimePromise ??= importEsm<CodexOAuthRuntime>('@earendil-works/pi-ai/oauth');
-  return await runtimePromise;
+let corePromise: Promise<PiAiCoreModule> | undefined;
+let providerPromise: Promise<CodexProviderModule> | undefined;
+
+async function createCodexRuntime() {
+  corePromise ??= importEsm<PiAiCoreModule>('@earendil-works/pi-ai');
+  providerPromise ??= importEsm<CodexProviderModule>(
+    '@earendil-works/pi-ai/providers/openai-codex',
+  );
+  const [core, provider] = await Promise.all([corePromise, providerPromise]);
+  const store = new core.InMemoryCredentialStore();
+  const models = core.createModels({ credentials: store });
+  models.setProvider(provider.openaiCodexProvider());
+  return { models, store };
+}
+
+// One store + Models per process: pi-ai serializes token refresh through the
+// store's modify() lock, so callers sharing this runtime cannot double-refresh
+// a rotating refresh token (segment transcription calls getToken() through
+// Promise.all). A fresh store per call would make that lock protect nothing.
+let sharedRuntimePromise: ReturnType<typeof createCodexRuntime> | undefined;
+
+function getSharedCodexRuntime(): ReturnType<typeof createCodexRuntime> {
+  sharedRuntimePromise ??= createCodexRuntime();
+  return sharedRuntimePromise;
+}
+
+// Drop the shared runtime so the next resolve seeds the store from the
+// caller's credentials. Required when the grant itself changes (fresh login);
+// without it the store would keep refreshing the previous grant's tokens.
+export function resetCodexRuntime(): void {
+  sharedRuntimePromise = undefined;
 }
 
 export function getCodexOAuthEnvCredentials(): CodexOAuthCredentials | undefined {
@@ -172,11 +194,21 @@ export async function resolveCodexAccessToken(params: {
   const credentials = params.credentials ?? getCodexOAuthEnvCredentials();
   if (!credentials) return undefined;
 
-  const { getOAuthApiKey } = await loadCodexOAuthRuntime();
-  const resolved = await getOAuthApiKey('openai-codex', { 'openai-codex': credentials });
+  const { models, store } = await getSharedCodexRuntime();
+  // Seed only an empty store. Within one process the store is always at least
+  // as fresh as any caller's copy (rotation lands in the store first; callers
+  // learn about it below via onCredentialsChanged), so overwriting it with
+  // caller credentials could resurrect an already-rotated refresh token.
+  const existing = await store.read('openai-codex');
+  if (existing?.type !== 'oauth') {
+    await store.modify('openai-codex', async () => ({ type: 'oauth', ...credentials }));
+  }
+  const resolved = await models.getAuth('openai-codex');
   if (!resolved) return undefined;
 
-  const nextCredentials = resolved.newCredentials as CodexOAuthCredentials;
+  const stored = await store.read('openai-codex');
+  if (stored?.type !== 'oauth') return undefined;
+  const { type: _type, ...nextCredentials } = stored;
   if (
     nextCredentials.access !== credentials.access ||
     nextCredentials.refresh !== credentials.refresh ||
@@ -185,7 +217,7 @@ export async function resolveCodexAccessToken(params: {
     await params.onCredentialsChanged?.(nextCredentials);
   }
 
-  return resolved.apiKey;
+  return resolved.auth.apiKey;
 }
 
 export async function requireCodexAccessToken(params: {
@@ -201,47 +233,70 @@ export async function requireCodexAccessToken(params: {
 
 export async function loginCodexOAuth(params: {
   openUrl: (url: string) => void | Promise<void>;
-  onPrompt: (prompt: OAuthPrompt) => Promise<string>;
+  onPrompt?: (prompt: OAuthPrompt) => Promise<string>;
   onProgress?: (message: string) => void;
   signal?: AbortSignal;
 }): Promise<CodexOAuthCredentials> {
-  const { loginOpenAICodex } = await loadCodexOAuthRuntime();
+  // Login runs on an ephemeral runtime so an in-flight login can't disturb the
+  // shared store other callers are refreshing against.
+  const { models } = await createCodexRuntime();
+  const credential = await models.login('openai-codex', 'oauth', {
+    signal: params.signal,
+    prompt: async (prompt) => {
+      // Preserve Listener's existing browser-login behavior. pi-ai 0.84 also
+      // offers device-code auth, but the current UI has no selector for it.
+      if (prompt.type === 'select') return 'browser';
+      return await runCodexOAuthPrompt(params.onPrompt, prompt, params.signal);
+    },
+    notify: (event) => {
+      if (event.type === 'auth_url') {
+        void params.openUrl(event.url);
+      } else if (event.type === 'progress' || event.type === 'info') {
+        params.onProgress?.(event.message);
+      } else if (event.type === 'device_code') {
+        params.onProgress?.(`Enter code ${event.userCode} at ${event.verificationUri}`);
+      }
+    },
+  });
+  if (credential.type !== 'oauth') {
+    throw new Error('Codex OAuth returned a non-OAuth credential.');
+  }
+  // A fresh grant obsoletes whatever the shared store held; drop it so the
+  // next resolve re-seeds from the new credentials.
+  resetCodexRuntime();
+  const { type: _type, ...credentials } = credential;
+  return credentials as CodexOAuthCredentials;
+}
 
-  // pi-ai exposes cancellation only via its `onManualCodeInput` race: when that
-  // promise rejects, pi-ai calls the loopback server's cancelWait() (so
-  // waitForCode() resolves null), records the error, and rethrows it inside
-  // the loginOpenAICodex finally block -- which then closes the loopback
-  // server and frees port 1455. We translate AbortSignal into that surface.
+export async function runCodexOAuthPrompt(
+  onPrompt: ((prompt: OAuthPrompt) => Promise<string>) | undefined,
+  prompt: AuthPrompt,
+  outerSignal?: AbortSignal,
+): Promise<string> {
+  const signals = [prompt.signal, outerSignal].filter(
+    (signal): signal is AbortSignal => signal !== undefined,
+  );
+  if (signals.length === 0 && onPrompt) return await onPrompt({ message: prompt.message });
+
+  const signal =
+    signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+  if (!signal) {
+    // No handler and nothing that could ever settle this prompt: fail loudly
+    // instead of installing a permanent hang. Unreachable today (pi-ai always
+    // attaches prompt.signal), kept as a tripwire for contract drift.
+    throw new Error('Codex OAuth prompt has no handler and no abort signal.');
+  }
+  signal.throwIfAborted();
   let abortListener: (() => void) | undefined;
-  const onManualCodeInput = params.signal
-    ? () =>
-        new Promise<string>((_resolve, reject) => {
-          const signal = params.signal!;
-          if (signal.aborted) {
-            reject(new CodexLoginCancelledError());
-            return;
-          }
-          abortListener = () => reject(new CodexLoginCancelledError());
-          signal.addEventListener('abort', abortListener, { once: true });
-        })
-    : undefined;
-
   try {
-    const credentials = await loginOpenAICodex({
-      originator: 'listener-ai',
-      onAuth: (info) => {
-        void params.openUrl(info.url);
-      },
-      onPrompt: params.onPrompt,
-      onProgress: params.onProgress,
-      onManualCodeInput,
-    });
-    return credentials as CodexOAuthCredentials;
+    return await Promise.race([
+      onPrompt ? onPrompt({ message: prompt.message, signal }) : new Promise<string>(() => {}),
+      new Promise<never>((_resolve, reject) => {
+        abortListener = () => reject(new CodexLoginCancelledError());
+        signal.addEventListener('abort', abortListener, { once: true });
+      }),
+    ]);
   } finally {
-    // The manualPromise is left pending in pi-ai's success path; remove the
-    // listener so it doesn't outlive the AbortController.
-    if (abortListener && params.signal) {
-      params.signal.removeEventListener('abort', abortListener);
-    }
+    if (abortListener) signal.removeEventListener('abort', abortListener);
   }
 }

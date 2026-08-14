@@ -2,6 +2,11 @@
 // our codebase compiles to CommonJS, so we can't statically `import` it --
 // see src/esmImport.ts for the workaround. Types are imported normally and
 // erased at compile time.
+//
+// Runtime surface is the root `createModels()` API (not the deprecated
+// `/compat` entrypoint): one shared Models collection carrying only the two
+// providers Listener uses, which also skips /compat's eager evaluation of
+// every bundled provider catalog at module load.
 
 import { importEsm } from './esmImport';
 
@@ -36,14 +41,52 @@ export type {
 export type PiAiModel = Model<Api>;
 
 type PiAiModule = typeof import('@earendil-works/pi-ai');
+type GoogleProviderModule = typeof import('@earendil-works/pi-ai/providers/google');
+type CodexProviderModule = typeof import('@earendil-works/pi-ai/providers/openai-codex');
 
-let modulePromise: Promise<PiAiModule> | undefined;
-function loadPiAi(): Promise<PiAiModule> {
-  modulePromise ??= importEsm<PiAiModule>('@earendil-works/pi-ai');
-  return modulePromise;
+interface PiAiRuntime {
+  pi: PiAiModule;
+  models: ReturnType<PiAiModule['createModels']>;
+  registerBuiltinProviders: () => void;
 }
 
-import { type AiProvider, toPiAiProvider } from './aiProvider';
+let runtimePromise: Promise<PiAiRuntime> | undefined;
+
+function loadRuntime(): Promise<PiAiRuntime> {
+  runtimePromise ??= (async () => {
+    const [pi, google, codex] = await Promise.all([
+      importEsm<PiAiModule>('@earendil-works/pi-ai'),
+      importEsm<GoogleProviderModule>('@earendil-works/pi-ai/providers/google'),
+      importEsm<CodexProviderModule>('@earendil-works/pi-ai/providers/openai-codex'),
+    ]);
+    const models = pi.createModels();
+    const registerBuiltinProviders = () => {
+      models.setProvider(google.googleProvider());
+      models.setProvider(codex.openaiCodexProvider());
+    };
+    registerBuiltinProviders();
+    return { pi, models, registerBuiltinProviders };
+  })();
+  return runtimePromise;
+}
+
+// Test-only: replace one provider on the shared Models (faux injection).
+// Returns a restore hook that re-registers the built-in providers; call it in
+// afterEach or faux state leaks into the next test.
+export async function swapProviderForTest(
+  provider: Parameters<PiAiRuntime['models']['setProvider']>[0],
+): Promise<() => void> {
+  const { models, registerBuiltinProviders } = await loadRuntime();
+  models.setProvider(provider);
+  return registerBuiltinProviders;
+}
+
+import {
+  type AiProvider,
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_GEMINI_MODEL,
+  toPiAiProvider,
+} from './aiProvider';
 import { type CostSession, type UsageKind, recordUsage } from './services/usageTracker';
 
 /**
@@ -57,38 +100,29 @@ export interface UsageContext {
   transcriptionRef?: string;
 }
 
-// Explicit overrides for model ids pi-ai's bundled registry doesn't carry yet.
-// Mirrors pi-ai's upstream main-branch entry shape so the next published
-// version transparently shadows what we have here (m.getModel() wins).
-// Add entries as Google releases new models ahead of pi-ai's catch-up cycle.
-const CUSTOM_GOOGLE_MODELS: Record<string, PiAiModel> = {
-  'gemini-3.5-flash': {
-    id: 'gemini-3.5-flash',
-    name: 'Gemini 3.5 Flash',
-    api: 'google-generative-ai',
-    provider: 'google',
-    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-    reasoning: true,
-    thinkingLevelMap: { off: null },
-    input: ['text', 'image'],
-    cost: { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 },
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  } as unknown as PiAiModel,
+const DEFAULT_MODEL_BY_PROVIDER: Record<AiProvider, string> = {
+  gemini: DEFAULT_GEMINI_MODEL,
+  codex: DEFAULT_CODEX_MODEL,
 };
 
 export async function getModel(provider: AiProvider, modelId: string): Promise<PiAiModel> {
-  const m = await loadPiAi();
+  const { models } = await loadRuntime();
   const piId = toPiAiProvider(provider);
-  // pi-ai's getModel is typed against literal model ids per provider; our
-  // model strings come from user config. Cast is documented as the supported
-  // path for non-literal ids ("Custom Models" in pi-ai's README).
-  const registered = m.getModel(piId as never, modelId as never) as unknown as
-    | PiAiModel
-    | undefined;
+  const lookup = (id: string) => models.getModel(piId, id);
+  const registered = lookup(modelId);
   if (registered) return registered;
-  if (provider === 'gemini' && CUSTOM_GOOGLE_MODELS[modelId]) {
-    return CUSTOM_GOOGLE_MODELS[modelId];
+  // pi-ai bumps occasionally retire catalog entries (0.84 dropped several
+  // gpt-5.x ids). A configured id that vanished must not brick every summary
+  // and agent call -- fall back to the provider default and say so.
+  const fallbackId = DEFAULT_MODEL_BY_PROVIDER[provider];
+  if (fallbackId !== modelId) {
+    const fallback = lookup(fallbackId);
+    if (fallback) {
+      console.warn(
+        `[pi-ai] Unknown model ${piId}/${modelId}; falling back to ${fallbackId}. Update the configured model in Settings.`,
+      );
+      return fallback;
+    }
   }
   throw new Error(`Unknown pi-ai model: ${piId}/${modelId}`);
 }
@@ -159,8 +193,8 @@ async function runPiAiCall(
     `${tag} <- ${elapsed}ms stop=${stop} textChars=${textChars} usage=in:${response.usage?.input ?? '?'}/out:${response.usage?.output ?? '?'}${response.errorMessage ? ` errorMessage=${response.errorMessage.slice(0, 300)}` : ''}`,
   );
   // Record cost only on successful turns -- error/aborted paths throw below.
-  // pi-ai already priced this call against its bundled model table
-  // (see node_modules/@earendil-works/pi-ai/dist/models.generated.js); pass
+  // pi-ai already priced this call against its bundled per-provider catalog
+  // (node_modules/@earendil-works/pi-ai/dist/providers/data/*.json); pass
   // its `cost.total` through verbatim rather than re-implementing.
   if (usageContext && response.stopReason !== 'error' && response.stopReason !== 'aborted') {
     const usage = response.usage;
@@ -200,13 +234,13 @@ export async function complete(
   options?: ProviderStreamOptions,
   usageContext?: UsageContext,
 ): Promise<AssistantMessage> {
-  const m = await loadPiAi();
+  const { models } = await loadRuntime();
   const adjustedOptions = adjustOptionsForModel(model, options);
   return runPiAiCall(
     model,
     options?.signal,
     context,
-    () => m.complete(model, context, adjustedOptions),
+    () => models.complete(model, context, adjustedOptions as ProviderStreamOptions | undefined),
     usageContext,
   );
 }
@@ -220,7 +254,7 @@ export async function completeSimple(
   options?: SimpleStreamOptions,
   usageContext?: UsageContext,
 ): Promise<AssistantMessage> {
-  const m = await loadPiAi();
+  const { models } = await loadRuntime();
   const adjustedOptions = adjustOptionsForModel(
     model,
     options as ProviderStreamOptions | undefined,
@@ -229,14 +263,14 @@ export async function completeSimple(
     model,
     options?.signal,
     context,
-    () => m.completeSimple(model, context, adjustedOptions),
+    () => models.completeSimple(model, context, adjustedOptions),
     usageContext,
   );
 }
 
 export async function getTypeBox(): Promise<PiAiModule['Type']> {
-  const m = await loadPiAi();
-  return m.Type;
+  const { pi } = await loadRuntime();
+  return pi.Type;
 }
 
 // Reduce a pi-ai assistant message to its concatenated text content.

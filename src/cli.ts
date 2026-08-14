@@ -358,10 +358,23 @@ function createAgentService(config: ConfigService, dataPath: string): AgentServi
   });
 }
 
-function promptLine(message: string): Promise<string> {
+function promptLine(message: string, signal?: AbortSignal): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    // Close the interface on abort -- pi-ai races this manual-code prompt
+    // against the browser loopback, and a pending stdin read would otherwise
+    // keep the process alive after a successful browser login.
+    const onAbort = () => {
+      rl.close();
+      reject(new Error('Prompt cancelled.'));
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
     rl.question(`${message} `, (answer) => {
+      signal?.removeEventListener('abort', onAbort);
       rl.close();
       resolve(answer);
     });
@@ -398,7 +411,7 @@ async function handleCodex(args: string[]): Promise<void> {
     openUrl: (url) => {
       process.stderr.write(`Open this URL in your browser:\n${url}\n`);
     },
-    onPrompt: async (prompt) => await promptLine(prompt.message),
+    onPrompt: async (prompt) => await promptLine(prompt.message, prompt.signal),
     onProgress: (message) => process.stderr.write(`${message}\n`),
   });
   config.setCodexOAuth(credentials);

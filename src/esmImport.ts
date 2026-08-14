@@ -4,8 +4,8 @@
 // packages with ERR_REQUIRE_ESM. `Function(...)` evaluates at runtime, so the
 // literal `import()` survives untouched and stays an actual dynamic import.
 //
-// Use this for any ESM-only dependency (`@earendil-works/pi-ai`,
-// `@earendil-works/pi-ai/oauth`).
+// Use this for ESM-only dependencies such as `@earendil-works/pi-ai`, its
+// provider subpaths, and `@google/genai`.
 export const importEsm = (() => {
   const fn = new Function('specifier', 'return import(specifier)') as <T>(
     specifier: string,

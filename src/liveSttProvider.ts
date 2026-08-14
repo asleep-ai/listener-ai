@@ -1,12 +1,11 @@
-import {
-  GoogleGenAI,
-  Modality,
-  type LiveConnectConfig,
-  type LiveConnectParameters,
-  type LiveServerMessage,
-  type Session,
+import type {
+  LiveConnectConfig,
+  LiveConnectParameters,
+  LiveServerMessage,
+  Session,
 } from '@google/genai';
 import WebSocket, { type RawData } from 'ws';
+import { importEsm } from './esmImport';
 import {
   DEFAULT_GEMINI_LIVE_TRANSCRIPTION_MODEL,
   DEFAULT_GEMINI_LIVE_TRANSLATION_MODEL,
@@ -63,6 +62,13 @@ const OPENAI_REALTIME_URL = 'wss://api.openai.com/v1/realtime';
 const OPENAI_TRANSLATION_URL = 'wss://api.openai.com/v1/realtime/translations';
 const OPENAI_PCM_RATE = 24_000;
 const GEMINI_PCM_RATE = 16_000;
+type GoogleGenAiModule = typeof import('@google/genai');
+let googleGenAiPromise: Promise<GoogleGenAiModule> | undefined;
+
+function loadGoogleGenAi(): Promise<GoogleGenAiModule> {
+  googleGenAiPromise ??= importEsm<GoogleGenAiModule>('@google/genai');
+  return googleGenAiPromise;
+}
 
 export function resolveStreamingProvider(
   config: LiveSttProviderConfig,
@@ -477,9 +483,12 @@ const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 4_000;
 const RECONNECT_STABLE_MS = 30_000;
-// @google/genai resolves ai.live.connect from `onopen` and does not reject on a
-// pre-open error/close, so a dead network can leave it pending forever. Bound
-// each attempt so a wedged reconnect fails and the loop can retry or give up.
+// @google/genai (2.16) resolves ai.live.connect only after the server's
+// setupComplete message and never settles it when the socket errors/closes
+// first -- whether that close lands before onopen or in the open-but-not-set-up
+// window. Our onclose handler fails the attempt for both cases; the timeout
+// bounds the remaining silent hangs (dead network, no close event) so a wedged
+// attempt fails and the loop can retry or give up.
 const CONNECT_TIMEOUT_MS = 15_000;
 
 export type GeminiLiveConnect = (params: LiveConnectParameters) => Promise<Session>;
@@ -527,6 +536,7 @@ export class GeminiLiveSession implements LiveSttSession {
     const apiKey = config.geminiApiKey?.trim();
     if (!apiKey) throw new Error('Gemini API key is not configured.');
     const translate = config.translate !== false;
+    const { GoogleGenAI, Modality } = await loadGoogleGenAi();
     const ai = new GoogleGenAI({ apiKey });
     const connectFn = deps.connect ?? ((params) => ai.live.connect(params));
     const sleepFn = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -578,18 +588,22 @@ export class GeminiLiveSession implements LiveSttSession {
   }
 
   private async connect(isResume: boolean): Promise<void> {
-    // Only a connection that actually opens may drive the reconnect loop. A close
-    // before onopen means this attempt never came up (the pre-open SDK failure the
-    // timeout also guards): fail the connect so create()/the reconnect loop can
-    // fall back or retry, instead of spinning a background reconnect on a dead
-    // attempt. Once opened, a reconnect only ever starts from that connection's
-    // terminal onclose, so connections never overlap and the callbacks need no
-    // further per-connection guard (a GoAway pre-handoff would change that).
-    let opened = false;
+    // Only a fully established connection may drive the reconnect loop.
+    // @google/genai 2.16 resolves connect() only after the server's
+    // setupComplete message and leaves it pending forever when the socket
+    // closes earlier, so any close before our race settles -- pre-open or in
+    // the open-but-not-set-up window -- means this attempt never came up: fail
+    // the connect so create()/the reconnect loop can fall back or retry,
+    // instead of spinning a background reconnect over an attempt the caller is
+    // still waiting on. Once established, a reconnect only ever starts from
+    // that connection's terminal onclose, so connections never overlap and the
+    // callbacks need no further per-connection guard (a GoAway pre-handoff
+    // would change that).
+    let established = false;
     let timedOut = false;
-    let failPreOpen: (error: Error) => void = () => {};
-    const preOpenFailure = new Promise<never>((_, reject) => {
-      failPreOpen = reject;
+    let failConnect: (error: Error) => void = () => {};
+    const connectFailure = new Promise<never>((_, reject) => {
+      failConnect = reject;
     });
     const connectPromise = this.connectFn({
       model: this.model,
@@ -604,7 +618,6 @@ export class GeminiLiveSession implements LiveSttSession {
           // Ignore a late open from an attempt we already abandoned (timed out)
           // or from any attempt once the session has been closed.
           if (timedOut || this.closed) return;
-          opened = true;
           // Monotonic clock: connection-stability timing must not be skewed by
           // wall-clock adjustments (NTP, manual changes).
           this.lastConnectedAt = performance.now();
@@ -632,10 +645,15 @@ export class GeminiLiveSession implements LiveSttSession {
           // close) must not drive a reconnect over the connection that already
           // replaced it; likewise once the session is closed.
           if (timedOut || this.closed) return;
-          if (opened) {
+          if (established) {
             void this.handleDisconnect();
           } else {
-            failPreOpen(new Error(this.lastErrorMessage ?? 'Gemini Live closed before opening.'));
+            failConnect(
+              new Error(
+                this.lastErrorMessage ??
+                  'Gemini Live closed before the connection was established.',
+              ),
+            );
           }
         },
       },
@@ -651,7 +669,7 @@ export class GeminiLiveSession implements LiveSttSession {
     try {
       this.session = await Promise.race([
         connectPromise,
-        preOpenFailure,
+        connectFailure,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
             timedOut = true;
@@ -659,6 +677,7 @@ export class GeminiLiveSession implements LiveSttSession {
           }, this.connectTimeoutMs);
         }),
       ]);
+      established = true;
     } finally {
       if (timer) clearTimeout(timer);
     }
