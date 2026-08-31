@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import assert from 'node:assert/strict';
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import * as path from 'path';
-import { ConfigService } from './configService';
+import { ConfigService, DEFAULT_SUMMARY_PROMPT } from './configService';
 import { makeTempDir, rmDir } from './test-helpers';
 
 let workDir: string;
@@ -312,6 +312,105 @@ describe('ConfigService: saveConfig file mode + concurrent merge', () => {
     const onDisk = JSON.parse(fs.readFileSync(path.join(dataPath, 'config.json'), 'utf-8'));
     assert.equal(onDisk.summaryPrompt, undefined, 'unsetKey must win over disk-side value');
     assert.equal(onDisk.globalShortcut, 'CommandOrControl+Shift+L', 'other A-keys must survive');
+  });
+});
+
+describe('ConfigService: summary prompt default migration', () => {
+  const legacyDefault = `Based on this meeting transcript, provide:
+
+1. A concise meeting title in Korean (10-20 characters that captures the main topic)
+2. A concise summary in Korean (2-3 paragraphs)
+3. Key points discussed in Korean (as a bullet list)
+4. Action items mentioned in Korean (as a bullet list)
+5. An appropriate emoji that represents the meeting
+
+Return as JSON:
+{
+  "suggestedTitle": "concise title in Korean",
+  "summary": "summary in Korean",
+  "keyPoints": ["point 1", "point 2"],
+  "actionItems": ["action 1", "action 2"],
+  "emoji": "📝"
+}`;
+
+  it('keeps the structured prompt contract decision-useful and evidence-grounded', () => {
+    assert.match(DEFAULT_SUMMARY_PROMPT, /full transcript/);
+    assert.match(DEFAULT_SUMMARY_PROMPT, /operational and commercial detail/);
+    assert.match(DEFAULT_SUMMARY_PROMPT, /4-7 sections with 3-6 bullets/);
+    assert.match(
+      DEFAULT_SUMMARY_PROMPT,
+      /explicit assignment, accepted request, or first-person commitment/,
+    );
+    assert.match(
+      DEFAULT_SUMMARY_PROMPT,
+      /decision about desired system behavior is not itself an action item/,
+    );
+    assert.match(
+      DEFAULT_SUMMARY_PROMPT,
+      /Do not infer ownership from the topic, expertise, or apparent role/,
+    );
+    assert.match(DEFAULT_SUMMARY_PROMPT, /"Speaker 2", "Participant 5", or "참가자 2"/);
+    assert.match(
+      DEFAULT_SUMMARY_PROMPT,
+      /Keep unresolved issues in the summary unless the transcript explicitly creates a follow-up action/,
+    );
+    assert.doesNotMatch(
+      DEFAULT_SUMMARY_PROMPT,
+      /Convert unresolved issues into explicit alignment actions/,
+    );
+    assert.match(DEFAULT_SUMMARY_PROMPT, /exactly one primary owner/);
+    assert.match(DEFAULT_SUMMARY_PROMPT, /empty array/);
+    assert.match(DEFAULT_SUMMARY_PROMPT, /meeting's primary language/);
+    assert.match(DEFAULT_SUMMARY_PROMPT, /"summarySections"/);
+    assert.match(DEFAULT_SUMMARY_PROMPT, /"actionItemGroups"/);
+  });
+
+  it('replaces an exactly matching legacy default with the current default once', () => {
+    const dataPath = freshDataPath('summary-legacy-default');
+    const configPath = path.join(dataPath, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ summaryPrompt: legacyDefault }));
+
+    const cfg = new ConfigService(dataPath);
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+    assert.equal(cfg.getSummaryPrompt(), DEFAULT_SUMMARY_PROMPT);
+    assert.equal(onDisk.summaryPrompt, undefined);
+    assert.equal(onDisk.summaryPromptMigratedToStructured, true);
+  });
+
+  it('preserves a custom prompt while marking the migration complete', () => {
+    const dataPath = freshDataPath('summary-custom');
+    const configPath = path.join(dataPath, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ summaryPrompt: 'Return my custom schema.' }));
+
+    const cfg = new ConfigService(dataPath);
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+    assert.equal(cfg.getSummaryPrompt(), 'Return my custom schema.');
+    assert.equal(onDisk.summaryPrompt, 'Return my custom schema.');
+    assert.equal(onDisk.summaryPromptMigratedToStructured, true);
+  });
+
+  it('exposes the reset prompt without persisting the renderer-only field', () => {
+    const dataPath = freshDataPath('summary-reset-payload');
+    const cfg = new ConfigService(dataPath);
+
+    assert.equal(cfg.getAllConfig().defaultSummaryPrompt, DEFAULT_SUMMARY_PROMPT);
+    cfg.updateConfig({ defaultSummaryPrompt: 'renderer attempted write' });
+
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dataPath, 'config.json'), 'utf-8'));
+    assert.equal(onDisk.defaultSummaryPrompt, undefined);
+  });
+
+  it('does not persist the current default as a custom prompt', () => {
+    const dataPath = freshDataPath('summary-current-default');
+    const cfg = new ConfigService(dataPath);
+
+    cfg.updateConfig({ summaryPrompt: DEFAULT_SUMMARY_PROMPT });
+
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dataPath, 'config.json'), 'utf-8'));
+    assert.equal(onDisk.summaryPrompt, undefined);
+    assert.equal(cfg.getSummaryPrompt(), DEFAULT_SUMMARY_PROMPT);
   });
 });
 

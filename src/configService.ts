@@ -59,6 +59,8 @@ export interface AppConfig {
   globalShortcut?: string;
   knownWords?: string[];
   summaryPrompt?: string;
+  // Read-only renderer payload field. It is never persisted by updateConfig.
+  defaultSummaryPrompt?: string;
   maxRecordingMinutes?: number;
   recordingReminderMinutes?: number;
   minRecordingSeconds?: number;
@@ -74,9 +76,10 @@ export interface AppConfig {
   // re-run the migration, so a user who deliberately re-selects the old
   // model after upgrade keeps their choice.
   codexTranscriptionMigratedToDiarize?: boolean;
+  summaryPromptMigratedToStructured?: boolean;
 }
 
-export const DEFAULT_SUMMARY_PROMPT = `Based on this meeting transcript, provide:
+const LEGACY_DEFAULT_SUMMARY_PROMPT = `Based on this meeting transcript, provide:
 
 1. A concise meeting title in Korean (10-20 characters that captures the main topic)
 2. A concise summary in Korean (2-3 paragraphs)
@@ -90,6 +93,47 @@ Return as JSON:
   "summary": "summary in Korean",
   "keyPoints": ["point 1", "point 2"],
   "actionItems": ["action 1", "action 2"],
+  "emoji": "📝"
+}`;
+
+export const DEFAULT_SUMMARY_PROMPT = `Create a decision-useful shared meeting record from the full transcript in the meeting's primary language. Do not rely on a thin or pre-generated summary.
+
+Grounding rules:
+- Preserve important operational and commercial detail when present, including the current model, proposed end-to-end flow, participant roles, commercial terms, supply, billing, settlement, cancellation, refunds, rollout channels, channel ownership, account conflicts, risks, pilot scope, sequencing, success conditions, commitments, deadlines, and decision owners.
+- Include names, numbers, owners, and deadlines only when the transcript clearly supports them. Omit or qualify uncertain details instead of guessing.
+- Distinguish confirmed decisions and commitments from proposals, exploratory discussion, risks, and unresolved questions.
+
+Meeting summary rules:
+- Organize the summary by the meeting's actual major agendas; do not force irrelevant categories.
+- Use concise but sufficiently detailed bullets under each agenda heading.
+- For a substantive multi-agenda meeting, aim for 4-7 sections with 3-6 bullets each. Shorten when the meeting itself is simple.
+
+Action item rules:
+- Include an action only when the transcript contains an explicit assignment, accepted request, or first-person commitment to concrete future work. A decision about desired system behavior is not itself an action item.
+- Use a named person, company, or team as the owner only when the transcript explicitly establishes that ownership. Do not infer ownership from the topic, expertise, or apparent role. Never use transcript placeholders such as "Speaker 2", "Participant 5", or "참가자 2" as owners, and never infer a person's identity or role from a placeholder.
+- Group confirmed actions by owner and put each action under exactly one primary owner. Create a joint group only when shared ownership is explicit; do not duplicate jointly owned work under individual owners.
+- Arrange related actions in practical execution order and include the deliverable, dependency, and timing when explicitly discussed.
+- Keep unresolved issues in the summary unless the transcript explicitly creates a follow-up action. Never invent documentation, issue filing, review, alignment, or implementation work merely because it would be useful.
+- Use "Unassigned" in the primary language only when concrete future work is explicit but its owner is not. If there are no grounded action items, return actionItemGroups as an empty array.
+
+Also provide a concise meeting title, a short list of the most important key points without repeating every summary bullet, and an appropriate emoji.
+
+Return JSON using this core structure (additional fields requested by appended instructions may be included):
+{
+  "suggestedTitle": "concise title",
+  "summarySections": [
+    {
+      "heading": "agenda or topic",
+      "bullets": ["Discussion: ...", "Decision: ..."]
+    }
+  ],
+  "keyPoints": ["important point"],
+  "actionItemGroups": [
+    {
+      "owner": "responsible company, team, or person",
+      "items": ["action item"]
+    }
+  ],
   "emoji": "📝"
 }`;
 
@@ -139,12 +183,19 @@ export class ConfigService {
   // next ConfigService construction sees the marker and skips the
   // migration entirely instead of clobbering their explicit choice.
   private migrateLegacyDefaults(): void {
-    if (this.config.codexTranscriptionMigratedToDiarize) return;
-    if (this.config.codexTranscriptionModel === 'gpt-4o-transcribe') {
-      this.setKey('codexTranscriptionModel', undefined);
+    if (!this.config.codexTranscriptionMigratedToDiarize) {
+      if (this.config.codexTranscriptionModel === 'gpt-4o-transcribe') {
+        this.setKey('codexTranscriptionModel', undefined);
+      }
+      this.setKey('codexTranscriptionMigratedToDiarize', true);
     }
-    this.setKey('codexTranscriptionMigratedToDiarize', true);
-    this.saveConfig();
+    if (!this.config.summaryPromptMigratedToStructured) {
+      if (this.config.summaryPrompt === LEGACY_DEFAULT_SUMMARY_PROMPT) {
+        this.setKey('summaryPrompt', undefined);
+      }
+      this.setKey('summaryPromptMigratedToStructured', true);
+    }
+    if (this.dirtyKeys.size > 0) this.saveConfig();
   }
 
   private loadConfig(): void {
@@ -570,7 +621,11 @@ export class ConfigService {
   }
 
   setSummaryPrompt(prompt: string): void {
-    this.setKey('summaryPrompt', prompt);
+    const normalized = prompt.trim();
+    this.setKey(
+      'summaryPrompt',
+      normalized && normalized !== DEFAULT_SUMMARY_PROMPT ? normalized : undefined,
+    );
     this.saveConfig();
   }
 
@@ -618,6 +673,15 @@ export class ConfigService {
         this.setKey('liveSttProvider', provider);
         continue;
       }
+      if (key === 'defaultSummaryPrompt') continue;
+      if (key === 'summaryPrompt') {
+        const prompt = typeof value === 'string' ? value.trim() : '';
+        this.setKey(
+          'summaryPrompt',
+          prompt && prompt !== DEFAULT_SUMMARY_PROMPT ? prompt : undefined,
+        );
+        continue;
+      }
       this.setKey(key as keyof AppConfig, value as AppConfig[keyof AppConfig]);
     }
     this.saveConfig();
@@ -657,6 +721,7 @@ export class ConfigService {
       globalShortcut: this.getGlobalShortcut(),
       knownWords: this.getKnownWords(),
       summaryPrompt: this.getSummaryPrompt(),
+      defaultSummaryPrompt: DEFAULT_SUMMARY_PROMPT,
       maxRecordingMinutes: this.getMaxRecordingMinutes(),
       recordingReminderMinutes: this.getRecordingReminderMinutes(),
       minRecordingSeconds: this.getMinRecordingSeconds(),

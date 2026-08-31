@@ -367,7 +367,7 @@ const MAX_QUALITY_NOTES = 10;
 const MAX_QUALITY_NOTE_CHARS = 300;
 
 // Normalize the summary model's optional `transcriptQualityNotes` JSON field
-// into a bounded string list. The prompt asks for short Korean sentences, but
+// into a bounded string list. The prompt asks for short sentences in the meeting's primary language, but
 // models sometimes return objects or nest unexpectedly -- tolerate that
 // without letting a malformed response bloat meta.json.
 export function normalizeTranscriptQualityNotes(raw: unknown): string[] {

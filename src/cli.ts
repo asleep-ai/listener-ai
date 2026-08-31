@@ -825,6 +825,8 @@ async function handleExport(args: string[]): Promise<void> {
       summary: data.summary || '',
       keyPoints: data.keyPoints ?? [],
       actionItems: data.actionItems ?? [],
+      summarySections: data.summarySections ?? [],
+      actionItemGroups: data.actionItemGroups ?? [],
       customFields: data.customFields ?? {},
       ...(data.liveNotes ? { liveNotes: data.liveNotes } : {}),
       ...(data.highlights ? { highlights: data.highlights } : {}),

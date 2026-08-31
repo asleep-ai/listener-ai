@@ -10,7 +10,6 @@ import {
   type ModelField,
   chooseInitial,
 } from '../services/model-options';
-import { DEFAULT_SUMMARY_PROMPT } from '../state';
 import type { GoogleSyncProgress } from '../electronAPI';
 import { formatUsd } from '../../src/usageFormat';
 
@@ -43,6 +42,7 @@ let testSlackWebhookBtn: HTMLButtonElement | null = null;
 let slackWebhookStatus: HTMLElement | null = null;
 let globalShortcutInput: HTMLInputElement | null = null;
 let knownWordsContainer: HTMLElement | null = null;
+let defaultSummaryPrompt = '';
 let knownWordsField: HTMLInputElement | null = null;
 let knownWordsValues: string[] = [];
 let aiPane: HTMLElement | null = null;
@@ -336,6 +336,7 @@ export async function showConfigModal(): Promise<void> {
     recordingReminderMinutes?: number | string;
     minRecordingSeconds?: number | string;
     summaryPrompt?: string;
+    defaultSummaryPrompt?: string;
   };
 
   // Pre-fill the form if values exist
@@ -440,15 +441,16 @@ export async function showConfigModal(): Promise<void> {
 
   // Pre-fill summary prompt
   const summaryPromptInput = document.getElementById('summaryPrompt') as HTMLTextAreaElement | null;
+  defaultSummaryPrompt = config.defaultSummaryPrompt || '';
   if (summaryPromptInput) {
-    summaryPromptInput.value = config.summaryPrompt || DEFAULT_SUMMARY_PROMPT;
+    summaryPromptInput.value = config.summaryPrompt || defaultSummaryPrompt;
   }
 
   const resetPromptBtn = document.getElementById('resetPrompt') as HTMLButtonElement | null;
   if (resetPromptBtn) {
     resetPromptBtn.onclick = () => {
       if (summaryPromptInput) {
-        summaryPromptInput.value = DEFAULT_SUMMARY_PROMPT;
+        summaryPromptInput.value = defaultSummaryPrompt;
       }
     };
   }
@@ -997,7 +999,7 @@ export function setupConfigModal(): void {
         crashReportingEnabled: !!crashReportingEnabledInput?.checked,
         globalShortcut: globalShortcut,
         knownWords: knownWords,
-        summaryPrompt: summaryPrompt || DEFAULT_SUMMARY_PROMPT,
+        summaryPrompt: summaryPrompt === defaultSummaryPrompt ? '' : summaryPrompt,
         maxRecordingMinutes: maxRecordingMinutes,
         recordingReminderMinutes: recordingReminderMinutes,
         minRecordingSeconds: minRecordingSeconds,

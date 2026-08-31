@@ -13,6 +13,7 @@ import {
 import { mimeTypeForExtension } from './audioFormats';
 import { type CodexOAuthCredentials } from './codexOAuth';
 import { CodexOAuthHolder } from './codexOAuthHolder';
+import { DEFAULT_SUMMARY_PROMPT } from './configService';
 import {
   EmptyTranscriptionError,
   isDiarizeModel,
@@ -121,8 +122,8 @@ ${lines.join('\n')}
 For every flagged moment above, write one entry in a JSON array named "highlights". Each entry must include:
 - "offsetMs": the exact integer from the input
 - "userText": the user's typed text, copied verbatim
-- "subtitle": a short topic label in Korean (3-7 words) summarising what was being discussed at that timestamp
-- "bullets": 2-5 short Korean bullet strings categorising the discussion at that point. Prefix each bullet with one of these categories when applicable, omitting categories that don't fit: "결정 사항:", "주요 인사이트:", "실행 항목:", "식별된 리스크:". If none of the categories fit, just write the bullet without a prefix.
+- "subtitle": a short topic label (3-7 words) in the meeting's primary language, summarising what was being discussed at that timestamp
+- "bullets": 2-5 short bullet strings in the meeting's primary language, categorising the discussion at that point. Prefix each bullet with a natural-language equivalent of Decision, Key insight, Action item, or Identified risk when applicable. If none fit, write the bullet without a prefix.
 
 Use the transcript as the ground truth -- if the user's typed text doesn't clearly match anything in the transcript, fall back to the meeting content nearest the given timestamp. Return the highlights array as an additional key alongside the other fields in the JSON.`;
 }
@@ -175,6 +176,8 @@ export interface TranscriptionResult {
   actionItems: string[];
   emoji: string;
   suggestedTitle?: string;
+  summarySections?: SummarySection[];
+  actionItemGroups?: ActionItemGroup[];
   customFields?: Record<string, unknown>;
   // Notes captured live by the user during the recording. Not produced by
   // Gemini -- attached by main after transcription returns.
@@ -189,6 +192,68 @@ export interface TranscriptionResult {
   // Aggregated from per-step usage telemetry via usageTracker. Absent when
   // every sub-call returned no usage (e.g. test stubs).
   cost?: CostSnapshot;
+}
+
+export interface SummarySection {
+  heading: string;
+  bullets: string[];
+}
+
+export interface ActionItemGroup {
+  owner: string;
+  items: string[];
+}
+
+function normalizeString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(normalizeString).filter((item) => item.length > 0);
+}
+
+const TRANSCRIPT_PLACEHOLDER_OWNER = /^(?:speaker|participant|참가자)\s*#?\s*\d+$/iu;
+
+function normalizeSummarySections(value: unknown): SummarySection[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const sections: SummarySection[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') return undefined;
+    const heading = normalizeString((entry as { heading?: unknown }).heading);
+    const rawBullets = (entry as { bullets?: unknown }).bullets;
+    if (
+      !heading ||
+      !Array.isArray(rawBullets) ||
+      rawBullets.length === 0 ||
+      !rawBullets.every((bullet) => typeof bullet === 'string' && bullet.trim())
+    ) {
+      return undefined;
+    }
+    sections.push({ heading, bullets: rawBullets.map((bullet) => bullet.trim()) });
+  }
+  return sections;
+}
+
+function normalizeActionItemGroups(value: unknown): ActionItemGroup[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const groups: ActionItemGroup[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') return undefined;
+    const owner = normalizeString((entry as { owner?: unknown }).owner);
+    const rawItems = (entry as { items?: unknown }).items;
+    if (
+      !owner ||
+      !Array.isArray(rawItems) ||
+      rawItems.length === 0 ||
+      !rawItems.every((item) => typeof item === 'string' && item.trim())
+    ) {
+      return undefined;
+    }
+    if (TRANSCRIPT_PLACEHOLDER_OWNER.test(owner)) continue;
+    groups.push({ owner, items: rawItems.map((item) => item.trim()) });
+  }
+  return groups.length > 0 ? groups : undefined;
 }
 
 interface QualityGatedTranscript {
@@ -452,7 +517,7 @@ IMPORTANT:
 // is advisory metadata alongside the separate cleanup pass.
 const TRANSCRIPT_QUALITY_PROMPT_BLOCK = `Additionally, before summarizing, review the transcript for transcription artifacts: sections where the same sentence or phrase repeats verbatim many times, boilerplate unrelated to the surrounding discussion (e.g. broadcast closing phrases on silence), or content that clearly breaks the flow of the meeting. These can be speech-to-text errors, not real speech.
 
-- If any exist, add a "transcriptQualityNotes" array to the JSON response. Each item is one short Korean sentence describing the suspicious section and why it looks like a transcription artifact.
+- If any exist, add a "transcriptQualityNotes" array to the JSON response. Each item is one short sentence in the meeting's primary language describing the suspicious section and why it looks like a transcription artifact.
 - If there are none, omit the field.
 - Never rewrite or remove transcript content based on this review.
 - Base the summary, key points, and action items only on content you judge to be genuine speech; do not summarize suspected artifacts as if they were discussion content.`;
@@ -655,15 +720,9 @@ export class GeminiService {
       this.provider === 'codex' ? await this.getCodexToken() : this.requireGeminiApiKey();
 
     const model = await getModel(this.provider, modelId);
-    // Force formal Korean register (합니다체). Codex (GPT-5.x) defaults to
-    // mixed/해요체 in Korean output; Gemini tends to 합니다체 already but the
-    // explicit constraint keeps both providers consistent. Applied as a system
-    // prompt so it overrides whatever tone the user's customSummaryPrompt
-    // implies for summary/keyPoints/actionItems bodies.
-    const koreanToneSystem =
-      '모든 한국어 출력은 격식체(합니다/입니다 어미)로 작성하세요. 반말이나 해요체를 쓰지 마세요. summary, keyPoints, actionItems 본문 모두 동일하게 적용합니다.';
     const context: Context = {
-      systemPrompt: koreanToneSystem,
+      systemPrompt:
+        'Follow the requested output contract and ground the response in the transcript.',
       messages: [
         {
           role: 'user',
@@ -1304,24 +1363,7 @@ Requirements:
         progressCallback(85, 'Generating summary and key points...');
       }
 
-      const basePrompt =
-        customSummaryPrompt ||
-        `Based on this meeting transcript, provide:
-
-1. A concise meeting title in Korean (10-20 characters that captures the main topic)
-2. A concise summary in Korean (2-3 paragraphs)
-3. Key points discussed in Korean (as a bullet list)
-4. Action items mentioned in Korean (as a bullet list)
-5. An appropriate emoji that represents the meeting
-
-Return as JSON:
-{
-  "suggestedTitle": "concise title in Korean",
-  "summary": "summary in Korean",
-  "keyPoints": ["point 1", "point 2"],
-  "actionItems": ["action 1", "action 2"],
-  "emoji": "📝"
-}`;
+      const basePrompt = customSummaryPrompt || DEFAULT_SUMMARY_PROMPT;
 
       const enrichableNotes = (liveNotes ?? []).filter((n) => (n.text ?? '').trim().length > 0);
       const highlightsBlock = buildHighlightsPromptBlock(enrichableNotes);
@@ -1338,7 +1380,15 @@ Return as JSON:
         costSession,
       );
 
-      let summaryData = {
+      let summaryData: {
+        suggestedTitle: string;
+        summary: string;
+        keyPoints: string[];
+        actionItems: string[];
+        emoji: string;
+        summarySections?: SummarySection[];
+        actionItemGroups?: ActionItemGroup[];
+      } = {
         suggestedTitle: '',
         summary: '',
         keyPoints: [] as string[],
@@ -1351,6 +1401,8 @@ Return as JSON:
         'summary',
         'keyPoints',
         'actionItems',
+        'summarySections',
+        'actionItemGroups',
         'emoji',
         'highlights',
         'transcriptQualityNotes',
@@ -1360,8 +1412,37 @@ Return as JSON:
       let rawQualityNotes: unknown;
 
       try {
-        const parsed = JSON.parse(stripJsonFences(summaryText));
-        summaryData = parsed;
+        const parsed = JSON.parse(stripJsonFences(summaryText)) as Record<string, unknown>;
+        const summarySections = normalizeSummarySections(parsed.summarySections);
+        const actionItemGroups = normalizeActionItemGroups(parsed.actionItemGroups);
+        const legacySummary = normalizeString(parsed.summary);
+        const keyPoints = normalizeStringArray(parsed.keyPoints);
+        const legacyActionItems = normalizeStringArray(parsed.actionItems);
+        if (!legacySummary && !summarySections) {
+          throw new TypeError('Summary output contains no valid summary content.');
+        }
+        summaryData = {
+          suggestedTitle: normalizeString(parsed.suggestedTitle),
+          summary:
+            legacySummary ||
+            summarySections
+              ?.map(
+                (section) =>
+                  `${section.heading}\n${section.bullets.map((bullet) => `- ${bullet}`).join('\n')}`,
+              )
+              .join('\n\n') ||
+            '',
+          keyPoints,
+          actionItems:
+            legacyActionItems.length > 0
+              ? legacyActionItems
+              : (actionItemGroups?.flatMap((group) =>
+                  group.items.map((item) => `${group.owner}: ${item}`),
+                ) ?? []),
+          emoji: normalizeString(parsed.emoji) || '📝',
+          summarySections,
+          actionItemGroups,
+        };
         rawHighlights = (parsed as { highlights?: unknown }).highlights;
         rawQualityNotes = (parsed as { transcriptQualityNotes?: unknown }).transcriptQualityNotes;
 
@@ -1374,11 +1455,7 @@ Return as JSON:
       } catch (e) {
         console.error('Error parsing summary JSON:', e);
         reportError(e, { operation: 'summary.parse', severity: 'warning' });
-        // Try to extract manually
-        const summaryMatch = summaryText.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
-        if (summaryMatch) {
-          summaryData.summary = summaryMatch[1].replace(/\\n/g, '\n');
-        }
+        throw new Error('The summary model returned invalid JSON.', { cause: e });
       }
 
       const highlights = mergeHighlights(liveNotes, rawHighlights);
@@ -1420,6 +1497,8 @@ Return as JSON:
           actionItems: summaryData.actionItems,
           emoji: summaryData.emoji,
           suggestedTitle: summaryData.suggestedTitle,
+          summarySections: summaryData.summarySections,
+          actionItemGroups: summaryData.actionItemGroups,
           customFields: Object.keys(customFields).length > 0 ? customFields : undefined,
           highlights,
         },

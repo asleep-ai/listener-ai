@@ -1,6 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type { HighlightEntry, TranscriptionResult } from './geminiService';
+import type {
+  ActionItemGroup,
+  HighlightEntry,
+  SummarySection,
+  TranscriptionResult,
+} from './geminiService';
 import type { CostSnapshot } from './services/usageTracker';
 
 /** One timestamped note captured while recording. Empty `text` = bare flag. */
@@ -96,6 +101,8 @@ export interface MeetingMetaV2 {
   audioFile?: string; // absolute path (kept compatible with v1.audioFilePath)
   cost?: CostSnapshot;
   customFields?: Record<string, unknown>;
+  summarySections?: SummarySection[];
+  actionItemGroups?: ActionItemGroup[];
   merge?: { sourceIds: string[] };
   exports?: {
     notion?: { pageUrl: string; uploadedAt?: string };
@@ -200,8 +207,10 @@ export function camelToLabel(key: string): string {
  * TranscriptionResult and reader-side ReadTranscriptionResult) satisfy it. */
 export type FormatSummaryInput = {
   summary?: string;
+  summarySections?: SummarySection[];
   keyPoints?: string[];
   actionItems?: string[];
+  actionItemGroups?: ActionItemGroup[];
   customFields?: Record<string, unknown>;
 };
 
@@ -226,7 +235,14 @@ export function formatSummary(
     lines.push('');
   }
 
-  if (result.summary) {
+  if (result.summarySections?.length) {
+    lines.push('## Summary\n');
+    for (const section of result.summarySections) {
+      lines.push(`### ${section.heading}`);
+      for (const bullet of section.bullets) lines.push(`- ${bullet}`);
+      lines.push('');
+    }
+  } else if (result.summary) {
     lines.push('## Summary\n');
     lines.push(`${result.summary}\n`);
   }
@@ -239,7 +255,14 @@ export function formatSummary(
     lines.push('');
   }
 
-  if (result.actionItems?.length) {
+  if (result.actionItemGroups?.length) {
+    lines.push('## Action Items\n');
+    for (const group of result.actionItemGroups) {
+      lines.push(`### ${group.owner}`);
+      for (const item of group.items) lines.push(`- ${item}`);
+      lines.push('');
+    }
+  } else if (result.actionItems?.length) {
     lines.push('## Action Items\n');
     for (const item of result.actionItems) {
       lines.push(`- ${item}`);
@@ -487,6 +510,43 @@ export function parseHighlightsField(raw: unknown): HighlightEntry[] | undefined
   }
 }
 
+function parseSummarySectionsField(raw: unknown): SummarySection[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const sections: SummarySection[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') return undefined;
+    const heading = (item as { heading?: unknown }).heading;
+    const bullets = (item as { bullets?: unknown }).bullets;
+    if (
+      typeof heading !== 'string' ||
+      !heading.trim() ||
+      !Array.isArray(bullets) ||
+      bullets.length === 0
+    ) {
+      return undefined;
+    }
+    if (!bullets.every((bullet) => typeof bullet === 'string' && bullet.trim())) return undefined;
+    sections.push({ heading: heading.trim(), bullets: bullets.map((bullet) => bullet.trim()) });
+  }
+  return sections;
+}
+
+function parseActionItemGroupsField(raw: unknown): ActionItemGroup[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const groups: ActionItemGroup[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') return undefined;
+    const owner = (item as { owner?: unknown }).owner;
+    const items = (item as { items?: unknown }).items;
+    if (typeof owner !== 'string' || !owner.trim() || !Array.isArray(items) || items.length === 0) {
+      return undefined;
+    }
+    if (!items.every((entry) => typeof entry === 'string' && entry.trim())) return undefined;
+    groups.push({ owner: owner.trim(), items: items.map((entry) => entry.trim()) });
+  }
+  return groups;
+}
+
 function yamlUnquote(value: string): string {
   if (value.startsWith('"') && value.endsWith('"')) {
     return value
@@ -591,6 +651,12 @@ function writeV2Files(folderPath: string, inputs: V2WriteInputs): void {
   if (inputs.result.cost && inputs.result.cost.breakdown.length > 0) meta.cost = inputs.result.cost;
   if (inputs.result.customFields && Object.keys(inputs.result.customFields).length > 0) {
     meta.customFields = inputs.result.customFields;
+  }
+  if (inputs.result.summarySections?.length) {
+    meta.summarySections = inputs.result.summarySections;
+  }
+  if (inputs.result.actionItemGroups?.length) {
+    meta.actionItemGroups = inputs.result.actionItemGroups;
   }
   if (inputs.mergedFrom?.length) {
     meta.merge = { sourceIds: inputs.mergedFrom };
@@ -792,6 +858,8 @@ export interface ReadTranscriptionResult {
   summary: string;
   keyPoints?: string[];
   actionItems?: string[];
+  summarySections?: SummarySection[];
+  actionItemGroups?: ActionItemGroup[];
   customFields?: Record<string, unknown>;
   audioFilePath?: string;
   transcribedAt?: string;
@@ -898,6 +966,8 @@ export async function readTranscription(
       summary: (summary ?? '').trim(),
       keyPoints: keyPoints && keyPoints.length > 0 ? keyPoints : undefined,
       actionItems: actionItems && actionItems.length > 0 ? actionItems : undefined,
+      summarySections: parseSummarySectionsField(meta.summarySections),
+      actionItemGroups: parseActionItemGroupsField(meta.actionItemGroups),
       customFields: meta.customFields,
       audioFilePath: meta.audioFile,
       transcribedAt: meta.transcribedAt,

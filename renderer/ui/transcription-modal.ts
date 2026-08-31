@@ -124,8 +124,10 @@ export function showSavedTranscript(
     currentTranscriptionData = {
       transcript: metadata.transcript,
       summary: metadata.summary,
+      summarySections: metadata.summarySections,
       keyPoints: metadata.keyPoints || [],
       actionItems: metadata.actionItems || [],
+      actionItemGroups: metadata.actionItemGroups,
       suggestedTitle: metadata.suggestedTitle,
       customFields: metadata.customFields,
       emoji: metadata.emoji,
