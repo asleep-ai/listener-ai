@@ -279,6 +279,7 @@ export function formatSummary(
 
   if (result.customFields) {
     for (const [key, value] of Object.entries(result.customFields)) {
+      if (key === 'transcriptQuality') continue;
       const label = camelToLabel(key);
       lines.push(`## ${label}\n`);
       if (Array.isArray(value)) {
