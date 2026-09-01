@@ -109,7 +109,7 @@ loops, then logs and persists the verdict using metrics only.
 ### 5. Summary + piggybacked review
 
 The summary call to the provider's large model also returns a
-`transcriptQualityNotes` JSON array: short Korean descriptions of sections
+`transcriptQualityNotes` JSON array: short descriptions in the meeting's primary language of sections
 that look like transcription artifacts. These are notes only. The model keeps
 suspected artifacts out of the summary but never rewrites the transcript.
 This adds no API calls.

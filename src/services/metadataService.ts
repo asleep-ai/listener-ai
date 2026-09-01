@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
+import type { ActionItemGroup, SummarySection } from '../geminiService';
 import type { LiveNote } from '../outputService';
 
 interface RecordingMetadata {
@@ -11,8 +12,10 @@ interface RecordingMetadata {
   // Old format fields (kept for backward compat)
   transcript?: string;
   summary?: string;
+  summarySections?: SummarySection[];
   keyPoints?: string[];
   actionItems?: string[];
+  actionItemGroups?: ActionItemGroup[];
   suggestedTitle?: string;
   transcribedAt?: string;
   customFields?: Record<string, unknown>;

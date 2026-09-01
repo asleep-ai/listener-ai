@@ -8,6 +8,8 @@ export interface NotionConfig {
   databaseId: string;
 }
 
+const NOTION_CHILDREN_BATCH_SIZE = 100;
+
 export class NotionService {
   private notion: Client;
   private databaseId: string;
@@ -56,32 +58,41 @@ export class NotionService {
       // Create rich text blocks for the page content
       const children: BlockObjectRequest[] = [];
 
-      // Add Summary section
-      if (transcriptionResult.summary) {
-        children.push(
-          {
-            type: 'heading_2',
-            heading_2: {
-              rich_text: [
-                {
-                  type: 'text',
-                  text: { content: '📝 Summary' },
+      // Add Summary section. Structured sections take precedence, while
+      // legacy recordings continue to use the flat summary paragraph.
+      if (transcriptionResult.summarySections?.length || transcriptionResult.summary) {
+        children.push({
+          type: 'heading_2',
+          heading_2: {
+            rich_text: [{ type: 'text', text: { content: '📝 Summary' } }],
+          },
+        } as BlockObjectRequest);
+
+        if (transcriptionResult.summarySections?.length) {
+          for (const section of transcriptionResult.summarySections) {
+            children.push({
+              type: 'heading_3',
+              heading_3: {
+                rich_text: [{ type: 'text', text: { content: section.heading.slice(0, 1900) } }],
+              },
+            } as BlockObjectRequest);
+            for (const bullet of section.bullets) {
+              children.push({
+                type: 'bulleted_list_item',
+                bulleted_list_item: {
+                  rich_text: [{ type: 'text', text: { content: bullet.slice(0, 1900) } }],
                 },
-              ],
-            },
-          } as BlockObjectRequest,
-          {
+              } as BlockObjectRequest);
+            }
+          }
+        } else {
+          children.push({
             type: 'paragraph',
             paragraph: {
-              rich_text: [
-                {
-                  type: 'text',
-                  text: { content: transcriptionResult.summary },
-                },
-              ],
+              rich_text: [{ type: 'text', text: { content: transcriptionResult.summary } }],
             },
-          } as BlockObjectRequest,
-        );
+          } as BlockObjectRequest);
+        }
       }
 
       // Add Key Points section
@@ -115,7 +126,7 @@ export class NotionService {
       }
 
       // Add Action Items section
-      if (transcriptionResult.actionItems && transcriptionResult.actionItems.length > 0) {
+      if (transcriptionResult.actionItemGroups?.length || transcriptionResult.actionItems?.length) {
         children.push({
           type: 'heading_2',
           heading_2: {
@@ -128,21 +139,36 @@ export class NotionService {
           },
         } as BlockObjectRequest);
 
-        // Add each action item as a to-do
-        transcriptionResult.actionItems.forEach((item) => {
-          children.push({
-            type: 'to_do',
-            to_do: {
-              rich_text: [
-                {
-                  type: 'text',
-                  text: { content: item },
+        if (transcriptionResult.actionItemGroups?.length) {
+          for (const group of transcriptionResult.actionItemGroups) {
+            children.push({
+              type: 'heading_3',
+              heading_3: {
+                rich_text: [{ type: 'text', text: { content: group.owner.slice(0, 1900) } }],
+              },
+            } as BlockObjectRequest);
+            for (const item of group.items) {
+              children.push({
+                type: 'to_do',
+                to_do: {
+                  rich_text: [{ type: 'text', text: { content: item.slice(0, 1900) } }],
+                  checked: false,
                 },
-              ],
-              checked: false,
-            },
-          } as BlockObjectRequest);
-        });
+              } as BlockObjectRequest);
+            }
+          }
+        } else {
+          // Add each legacy action item as a to-do.
+          transcriptionResult.actionItems.forEach((item) => {
+            children.push({
+              type: 'to_do',
+              to_do: {
+                rich_text: [{ type: 'text', text: { content: item } }],
+                checked: false,
+              },
+            } as BlockObjectRequest);
+          });
+        }
       }
 
       // Highlights section -- prefer the AI-enriched view (per-moment title +
@@ -300,8 +326,17 @@ export class NotionService {
           emoji: (transcriptionResult.emoji || '📝') as any,
         },
         properties: properties,
-        children: children,
+        children: children.slice(0, NOTION_CHILDREN_BATCH_SIZE),
       });
+
+      for (let offset = NOTION_CHILDREN_BATCH_SIZE; offset < children.length;) {
+        const batch = children.slice(offset, offset + NOTION_CHILDREN_BATCH_SIZE);
+        await this.notion.blocks.children.append({
+          block_id: response.id,
+          children: batch,
+        });
+        offset += batch.length;
+      }
 
       console.log('Notion page created successfully:', response.id);
 

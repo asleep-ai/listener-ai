@@ -83,12 +83,60 @@ function renderHighlightLines(data: TranscriptionData): string[] {
   return liveNotesToLines(data.liveNotes);
 }
 
+type SummarySection = { heading: string; bullets: string[] };
+type ActionItemGroup = { owner: string; items: string[] };
+
+function validSummarySections(value: unknown): SummarySection[] {
+  if (!Array.isArray(value) || value.length === 0) return [];
+  const sections: SummarySection[] = [];
+  for (const section of value) {
+    if (!section || typeof section !== 'object') return [];
+    const heading = (section as { heading?: unknown }).heading;
+    const bullets = (section as { bullets?: unknown }).bullets;
+    if (typeof heading !== 'string' || !heading.trim() || !Array.isArray(bullets)) return [];
+    const validBullets = bullets.filter(
+      (bullet): bullet is string => typeof bullet === 'string' && !!bullet.trim(),
+    );
+    if (validBullets.length !== bullets.length || validBullets.length === 0) return [];
+    sections.push({
+      heading: heading.trim(),
+      bullets: validBullets.map((bullet) => bullet.trim()),
+    });
+  }
+  return sections;
+}
+
+function validActionItemGroups(value: unknown): ActionItemGroup[] {
+  if (!Array.isArray(value) || value.length === 0) return [];
+  const groups: ActionItemGroup[] = [];
+  for (const group of value) {
+    if (!group || typeof group !== 'object') return [];
+    const owner = (group as { owner?: unknown }).owner;
+    const items = (group as { items?: unknown }).items;
+    if (typeof owner !== 'string' || !owner.trim() || !Array.isArray(items)) return [];
+    const validItems = items.filter(
+      (item): item is string => typeof item === 'string' && !!item.trim(),
+    );
+    if (validItems.length !== items.length || validItems.length === 0) return [];
+    groups.push({ owner: owner.trim(), items: validItems.map((item) => item.trim()) });
+  }
+  return groups;
+}
+
 // Convert structured transcription data to a markdown string
 export function structuredToMarkdown(data: TranscriptionData, section: string): string {
   const lines: string[] = [];
 
   if (section === 'all' || section === 'summary') {
-    if (data.summary) {
+    const summarySections = validSummarySections(data.summarySections);
+    if (summarySections.length > 0) {
+      if (section === 'all') lines.push('## Summary\n');
+      for (const summarySection of summarySections) {
+        lines.push(`### ${summarySection.heading}`);
+        for (const bullet of summarySection.bullets) lines.push(`- ${bullet}`);
+        lines.push('');
+      }
+    } else if (data.summary) {
       if (section === 'all') lines.push('## Summary\n');
       lines.push(data.summary);
       lines.push('');
@@ -106,11 +154,17 @@ export function structuredToMarkdown(data: TranscriptionData, section: string): 
   }
 
   if (section === 'all' || section === 'actions') {
-    if (data.actionItems?.length) {
+    const actionItemGroups = validActionItemGroups(data.actionItemGroups);
+    if (actionItemGroups.length > 0) {
       if (section === 'all') lines.push('## Action Items\n');
-      for (const item of data.actionItems) {
-        lines.push(`- ${item}`);
+      for (const group of actionItemGroups) {
+        lines.push(`### ${group.owner}`);
+        for (const item of group.items) lines.push(`- ${item}`);
+        lines.push('');
       }
+    } else if (data.actionItems?.length) {
+      if (section === 'all') lines.push('## Action Items\n');
+      for (const item of data.actionItems) lines.push(`- ${item}`);
       lines.push('');
     }
   }
@@ -171,8 +225,12 @@ export function renderDynamicFields(data: TranscriptionData): void {
   if (data.keyPoints?.length) {
     fields.push({ key: 'keypoints', label: 'Key Points', value: data.keyPoints });
   }
-  if (data.actionItems?.length) {
-    fields.push({ key: 'actions', label: 'Action Items', value: data.actionItems });
+  if (validActionItemGroups(data.actionItemGroups).length > 0 || data.actionItems?.length) {
+    fields.push({
+      key: 'actions',
+      label: 'Action Items',
+      value: data.actionItemGroups || data.actionItems,
+    });
   }
   const hasHighlights = Array.isArray(data.highlights) && data.highlights.length > 0;
   const hasLiveNotes = Array.isArray(data.liveNotes) && data.liveNotes.length > 0;

@@ -148,6 +148,8 @@ export function register(ctx: IpcContext): void {
             summary: result.summary,
             keyPoints: result.keyPoints,
             actionItems: result.actionItems,
+            ...(result.summarySections ? { summarySections: result.summarySections } : {}),
+            ...(result.actionItemGroups ? { actionItemGroups: result.actionItemGroups } : {}),
             customFields: result.customFields,
             liveNotes,
             transcribedAt: new Date().toISOString(),

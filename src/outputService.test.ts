@@ -389,11 +389,22 @@ describe('saveTranscription v2 default', () => {
     assert.notEqual(path.basename(a), path.basename(b));
   });
 
-  it('round-trips through readTranscription (mergedFrom + keyPoints + actionItems)', async () => {
+  it('round-trips structured and legacy summaries through v2 storage', async () => {
     const dataPath = makeTmpDataPath();
+    const result: TranscriptionResult = {
+      ...baseResult,
+      summarySections: [
+        { heading: 'Decisions', bullets: ['Ship the structured format'] },
+        { heading: 'Discussion', bullets: ['Keep legacy output compatible'] },
+      ],
+      actionItemGroups: [
+        { owner: 'Listener.AI', items: ['Implement persistence'] },
+        { owner: 'Partner', items: ['Confirm the rollout date'] },
+      ],
+    };
     const folderPath = saveTranscription({
       title: 'Combined Meeting',
-      result: baseResult,
+      result,
       dataPath,
       mergedFrom: ['Part_One', 'Part_Two'],
     });
@@ -404,8 +415,46 @@ describe('saveTranscription v2 default', () => {
     assert.equal(data!.summary, 'A short greeting.');
     assert.deepEqual(data!.keyPoints, ['Greeting exchanged']);
     assert.deepEqual(data!.actionItems, ['Schedule follow-up']);
+    assert.deepEqual(data!.summarySections, result.summarySections);
+    assert.deepEqual(data!.actionItemGroups, result.actionItemGroups);
     assert.deepEqual(data!.mergedFrom, ['Part_One', 'Part_Two']);
     assert.equal(data!.transcript, 'Speaker A: hello.\nSpeaker B: hi.');
+
+    const meta = JSON.parse(fs.readFileSync(path.join(folderPath, META_JSON), 'utf-8'));
+    assert.equal(meta.schemaVersion, 1);
+    assert.deepEqual(meta.summarySections, result.summarySections);
+    assert.deepEqual(meta.actionItemGroups, result.actionItemGroups);
+    assert.equal(
+      fs.readFileSync(path.join(folderPath, SUMMARY_FILE), 'utf-8').trim(),
+      result.summary,
+    );
+    assert.deepEqual(
+      parseBullets(fs.readFileSync(path.join(folderPath, ACTION_ITEMS_FILE), 'utf-8')),
+      result.actionItems,
+    );
+
+    const markdown = formatSummary(data!, data!.title);
+    assert.match(markdown, /### Decisions\n- Ship the structured format/);
+    assert.match(markdown, /### Listener\.AI\n- Implement persistence/);
+    assert.doesNotMatch(markdown, /A short greeting\./);
+    assert.doesNotMatch(markdown, /Schedule follow-up/);
+  });
+
+  it('ignores malformed structured metadata while preserving legacy fields', async () => {
+    const dataPath = makeTmpDataPath();
+    const folderPath = saveTranscription({ title: 'Malformed', result: baseResult, dataPath });
+    const metaPath = path.join(folderPath, META_JSON);
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    meta.summarySections = [{ heading: 'Valid', bullets: ['Kept'] }, { heading: 42 }];
+    meta.actionItemGroups = 'not-an-array';
+    fs.writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf-8');
+
+    const data = await readTranscription(folderPath);
+    assert.ok(data);
+    assert.equal(data.summarySections, undefined);
+    assert.equal(data.actionItemGroups, undefined);
+    assert.equal(data.summary, baseResult.summary);
+    assert.deepEqual(data.actionItems, baseResult.actionItems);
   });
 
   it('omits optional files when fields are empty', () => {

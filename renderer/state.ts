@@ -86,22 +86,3 @@ export function getDom(): DomRefs {
   }
   return domRefs;
 }
-
-// Default summary prompt -- moved out of renderer.js global scope so the
-// config modal can import it.
-export const DEFAULT_SUMMARY_PROMPT = `Based on this meeting transcript, provide:
-
-1. A concise meeting title in Korean (10-20 characters that captures the main topic)
-2. A concise summary in Korean (2-3 paragraphs)
-3. Key points discussed in Korean (as a bullet list)
-4. Action items mentioned in Korean (as a bullet list)
-5. An appropriate emoji that represents the meeting
-
-Return as JSON:
-{
-  "suggestedTitle": "concise title in Korean",
-  "summary": "summary in Korean",
-  "keyPoints": ["point 1", "point 2"],
-  "actionItems": ["action 1", "action 2"],
-  "emoji": "📝"
-}`;

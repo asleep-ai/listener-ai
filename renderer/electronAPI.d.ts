@@ -120,6 +120,7 @@ export type ConfigPayload = {
   globalShortcut?: string;
   knownWords?: string[];
   summaryPrompt?: string;
+  defaultSummaryPrompt?: string;
   recordSystemAudio?: boolean;
   crashReportingEnabled?: boolean;
   audioDeviceId?: string;

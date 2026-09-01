@@ -959,6 +959,10 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     ): Promise<{
       transcript: string;
       summary: string;
+      keyPoints: string[];
+      actionItems: string[];
+      summarySections?: Array<{ heading: string; bullets: string[] }>;
+      actionItemGroups?: Array<{ owner: string; items: string[] }>;
       customFields?: Record<string, unknown>;
     }>;
     getShortAudioTranscript(
@@ -1056,6 +1060,174 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     const result = await service.transcribeWithTwoSteps(makeAudioStub('clean.webm'), 10);
 
     assert.equal(result.customFields, undefined);
+  });
+
+  it('normalizes structured notes and derives the legacy summary fields', async () => {
+    const { service, summaryPrompts } = makeTwoStepService({
+      transcript: 'Speaker 1: We approved the launch.\n\nSpeaker 2: Acme will publish it.',
+      summaryJson: JSON.stringify({
+        suggestedTitle: 'Launch review',
+        summarySections: [
+          { heading: ' Launch ', bullets: [' Discussion: timing ', 'Decision: ship Friday'] },
+        ],
+        keyPoints: [' Approved launch '],
+        actionItemGroups: [{ owner: ' Acme ', items: [' Publish release notes '] }],
+        emoji: '🚀',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('structured.webm'), 10);
+
+    assert.match(summaryPrompts[0], /meeting's primary language/);
+    assert.match(
+      summaryPrompts[0],
+      /explicit assignment, accepted request, or first-person commitment/,
+    );
+    assert.match(summaryPrompts[0], /"Speaker 2", "Participant 5", or "참가자 2"/);
+    assert.deepEqual(result.summarySections, [
+      { heading: 'Launch', bullets: ['Discussion: timing', 'Decision: ship Friday'] },
+    ]);
+    assert.deepEqual(result.actionItemGroups, [
+      { owner: 'Acme', items: ['Publish release notes'] },
+    ]);
+    assert.equal(result.summary, 'Launch\n- Discussion: timing\n- Decision: ship Friday');
+    assert.deepEqual(result.keyPoints, ['Approved launch']);
+    assert.deepEqual(result.actionItems, ['Acme: Publish release notes']);
+    assert.equal(result.customFields, undefined);
+  });
+
+  it('keeps legacy custom-prompt response fields when structured fields are invalid', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Legacy custom response.',
+      summaryJson: JSON.stringify({
+        suggestedTitle: 'Legacy',
+        summary: 'Legacy summary',
+        keyPoints: ['One'],
+        actionItems: ['Do it'],
+        summarySections: [
+          { heading: 'Valid-looking subset', bullets: ['must not shadow legacy'] },
+          { heading: '', bullets: ['invalid'] },
+        ],
+        actionItemGroups: [
+          { owner: 'Owner', items: ['must not shadow legacy'] },
+          { owner: 'Owner', items: [] },
+        ],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('legacy-custom.webm'),
+      10,
+      undefined,
+      'Return my legacy JSON fields.',
+    );
+
+    assert.equal(result.summary, 'Legacy summary');
+    assert.deepEqual(result.keyPoints, ['One']);
+    assert.deepEqual(result.actionItems, ['Do it']);
+    assert.equal(result.summarySections, undefined);
+    assert.equal(result.actionItemGroups, undefined);
+  });
+
+  it('honors explicit legacy projections from a custom prompt alongside structured fields', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Custom response.',
+      summaryJson: JSON.stringify({
+        suggestedTitle: 'Custom',
+        summary: 'Custom summary projection',
+        keyPoints: ['Custom key point'],
+        actionItems: ['Custom action projection'],
+        summarySections: [{ heading: 'Agenda', bullets: ['Structured detail'] }],
+        actionItemGroups: [{ owner: 'Owner', items: ['Structured action'] }],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('custom-projections.webm'),
+      10,
+      undefined,
+      'Return both legacy and structured fields.',
+    );
+
+    assert.equal(result.summary, 'Custom summary projection');
+    assert.deepEqual(result.keyPoints, ['Custom key point']);
+    assert.deepEqual(result.actionItems, ['Custom action projection']);
+    assert.deepEqual(result.summarySections, [
+      { heading: 'Agenda', bullets: ['Structured detail'] },
+    ]);
+    assert.deepEqual(result.actionItemGroups, [{ owner: 'Owner', items: ['Structured action'] }]);
+  });
+
+  it('fails instead of silently saving an empty note when summary JSON is malformed', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: '{"summarySections":[{"heading":"Agenda","bullets":[',
+    });
+
+    await assert.rejects(
+      service.transcribeWithTwoSteps(makeAudioStub('malformed-summary.webm'), 10),
+      /summary model returned invalid JSON/,
+    );
+  });
+
+  it('fails instead of saving an empty note when structured summary content is invalid', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: JSON.stringify({
+        suggestedTitle: 'Meeting',
+        summarySections: [{ heading: 'Agenda', bullets: [] }],
+        keyPoints: [],
+        actionItemGroups: [],
+        emoji: '📝',
+      }),
+    });
+
+    await assert.rejects(
+      service.transcribeWithTwoSteps(makeAudioStub('invalid-structured-summary.webm'), 10),
+      /summary model returned invalid JSON/,
+    );
+  });
+
+  it('drops placeholder-owned action groups returned by the model', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Speaker 2: I will send the plan. Acme will publish the notes.',
+      summaryJson: JSON.stringify({
+        suggestedTitle: 'Meeting',
+        summarySections: [{ heading: 'Agenda', bullets: ['The plan was discussed.'] }],
+        keyPoints: [],
+        actionItemGroups: [
+          { owner: 'Speaker 2', items: ['Send the plan'] },
+          { owner: 'Acme', items: ['Publish the notes'] },
+        ],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('placeholder-owned-action.webm'),
+      10,
+    );
+
+    assert.deepEqual(result.actionItemGroups, [{ owner: 'Acme', items: ['Publish the notes'] }]);
+    assert.deepEqual(result.actionItems, ['Acme: Publish the notes']);
+  });
+
+  it('does not duplicate every summary bullet when key points are omitted', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Structured response.',
+      summaryJson: JSON.stringify({
+        suggestedTitle: 'Agenda',
+        summarySections: [{ heading: 'Agenda', bullets: ['Detail one', 'Detail two'] }],
+        actionItemGroups: [{ owner: 'Owner', items: ['Follow up'] }],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('no-key-points.webm'), 10);
+
+    assert.deepEqual(result.keyPoints, []);
   });
 
   it('persists accepted cleanup on the existing transcriptQuality field', async () => {

@@ -28,7 +28,7 @@ Listener.AI is an Electron desktop application for recording meetings and produc
 - Provider is selected by `aiProvider`: `gemini` uses Google Gemini for summary (default `gemini-3.5-flash`, configurable via `geminiModel`) and transcription (default `gemini-2.5-flash`, configurable via `geminiFlashModel`); `codex` uses Codex OAuth tokens plus OpenAI transcription/Responses endpoints (configurable via `codexTranscriptionModel` and `codexModel`)
 - Gemini summary depth is controlled by `geminiThinkingLevel` (`low` | `medium` | `high`, default `medium`). Forwarded to pi-ai's `reasoning` option, which the google provider maps to `generationConfig.thinkingConfig.thinkingLevel`. Only the summary path uses it; transcription stays on `gemini-2.5-flash` with no reasoning
 - Gemini uploads large audio through the Gemini files API; Codex converts unsupported audio formats to WebM/Opus first; both providers segment long or over-limit recordings
-- Korean-focused output: full transcript with speaker identification, summary, key points, action items, auto-generated title, and emoji icon
+- Meeting-language output: full transcript with speaker identification, agenda-based summary, key points, owner-grouped action items, auto-generated title, and emoji icon
 - User-supplied `summaryPrompt` and `knownWords` (proper-noun hints) are injected into the prompt
 - **Repetition/hallucination analyzer (issue #182).** `src/transcriptQuality.ts` measures ASR loop shapes on silence/noise/music: consecutive near-identical lines (char-bigram Dice ≥ 0.9 on whitespace-stripped text, so Korean spacing variants compare equal), 1-4-word block loops, space-less character-period loops (KMP), and a local deflate compression metric (deliberately NOT labeled a provider compression_ratio). In the batch per-result gate it supplies metrics and the fallback verdict when the judge fails; the assembled-transcript pass still uses it directly for cross-segment loops. Thresholds are conservative so legitimate repetition (`네, 네`, stutters, emphasis, short chants) never flags. Quality logs contain metrics, reasons, counts, and capped errors only — never transcript text.
 - **Quality gate wiring.** Batch paths (`transcribeSingleSegment`, `getShortAudioTranscript`) strip the `[NO_SPEECH]` sentinel, then run `applyTranscriptQualityGate` with one small-model judge call per non-empty first/retry result: Gemini uses hardcoded `gemini-2.5-flash-lite`; Codex reuses pi-ai with configured `codexModel`. The judge alone triggers the bounded retry ladder; malformed/failed judge calls fall back to the analyzer, while `AbortError` is rethrown. Empty text is clean silence evidence and never calls the judge. Retries use `QUALITY_RETRY_TRANSCRIPT_PROMPT` (no glossary, positional prefix, or examples) at `QUALITY_RETRY_TEMPERATURES` [0.4, 0.8], in order, and the first judge-clean result wins. Each rung reports through the existing progressCallback ("quality retry N/M"); first attempts stay at 0.2. Codex diarize accepts neither prompt nor temperature, so it gets one provider-nondeterministic re-roll. If configured retries all run and remain flagged, the gate makes one cleanup call on the FIRST result before assembly. It accepts the rewrite only when `cleaned.length <= first.length` and the same verdict path (judge, analyzer fallback, empty-is-clean) says clean; accepted cleanup returns `flagged: false, cleaned: true`, including empty output. Rejected or non-abort failed cleanup keeps the first result marked uncertain; cleanup `AbortError` is rethrown. Cleanup does not run when retries are absent, a rung throws, or a rung succeeds. Accepted batch cleanup is persisted as `customFields.transcriptQuality.cleaned = true`. `TranscriptionOptions.qualityRetry: false` (used by `transcribeLiveSnippet`) disables judge, retry, and cleanup. `DEFAULT_TRANSCRIPT_PROMPT` intentionally has NO example dialogue and defines the `[NO_SPEECH]` sentinel — don't re-add examples.
@@ -113,12 +113,12 @@ listener --help                      Show usage
 
 - `<ref>` is either an index from `listener list` or a transcription folder name.
 - `--field` accepts: `title`, `summary`, `keyPoints`, `actionItems`, `transcript`, `all`.
-- `config set` / `config unset` accept the keys listed in the Configuration table below, except `audioDeviceId` (UI-only) and `lastSeenVersion` (managed by the app).
+- `config set` / `config unset` accept the user-configurable keys listed in the Configuration table below; UI-only, managed migration, and read-only payload fields are excluded.
 - CLI and GUI share the same `config.json` in the app data directory.
 
 ## Configuration
 
-All values are stored in plaintext JSON at `getDataPath()/config.json`.
+Persisted values are stored in plaintext JSON at `getDataPath()/config.json`. Read-only renderer payload fields are noted below and are not written to disk.
 
 | Key | Purpose |
 |---|---|
@@ -135,6 +135,8 @@ All values are stored in plaintext JSON at `getDataPath()/config.json`.
 | `globalShortcut` | Start/stop hotkey |
 | `knownWords` | Proper nouns / jargon injected into Gemini prompt |
 | `summaryPrompt` | User-customized summary-stage prompt |
+| `summaryPromptMigratedToStructured` | Internal one-time migration marker for the structured default prompt |
+| `defaultSummaryPrompt` | Read-only renderer payload used to reset the prompt; never persisted |
 | `maxRecordingMinutes` | Hard stop for long recordings |
 | `recordingReminderMinutes` | Reminder cadence |
 | `minRecordingSeconds` | Discards accidental short recordings |
@@ -159,7 +161,7 @@ Each meeting is a folder named `<ts24>_<sanitized-title>/` where `ts24` is a 24-
 
 Files inside the folder (each holds exactly one semantic field, so there is no in-file duplication and no body parser is needed):
 
-- `meta.json` — structured metadata: `schemaVersion`, `title`, `suggestedTitle`, `emoji`, `transcribedAt`, `audioFile`, `cost`, `customFields`, `merge.sourceIds`, `exports.notion`, `exports.slack`. Unknown keys are preserved on read so future writers can add fields without bumping `schemaVersion`. **`meta.json` is written LAST by `writeV2Files` so it doubles as a v2 sentinel — if a save/migration crashes mid-write the folder still looks like v1 and a retry restarts cleanly.**
+- `meta.json` — structured metadata: `schemaVersion`, `title`, `suggestedTitle`, `emoji`, `transcribedAt`, `audioFile`, `cost`, `summarySections`, `actionItemGroups`, `customFields`, `merge.sourceIds`, `exports.notion`, `exports.slack`. Unknown keys are preserved on read so future writers can add fields without bumping `schemaVersion`. **`meta.json` is written LAST by `writeV2Files` so it doubles as a v2 sentinel — if a save/migration crashes mid-write the folder still looks like v1 and a retry restarts cleanly.**
 - `summary.md` — plain markdown text of the summary, no frontmatter, no `# heading`.
 - `key-points.md` — bullets (`- item` per line). Writer normalizes `\n` in items to spaces so the round-trip is unambiguous.
 - `action-items.md` — same shape as `key-points.md`.

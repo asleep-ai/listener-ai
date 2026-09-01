@@ -1,6 +1,6 @@
 # Listener.AI
 
-Listener.AI is a desktop meeting recorder and CLI that turns audio into searchable AI meeting notes. It records meetings, imports existing audio, transcribes with Gemini, generates Korean summaries, key points, and action items, then keeps everything in a local archive you can send to Notion or Slack.
+Listener.AI is a desktop meeting recorder and CLI that turns audio into searchable AI meeting notes. It records meetings, imports existing audio, transcribes with Gemini, generates agenda-based summaries and owner-grouped action items in the meeting's primary language, then keeps everything in a local archive you can send to Notion or Slack.
 
 Available as a **desktop app** via [GitHub Releases](https://github.com/asleep-ai/listener-ai/releases) and as a **CLI tool** via npm.
 
@@ -128,7 +128,7 @@ listener --help                       # Show usage
 
 Supported formats: mp3, m4a, wav, ogg, flac, aac, wma, opus, webm
 
-Full meeting-note output is a folder containing `transcript.md` and `summary.md` with speaker identification, Korean summary, key points, and action items. Transcript-only output can print plain text to stdout or write directly to a file.
+Full meeting-note output is a folder containing `transcript.md` and `summary.md` with speaker identification, an agenda-based summary, key points, and owner-grouped action items in the meeting's primary language. Transcript-only output can print plain text to stdout or write directly to a file.
 
 ## Configuration
 
