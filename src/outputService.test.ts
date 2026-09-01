@@ -103,6 +103,29 @@ describe('saveTranscription with mergedFrom', () => {
   });
 });
 
+describe('formatSummary custom fields', () => {
+  it('keeps ordinary fields while hiding internal transcript quality metadata', () => {
+    const body = formatSummary(
+      {
+        ...baseResult,
+        customFields: {
+          decisions: ['DECISION_SENTINEL'],
+          transcriptQuality: {
+            cleaned: true,
+            modelNotes: ['QUALITY_SENTINEL'],
+          },
+        },
+      },
+      'Custom Fields',
+    );
+
+    assert.match(body, /## Decisions/);
+    assert.match(body, /DECISION_SENTINEL/);
+    assert.doesNotMatch(body, /Transcript Quality/);
+    assert.doesNotMatch(body, /QUALITY_SENTINEL/);
+  });
+});
+
 describe('updateTranscriptionStatus', () => {
   it('writes Notion URL and Slack send timestamp without losing the markdown body', async () => {
     const dataPath = makeTmpDataPath();

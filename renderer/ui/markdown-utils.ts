@@ -180,7 +180,7 @@ export function structuredToMarkdown(data: TranscriptionData, section: string): 
 
   if (section === 'all' && data.customFields) {
     for (const [key, value] of Object.entries(data.customFields)) {
-      if (value == null) continue;
+      if (key === 'transcriptQuality' || value == null) continue;
       lines.push(`## ${camelToLabel(key)}\n`);
       if (Array.isArray(value)) {
         for (const v of value) lines.push(`- ${v}`);
@@ -195,6 +195,7 @@ export function structuredToMarkdown(data: TranscriptionData, section: string): 
 
   if (section?.startsWith('cf-') && data.customFields) {
     const cfKey = section.slice(3);
+    if (cfKey === 'transcriptQuality') return '';
     const value = data.customFields[cfKey];
     if (Array.isArray(value)) {
       for (const v of value) lines.push(`- ${v}`);
@@ -243,6 +244,7 @@ export function renderDynamicFields(data: TranscriptionData): void {
   }
   if (data.customFields) {
     for (const [key, value] of Object.entries(data.customFields)) {
+      if (key === 'transcriptQuality') continue;
       if (value != null && (typeof value !== 'string' || value.trim())) {
         fields.push({ key: `cf-${key}`, label: camelToLabel(key), value });
       }

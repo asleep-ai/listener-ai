@@ -267,6 +267,38 @@ describe('listener show / export across v1 + v2 folders', () => {
     assert.match(stdout, /## Action Items\n[\s\S]*- AI1/);
   });
 
+  it('hides transcript quality from show while retaining it in raw JSON export', async () => {
+    const folderPath = saveTranscription({
+      title: 'Quality Metadata',
+      result: {
+        transcript: 't',
+        summary: 'Summary text.',
+        keyPoints: [],
+        actionItems: [],
+        emoji: 'X',
+        customFields: {
+          decisions: ['DECISION_SENTINEL'],
+          transcriptQuality: { modelNotes: ['QUALITY_SENTINEL'] },
+        },
+      },
+      dataPath: showDataPath,
+    });
+
+    const shown = await runCli(['show', path.basename(folderPath)]);
+    assert.equal(shown.code, 0);
+    assert.match(shown.stdout, /## Decisions/);
+    assert.match(shown.stdout, /DECISION_SENTINEL/);
+    assert.doesNotMatch(shown.stdout, /Transcript Quality/);
+    assert.doesNotMatch(shown.stdout, /QUALITY_SENTINEL/);
+
+    const exported = await runCli(['export', path.basename(folderPath), '--json']);
+    assert.equal(exported.code, 0);
+    const json = JSON.parse(exported.stdout);
+    assert.deepEqual(json.customFields.transcriptQuality, {
+      modelNotes: ['QUALITY_SENTINEL'],
+    });
+  });
+
   it('show on a v1 folder still prints its frontmatter body', async () => {
     const folderPath = __saveTranscriptionLegacyV1ForTests({
       title: 'V1 Show',
