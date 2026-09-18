@@ -2,9 +2,20 @@ export const AI_PROVIDERS = ['gemini', 'codex'] as const;
 
 export type AiProvider = (typeof AI_PROVIDERS)[number];
 
-export const LIVE_STT_PROVIDERS = ['auto', 'openai', 'gemini', 'chunked'] as const;
+export const LIVE_STT_PROVIDERS = ['auto', 'openai', 'gemini', 'soniox', 'chunked'] as const;
 
 export type LiveSttProvider = (typeof LIVE_STT_PROVIDERS)[number];
+
+// Batch (file) transcription backend. `auto` follows `aiProvider` so existing
+// installs keep their current behavior; Soniox is opt-in only.
+export const TRANSCRIPTION_PROVIDERS = ['auto', 'gemini', 'codex', 'soniox'] as const;
+
+export type TranscriptionProvider = (typeof TRANSCRIPTION_PROVIDERS)[number];
+
+/** A resolved backend: `auto` has already been mapped onto a real provider. */
+export type BatchSttProvider = 'gemini' | 'codex' | 'soniox';
+
+export const DEFAULT_TRANSCRIPTION_PROVIDER: TranscriptionProvider = 'auto';
 
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash';
 export const DEFAULT_GEMINI_FLASH_MODEL = 'gemini-2.5-flash';
@@ -52,6 +63,11 @@ export const DEFAULT_OPENAI_REALTIME_SESSION_MODEL = 'gpt-realtime-2';
 export const DEFAULT_GEMINI_LIVE_TRANSCRIPTION_MODEL = 'gemini-3.1-flash-live-preview';
 export const DEFAULT_GEMINI_LIVE_TRANSLATION_MODEL = 'gemini-3.5-live-translate-preview';
 
+// Soniox model ids. Model churn is roughly annual and retired ids are silently
+// re-routed to the successor, so log the resolved id rather than assuming it.
+export const SONIOX_ASYNC_MODEL = 'stt-async-v5';
+export const SONIOX_REALTIME_MODEL = 'stt-rt-v5';
+
 export function isAiProvider(value: string): value is AiProvider {
   return (AI_PROVIDERS as readonly string[]).includes(value);
 }
@@ -60,6 +76,27 @@ export function normalizeAiProvider(value: unknown): AiProvider | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim().toLowerCase();
   return isAiProvider(normalized) ? normalized : undefined;
+}
+
+export function isTranscriptionProvider(value: string): value is TranscriptionProvider {
+  return (TRANSCRIPTION_PROVIDERS as readonly string[]).includes(value);
+}
+
+export function normalizeTranscriptionProvider(
+  value: unknown,
+  fallback: TranscriptionProvider = DEFAULT_TRANSCRIPTION_PROVIDER,
+): TranscriptionProvider {
+  if (typeof value !== 'string') return fallback;
+  const normalized = value.trim().toLowerCase();
+  return isTranscriptionProvider(normalized) ? normalized : fallback;
+}
+
+/** `auto` follows the configured chat provider; everything else is explicit. */
+export function resolveBatchSttProvider(
+  transcriptionProvider: TranscriptionProvider,
+  aiProvider: AiProvider,
+): BatchSttProvider {
+  return transcriptionProvider === 'auto' ? aiProvider : transcriptionProvider;
 }
 
 export function isLiveSttProvider(value: string): value is LiveSttProvider {

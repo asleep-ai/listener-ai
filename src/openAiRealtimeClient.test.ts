@@ -53,6 +53,17 @@ describe('openAiRealtimeClient', () => {
     });
   });
 
+  it('builds no client-secret request for a non-OpenAI provider', () => {
+    for (const provider of ['gemini', 'soniox', 'chunked'] as const) {
+      assert.equal(
+        buildRealtimeClientSecretRequest({ provider, translate: true }),
+        null,
+        `${provider} must not route through the OpenAI client-secret path`,
+      );
+    }
+    assert.notEqual(buildRealtimeClientSecretRequest({ provider: 'auto', translate: true }), null);
+  });
+
   it('uses the supplied OpenAI API key to create a WebRTC client config', async () => {
     let seenUrl = '';
     let seenAuth = '';

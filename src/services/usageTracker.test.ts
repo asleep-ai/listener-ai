@@ -90,6 +90,18 @@ describe('computeCost', () => {
     );
   });
 
+  it('prices the Soniox models at their published hourly rates', () => {
+    // $0.12/hr realtime, $0.10/hr async.
+    assert.equal(
+      roundCents(computeCost('stt-rt-v5', 'realtime', { audioSeconds: 3600 }).usd),
+      0.12,
+    );
+    assert.equal(
+      roundCents(computeCost('stt-async-v5', 'transcription', { audioSeconds: 3600 }).usd),
+      0.1,
+    );
+  });
+
   it('treats thoughts tokens as output (folded by caller)', () => {
     // geminiService wraps candidates+thoughts into a single `output` count.
     const pricing = MODEL_PRICING['gemini-2.5-flash'];
