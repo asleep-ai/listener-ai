@@ -1,6 +1,6 @@
 # Soniox adoption plan
 
-Status: proposal (research done 2026-09-17, nothing implemented). Research inputs: Soniox public
+Status: implemented 2026-09-18; Phase 0 eval pending. Research inputs: Soniox public
 docs/pricing/status/npm registry, AssemblyAI's 2026-09-09 multilingual benchmark, and a source-anchored
 map of Listener.AI's two provider seams. When code and this document disagree, fix one of them.
 

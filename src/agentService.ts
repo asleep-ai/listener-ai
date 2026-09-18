@@ -1,5 +1,13 @@
 import * as path from 'path';
-import { DEFAULT_CODEX_MODEL, type AiProvider, normalizeLiveSttProvider } from './aiProvider';
+import {
+  DEFAULT_CODEX_MODEL,
+  LIVE_STT_PROVIDERS,
+  TRANSCRIPTION_PROVIDERS,
+  type AiProvider,
+  isTranscriptionProvider,
+  normalizeLiveSttProvider,
+  normalizeTranscriptionProvider,
+} from './aiProvider';
 import { type CodexOAuthCredentials } from './codexOAuth';
 import { CodexOAuthHolder } from './codexOAuthHolder';
 import type { ConfigService } from './configService';
@@ -90,6 +98,9 @@ export const WRITABLE_CONFIG_KEYS = [
   'liveSttProvider',
   'liveSttLanguage',
   'liveTranslationLanguage',
+  // Non-secret backend selector. The Soniox API key it may point at is
+  // deliberately neither readable nor writable here.
+  'transcriptionProvider',
 ] as const;
 
 export type WritableConfigKey = (typeof WRITABLE_CONFIG_KEYS)[number];
@@ -138,8 +149,19 @@ export function coerceConfigValue(
     }
     case 'liveSttProvider': {
       const provider = normalizeLiveSttProvider(raw);
-      if (!provider) return { ok: false, error: `${key} expects auto, openai, gemini, or chunked` };
+      if (!provider) {
+        return { ok: false, error: `${key} expects one of: ${LIVE_STT_PROVIDERS.join(', ')}` };
+      }
       return { ok: true, value: provider };
+    }
+    case 'transcriptionProvider': {
+      // `normalize*` falls back to `auto` for junk, so validate before coercing
+      // or a typo would silently reset the backend instead of erroring.
+      const candidate = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+      if (!isTranscriptionProvider(candidate)) {
+        return { ok: false, error: `${key} expects one of: ${TRANSCRIPTION_PROVIDERS.join(', ')}` };
+      }
+      return { ok: true, value: normalizeTranscriptionProvider(candidate) };
     }
     case 'liveSttLanguage': {
       if (typeof raw !== 'string') return { ok: false, error: `${key} expects a string` };

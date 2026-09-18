@@ -20,6 +20,7 @@ const CODEX_ENV_KEYS = [
   'OPENAI_CODEX_REFRESH_TOKEN',
   'OPENAI_CODEX_EXPIRES',
   'OPENAI_API_KEY',
+  'SONIOX_API_KEY',
   'GEMINI_API_KEY',
   'LISTENER_AI_PROVIDER',
   'LISTENER_CODEX_AUTH_PATH',
@@ -539,6 +540,81 @@ describe('ConfigService: live STT config', () => {
     assert.equal(cfg.getLiveSttProvider(), 'openai');
     cfg.updateConfig({ liveSttProvider: 'claude' as never });
     assert.equal(cfg.getLiveSttProvider(), 'openai');
+  });
+
+  it('accepts a Soniox API key as Soniox live auth', () => {
+    const cfg = new ConfigService(freshDataPath('live-soniox-key'));
+    cfg.updateConfig({ liveSttProvider: 'soniox' });
+    assert.equal(cfg.hasStreamingLiveSttAuth(), false);
+    cfg.setSonioxApiKey('soniox-key');
+    assert.equal(cfg.hasStreamingLiveSttAuth(), true);
+  });
+
+  it('auto ignores the Soniox key', () => {
+    const cfg = new ConfigService(freshDataPath('live-auto-ignores-soniox'));
+    cfg.updateConfig({ liveSttProvider: 'auto' });
+    cfg.setSonioxApiKey('soniox-key');
+    assert.equal(cfg.hasStreamingLiveSttAuth(), false);
+  });
+});
+
+describe('ConfigService: transcription provider', () => {
+  it('defaults to auto and follows the AI provider', () => {
+    const cfg = new ConfigService(freshDataPath('transcription-default'));
+    assert.equal(cfg.getTranscriptionProvider(), 'auto');
+    cfg.setAiProvider('gemini');
+    assert.equal(cfg.resolveTranscriptionProvider(), 'gemini');
+    cfg.setAiProvider('codex');
+    assert.equal(cfg.resolveTranscriptionProvider(), 'codex');
+  });
+
+  it('round-trips an explicit provider through disk and ignores aiProvider', () => {
+    const dataPath = freshDataPath('transcription-roundtrip');
+    const cfg = new ConfigService(dataPath);
+    cfg.setAiProvider('codex');
+    cfg.setTranscriptionProvider('soniox');
+
+    const reloaded = new ConfigService(dataPath);
+    assert.equal(reloaded.getTranscriptionProvider(), 'soniox');
+    assert.equal(reloaded.resolveTranscriptionProvider(), 'soniox');
+  });
+
+  it('drops invalid transcriptionProvider values on updateConfig', () => {
+    const cfg = new ConfigService(freshDataPath('transcription-validation'));
+    cfg.updateConfig({ transcriptionProvider: 'soniox' });
+    assert.equal(cfg.getTranscriptionProvider(), 'soniox');
+    cfg.updateConfig({ transcriptionProvider: 'whisper' as never });
+    assert.equal(cfg.getTranscriptionProvider(), 'soniox');
+  });
+
+  it('reports transcription auth separately from summary auth', () => {
+    const cfg = new ConfigService(freshDataPath('transcription-auth'));
+    cfg.setGeminiApiKey('gemini-key');
+    cfg.setTranscriptionProvider('soniox');
+    assert.equal(cfg.hasAiAuth(), true, 'summary auth still comes from aiProvider');
+    assert.equal(cfg.hasTranscriptionAuth(), false);
+    cfg.setSonioxApiKey('soniox-key');
+    assert.equal(cfg.hasTranscriptionAuth(), true);
+  });
+
+  it('a Soniox key alone does not satisfy summary auth', () => {
+    const cfg = new ConfigService(freshDataPath('transcription-auth-no-summary'));
+    cfg.setTranscriptionProvider('soniox');
+    cfg.setSonioxApiKey('soniox-key');
+    assert.equal(cfg.hasTranscriptionAuth(), true);
+    assert.equal(cfg.hasAiAuth(), false);
+  });
+
+  it('falls back to SONIOX_API_KEY but never surfaces it to the settings form', () => {
+    process.env.SONIOX_API_KEY = 'env-soniox';
+
+    const cfg = new ConfigService(freshDataPath('soniox-env'));
+    assert.equal(cfg.getSonioxApiKey(), 'env-soniox');
+    assert.equal(cfg.getAllConfig().sonioxApiKey, undefined);
+
+    cfg.setSonioxApiKey('config-soniox');
+    assert.equal(cfg.getSonioxApiKey(), 'config-soniox');
+    assert.equal(cfg.getAllConfig().sonioxApiKey, 'config-soniox');
   });
 });
 

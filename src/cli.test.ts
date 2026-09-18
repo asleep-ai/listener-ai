@@ -132,6 +132,32 @@ describe('listener CLI basics', () => {
     assert.match(stderr, /liveSttProvider must be one of/);
   });
 
+  it('config set + get round-trips transcriptionProvider', async () => {
+    const set = await runCli(['config', 'set', 'transcriptionProvider', 'soniox']);
+    assert.equal(set.code, 0);
+    const get = await runCli(['config', 'get', 'transcriptionProvider']);
+    assert.equal(get.code, 0);
+    assert.equal(get.stdout.trim(), 'soniox');
+    // Leave the shared sandbox on the default so later cases aren't routed to
+    // a backend they have no credentials for.
+    await runCli(['config', 'set', 'transcriptionProvider', 'auto']);
+  });
+
+  it('config set rejects invalid transcriptionProvider', async () => {
+    const { stderr, code } = await runCli(['config', 'set', 'transcriptionProvider', 'whisper']);
+    assert.equal(code, 1);
+    assert.match(stderr, /transcriptionProvider must be one of/);
+  });
+
+  it('config list masks sonioxApiKey', async () => {
+    await runCli(['config', 'set', 'sonioxApiKey', 'soniox-SECRET1234']);
+    const { stdout } = await runCli(['config', 'list']);
+    const line = stdout.split('\n').find((l) => l.startsWith('sonioxApiKey='));
+    assert.ok(line, 'expected sonioxApiKey in config list');
+    assert.equal(line, 'sonioxApiKey=****1234');
+    assert.doesNotMatch(line!, /SECRET/);
+  });
+
   it('config set rejects invalid aiProvider', async () => {
     const { stderr, code } = await runCli(['config', 'set', 'aiProvider', 'openai']);
     assert.equal(code, 1);
@@ -465,6 +491,9 @@ describe('listener transcript (CLI integration)', () => {
           LISTENER_DATA_PATH: transcriptDataPath,
           LISTENER_TEST_MODE: '1',
           GEMINI_API_KEY: 'test-mode-key',
+          // A developer's real key must not decide whether the Soniox
+          // credential gate below fires.
+          SONIOX_API_KEY: '',
         },
       });
       let stdout = '';
@@ -549,6 +578,33 @@ describe('listener transcript (CLI integration)', () => {
     const { stderr, code } = await runCli(['transcript', audio, '--output', bogus]);
     assert.equal(code, 1);
     assert.match(stderr, /Output directory does not exist/);
+  });
+
+  it('names Codex, not Gemini, when transcriptionProvider is codex without sign-in', async () => {
+    await runCli(['config', 'set', 'transcriptionProvider', 'codex']);
+    try {
+      const audio = makeAudio('needs-codex.mp3');
+      const { stderr, code } = await runCli(['transcript', audio]);
+      assert.equal(code, 1);
+      assert.match(stderr, /transcriptionProvider is codex/);
+      assert.match(stderr, /listener codex login/);
+      assert.doesNotMatch(stderr, /Gemini API key not found/);
+    } finally {
+      await runCli(['config', 'set', 'transcriptionProvider', 'auto']);
+    }
+  });
+
+  it('errors when transcriptionProvider is soniox without a Soniox key', async () => {
+    await runCli(['config', 'set', 'transcriptionProvider', 'soniox']);
+    try {
+      const audio = makeAudio('needs-soniox.mp3');
+      const { stderr, code } = await runCli(['transcript', audio]);
+      assert.equal(code, 1);
+      assert.match(stderr, /Soniox API key not found/);
+      assert.match(stderr, /config set sonioxApiKey/);
+    } finally {
+      await runCli(['config', 'set', 'transcriptionProvider', 'auto']);
+    }
   });
 });
 
