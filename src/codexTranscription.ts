@@ -22,6 +22,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { mimeTypeForExtension } from './audioFormats';
+import { EmptyTranscriptionError, TranscriptionApiError } from './transcriptionErrors';
+
+// The transcription error types are provider-neutral and live in
+// `transcriptionErrors.ts` so a non-Codex backend can throw them without
+// importing this client. Re-exported here for existing importers.
+export {
+  EmptyTranscriptionError,
+  TranscriptionApiError,
+  type TranscriptionApiErrorDetails,
+} from './transcriptionErrors';
 
 const OPENAI_API_BASE_URL = 'https://api.openai.com/v1';
 const DIARIZE_MODEL_ID = 'gpt-4o-transcribe-diarize';
@@ -37,58 +47,6 @@ export const OPENAI_TRANSCRIPTION_EXTENSIONS = new Set([
 ]);
 
 export type CodexTokenProvider = () => Promise<string>;
-
-export interface TranscriptionApiErrorDetails {
-  status: number;
-  statusText: string;
-  requestId?: string;
-  errorType?: string;
-  errorCode?: string;
-  rawBody?: string;
-}
-
-export class TranscriptionApiError extends Error {
-  readonly status: number;
-  readonly statusText: string;
-  readonly requestId?: string;
-  readonly errorType?: string;
-  readonly errorCode?: string;
-  readonly rawBody?: string;
-  constructor(message: string, details: TranscriptionApiErrorDetails) {
-    super(message);
-    this.name = 'TranscriptionApiError';
-    this.status = details.status;
-    this.statusText = details.statusText;
-    this.requestId = details.requestId;
-    this.errorType = details.errorType;
-    this.errorCode = details.errorCode;
-    this.rawBody = details.rawBody;
-  }
-  toJSON(): TranscriptionApiErrorDetails & { message: string; name: string } {
-    return {
-      name: this.name,
-      message: this.message,
-      status: this.status,
-      statusText: this.statusText,
-      requestId: this.requestId,
-      errorType: this.errorType,
-      errorCode: this.errorCode,
-      rawBody: this.rawBody,
-    };
-  }
-}
-
-// Thrown when the provider processed the audio fine but produced no usable
-// speech (silence, noise-only input). Distinct from TranscriptionApiError so
-// callers can branch: whole-file transcription surfaces it as a friendly
-// "no speech found" error, while per-segment and live-snippet callers treat
-// it as an empty result instead of failing the whole run (issue #182).
-export class EmptyTranscriptionError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'EmptyTranscriptionError';
-  }
-}
 
 export interface DiarizedSegment {
   speaker?: string;

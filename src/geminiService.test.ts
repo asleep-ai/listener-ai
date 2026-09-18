@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
-import { EmptyTranscriptionError } from './codexTranscription';
+import { EmptyTranscriptionError } from './transcriptionErrors';
 import { GeminiService, computeSegmentPlan, segmentOverlapSeconds } from './geminiService';
 import { findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
@@ -900,6 +900,48 @@ describe('GeminiService short-audio quality judge wiring', () => {
     assert.equal(result.text, text);
     assert.equal(result.cleaned, false);
     assert.equal(result.uncertain, true);
+  });
+
+  // The batch STT backend is selected independently of the chat provider, so
+  // a Codex user can transcribe on Gemini while summary/judge stay on Codex.
+  it('routes audio to the transcription backend, not the chat provider', async () => {
+    const service = new GeminiService({
+      provider: 'codex',
+      transcriptionProvider: 'gemini',
+      apiKey: 'test-key',
+      codexOAuth: { access: 'x', refresh: 'y', expires: Date.now() + 86_400_000 },
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as ShortAudioHelpers;
+    const audioPath = path.join(workDir, 'short-mixed-provider.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    const text = '참가자1: 제미나이 백엔드가 받은 오디오입니다.';
+    let geminiCalls = 0;
+    service.generateGeminiTranscript = async () => {
+      geminiCalls++;
+      return text;
+    };
+    service.judgeTranscriptQuality = async () => ({ flagged: false, reason: 'natural speech' });
+
+    const result = await service.getShortAudioTranscript(audioPath, 10);
+
+    assert.equal(geminiCalls, 1);
+    assert.equal(result.text, text);
+  });
+
+  it('refuses to construct a service for an unavailable transcription backend', () => {
+    assert.throws(
+      () =>
+        new GeminiService({
+          transcriptionProvider: 'soniox',
+          apiKey: 'test-key',
+          dataPath: workDir,
+          proModel: 'gemini-test-pro',
+          flashModel: 'gemini-test-flash',
+        }),
+      /Soniox transcription backend is not available/,
+    );
   });
 });
 

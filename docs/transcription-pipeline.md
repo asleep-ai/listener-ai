@@ -28,7 +28,16 @@ All file entrypoints (auto-record, modal, regenerate, drag-drop, IPC, CLI,
 merge) converge on `GeminiService.transcribeAudio` → `transcribeWithTwoSteps`
 (`src/geminiService.ts`).
 
-### 1. Segmentation (duration > 300s, or Codex files > 24 MB)
+### 1. Segmentation (duration > `maxSegmentSeconds`, or file > `maxBytes`)
+
+Both thresholds are properties of the selected batch backend
+(`src/batchSttBackend.ts`), read by the pure `planSegmentation` helper rather
+than branched on the provider name. Gemini declares `maxSegmentSeconds: 300`
+and no byte cap; Codex declares the same 300s plus `maxBytes: 24 MB`, and a
+file above that also shrinks the segment length proportionally (targeting
+20 MB per cut, floored at 30s) so each segment fits one request. A backend
+that keeps speaker identity consistent only within a single request raises
+`maxSegmentSeconds` instead of relying on boundary reconciliation.
 
 `computeSegmentPlan` starts every segment after the first
 `SEGMENT_OVERLAP_SECONDS` early (15s, capped at segmentDuration/4), so boundary
@@ -140,17 +149,29 @@ reconciliation. Flagged but unrecovered text is kept and marked.
 
 ## Provider matrix
 
+Each row below is a property of the `BatchSttBackend` the pipeline holds
+(`src/batchSttBackend.ts`), not a branch inside `geminiService.ts`.
+`acceptedExtensions` (`null` = no pre-conversion) drives the ffmpeg remux.
+`supportsPrompt: false` means no prompt is assembled at all — no glossary
+block, no positional segment prefix, no format instructions — and the
+vocabulary is handed over as a separate `glossary` field instead.
+`supportsTemperature` sizes the retry ladder via `retryTemperaturesFor`, and
+`maxBytes` / `maxSegmentSeconds` feed `planSegmentation`. Adding an engine
+means adding a backend, not another provider branch.
+
 | Stage | Gemini (default) | Codex — `gpt-4o-transcribe`, `whisper-1` | Codex — `gpt-4o-transcribe-diarize` (codex default) |
 |---|---|---|---|
 | Transcription call | `generateContent` on `geminiFlashModel` (inline ≤ 20 MB, files API above) | `POST /v1/audio/transcriptions` | same endpoint, `diarized_json` + `chunking_strategy=auto` |
 | Per-result quality judge | `gemini-2.5-flash-lite` via text-only `generateContent` | configured `codexModel` via pi-ai | configured `codexModel` via pi-ai |
 | Exhaustion cleanup | `gemini-2.5-flash-lite` via text-only `generateContent` | configured `codexModel` via pi-ai | configured `codexModel` via pi-ai |
-| Prompt (glossary, instructions, `[NO_SPEECH]`) | sent | sent | **not sent** — model rejects `prompt` |
+| Prompt (glossary, instructions, `[NO_SPEECH]`) — `supportsPrompt` | sent | sent | **not sent** — model rejects `prompt`, so the pipeline never assembles one |
 | First-attempt temperature | 0.2 | provider default (field omitted) | provider default |
 | Retry ladder temperatures | 0.4 → 0.8 via `config.temperature` | 0.4 → 0.8 via `temperature` form field | **no temperature knob** — one re-roll relying on provider nondeterminism |
 | Empty result semantics | `text === ''` → `EmptyTranscriptionError` | empty `text` → `EmptyTranscriptionError`; missing `text` → malformed-response error | zero/all-empty segments → `EmptyTranscriptionError` |
 | Speaker labels | prompted `참가자N` | none (plain text) | provider speakers re-labeled to `참가자N` |
-| Segmentation trigger | > 300s | > 300s or > 24 MB (size-shrunk segment length) | same |
+| Segmentation trigger (`maxSegmentSeconds`, `maxBytes`) | > 300s | > 300s or > 24 MB (size-shrunk segment length) | same |
+| Pre-conversion (`acceptedExtensions`) | none — `null`, any container ffmpeg reads | remux to `.webm` outside mp3/mp4/mpeg/mpga/m4a/wav/webm | same |
+| Segment re-encode flag (`requiresReencodedSegments`) | false | true | true |
 
 Implication: the diarize model has the weakest retry surface (no prompt, no
 temperature), so a judge-flagged result gets one provider-nondeterministic

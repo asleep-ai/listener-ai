@@ -18,6 +18,13 @@ describe('isTranscriptionTempFile', () => {
     assert.equal(isTranscriptionTempFile('Talk_codex_1.webm'), true);
   });
 
+  // The pre-conversion temp name carries the batch backend id, so every id in
+  // BATCH_STT_BACKEND_IDS has to be recognised, not just the Codex one.
+  it('matches pre-conversion temps for every batch backend id', () => {
+    assert.equal(isTranscriptionTempFile('Meeting_soniox_1715923200000.webm'), true);
+    assert.equal(isTranscriptionTempFile('Meeting_gemini_1715923200000.webm'), true);
+  });
+
   it('does not match user recordings that share the prefix', () => {
     assert.equal(isTranscriptionTempFile('Meeting_segment_notes.webm'), false);
     assert.equal(isTranscriptionTempFile('Meeting_segment_1.webm'), false);

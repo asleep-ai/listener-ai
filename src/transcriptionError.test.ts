@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { TranscriptionApiError } from './codexTranscription';
+import { isRetryableStatus, TranscriptionApiError } from './transcriptionErrors';
 import { annotateTranscriptionError } from './geminiService';
 
 describe('annotateTranscriptionError - TranscriptionApiError path', () => {
@@ -121,15 +121,9 @@ describe('TranscriptionApiError retryability boundary', () => {
 
   // Indirect: annotateTranscriptionError isn't where the retry decision
   // happens, but TranscriptionApiError is the surface, and a regression in
-  // the retry-classifier is what we want to catch. The classifier is the
-  // local `isRetryableStatus` helper in geminiService.ts; we re-derive
-  // the same rule here so the table doubles as documentation.
-  const isRetryableStatus = (status: number): boolean => {
-    if (status >= 500) return true;
-    if (status === 429 || status === 408) return true;
-    return false;
-  };
-
+  // the retry-classifier is what we want to catch. The classifier is
+  // `isRetryableStatus` in transcriptionErrors.ts, exercised directly here so
+  // the table doubles as documentation.
   for (const { status, retryable, reason } of cases) {
     it(`status ${status} is ${retryable ? 'retryable' : 'non-retryable'} (${reason})`, () => {
       assert.equal(isRetryableStatus(status), retryable);

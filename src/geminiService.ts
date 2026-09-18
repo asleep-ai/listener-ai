@@ -15,12 +15,23 @@ import { type CodexOAuthCredentials } from './codexOAuth';
 import { CodexOAuthHolder } from './codexOAuthHolder';
 import { DEFAULT_SUMMARY_PROMPT } from './configService';
 import {
-  EmptyTranscriptionError,
   isDiarizeModel,
   OPENAI_TRANSCRIPTION_EXTENSIONS,
-  TranscriptionApiError,
   transcribeCodexAudio,
 } from './codexTranscription';
+import {
+  EmptyTranscriptionError,
+  isRetryableStatus,
+  TranscriptionApiError,
+} from './transcriptionErrors';
+import {
+  type BatchSttBackend,
+  type BatchSttBackendId,
+  type BatchSttPrepareParams,
+  DEFAULT_MAX_SEGMENT_SECONDS,
+  planSegmentation,
+  retryTemperaturesFor,
+} from './batchSttBackend';
 import {
   NO_SPEECH_SENTINEL,
   analyzeAssembledTranscript,
@@ -405,7 +416,7 @@ export class TranscriptionError extends Error {
 
 export function annotateTranscriptionError(
   error: unknown,
-  provider: AiProvider,
+  provider: BatchSttBackendId,
 ): TranscriptionError {
   const rawMessage = error instanceof Error ? error.message : String(error);
   // Provider handled the audio but found no speech -- a user-facing state
@@ -454,16 +465,10 @@ export function annotateTranscriptionError(
   return new TranscriptionError({ userMessage, rawMessage }, { cause: error });
 }
 
-function isRetryableStatus(status: number): boolean {
-  // Worth retrying: server errors (5xx), rate-limit (429), and the rare
-  // 408 request-timeout. Everything else in 4xx is a non-transient client
-  // / config issue (invalid model id, bad request shape, auth, billing).
-  if (status >= 500) return true;
-  if (status === 429 || status === 408) return true;
-  return false;
-}
-
-function friendlyMessageForApiError(error: TranscriptionApiError, provider: AiProvider): string {
+function friendlyMessageForApiError(
+  error: TranscriptionApiError,
+  provider: BatchSttBackendId,
+): string {
   const code = error.errorCode;
   const status = error.status;
   if (code === 'insufficient_quota' || code === 'billing_hard_limit_reached') {
@@ -533,12 +538,6 @@ const QUALITY_RETRY_TRANSCRIPT_PROMPT = `Transcribe the speech in this audio exa
 - Transcribe only speech that actually occurs in the audio; never fill gaps or repeat content that is not actually repeated.
 - If there is no clearly intelligible speech, return exactly ${NO_SPEECH_SENTINEL}.
 - Return only the transcript text.`;
-
-// Whisper's fallback ladder compressed to two points -- the low rung keeps
-// recovered speech accurate when it is enough to break the loop, while the
-// high rung maximizes escape probability. Bounded at two extra calls per
-// flagged transcript.
-const QUALITY_RETRY_TEMPERATURES = [0.4, 0.8] as const;
 
 const GEMINI_QUALITY_JUDGE_MODEL = 'gemini-2.5-flash-lite';
 
@@ -616,7 +615,15 @@ function unwrapJsonStringResponse(text: string): string {
 
 export interface GeminiServiceOptions {
   provider?: AiProvider;
+  /**
+   * Batch speech-to-text engine. Already resolved by the caller (no `auto`
+   * here); defaults to `provider`, which is how every caller behaved before
+   * the batch backend seam existed. Summary, judge, cleanup, translation and
+   * the agent stay on `provider` regardless.
+   */
+  transcriptionProvider?: BatchSttBackendId;
   apiKey?: string;
+  sonioxApiKey?: string;
   codexOAuth?: CodexOAuthCredentials;
   onCodexOAuthUpdate?: (credentials: CodexOAuthCredentials) => void | Promise<void>;
   dataPath?: string;
@@ -635,6 +642,7 @@ export class GeminiService {
   private geminiApiKey?: string;
   private codexAuth?: CodexOAuthHolder;
   private provider: AiProvider;
+  private sttBackend: BatchSttBackend;
   private ffmpegManager: FFmpegManager;
   private knownWords: string[];
   private proModel: string;
@@ -656,10 +664,18 @@ export class GeminiService {
 
   constructor(options: GeminiServiceOptions) {
     this.provider = options.provider ?? 'gemini';
-    if (this.provider === 'gemini') {
-      if (!options.apiKey) {
-        throw new Error('Gemini API key is required for the Gemini provider.');
-      }
+    const transcriptionProvider = options.transcriptionProvider ?? this.provider;
+    // A client is needed when EITHER the chat provider or the transcription
+    // backend is that vendor: the two can now differ. The chat provider still
+    // hard-fails here on a missing Gemini key because every non-transcript
+    // path depends on it, while a transcription-only credential gap surfaces
+    // from the first transcribe call with a friendlier message.
+    const needsGemini = this.provider === 'gemini' || transcriptionProvider === 'gemini';
+    const needsCodex = this.provider === 'codex' || transcriptionProvider === 'codex';
+    if (this.provider === 'gemini' && !options.apiKey) {
+      throw new Error('Gemini API key is required for the Gemini provider.');
+    }
+    if (needsGemini && options.apiKey) {
       this.ai = loadGoogleGenAi().then(
         ({ GoogleGenAI }) => new GoogleGenAI({ apiKey: options.apiKey }),
       );
@@ -668,7 +684,8 @@ export class GeminiService {
       // unhandled rejection instead of surfacing from that call.
       this.ai.catch(() => {});
       this.geminiApiKey = options.apiKey;
-    } else {
+    }
+    if (needsCodex) {
       this.codexAuth = new CodexOAuthHolder({
         credentials: options.codexOAuth,
         onUpdate: options.onCodexOAuthUpdate,
@@ -682,6 +699,89 @@ export class GeminiService {
     this.codexTranscriptionModel =
       options.codexTranscriptionModel || DEFAULT_CODEX_TRANSCRIPTION_MODEL;
     this.thinkingLevel = options.thinkingLevel ?? DEFAULT_GEMINI_THINKING_LEVEL;
+    // Last: the backends read the model fields assigned above.
+    this.sttBackend = this.createSttBackend(transcriptionProvider);
+  }
+
+  private createSttBackend(id: BatchSttBackendId): BatchSttBackend {
+    switch (id) {
+      case 'codex':
+        return this.createCodexSttBackend();
+      case 'soniox':
+        throw new Error('Soniox transcription backend is not available in this build.');
+      default:
+        return this.createGeminiSttBackend();
+    }
+  }
+
+  // Gemini takes any container ffmpeg can produce and bills by token, so it
+  // needs no pre-conversion and no byte cap. Both call shapes go through
+  // `generateGeminiTranscript`, which stays a replaceable instance method --
+  // the backend must resolve it at call time, not capture it here.
+  private createGeminiSttBackend(): BatchSttBackend {
+    return {
+      id: 'gemini',
+      modelId: this.flashModel,
+      acceptedExtensions: null,
+      supportsPrompt: true,
+      supportsTemperature: true,
+      maxSegmentSeconds: DEFAULT_MAX_SEGMENT_SECONDS,
+      requiresReencodedSegments: false,
+      prepareWholeFile: (params) => this.uploadGeminiWholeFile(params),
+      transcribe: (params) =>
+        this.generateGeminiTranscript(
+          params.audioFilePath,
+          typeof params.fileHandle === 'string' ? params.fileHandle : null,
+          params.prompt ?? '',
+          params.signal,
+          params.session,
+          params.temperature,
+        ),
+      // The Gemini hot path records from inside `generateGeminiTranscript`,
+      // where the response's usageMetadata is in scope; this is that same
+      // recorder exposed on the backend contract.
+      recordUsage: (session, _audioSeconds, extra) =>
+        recordGeminiUsage(session, this.flashModel, extra),
+    };
+  }
+
+  // OpenAI accepts a fixed extension set, caps a request at 25 MB (we segment
+  // at 24 to keep headroom), and the diarize model rejects both `prompt` and
+  // `temperature`, which is what collapses the retry ladder to one re-roll.
+  private createCodexSttBackend(): BatchSttBackend {
+    const diarize = isDiarizeModel(this.codexTranscriptionModel);
+    const backend: BatchSttBackend = {
+      id: 'codex',
+      modelId: this.codexTranscriptionModel,
+      acceptedExtensions: OPENAI_TRANSCRIPTION_EXTENSIONS,
+      supportsPrompt: !diarize,
+      supportsTemperature: !diarize,
+      maxBytes: 24 * 1024 * 1024,
+      maxSegmentSeconds: DEFAULT_MAX_SEGMENT_SECONDS,
+      requiresReencodedSegments: true,
+      transcribe: async (params) => {
+        const text = await transcribeCodexAudio({
+          getToken: () => this.getCodexToken(),
+          audioFilePath: params.audioFilePath,
+          model: this.codexTranscriptionModel,
+          // `prompt` and `temperature` are dropped inside transcribeCodexAudio
+          // when the diarize model is active. Keep passing them -- the helper
+          // picks the right shape per model.
+          prompt: params.prompt,
+          temperature: params.temperature,
+          // Intentionally NOT passing `language: 'ko'`. Whisper-derived
+          // transcription auto-detects from the first ~30s, which handles
+          // bilingual/code-switched meetings (Korean primary, English
+          // acronyms/quotes) better than forcing a single language.
+          signal: params.signal,
+        });
+        backend.recordUsage(params.session, params.audioSeconds ?? 0);
+        return text;
+      },
+      recordUsage: (session, audioSeconds) =>
+        recordCodexSttUsage(session, this.codexTranscriptionModel, audioSeconds),
+    };
+    return backend;
   }
 
   private async gemini(): Promise<GoogleGenAI> {
@@ -865,14 +965,19 @@ export class GeminiService {
     audioFilePath: string;
     cleanup?: () => void;
   }> {
-    if (this.provider !== 'codex') return { audioFilePath };
+    // `null` means the backend reads anything ffmpeg can produce.
+    const accepted = this.sttBackend.acceptedExtensions;
+    if (accepted === null) return { audioFilePath };
 
     const ext = path.extname(audioFilePath).toLowerCase();
-    if (OPENAI_TRANSCRIPTION_EXTENSIONS.has(ext)) return { audioFilePath };
+    if (accepted.has(ext)) return { audioFilePath };
 
+    // `<base>_<backendId>_<ts>.webm`. `isTranscriptionTempFile` in
+    // audioFormats.ts must recognise the same shape or the remuxed file shows
+    // up in the recordings list mid-transcription.
     const outputPath = path.join(
       path.dirname(audioFilePath),
-      `${path.basename(audioFilePath, ext)}_codex_${Date.now()}.webm`,
+      `${path.basename(audioFilePath, ext)}_${this.sttBackend.id}_${Date.now()}.webm`,
     );
     const ffmpegPath = await this.getFFmpegPath();
     try {
@@ -978,7 +1083,7 @@ export class GeminiService {
       );
     } catch (error) {
       console.error('Error transcribing audio:', error);
-      throw annotateTranscriptionError(error, this.provider);
+      throw annotateTranscriptionError(error, this.sttBackend.id);
     } finally {
       prepared.cleanup?.();
     }
@@ -1295,12 +1400,13 @@ Requirements:
       // faster than one big sequential pass. Trade-off for the diarize
       // model: speaker IDs are mapped fresh per segment ("Speaker 0" in
       // segment 1 may not be the same physical person as "Speaker 0" in
-      // segment 2). See docs/model-pricing.md.
-      const shouldSegment = duration > 300 || (this.provider === 'codex' && fileSizeInMB > 24);
-      const segmentDuration =
-        this.provider === 'codex' && duration > 0 && fileSizeInMB > 20
-          ? Math.max(30, Math.min(300, Math.floor((20 / fileSizeInMB) * duration)))
-          : 300;
+      // segment 2). See docs/model-pricing.md. The thresholds themselves are
+      // backend properties (maxSegmentSeconds, maxBytes).
+      const { shouldSegment, segmentDuration } = planSegmentation(
+        this.sttBackend,
+        duration,
+        fileSizeInMB,
+      );
 
       // Step 1: Get transcript
       if (shouldSegment) {
@@ -1538,118 +1644,58 @@ Requirements:
         progressCallback(20, 'Processing audio file...');
       }
 
-      const transcriptPrompt = `${includeGlossary ? this.buildGlossaryBlock() : ''}${customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT}`;
-      if (this.provider === 'codex') {
-        const runCodex = async (prompt: string, temperature?: number): Promise<string> => {
-          const text = await transcribeCodexAudio({
-            getToken: () => this.getCodexToken(),
-            audioFilePath,
-            model: this.codexTranscriptionModel,
-            // `prompt` is dropped inside transcribeCodexAudio when the
-            // diarize model is active. Keep passing it -- the helper picks
-            // the right shape per model.
-            prompt,
-            temperature,
-            // Intentionally NOT passing `language: 'ko'`. Whisper-derived
-            // transcription auto-detects from the first ~30s, which handles
-            // bilingual/code-switched meetings (Korean primary, English
-            // acronyms/quotes) better than forcing a single language.
-            signal,
-          });
-          recordCodexSttUsage(session, this.codexTranscriptionModel, audioSeconds);
-          return text;
-        };
-        // The diarize model accepts neither prompt nor temperature, so two
-        // ladder rungs would be byte-identical requests. Keep one re-roll and
-        // rely on provider nondeterminism instead.
-        const retryTemperatures = isDiarizeModel(this.codexTranscriptionModel)
-          ? [undefined]
-          : [...QUALITY_RETRY_TEMPERATURES];
-        const gated = await applyTranscriptQualityGate({
-          text: stripNoSpeechSentinel(await runCodex(transcriptPrompt)),
-          label: 'short audio (codex)',
-          judge: qualityJudge,
-          cleanup: qualityCleanup,
-          retries: qualityRetry
-            ? retryTemperatures.map((temperature, index) => () => {
-                reportQualityRetry(index + 1, retryTemperatures.length);
-                return runCodex(QUALITY_RETRY_TRANSCRIPT_PROMPT, temperature)
-                  .then(stripNoSpeechSentinel)
-                  .catch(emptyTranscriptionAsBlank);
-              })
-            : undefined,
-          log: (message) => console.error(message),
-        });
-        if (!gated.text.trim()) {
-          throw new EmptyTranscriptionError('Transcription produced no speech content');
-        }
-        return {
-          text: gated.text,
-          cleaned: gated.cleaned === true,
-          uncertain: gated.flagged,
-        };
-      }
+      const backend = this.sttBackend;
+      // A backend with no prompt surface (the Codex diarize model) gets no
+      // prompt at all: assembling instructions it would discard only invites
+      // a future reader to assume the glossary reached the provider. The
+      // vocabulary goes out of band through `glossary` instead.
+      const transcriptPrompt = backend.supportsPrompt
+        ? `${includeGlossary ? this.buildGlossaryBlock() : ''}${customPrompt ?? DEFAULT_TRANSCRIPT_PROMPT}`
+        : undefined;
 
-      const ai = await this.gemini();
+      // One provider-side upload (when the backend has one) shared by every
+      // rung of the retry ladder.
+      const fileHandle = await backend.prepareWholeFile?.({
+        audioFilePath,
+        fileSizeMb: fileSizeInMB,
+        session,
+        signal,
+        onProgress: progressCallback,
+      });
 
-      // Use Files API for files over 20MB
-      let fileUri: string | null = null;
-      if (fileSizeInMB > 20) {
-        console.error('File is over 20MB, using Files API for upload...');
-
-        if (progressCallback) {
-          progressCallback(25, 'Uploading large file to Gemini...');
-        }
-
-        const mimeType = mimeTypeForExtension(path.extname(audioFilePath));
-
-        const fileData = await fs.promises.readFile(audioFilePath);
-        const uploadResult = await ai.files.upload({
-          file: new Blob([fileData], { type: mimeType }),
-          config: { abortSignal: signal },
+      const retryPrompt = backend.supportsPrompt ? QUALITY_RETRY_TRANSCRIPT_PROMPT : undefined;
+      const run = (
+        prompt: string | undefined,
+        temperature?: number,
+        glossary?: string[],
+      ): Promise<string> =>
+        backend.transcribe({
+          audioFilePath,
+          prompt,
+          temperature,
+          glossary,
+          audioSeconds,
+          fileHandle,
+          session,
+          signal,
         });
 
-        fileUri = uploadResult.uri || '';
-
-        // Wait for file to be active
-        let file = await ai.files.get({
-          name: uploadResult.name || '',
-          config: { abortSignal: signal },
-        });
-        let retries = 0;
-        while (file.state === 'PROCESSING' && retries < 30) {
-          signal?.throwIfAborted();
-          console.error(`Waiting for file to be processed... (attempt ${retries + 1}/30)`);
-          await abortableDelay(2000, signal);
-          file = await ai.files.get({
-            name: uploadResult.name || '',
-            config: { abortSignal: signal },
-          });
-          retries++;
-        }
-
-        if (file.state !== 'ACTIVE') {
-          throw new Error(`File is not active. State: ${file.state}`);
-        }
-      }
-
-      if (progressCallback) {
-        progressCallback(50, 'Transcribing audio...');
-      }
-
-      const runGemini = (prompt: string, temperature?: number): Promise<string> =>
-        this.generateGeminiTranscript(audioFilePath, fileUri, prompt, signal, session, temperature);
+      // The retry prompt is context-cleared on purpose, so no glossary is
+      // handed to the rungs either.
+      const retryTemperatures = retryTemperaturesFor(backend);
       const gated = await applyTranscriptQualityGate({
-        text: stripNoSpeechSentinel(await runGemini(transcriptPrompt)),
-        label: 'short audio (gemini)',
+        text: stripNoSpeechSentinel(
+          await run(transcriptPrompt, undefined, includeGlossary ? this.knownWords : undefined),
+        ),
+        label: `short audio (${backend.id})`,
         judge: qualityJudge,
         cleanup: qualityCleanup,
         retries: qualityRetry
-          ? QUALITY_RETRY_TEMPERATURES.map((temperature, index) => () => {
-              reportQualityRetry(index + 1, QUALITY_RETRY_TEMPERATURES.length);
-              return runGemini(QUALITY_RETRY_TRANSCRIPT_PROMPT, temperature).then(
-                stripNoSpeechSentinel,
-              );
+          ? retryTemperatures.map((temperature, index) => () => {
+              reportQualityRetry(index + 1, retryTemperatures.length);
+              return run(retryPrompt, temperature)
+                .then(stripNoSpeechSentinel)
+                .catch(emptyTranscriptionAsBlank);
             })
           : undefined,
         log: (message) => console.error(message),
@@ -1666,6 +1712,57 @@ Requirements:
       console.error('Error transcribing short audio:', error);
       throw error;
     }
+  }
+
+  // Whole-file preparation for the Gemini backend: anything over 20MB goes
+  // through the files API, smaller files ride inline on the request. The
+  // returned URI (undefined when inline) is handed back to every transcribe
+  // call for this file, so the retry ladder reuses one upload. Segments never
+  // come through here -- they are capped well under 20MB by construction and
+  // always go inline.
+  private async uploadGeminiWholeFile(params: BatchSttPrepareParams): Promise<string | undefined> {
+    const ai = await this.gemini();
+
+    let fileUri: string | undefined;
+    if (params.fileSizeMb > 20) {
+      console.error('File is over 20MB, using Files API for upload...');
+
+      params.onProgress?.(25, 'Uploading large file to Gemini...');
+
+      const mimeType = mimeTypeForExtension(path.extname(params.audioFilePath));
+
+      const fileData = await fs.promises.readFile(params.audioFilePath);
+      const uploadResult = await ai.files.upload({
+        file: new Blob([fileData], { type: mimeType }),
+        config: { abortSignal: params.signal },
+      });
+
+      fileUri = uploadResult.uri || '';
+
+      // Wait for file to be active
+      let file = await ai.files.get({
+        name: uploadResult.name || '',
+        config: { abortSignal: params.signal },
+      });
+      let retries = 0;
+      while (file.state === 'PROCESSING' && retries < 30) {
+        params.signal?.throwIfAborted();
+        console.error(`Waiting for file to be processed... (attempt ${retries + 1}/30)`);
+        await abortableDelay(2000, params.signal);
+        file = await ai.files.get({
+          name: uploadResult.name || '',
+          config: { abortSignal: params.signal },
+        });
+        retries++;
+      }
+
+      if (file.state !== 'ACTIVE') {
+        throw new Error(`File is not active. State: ${file.state}`);
+      }
+    }
+
+    params.onProgress?.(50, 'Transcribing audio...');
+    return fileUri;
   }
 
   // Single Gemini generateContent transcription call. Shared by the first
@@ -1743,7 +1840,8 @@ Requirements:
   // first attempt and the context-cleared quality retry.
   private async transcribeSegmentRaw(
     segmentFile: string,
-    promptText: string,
+    // Undefined when the backend has no prompt surface (Codex diarize).
+    promptText: string | undefined,
     segmentSeconds: number,
     signal?: AbortSignal,
     session?: CostSession,
@@ -1751,51 +1849,19 @@ Requirements:
     // (provider default, exactly as before) and gemini falls back to 0.2.
     // Only the quality retry passes an explicit raised value.
     temperature?: number,
+    // Only set on first attempts, and only for backends that take vocabulary
+    // out of band -- the prompt-based backends already carry it in promptText.
+    glossary?: string[],
   ): Promise<string> {
-    if (this.provider === 'codex') {
-      const transcript = await transcribeCodexAudio({
-        getToken: () => this.getCodexToken(),
-        audioFilePath: segmentFile,
-        model: this.codexTranscriptionModel,
-        prompt: promptText,
-        temperature,
-        signal,
-      });
-      recordCodexSttUsage(session, this.codexTranscriptionModel, segmentSeconds);
-      return transcript;
-    }
-
-    const audioData = await fs.promises.readFile(segmentFile);
-    const base64Audio = audioData.toString('base64');
-    const mimeType = mimeTypeForExtension(path.extname(segmentFile));
-
-    const result = await (
-      await this.gemini()
-    ).models.generateContent({
-      model: this.flashModel,
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              inlineData: {
-                mimeType: mimeType,
-                data: base64Audio,
-              },
-            },
-            { text: promptText },
-          ],
-        },
-      ],
-      config: {
-        temperature: temperature ?? 0.2,
-        maxOutputTokens: 32768,
-        abortSignal: signal,
-      },
+    return await this.sttBackend.transcribe({
+      audioFilePath: segmentFile,
+      prompt: promptText,
+      temperature,
+      glossary,
+      audioSeconds: segmentSeconds,
+      session,
+      signal,
     });
-
-    recordGeminiUsage(session, this.flashModel, result.usageMetadata);
-    return result.text || '';
   }
 
   // Transcribe a single segment with retry logic
@@ -1822,12 +1888,14 @@ Requirements:
     const maxRetries = 3;
     let lastError: any = null;
     let attemptsMade = 0;
-    const segmentPrompt = this.createSegmentPrompt(
-      segmentIndex,
-      totalSegments,
-      customPrompt,
-      includeGlossary,
-    );
+    // No prompt surface means no prompt: the positional prefix, glossary
+    // block and format instructions would all be discarded provider-side.
+    const segmentPrompt = this.sttBackend.supportsPrompt
+      ? this.createSegmentPrompt(segmentIndex, totalSegments, customPrompt, includeGlossary)
+      : undefined;
+    const retryPrompt = this.sttBackend.supportsPrompt
+      ? QUALITY_RETRY_TRANSCRIPT_PROMPT
+      : undefined;
     const segmentSeconds = Math.max(0, segmentEndTime - segmentStartTime);
     const segmentHeader = this.createSegmentHeader(segmentIndex, segmentStartTime, segmentEndTime);
     const qualityJudge = qualityRetry
@@ -1852,6 +1920,8 @@ Requirements:
             segmentSeconds,
             signal,
             session,
+            undefined,
+            includeGlossary ? this.knownWords : undefined,
           ),
         );
 
@@ -1860,12 +1930,10 @@ Requirements:
         // Repetition/hallucination gate (issue #182): the small-model judge
         // decides whether output gets a context-cleared retry ladder. The
         // analyzer supplies metrics and the fail-open fallback verdict.
-        // The diarize model ignores both retry controls, so its bounded ladder
-        // is a single provider-nondeterministic re-roll.
-        const retryTemperatures =
-          this.provider === 'codex' && isDiarizeModel(this.codexTranscriptionModel)
-            ? [undefined]
-            : [...QUALITY_RETRY_TEMPERATURES];
+        // A backend with no temperature knob (the Codex diarize model) ignores
+        // both retry controls, so its bounded ladder is a single
+        // provider-nondeterministic re-roll.
+        const retryTemperatures = retryTemperaturesFor(this.sttBackend);
         const gated = await applyTranscriptQualityGate({
           text: raw,
           label: `segment ${segmentIndex + 1}/${totalSegments}`,
@@ -1876,7 +1944,7 @@ Requirements:
                 onQualityRetry?.(index + 1, retryTemperatures.length);
                 return this.transcribeSegmentRaw(
                   segmentFile,
-                  QUALITY_RETRY_TRANSCRIPT_PROMPT,
+                  retryPrompt,
                   segmentSeconds,
                   signal,
                   session,
@@ -1985,11 +2053,13 @@ Requirements:
       // Split audio into 5-minute segments. Codex transcription requires
       // accurate cut times (gpt-4o-transcribe rejects >1400s/segment), so
       // force re-encode there; Gemini's API tolerates long inputs and we
-      // keep the cheaper `-c copy` path for it.
+      // keep the cheaper `-c copy` path for it. Only the legacy
+      // unknown-duration muxer still honors the flag -- the plan path always
+      // re-encodes.
       segmentFiles = await this.splitAudioIntoSegments(
         audioFilePath,
         segmentDuration,
-        this.provider === 'codex',
+        this.sttBackend.requiresReencodedSegments,
         signal,
         duration,
       );

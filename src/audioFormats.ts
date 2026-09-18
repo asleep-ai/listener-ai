@@ -1,3 +1,5 @@
+import { BATCH_STT_BACKEND_IDS } from './batchSttBackend';
+
 export const SUPPORTED_AUDIO_EXTENSIONS = [
   '.mp3',
   '.m4a',
@@ -67,13 +69,18 @@ export function mimeTypeForFile(filename: string): string {
 
 // Transient files the transcription pipeline writes alongside user recordings:
 //   - `<base>_segment_NNN.<ext>` from ffmpeg's segment muxer (NNN = `%03d`)
-//   - `<base>_codex_<Date.now()>.webm` from `prepareAudioForProvider` when a
-//     non-OpenAI-supported source extension (.ogg/.flac/.aac/.opus) needs to
-//     be remuxed before hitting `/v1/audio/transcriptions`
+//   - `<base>_<backendId>_<Date.now()>.webm` from `prepareAudioForProvider`
+//     when the source extension is outside the batch backend's
+//     `acceptedExtensions` (e.g. .ogg/.flac/.aac/.opus before OpenAI's
+//     `/v1/audio/transcriptions`) and needs a remux first
+// The backend ids come from BATCH_STT_BACKEND_IDS so a new engine's temp
+// files are recognised without editing this pattern.
 // Used by the recordings watcher to suppress mid-transcription refreshes that
 // would wipe the inline progress row, and by `get-recordings` so these temp
 // files don't appear as ghost recordings while a transcribe is in flight.
-const TRANSCRIPTION_TEMP_FILE_PATTERN = /(?:_segment_\d{3}|_codex_\d+)\.[A-Za-z0-9]+$/;
+const TRANSCRIPTION_TEMP_FILE_PATTERN = new RegExp(
+  `(?:_segment_\\d{3}|_(?:${BATCH_STT_BACKEND_IDS.join('|')})_\\d+)\\.[A-Za-z0-9]+$`,
+);
 
 export function isTranscriptionTempFile(filename: string): boolean {
   return TRANSCRIPTION_TEMP_FILE_PATTERN.test(filename);
