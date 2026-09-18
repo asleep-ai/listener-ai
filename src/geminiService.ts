@@ -20,6 +20,12 @@ import {
   transcribeCodexAudio,
 } from './codexTranscription';
 import {
+  SONIOX_ASYNC_MODEL,
+  SONIOX_MAX_FILE_SECONDS,
+  SONIOX_TRANSCRIPTION_EXTENSIONS,
+  transcribeSonioxAudio,
+} from './sonioxTranscription';
+import {
   EmptyTranscriptionError,
   isRetryableStatus,
   TranscriptionApiError,
@@ -43,6 +49,7 @@ import {
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
 import { type Context, completeSimple, extractFinalText, getModel } from './piAiClient';
 import { reportError } from './sentry';
+import { telemetryHash } from './sentryScrub';
 import { FFmpegManager } from './services/ffmpegManager';
 import { type CostSession, type CostSnapshot, createCostSession } from './services/usageTracker';
 import { importEsm } from './esmImport';
@@ -331,9 +338,10 @@ function attachCost(result: TranscriptionResult, session: CostSession): Transcri
   return { ...result, cost };
 }
 
-// OpenAI's /v1/audio/transcriptions doesn't return token counts, so we record
-// by audio duration alone (per-minute billing on the codex side).
-function recordCodexSttUsage(
+// Neither OpenAI's /v1/audio/transcriptions nor Soniox's async API returns
+// token counts, and both bill by elapsed audio, so duration is the whole
+// usage row for those backends.
+function recordAudioDurationUsage(
   session: CostSession | undefined,
   modelId: string,
   audioSeconds: number,
@@ -451,10 +459,7 @@ export function annotateTranscriptionError(
   const lower = rawMessage.toLowerCase();
   let userMessage: string;
   if (lower.includes('api key')) {
-    userMessage =
-      provider === 'codex'
-        ? 'Invalid Codex OAuth token. Please sign in again.'
-        : 'Invalid API key. Please check your Gemini API key configuration.';
+    userMessage = API_KEY_FALLBACK_MESSAGES[provider];
   } else if (lower.includes('quota')) {
     userMessage = 'API quota exceeded. Please try again later.';
   } else if (lower.includes('model')) {
@@ -465,10 +470,57 @@ export function annotateTranscriptionError(
   return new TranscriptionError({ userMessage, rawMessage }, { cause: error });
 }
 
+// Credential copy for the non-API error path (SDK/file/ffmpeg errors whose
+// message merely mentions an api key, plus our own "not configured" throws).
+// A Record keyed by the backend id so a new backend fails to compile until it
+// says what a credential problem looks like for it.
+const API_KEY_FALLBACK_MESSAGES: Record<BatchSttBackendId, string> = {
+  gemini: 'Invalid API key. Please check your Gemini API key configuration.',
+  codex: 'Invalid Codex OAuth token. Please sign in again.',
+  soniox: 'Soniox API key is missing or invalid. Please check your Soniox API key in Settings.',
+};
+
+// Soniox's envelope is `{ status_code, error_type, ... }` with its own
+// vocabulary, so it gets its own table instead of threading a third branch
+// through each OpenAI/Gemini comparison below.
+function sonioxMessageForApiError(error: TranscriptionApiError): string {
+  const code = error.errorCode;
+  const status = error.status;
+  if (status === 401 || code === 'unauthenticated') {
+    return 'Invalid Soniox API key. Please check your Soniox API key in Settings.';
+  }
+  if (
+    status === 402 ||
+    code === 'organization_balance_exhausted' ||
+    (code !== undefined && code.endsWith('_budget_exhausted'))
+  ) {
+    return 'Soniox account balance or budget is exhausted. Add credit at soniox.com.';
+  }
+  if (status === 429 || code === 'limit_exceeded') {
+    return 'Soniox rate or concurrency limit reached. Please retry in a minute.';
+  }
+  if (code !== undefined && code.startsWith('file_download_')) {
+    return `Soniox could not read the uploaded audio (${code}). Please try transcribing again.`;
+  }
+  if (
+    status === 413 ||
+    code === 'max_duration_reached' ||
+    code === 'invalid_audio_file' ||
+    code === 'transcription_output_too_long'
+  ) {
+    return 'Soniox rejected the audio (too long or undecodable).';
+  }
+  if (status === 403 || code === 'permission_denied') {
+    return 'Soniox refused the request (403). Check that this key may use the transcription model.';
+  }
+  return `Failed to transcribe audio (HTTP ${status}).`;
+}
+
 function friendlyMessageForApiError(
   error: TranscriptionApiError,
   provider: BatchSttBackendId,
 ): string {
+  if (provider === 'soniox') return sonioxMessageForApiError(error);
   const code = error.errorCode;
   const status = error.status;
   if (code === 'insufficient_quota' || code === 'billing_hard_limit_reached') {
@@ -640,6 +692,7 @@ export interface GeminiServiceOptions {
 export class GeminiService {
   private ai?: Promise<GoogleGenAI>;
   private geminiApiKey?: string;
+  private sonioxApiKey?: string;
   private codexAuth?: CodexOAuthHolder;
   private provider: AiProvider;
   private sttBackend: BatchSttBackend;
@@ -685,6 +738,10 @@ export class GeminiService {
       this.ai.catch(() => {});
       this.geminiApiKey = options.apiKey;
     }
+    // No hard failure for a missing Soniox key: it is a transcription-only
+    // credential, so the gap surfaces from the first transcribe call rather
+    // than blocking a service whose summary/agent paths are fully configured.
+    this.sonioxApiKey = options.sonioxApiKey;
     if (needsCodex) {
       this.codexAuth = new CodexOAuthHolder({
         credentials: options.codexOAuth,
@@ -708,7 +765,7 @@ export class GeminiService {
       case 'codex':
         return this.createCodexSttBackend();
       case 'soniox':
-        throw new Error('Soniox transcription backend is not available in this build.');
+        return this.createSonioxSttBackend();
       default:
         return this.createGeminiSttBackend();
     }
@@ -779,7 +836,57 @@ export class GeminiService {
         return text;
       },
       recordUsage: (session, audioSeconds) =>
-        recordCodexSttUsage(session, this.codexTranscriptionModel, audioSeconds),
+        recordAudioDurationUsage(session, this.codexTranscriptionModel, audioSeconds),
+    };
+    return backend;
+  }
+
+  // Soniox takes the whole meeting as one async job. `maxSegmentSeconds` is
+  // the provider's own 300-minute file cap rather than the usual 300 seconds:
+  // speaker ids are consistent only within a single request, and whole-file
+  // diarization is the reason to pick this backend at all. It has neither a
+  // prompt nor a temperature knob, so the glossary rides `context.terms` and
+  // the retry ladder collapses to one provider-nondeterministic re-roll.
+  private createSonioxSttBackend(): BatchSttBackend {
+    const backend: BatchSttBackend = {
+      id: 'soniox',
+      modelId: SONIOX_ASYNC_MODEL,
+      acceptedExtensions: SONIOX_TRANSCRIPTION_EXTENSIONS,
+      supportsPrompt: false,
+      supportsTemperature: false,
+      maxSegmentSeconds: SONIOX_MAX_FILE_SECONDS,
+      requiresReencodedSegments: true,
+      transcribe: async (params) => {
+        const apiKey = this.sonioxApiKey?.trim();
+        if (!apiKey) {
+          throw new Error(
+            'Soniox API key is not configured. Add your Soniox API key in Settings to transcribe with Soniox.',
+          );
+        }
+        const result = await transcribeSonioxAudio({
+          apiKey,
+          audioFilePath: params.audioFilePath,
+          terms: params.glossary,
+          // Correlation id for support tickets. The basename is title-derived
+          // (meeting content), so only its opaque hash may leave the machine.
+          clientReferenceId: telemetryHash(path.basename(params.audioFilePath)),
+          signal: params.signal,
+          onProgress: params.onProgress,
+          // The segment path already retries; only the whole-file path, which
+          // has no retry loop above it, asks this client for its own.
+          maxAttempts: params.wholeFile ? 3 : 1,
+        });
+        // Prefer the provider's own measurement: it is what the invoice is
+        // computed from, and it exists even when ffprobe returned 0.
+        const audioSeconds =
+          result.audioDurationMs !== undefined
+            ? result.audioDurationMs / 1000
+            : (params.audioSeconds ?? 0);
+        backend.recordUsage(params.session, audioSeconds);
+        return result.text;
+      },
+      recordUsage: (session, audioSeconds) =>
+        recordAudioDurationUsage(session, SONIOX_ASYNC_MODEL, audioSeconds),
     };
     return backend;
   }
@@ -1668,6 +1775,9 @@ Requirements:
         prompt: string | undefined,
         temperature?: number,
         glossary?: string[],
+        // Only the first attempt narrates: a retry rung has already reported
+        // its own progress and must not rewind the bar.
+        onProgress?: (percent: number, message: string) => void,
       ): Promise<string> =>
         backend.transcribe({
           audioFilePath,
@@ -1676,6 +1786,8 @@ Requirements:
           glossary,
           audioSeconds,
           fileHandle,
+          onProgress,
+          wholeFile: true,
           session,
           signal,
         });
@@ -1685,7 +1797,12 @@ Requirements:
       const retryTemperatures = retryTemperaturesFor(backend);
       const gated = await applyTranscriptQualityGate({
         text: stripNoSpeechSentinel(
-          await run(transcriptPrompt, undefined, includeGlossary ? this.knownWords : undefined),
+          await run(
+            transcriptPrompt,
+            undefined,
+            includeGlossary ? this.knownWords : undefined,
+            progressCallback,
+          ),
         ),
         label: `short audio (${backend.id})`,
         judge: qualityJudge,

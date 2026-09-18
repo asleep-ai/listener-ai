@@ -27,6 +27,7 @@
     "dist/transcriptQuality.js",
     "dist/liveSttProvider.js",
     "dist/sonioxLiveProvider.js",
+    "dist/sonioxTranscription.js",
     "dist/liveSttUtils.js",
     "dist/batchSttBackend.js",
     "dist/transcriptionErrors.js",

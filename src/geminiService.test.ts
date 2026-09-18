@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
 import { EmptyTranscriptionError } from './transcriptionErrors';
+import { type BatchSttBackend, planSegmentation, retryTemperaturesFor } from './batchSttBackend';
 import { GeminiService, computeSegmentPlan, segmentOverlapSeconds } from './geminiService';
+import { createCostSession } from './services/usageTracker';
 import { findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
 const ffmpegPath = findFfmpegSync();
@@ -929,19 +931,160 @@ describe('GeminiService short-audio quality judge wiring', () => {
     assert.equal(geminiCalls, 1);
     assert.equal(result.text, text);
   });
+});
 
-  it('refuses to construct a service for an unavailable transcription backend', () => {
-    assert.throws(
-      () =>
-        new GeminiService({
-          transcriptionProvider: 'soniox',
-          apiKey: 'test-key',
-          dataPath: workDir,
-          proModel: 'gemini-test-pro',
-          flashModel: 'gemini-test-flash',
-        }),
-      /Soniox transcription backend is not available/,
+// Soniox is the third batch backend. Its distinguishing properties are the
+// 300-minute single-file window (whole-meeting diarization is the reason to
+// pick it) and the absence of prompt/temperature knobs.
+describe('GeminiService Soniox batch backend', () => {
+  type SonioxHelpers = {
+    sttBackend: BatchSttBackend;
+    getShortAudioTranscript(
+      audioFilePath: string,
+      audioSeconds: number,
+      progressCallback?: (percent: number, message: string) => void,
+      customPrompt?: string,
+      signal?: AbortSignal,
+      session?: unknown,
+      includeGlossary?: boolean,
+      qualityRetry?: boolean,
+    ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
+    judgeTranscriptQuality(
+      text: string,
+      signal?: AbortSignal,
+    ): Promise<{ flagged: boolean; reason?: string }>;
+  };
+
+  const originalFetch = globalThis.fetch;
+
+  // Minimal scripted Soniox API. The full protocol is covered in
+  // sonioxTranscription.test.ts; here it only has to let the backend run.
+  function stubSonioxFetch(options: { audioDurationMs?: number }): Array<{
+    method: string;
+    url: string;
+    body?: unknown;
+  }> {
+    const requests: Array<{ method: string; url: string; body?: unknown }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      requests.push({
+        method,
+        url,
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+      });
+      const reply = (payload: unknown) =>
+        new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      if (method === 'POST' && url.endsWith('/v1/files')) return reply({ id: 'file_x' });
+      if (method === 'POST' && url.endsWith('/v1/transcriptions')) return reply({ id: 'tr_x' });
+      if (method === 'GET' && url.endsWith('/transcript')) {
+        return reply({ tokens: [{ text: '회의 시작합니다', speaker: '2' }] });
+      }
+      if (method === 'GET') {
+        return reply({ status: 'completed', audio_duration_ms: options.audioDurationMs });
+      }
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    return requests;
+  }
+
+  function makeSonioxService(options: { sonioxApiKey?: string; knownWords?: string[] } = {}) {
+    return new GeminiService({
+      transcriptionProvider: 'soniox',
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+      ...options,
+    }) as unknown as SonioxHelpers;
+  }
+
+  after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('selects a whole-file backend with no prompt or temperature surface', () => {
+    const backend = makeSonioxService({ sonioxApiKey: 'soniox-key' }).sttBackend;
+    assert.equal(backend.id, 'soniox');
+    assert.equal(backend.modelId, 'stt-async-v5');
+    assert.equal(backend.maxSegmentSeconds, 18_000);
+    assert.equal(backend.supportsPrompt, false);
+    assert.equal(backend.supportsTemperature, false);
+    assert.equal(backend.maxBytes, undefined);
+    assert.equal(backend.requiresReencodedSegments, true);
+    // No prompt/temperature knob collapses the ladder to one re-roll.
+    assert.deepEqual(retryTemperaturesFor(backend), [undefined]);
+  });
+
+  it('sends a two-hour meeting as one file instead of segmenting it', () => {
+    const backend = makeSonioxService({ sonioxApiKey: 'soniox-key' }).sttBackend;
+    assert.equal(planSegmentation(backend, 7200, 60).shouldSegment, false);
+    // Only past the provider's own 300-minute cap does the segment plan run.
+    assert.equal(planSegmentation(backend, 18_001, 400).shouldSegment, true);
+  });
+
+  it('constructs without a Soniox key and fails only when transcription starts', async () => {
+    const backend = makeSonioxService().sttBackend;
+    await assert.rejects(
+      backend.transcribe({ audioFilePath: path.join(workDir, 'missing.webm') }),
+      /Soniox API key is not configured/,
     );
+  });
+
+  it('forwards the glossary as context.terms and records provider-measured usage', async () => {
+    const service = makeSonioxService({
+      sonioxApiKey: 'soniox-key',
+      knownWords: ['Listener.AI', 'Asleep'],
+    });
+    const audioPath = path.join(workDir, 'soniox-short.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+
+    const requests = stubSonioxFetch({ audioDurationMs: 12_000 });
+
+    service.judgeTranscriptQuality = async () => ({ flagged: false, reason: 'natural speech' });
+    const session = createCostSession();
+    const result = await service.getShortAudioTranscript(
+      audioPath,
+      10,
+      undefined,
+      undefined,
+      undefined,
+      session,
+    );
+
+    assert.equal(result.text, '참가자1: 회의 시작합니다');
+    // Usage is billed from the provider's own measurement (12s), not the
+    // ffprobe number the caller passed (10s).
+    assert.deepEqual(
+      session.snapshot().breakdown.map(({ modelId, kind, usage }) => ({ modelId, kind, usage })),
+      [{ modelId: 'stt-async-v5', kind: 'transcription', usage: { audioSeconds: 12 } }],
+    );
+    const create = requests.find((req) => req.url.endsWith('/v1/transcriptions'));
+    assert.ok(create, 'expected a transcription-create request');
+    assert.deepEqual((create.body as { context?: unknown }).context, {
+      terms: ['Listener.AI', 'Asleep'],
+    });
+    // Both server-side objects are cleaned up on the happy path (quota).
+    assert.deepEqual(
+      requests.filter((req) => req.method === 'DELETE').map((req) => req.url),
+      ['https://api.soniox.com/v1/transcriptions/tr_x', 'https://api.soniox.com/v1/files/file_x'],
+    );
+  });
+
+  it('falls back to the ffprobe duration when the API omits audio_duration_ms', async () => {
+    const service = makeSonioxService({ sonioxApiKey: 'soniox-key' });
+    const audioPath = path.join(workDir, 'soniox-no-duration.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    stubSonioxFetch({});
+
+    service.judgeTranscriptQuality = async () => ({ flagged: false, reason: 'natural speech' });
+    const session = createCostSession();
+    await service.getShortAudioTranscript(audioPath, 42, undefined, undefined, undefined, session);
+
+    assert.deepEqual(session.snapshot().breakdown[0].usage, { audioSeconds: 42 });
   });
 });
 

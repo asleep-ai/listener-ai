@@ -63,6 +63,23 @@ export interface BatchSttTranscribeParams {
   audioSeconds?: number;
   /** Opaque value from `prepareWholeFile`, absent on the segment path. */
   fileHandle?: unknown;
+  /**
+   * Progress sink for a backend whose `transcribe` call is itself the
+   * long-running step -- Soniox uploads, creates and polls an async job
+   * inside one call, with no `prepareWholeFile` to narrate it. Passed only on
+   * the first whole-file attempt; the segment loop and the quality-retry
+   * rungs report their own progress and leave this undefined so the bar never
+   * jumps backwards.
+   */
+  onProgress?: (percent: number, message: string) => void;
+  /**
+   * True when this call is the non-segmented whole-file path. Only a backend
+   * that retries its own transport needs it: `transcribeSingleSegment`
+   * already wraps the segment path in a bounded retry loop, while
+   * `getShortAudioTranscript` has none, so a self-retrying backend would
+   * otherwise multiply the two.
+   */
+  wholeFile?: boolean;
   session?: CostSession;
   signal?: AbortSignal;
 }

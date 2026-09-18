@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { isTranscriptionTempFile } from './audioFormats';
+import { isTranscriptionTempFile, mimeTypeForExtension } from './audioFormats';
 
 // The recordings watcher and `get-recordings` both rely on this helper to
 // suppress transient transcription artifacts. A loose match would let user
@@ -35,5 +35,27 @@ describe('isTranscriptionTempFile', () => {
   it('requires a single extension after the suffix (no nested dots)', () => {
     assert.equal(isTranscriptionTempFile('Meeting_segment_001.txt.webm'), false);
     assert.equal(isTranscriptionTempFile('Meeting_codex_123.tar.gz'), false);
+  });
+});
+
+// The multipart upload labels the audio part with this mime type. A missing
+// entry silently falls back to `audio/mp3`, which makes a provider demux the
+// wrong format -- so every extension a backend accepts directly needs a row.
+describe('mimeTypeForExtension', () => {
+  it('maps the containers the Soniox backend accepts directly', () => {
+    assert.equal(mimeTypeForExtension('.mp4'), 'audio/mp4');
+    assert.equal(mimeTypeForExtension('.aiff'), 'audio/aiff');
+    assert.equal(mimeTypeForExtension('.amr'), 'audio/amr');
+    assert.equal(mimeTypeForExtension('.asf'), 'audio/x-ms-asf');
+  });
+
+  it('keeps the existing recording-pipeline mappings', () => {
+    assert.equal(mimeTypeForExtension('.webm'), 'audio/webm');
+    assert.equal(mimeTypeForExtension('.m4a'), 'audio/mp4');
+    assert.equal(mimeTypeForExtension('WAV'), 'audio/wav');
+  });
+
+  it('falls back to audio/mp3 for an unknown extension', () => {
+    assert.equal(mimeTypeForExtension('.xyz'), 'audio/mp3');
   });
 });

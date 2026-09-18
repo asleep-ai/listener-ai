@@ -21,6 +21,13 @@ const MIME_FOR_EXTENSION: Record<string, string> = {
   '.opus': 'audio/ogg',
   '.flac': 'audio/flac',
   '.aac': 'audio/aac',
+  // Containers only the Soniox backend accepts directly. Without an entry
+  // here the multipart upload would label them `audio/mp3` (the fallback) and
+  // the server would demux against the wrong format.
+  '.mp4': 'audio/mp4',
+  '.aiff': 'audio/aiff',
+  '.amr': 'audio/amr',
+  '.asf': 'audio/x-ms-asf',
 };
 
 const EXTENSION_FOR_MIME: Record<string, string> = {

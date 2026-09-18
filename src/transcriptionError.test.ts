@@ -7,7 +7,11 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { isRetryableStatus, TranscriptionApiError } from './transcriptionErrors';
+import {
+  EmptyTranscriptionError,
+  isRetryableStatus,
+  TranscriptionApiError,
+} from './transcriptionErrors';
 import { annotateTranscriptionError } from './geminiService';
 
 describe('annotateTranscriptionError - TranscriptionApiError path', () => {
@@ -68,6 +72,95 @@ describe('annotateTranscriptionError - TranscriptionApiError path', () => {
     const annotated = annotateTranscriptionError(upstream, 'gemini');
     assert.match(annotated.userMessage, /quota exceeded/i);
     assert.doesNotMatch(annotated.userMessage, /ChatGPT/);
+  });
+});
+
+// Soniox uses its own error vocabulary (`error_type` on a `status_code`
+// envelope), so its copy names the Soniox key/balance instead of Gemini's or
+// ChatGPT's -- the first thing a user checks when transcription stops.
+describe('annotateTranscriptionError - Soniox copy', () => {
+  const sonioxError = (status: number, errorType?: string): TranscriptionApiError =>
+    new TranscriptionApiError(`soniox says ${status}`, {
+      status,
+      statusText: 'error',
+      errorType,
+      errorCode: errorType,
+      requestId: 'req_soniox',
+    });
+
+  it('points 401 at the Soniox API key setting', () => {
+    const annotated = annotateTranscriptionError(sonioxError(401, 'unauthenticated'), 'soniox');
+    assert.match(annotated.userMessage, /Soniox API key/);
+    assert.doesNotMatch(annotated.userMessage, /Gemini|ChatGPT/);
+    assert.equal(annotated.status, 401);
+    assert.equal(annotated.requestId, 'req_soniox');
+  });
+
+  it('points 402 at the account balance', () => {
+    const annotated = annotateTranscriptionError(
+      sonioxError(402, 'organization_balance_exhausted'),
+      'soniox',
+    );
+    assert.match(annotated.userMessage, /balance or budget is exhausted/);
+  });
+
+  it('treats a project budget error as the same balance problem', () => {
+    const annotated = annotateTranscriptionError(
+      sonioxError(200, 'project_budget_exhausted'),
+      'soniox',
+    );
+    assert.match(annotated.userMessage, /balance or budget is exhausted/);
+  });
+
+  it('maps 429 to rate/concurrency copy', () => {
+    const annotated = annotateTranscriptionError(sonioxError(429, 'limit_exceeded'), 'soniox');
+    assert.match(annotated.userMessage, /rate or concurrency limit/i);
+  });
+
+  it('maps audio rejections to one audio-shaped message', () => {
+    for (const [status, errorType] of [
+      [413, undefined],
+      [400, 'invalid_audio_file'],
+      [413, 'max_duration_reached'],
+      [400, 'transcription_output_too_long'],
+    ] as Array<[number, string | undefined]>) {
+      const annotated = annotateTranscriptionError(sonioxError(status, errorType), 'soniox');
+      assert.match(annotated.userMessage, /too long or undecodable/);
+    }
+  });
+
+  it('names the server error type when Soniox could not read the upload', () => {
+    const annotated = annotateTranscriptionError(
+      sonioxError(400, 'file_download_timeout'),
+      'soniox',
+    );
+    assert.match(annotated.userMessage, /could not read the uploaded audio/);
+    assert.match(annotated.userMessage, /file_download_timeout/);
+  });
+
+  it('falls back to the HTTP status for an unmapped failure', () => {
+    const annotated = annotateTranscriptionError(sonioxError(500, 'internal_error'), 'soniox');
+    assert.match(annotated.userMessage, /HTTP 500/);
+  });
+
+  it('names Soniox when the unconfigured-key error reaches the legacy path', () => {
+    // The backend's own "not configured" throw is a plain Error, so it lands
+    // in the substring fallback -- which must not blame the Gemini key.
+    const annotated = annotateTranscriptionError(
+      new Error('Soniox API key is not configured. Add your Soniox API key in Settings.'),
+      'soniox',
+    );
+    assert.match(annotated.userMessage, /Soniox API key/);
+    assert.doesNotMatch(annotated.userMessage, /Gemini/);
+  });
+
+  it('keeps the shared no-speech copy for an empty Soniox transcript', () => {
+    const annotated = annotateTranscriptionError(
+      new EmptyTranscriptionError('Soniox transcription returned no speech'),
+      'soniox',
+    );
+    assert.equal(annotated.userMessage, 'No intelligible speech was found in this recording.');
+    assert.equal(annotated.rawMessage, 'Soniox transcription returned no speech');
   });
 });
 

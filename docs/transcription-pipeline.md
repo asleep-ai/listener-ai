@@ -37,7 +37,11 @@ and no byte cap; Codex declares the same 300s plus `maxBytes: 24 MB`, and a
 file above that also shrinks the segment length proportionally (targeting
 20 MB per cut, floored at 30s) so each segment fits one request. A backend
 that keeps speaker identity consistent only within a single request raises
-`maxSegmentSeconds` instead of relying on boundary reconciliation.
+`maxSegmentSeconds` instead of relying on boundary reconciliation. Soniox is
+that case: it declares `maxSegmentSeconds: 18_000` (its own 300-minute
+per-file cap) so a whole meeting goes up as one async job and speaker ids stay
+consistent end to end. Only a recording longer than five hours reaches
+`computeSegmentPlan` and `reconcileOverlappingSegments` on that backend.
 
 `computeSegmentPlan` starts every segment after the first
 `SEGMENT_OVERLAP_SECONDS` early (15s, capped at segmentDuration/4), so boundary
@@ -159,23 +163,32 @@ vocabulary is handed over as a separate `glossary` field instead.
 `maxBytes` / `maxSegmentSeconds` feed `planSegmentation`. Adding an engine
 means adding a backend, not another provider branch.
 
-| Stage | Gemini (default) | Codex — `gpt-4o-transcribe`, `whisper-1` | Codex — `gpt-4o-transcribe-diarize` (codex default) |
-|---|---|---|---|
-| Transcription call | `generateContent` on `geminiFlashModel` (inline ≤ 20 MB, files API above) | `POST /v1/audio/transcriptions` | same endpoint, `diarized_json` + `chunking_strategy=auto` |
-| Per-result quality judge | `gemini-2.5-flash-lite` via text-only `generateContent` | configured `codexModel` via pi-ai | configured `codexModel` via pi-ai |
-| Exhaustion cleanup | `gemini-2.5-flash-lite` via text-only `generateContent` | configured `codexModel` via pi-ai | configured `codexModel` via pi-ai |
-| Prompt (glossary, instructions, `[NO_SPEECH]`) — `supportsPrompt` | sent | sent | **not sent** — model rejects `prompt`, so the pipeline never assembles one |
-| First-attempt temperature | 0.2 | provider default (field omitted) | provider default |
-| Retry ladder temperatures | 0.4 → 0.8 via `config.temperature` | 0.4 → 0.8 via `temperature` form field | **no temperature knob** — one re-roll relying on provider nondeterminism |
-| Empty result semantics | `text === ''` → `EmptyTranscriptionError` | empty `text` → `EmptyTranscriptionError`; missing `text` → malformed-response error | zero/all-empty segments → `EmptyTranscriptionError` |
-| Speaker labels | prompted `참가자N` | none (plain text) | provider speakers re-labeled to `참가자N` |
-| Segmentation trigger (`maxSegmentSeconds`, `maxBytes`) | > 300s | > 300s or > 24 MB (size-shrunk segment length) | same |
-| Pre-conversion (`acceptedExtensions`) | none — `null`, any container ffmpeg reads | remux to `.webm` outside mp3/mp4/mpeg/mpga/m4a/wav/webm | same |
-| Segment re-encode flag (`requiresReencodedSegments`) | false | true | true |
+| Stage | Gemini (default) | Codex — `gpt-4o-transcribe`, `whisper-1` | Codex — `gpt-4o-transcribe-diarize` (codex default) | Soniox — `stt-async-v5` (opt-in) |
+|---|---|---|---|---|
+| Transcription call | `generateContent` on `geminiFlashModel` (inline ≤ 20 MB, files API above) | `POST /v1/audio/transcriptions` | same endpoint, `diarized_json` + `chunking_strategy=auto` | async job: `POST /v1/files` → `POST /v1/transcriptions` → poll → `GET .../transcript`, then `DELETE` both (account quotas) |
+| Per-result quality judge | `gemini-2.5-flash-lite` via text-only `generateContent` | configured `codexModel` via pi-ai | configured `codexModel` via pi-ai | judge follows the chat provider (`aiProvider`), not the backend |
+| Exhaustion cleanup | `gemini-2.5-flash-lite` via text-only `generateContent` | configured `codexModel` via pi-ai | configured `codexModel` via pi-ai | same — cleanup also follows `aiProvider` |
+| Prompt (glossary, instructions, `[NO_SPEECH]`) — `supportsPrompt` | sent | sent | **not sent** — model rejects `prompt`, so the pipeline never assembles one | **not sent** — no prompt surface at all; the glossary goes out of band as `context.terms` |
+| First-attempt temperature | 0.2 | provider default (field omitted) | provider default | no temperature parameter exists |
+| Retry ladder temperatures | 0.4 → 0.8 via `config.temperature` | 0.4 → 0.8 via `temperature` form field | **no temperature knob** — one re-roll relying on provider nondeterminism | **no temperature knob** — one re-roll, same as the diarize model |
+| Empty result semantics | `text === ''` → `EmptyTranscriptionError` | empty `text` → `EmptyTranscriptionError`; missing `text` → malformed-response error | zero/all-empty segments → `EmptyTranscriptionError` | no tokens, or only audio-event/whitespace tokens → `EmptyTranscriptionError` |
+| Speaker labels | prompted `참가자N` | none (plain text) | provider speakers re-labeled to `참가자N` | provider speaker ids re-labeled to `참가자N` by first appearance, consistent across the whole file |
+| Segmentation trigger (`maxSegmentSeconds`, `maxBytes`) | > 300s | > 300s or > 24 MB (size-shrunk segment length) | same | > 18,000s (300 min), no byte cap |
+| Pre-conversion (`acceptedExtensions`) | none — `null`, any container ffmpeg reads | remux to `.webm` outside mp3/mp4/mpeg/mpga/m4a/wav/webm | same | remux to `.webm` outside webm/mp3/m4a/mp4/wav/ogg/flac/aac/aiff/amr/asf |
+| Segment re-encode flag (`requiresReencodedSegments`) | false | true | true | true |
 
-Implication: the diarize model has the weakest retry surface (no prompt, no
-temperature), so a judge-flagged result gets one provider-nondeterministic
-re-roll before uncertainty marking.
+Implication: the diarize model and Soniox have the weakest retry surface (no
+prompt, no temperature), so a judge-flagged result gets one
+provider-nondeterministic re-roll before uncertainty marking. Soniox trades
+that away for whole-file speaker consistency and per-second billing; its
+transcription usage row is `{ modelId: 'stt-async-v5', kind: 'transcription',
+usage: { audioSeconds } }`, taken from the provider's own
+`audio_duration_ms` when it reports one. Note that a quality re-roll on this
+backend is a whole second job: another upload, another transcription, and two
+more entries against the 1,000-stored-file / 2,000-transcription account
+quotas, all deleted as they complete. The whole-file path also retries a
+transient 5xx up to three times on its own, because only the segment path has
+a retry loop above it.
 
 ## Live path (light safety net by design)
 
