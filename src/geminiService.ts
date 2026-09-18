@@ -890,11 +890,19 @@ export class GeminiService {
           result.audioDurationMs !== undefined
             ? result.audioDurationMs / 1000
             : (params.audioSeconds ?? 0);
-        backend.recordUsage(params.session, audioSeconds);
+        // Bill the model the SERVER ran, not the one we asked for: Soniox
+        // silently re-routes a retired id to its successor, and a usage row
+        // naming the requested id would hide the re-route and price the wrong
+        // model.
+        backend.recordUsage(params.session, audioSeconds, result.modelId);
         return result.text;
       },
-      recordUsage: (session, audioSeconds) =>
-        recordAudioDurationUsage(session, SONIOX_ASYNC_MODEL, audioSeconds),
+      recordUsage: (session, audioSeconds, extra) =>
+        recordAudioDurationUsage(
+          session,
+          typeof extra === 'string' && extra.trim().length > 0 ? extra.trim() : SONIOX_ASYNC_MODEL,
+          audioSeconds,
+        ),
     };
     return backend;
   }

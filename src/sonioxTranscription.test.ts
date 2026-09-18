@@ -42,7 +42,8 @@ interface ScriptOptions {
   statuses?: unknown[];
   transcript?: unknown;
   uploadResponse?: () => Response;
-  createResponse?: () => Response;
+  /** Receives the init so a test can inspect the signal the client passed. */
+  createResponse?: (init?: RequestInit) => Response;
   transcriptResponse?: () => Response;
   deleteResponse?: (resource: 'transcription' | 'file') => Response;
 }
@@ -87,7 +88,7 @@ function scriptFetch(options: ScriptOptions = {}): {
       return options.uploadResponse?.() ?? json({ id: FILE_ID });
     }
     if (method === 'POST' && url.endsWith('/v1/transcriptions')) {
-      return options.createResponse?.() ?? json({ id: TRANSCRIPTION_ID, status: 'queued' });
+      return options.createResponse?.(init) ?? json({ id: TRANSCRIPTION_ID, status: 'queued' });
     }
     if (method === 'GET' && url.endsWith(`/v1/transcriptions/${TRANSCRIPTION_ID}`)) {
       const next = statuses.length > 1 ? statuses.shift() : statuses[0];
@@ -238,8 +239,15 @@ describe('transcribeSonioxAudio', () => {
 
   it('sends the bearer token on every request and never logs it', async () => {
     const logged: string[] = [];
+    const stdout: string[] = [];
     const originalLog = console.log;
+    const originalError = console.error;
     console.log = (...args: unknown[]) => {
+      const line = args.map(String).join(' ');
+      logged.push(line);
+      stdout.push(line);
+    };
+    console.error = (...args: unknown[]) => {
       logged.push(args.map(String).join(' '));
     };
     try {
@@ -252,8 +260,12 @@ describe('transcribeSonioxAudio', () => {
       for (const line of logged) {
         assert.ok(!line.includes(API_KEY), `api key leaked into a log line: ${line}`);
       }
+      // Diagnostics belong on stderr: `listener transcript <file>` writes the
+      // transcript itself to stdout, and a summary line there corrupts it.
+      assert.deepEqual(stdout, [], `diagnostics must not reach stdout: ${stdout.join(' | ')}`);
     } finally {
       console.log = originalLog;
+      console.error = originalError;
     }
   });
 
@@ -428,6 +440,55 @@ describe('transcribeSonioxAudio', () => {
       assert.notEqual(call.signal, controller.signal);
       assert.equal(call.signal.aborted, false);
     }
+  });
+
+  it('keeps a cancel a cancel when it lands while the error body is read', async () => {
+    // Swallowing the AbortError here would report the user's own cancel as a
+    // provider failure, and hand it to the caller's retry ladder.
+    const { impl } = scriptFetch({
+      uploadResponse: () => {
+        const response = new Response('{}', { status: 503 });
+        Object.defineProperty(response, 'text', {
+          value: () => Promise.reject(new DOMException('Aborted', 'AbortError')),
+        });
+        return response;
+      },
+    });
+
+    await assert.rejects(run(impl, { maxAttempts: 3 }), (err: unknown) => {
+      assert.equal((err as { name?: unknown } | null)?.name, 'AbortError');
+      assert.ok(!(err instanceof TranscriptionApiError));
+      return true;
+    });
+  });
+
+  it('deletes the job when the cancel lands between the create headers and its body', async () => {
+    // Soniox allocates the job when it answers the headers. Letting the
+    // caller's abort reach the body read loses the id, and `finally` can only
+    // delete what it learned -- so the job leaks against the 2,000-job quota.
+    const controller = new AbortController();
+    const { impl, calls } = scriptFetch({
+      createResponse: (init) => {
+        const response = json({ id: TRANSCRIPTION_ID, status: 'queued' });
+        Object.defineProperty(response, 'json', {
+          value: async () => {
+            controller.abort();
+            if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+            return { id: TRANSCRIPTION_ID, status: 'queued' };
+          },
+        });
+        return response;
+      },
+    });
+
+    await assert.rejects(
+      run(impl, { signal: controller.signal }),
+      (err: unknown) => (err as { name?: unknown } | null)?.name === 'AbortError',
+    );
+    assert.deepEqual(steps(calls).slice(-2), [
+      `DELETE /v1/transcriptions/${TRANSCRIPTION_ID}`,
+      `DELETE /v1/files/${FILE_ID}`,
+    ]);
   });
 
   it('forwards the caller signal into the upload/create/poll requests', async () => {

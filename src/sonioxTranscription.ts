@@ -98,6 +98,11 @@ const CLEANUP_TIMEOUT_MS = 5_000;
 // readable under "Show details" without bloating logs.
 const RAW_BODY_CAP = 1500;
 
+// Deadline for reading a response body once its headers have arrived. The
+// caller's cancel is deliberately detached at that point (see
+// `fetchAllocation`), so these small bodies need a deadline of their own.
+const BODY_READ_TIMEOUT_MS = 10_000;
+
 // A job that fails with one of these will fail again on a retry -- the input
 // is wrong, not the service. Everything else (capacity, internal errors) is
 // reported as a 5xx so `isRetryableStatus` lets the caller try again.
@@ -210,7 +215,16 @@ async function failureFromResponse(
   response: Response,
   operation: string,
 ): Promise<TranscriptionApiError> {
-  const body = await response.text().catch(() => '');
+  let body = '';
+  try {
+    body = await response.text();
+  } catch (error) {
+    // A cancel landing while the error body streams is still a cancel. Turning
+    // it into a TranscriptionApiError would report the user's own abort as a
+    // provider failure -- and make the caller's retry ladder act on it.
+    if ((error as { name?: unknown } | null)?.name === 'AbortError') throw error;
+    // Anything else (truncated/undecodable body) stays an opaque empty body.
+  }
   let parsed: SonioxErrorBody | undefined;
   try {
     parsed = JSON.parse(body) as SonioxErrorBody;
@@ -316,6 +330,62 @@ export function formatSonioxTokens(tokens?: SonioxAsyncToken[]): string {
   return lines.join('\n\n');
 }
 
+/** Read a response body under its own deadline, never the caller's signal. */
+async function readWithDeadline<T>(
+  controller: AbortController,
+  read: () => Promise<T>,
+): Promise<T> {
+  const deadline = AbortSignal.timeout(BODY_READ_TIMEOUT_MS);
+  const onTimeout = (): void => controller.abort(deadline.reason);
+  deadline.addEventListener('abort', onTimeout, { once: true });
+  try {
+    return await read();
+  } finally {
+    deadline.removeEventListener('abort', onTimeout);
+  }
+}
+
+/**
+ * POST a request that allocates a server-side object (a stored file, a
+ * transcription job) and return its parsed body.
+ *
+ * The caller's signal drives the request only until the response headers
+ * arrive. Past that point the server has already created the object, and
+ * aborting the body read would throw away the id we need -- `runSonioxJob`'s
+ * `finally` can only delete what it learned, so a cancel in that window would
+ * silently leak one of the hard account quotas. The body is therefore read
+ * under its own deadline, and the caller re-checks the abort once the id is
+ * recorded.
+ */
+async function fetchAllocation(params: {
+  fetchImpl: typeof fetch;
+  url: string;
+  init: Omit<RequestInit, 'signal'>;
+  operation: string;
+  signal?: AbortSignal;
+}): Promise<{ id?: unknown }> {
+  const controller = new AbortController();
+  const forwardAbort = (): void => controller.abort(params.signal?.reason);
+  if (params.signal?.aborted) forwardAbort();
+  params.signal?.addEventListener('abort', forwardAbort, { once: true });
+  try {
+    const response = await params.fetchImpl(params.url, {
+      ...params.init,
+      signal: controller.signal,
+    });
+    // Headers are in: from here the caller's cancel must not reach the body.
+    params.signal?.removeEventListener('abort', forwardAbort);
+    if (!response.ok) {
+      throw await readWithDeadline(controller, () =>
+        failureFromResponse(response, params.operation),
+      );
+    }
+    return await readWithDeadline(controller, () => response.json() as Promise<{ id?: unknown }>);
+  } finally {
+    params.signal?.removeEventListener('abort', forwardAbort);
+  }
+}
+
 async function uploadAudioFile(params: {
   fetchImpl: typeof fetch;
   apiKey: string;
@@ -331,15 +401,17 @@ async function uploadAudioFile(params: {
   // title, and the extension is all the server needs to pick a demuxer.
   form.append('file', blob, `audio${ext}`);
 
-  const response = await params.fetchImpl(`${SONIOX_API_BASE_URL}/v1/files`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${params.apiKey}` },
-    body: form,
+  const payload = await fetchAllocation({
+    fetchImpl: params.fetchImpl,
+    url: `${SONIOX_API_BASE_URL}/v1/files`,
+    init: {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${params.apiKey}` },
+      body: form,
+    },
+    operation: 'file upload',
     signal: params.signal,
   });
-  if (!response.ok) throw await failureFromResponse(response, 'file upload');
-
-  const payload = (await response.json()) as { id?: unknown };
   if (typeof payload.id !== 'string' || payload.id.length === 0) {
     throw new Error('Soniox file upload response missing id');
   }
@@ -369,18 +441,20 @@ async function createTranscription(params: {
   if (terms.length > 0) body.context = { terms };
   if (params.clientReferenceId) body.client_reference_id = params.clientReferenceId;
 
-  const response = await params.fetchImpl(`${SONIOX_API_BASE_URL}/v1/transcriptions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${params.apiKey}`,
-      'Content-Type': 'application/json',
+  const payload = await fetchAllocation({
+    fetchImpl: params.fetchImpl,
+    url: `${SONIOX_API_BASE_URL}/v1/transcriptions`,
+    init: {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${params.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
+    operation: 'transcription create',
     signal: params.signal,
   });
-  if (!response.ok) throw await failureFromResponse(response, 'transcription create');
-
-  const payload = (await response.json()) as { id?: unknown };
   if (typeof payload.id !== 'string' || payload.id.length === 0) {
     throw new Error('Soniox transcription create response missing id');
   }
@@ -576,7 +650,12 @@ async function runSonioxJob(
       signal,
     });
     fileId = uploaded.fileId;
-    console.log(
+    // Honor a cancel only once the id is recorded, so `finally` can delete the
+    // object the server already allocated for us.
+    signal?.throwIfAborted();
+    // stderr, not stdout: `listener transcript <file>` writes the transcript
+    // itself to stdout, and a diagnostic line there would corrupt it.
+    console.error(
       `[soniox-transcribe] -> ${(uploaded.sizeBytes / (1024 * 1024)).toFixed(2)}MB model=${model} ` +
         `hints=${languageHints.join('+')} terms=${params.terms?.length ?? 0}`,
     );
@@ -591,6 +670,7 @@ async function runSonioxJob(
       clientReferenceId: params.clientReferenceId,
       signal,
     });
+    signal?.throwIfAborted();
 
     params.onProgress?.(SONIOX_TRANSCRIBE_PERCENT, 'Transcribing with Soniox...');
     const status = await pollUntilCompleted({
@@ -611,7 +691,7 @@ async function runSonioxJob(
     // Server-reported model, because retired ids are auto-routed to the
     // successor without a changelog entry (see docs/soniox-adoption-plan.md).
     const resolvedModel = status.model?.trim() || model;
-    console.log(
+    console.error(
       `[soniox-transcribe] <- ${Date.now() - startedAt}ms model=${resolvedModel} ` +
         `audio=${status.audio_duration_ms ?? 0}ms tokens=${transcript.tokens?.length ?? 0}`,
     );

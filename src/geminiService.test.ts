@@ -959,7 +959,7 @@ describe('GeminiService Soniox batch backend', () => {
 
   // Minimal scripted Soniox API. The full protocol is covered in
   // sonioxTranscription.test.ts; here it only has to let the backend run.
-  function stubSonioxFetch(options: { audioDurationMs?: number }): Array<{
+  function stubSonioxFetch(options: { audioDurationMs?: number; model?: string }): Array<{
     method: string;
     url: string;
     body?: unknown;
@@ -984,7 +984,11 @@ describe('GeminiService Soniox batch backend', () => {
         return reply({ tokens: [{ text: '회의 시작합니다', speaker: '2' }] });
       }
       if (method === 'GET') {
-        return reply({ status: 'completed', audio_duration_ms: options.audioDurationMs });
+        return reply({
+          status: 'completed',
+          audio_duration_ms: options.audioDurationMs,
+          model: options.model,
+        });
       }
       return new Response(null, { status: 204 });
     }) as typeof fetch;
@@ -1071,6 +1075,25 @@ describe('GeminiService Soniox batch backend', () => {
     assert.deepEqual(
       requests.filter((req) => req.method === 'DELETE').map((req) => req.url),
       ['https://api.soniox.com/v1/transcriptions/tr_x', 'https://api.soniox.com/v1/files/file_x'],
+    );
+  });
+
+  it('bills the model the server reported, not the one that was requested', async () => {
+    // Soniox re-routes a retired id to its successor without saying so. A
+    // usage row naming the requested id would hide the re-route and price the
+    // wrong model.
+    const service = makeSonioxService({ sonioxApiKey: 'soniox-key' });
+    const audioPath = path.join(workDir, 'soniox-rerouted.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    stubSonioxFetch({ audioDurationMs: 30_000, model: 'stt-async-v6' });
+
+    service.judgeTranscriptQuality = async () => ({ flagged: false, reason: 'natural speech' });
+    const session = createCostSession();
+    await service.getShortAudioTranscript(audioPath, 30, undefined, undefined, undefined, session);
+
+    assert.deepEqual(
+      session.snapshot().breakdown.map(({ modelId, usage }) => ({ modelId, usage })),
+      [{ modelId: 'stt-async-v6', usage: { audioSeconds: 30 } }],
     );
   });
 

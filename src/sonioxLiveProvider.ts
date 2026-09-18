@@ -72,8 +72,12 @@ export interface SonioxSocket {
 export interface SonioxLiveSessionDeps {
   /** Override the socket factory (tests inject a scripted fake). */
   createWebSocket?: (url: string) => SonioxSocket;
-  /** Override backoff/grace sleeps (tests collapse them so the loop runs instantly). */
-  sleep?: (ms: number) => Promise<void>;
+  /**
+   * Override backoff/grace sleeps (tests collapse them so the loop runs
+   * instantly). The optional signal cancels the wait: close() uses it so no
+   * backoff, grace or drain timer outlives the session.
+   */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** Override the per-attempt connect timeout. */
   connectTimeoutMs?: number;
   /** Override the silence keepalive cadence. */
@@ -86,16 +90,30 @@ export class SonioxRealtimeError extends Error {
   readonly status?: number;
   readonly errorType?: string;
   readonly requestId?: string;
+  /**
+   * The provider's own `error_message` text. Kept OFF `message` on purpose:
+   * `reportError` ships `Error.message` to Sentry verbatim, and a realtime
+   * error string can quote the request that produced it. Only the metadata
+   * (status, type, request id) is safe to transmit, so this field must never
+   * be copied into a `reportError` `extra`.
+   */
+  readonly detail?: string;
 
   constructor(
     message: string,
-    details: { status?: number; errorType?: string; requestId?: string } = {},
+    details: {
+      status?: number;
+      errorType?: string;
+      requestId?: string;
+      detail?: string;
+    } = {},
   ) {
     super(message);
     this.name = 'SonioxRealtimeError';
     this.status = details.status;
     this.errorType = details.errorType;
     this.requestId = details.requestId;
+    this.detail = details.detail;
   }
 }
 
@@ -168,21 +186,47 @@ function isRetryableSonioxStatus(status: number | undefined): boolean {
   return status >= 500 && status < 600;
 }
 
+// The message is metadata only (see SonioxRealtimeError.detail): it is what
+// reaches Sentry, so the provider's free-form text stays on `detail`.
 function toSonioxRealtimeError(message: SonioxServerMessage): SonioxRealtimeError {
   const status = typeof message.error_code === 'number' ? message.error_code : undefined;
   const errorType = message.error_type?.trim() || undefined;
-  const detail = message.error_message?.trim() || 'Soniox realtime error.';
-  const label = [status, errorType].filter((part) => part !== undefined).join(' ');
-  return new SonioxRealtimeError(label ? `Soniox realtime error (${label}): ${detail}` : detail, {
-    status,
-    errorType,
-    requestId: message.request_id?.trim() || undefined,
-  });
+  return new SonioxRealtimeError(
+    `Soniox realtime error ${status ?? 'unknown'} (${errorType ?? 'unknown'})`,
+    {
+      status,
+      errorType,
+      requestId: message.request_id?.trim() || undefined,
+      detail: message.error_message?.trim() || undefined,
+    },
+  );
 }
 
 function toError(value: unknown, fallback: string): Error {
   if (value instanceof Error) return value;
   return new Error(value ? String(value) : fallback);
+}
+
+/**
+ * Default wait: resolves on the timer or the moment the signal fires, and
+ * always clears the timer so nothing is left pending after close().
+ */
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 export class SonioxLiveSession implements LiveSttSession {
@@ -197,11 +241,27 @@ export class SonioxLiveSession implements LiveSttSession {
 
   private finalSourceTokens: SonioxToken[] = [];
   private finalTranslationTokens: SonioxToken[] = [];
+  /**
+   * Source finals for the run that started while the previous one is still
+   * held for its late translation. Buffered apart so a translation token
+   * arriving in the meantime attaches to the run it actually belongs to.
+   */
+  private nextFinalSourceTokens: SonioxToken[] = [];
   private nonFinalSourceTokens: SonioxToken[] = [];
   private nonFinalTranslationTokens: SonioxToken[] = [];
   private pendingFinal = false;
   /** Bumped on every flush so a stale grace timer can't settle a later run. */
   private runSeq = 0;
+  /**
+   * Recording-timeline offset of the first PCM frame sent on the CURRENT
+   * connection. Soniox restarts token timestamps at 0 on every stream, so
+   * after a reconnect the raw `start_ms` would rewind each final to the start
+   * of the meeting -- and LiveSessionService, which orders by offset, would
+   * move later speech ahead of earlier speech.
+   */
+  private streamBaseOffsetMs: number | null = null;
+  /** Fires once on close so every pending wait can bail out immediately. */
+  private readonly closeController = new AbortController();
 
   private keepaliveTimer: NodeJS.Timeout | null = null;
   private lastSendAt = 0;
@@ -217,7 +277,7 @@ export class SonioxLiveSession implements LiveSttSession {
 
   private constructor(
     private readonly createWebSocketFn: (url: string) => SonioxSocket,
-    private readonly sleepFn: (ms: number) => Promise<void>,
+    private readonly sleepFn: (ms: number, signal?: AbortSignal) => Promise<void>,
     private readonly connectTimeoutMs: number,
     private readonly keepaliveIntervalMs: number,
     private readonly nowFn: () => number,
@@ -264,7 +324,7 @@ export class SonioxLiveSession implements LiveSttSession {
     }
     const instance = new SonioxLiveSession(
       deps.createWebSocket ?? ((url) => new WebSocket(url)),
-      deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+      deps.sleep ?? defaultSleep,
       deps.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
       deps.keepaliveIntervalMs ?? KEEPALIVE_INTERVAL_MS,
       deps.now ?? (() => Date.now()),
@@ -278,7 +338,7 @@ export class SonioxLiveSession implements LiveSttSession {
     try {
       await instance.connect(false);
     } catch (error) {
-      instance.closed = true;
+      instance.markClosed();
       throw error;
     } finally {
       instance.firstConnectPending = false;
@@ -312,6 +372,9 @@ export class SonioxLiveSession implements LiveSttSession {
     this.socket = socket;
     this.connected = false;
     this.finishedSeen = false;
+    // A fresh stream restarts its token clock, so the next frame we manage to
+    // send re-anchors it onto the recording timeline.
+    this.streamBaseOffsetMs = null;
 
     socket.on('open', () => {
       if (timedOut || this.closed || this.socket !== socket) return;
@@ -433,7 +496,7 @@ export class SonioxLiveSession implements LiveSttSession {
           this.callbacks.onStatus?.(
             `Reconnecting to Soniox realtime ${this.kind} (attempt ${this.reconnectAttempts})...`,
           );
-          await this.sleepFn(delayMs);
+          await this.sleepFn(delayMs, this.closeController.signal);
           if (this.closed) return;
           try {
             await this.connect(true);
@@ -507,7 +570,7 @@ export class SonioxLiveSession implements LiveSttSession {
     // Emit whatever was already transcribed first: close() is a no-op once
     // `closed` is set, so this is the last chance to flush it.
     this.flushFinal();
-    this.closed = true;
+    this.markClosed();
     this.stopKeepalive();
     reportError(error, {
       operation: 'liveSession.sonioxFatalFrame',
@@ -540,27 +603,31 @@ export class SonioxLiveSession implements LiveSttSession {
       }
     }
 
-    // Translation finals in this message belong to the run that is still
-    // pending, so buffer them BEFORE deciding to settle it. Soniox commonly
-    // sends run A's translation in the same message as run B's first source
-    // tokens; flushing first would ship A untranslated and hand its
-    // translation to B.
+    // Translation finals always belong to the run that is still held. Soniox
+    // emits a run's translation after its endpoint, commonly in the same
+    // message as the NEXT run's first source tokens.
     this.finalTranslationTokens.push(...finalTranslation);
-
-    // A final held back for late translation tokens is settled the moment new
-    // source speech arrives: the previous run is definitively over.
-    if (this.pendingFinal && (finalSource.length > 0 || nonFinalSource.length > 0)) {
-      this.flushFinal();
-    }
-
-    this.finalSourceTokens.push(...finalSource);
+    // Source speech alone never releases a held run. Releasing on it shipped
+    // the held run untranslated and then attached its translation to the run
+    // that followed. A held run is released only by its grace timeout, by the
+    // next endpoint, or by a terminal event (finished/disconnect/close).
+    if (this.pendingFinal) this.nextFinalSourceTokens.push(...finalSource);
+    else this.finalSourceTokens.push(...finalSource);
     this.nonFinalSourceTokens = nonFinalSource;
     this.nonFinalTranslationTokens = nonFinalTranslation;
 
-    const sourceTokens = [...this.finalSourceTokens, ...this.nonFinalSourceTokens];
+    // Interim text tracks the run currently being spoken, which is the one
+    // buffered behind the held run while a translation is outstanding.
+    const sourceTokens = [
+      ...(this.pendingFinal ? this.nextFinalSourceTokens : this.finalSourceTokens),
+      ...this.nonFinalSourceTokens,
+    ];
     const interim = joinTokenText(sourceTokens);
     if (interim) {
-      this.callbacks.onInterim({ text: interim, offsetMs: firstStartMs(sourceTokens) });
+      this.callbacks.onInterim({
+        text: interim,
+        offsetMs: this.timelineOffsetMs(firstStartMs(sourceTokens)),
+      });
     }
     if (nonFinalTranslation.length > 0) {
       const translationTokens = [...this.finalTranslationTokens, ...this.nonFinalTranslationTokens];
@@ -568,7 +635,7 @@ export class SonioxLiveSession implements LiveSttSession {
       if (interimTranslation) {
         this.callbacks.onTranslationInterim?.({
           text: interimTranslation,
-          offsetMs: firstStartMs(sourceTokens),
+          offsetMs: this.timelineOffsetMs(firstStartMs(sourceTokens)),
         });
       }
     }
@@ -578,26 +645,37 @@ export class SonioxLiveSession implements LiveSttSession {
 
   private finalizeRun(): void {
     if (this.kind === 'translation') {
-      if (this.pendingFinal) return;
+      // An endpoint closes a new run, which also settles the previous one: it
+      // can no longer receive translation tokens, and it has to be emitted
+      // BEFORE the run that followed it.
+      if (this.pendingFinal) this.emitCurrentRun();
       this.pendingFinal = true;
       const run = this.runSeq;
-      void this.sleepFn(TRANSLATION_GRACE_MS).then(() => {
-        // A run flushed early by new speech leaves its grace timer behind; it
-        // must not settle whatever run is pending by the time it fires.
-        if (this.pendingFinal && this.runSeq === run) this.flushFinal();
+      void this.sleepFn(TRANSLATION_GRACE_MS, this.closeController.signal).then(() => {
+        // A run released early leaves its grace timer behind; it must not
+        // settle whatever run is pending by the time it fires.
+        if (this.pendingFinal && this.runSeq === run) this.emitCurrentRun();
       });
       return;
     }
-    this.flushFinal();
+    this.emitCurrentRun();
   }
 
-  private flushFinal(): void {
+  /** Map a stream-relative token timestamp onto the recording timeline. */
+  private timelineOffsetMs(streamMs: number | undefined): number | undefined {
+    if (typeof streamMs !== 'number') return undefined;
+    return (this.streamBaseOffsetMs ?? 0) + streamMs;
+  }
+
+  /** Emit the buffered run, then promote whatever accumulated behind it. */
+  private emitCurrentRun(): void {
     this.pendingFinal = false;
     this.runSeq++;
     const sourceTokens = this.finalSourceTokens;
     const translationTokens = this.finalTranslationTokens;
-    this.finalSourceTokens = [];
+    this.finalSourceTokens = this.nextFinalSourceTokens;
     this.finalTranslationTokens = [];
+    this.nextFinalSourceTokens = [];
     // Non-finals are a full hypothesis that the server re-sends on every
     // message, so the next message restores anything still in flight.
     this.nonFinalSourceTokens = [];
@@ -609,11 +687,18 @@ export class SonioxLiveSession implements LiveSttSession {
     const translation = joinTokenText(translationTokens);
     this.callbacks.onFinal({
       text,
-      offsetMs: start,
+      offsetMs: this.timelineOffsetMs(start),
+      // Both timestamps come from the same stream, so the span needs no rebase.
       durationMs:
         typeof start === 'number' && typeof end === 'number' ? Math.max(0, end - start) : undefined,
       translation: translation || undefined,
     });
+  }
+
+  /** Terminal flush: emit the held run and anything buffered behind it. */
+  private flushFinal(): void {
+    this.emitCurrentRun();
+    while (this.finalSourceTokens.length > 0) this.emitCurrentRun();
   }
 
   private startKeepalive(): void {
@@ -641,6 +726,16 @@ export class SonioxLiveSession implements LiveSttSession {
     this.keepaliveTimer = null;
   }
 
+  /**
+   * Single close latch: stops the reconnect loop and cancels every pending
+   * wait (backoff, translation grace, drain) so no timer outlives the session.
+   */
+  private markClosed(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.closeController.abort();
+  }
+
   private teardownSocket(): void {
     const socket = this.socket;
     this.socket = null;
@@ -661,6 +756,9 @@ export class SonioxLiveSession implements LiveSttSession {
     try {
       this.socket.send(pcm);
       this.lastSendAt = this.nowFn();
+      // The first frame that actually reaches this socket anchors the stream
+      // clock to the recording timeline (see streamBaseOffsetMs).
+      this.streamBaseOffsetMs ??= frame.offsetMs;
     } catch {
       // The socket may be tearing down just before a reconnect; drop the frame.
     }
@@ -668,8 +766,13 @@ export class SonioxLiveSession implements LiveSttSession {
 
   async close(): Promise<void> {
     if (this.closed) return;
-    this.closed = true;
+    this.markClosed();
     this.stopKeepalive();
+    // A reconnect attempt may be mid-flight, and tearing its socket down does
+    // not settle it (the close handler ignores a socket we already dropped).
+    // Settling it here is what runs connect()'s finally and clears the 15s
+    // connect-timeout timer instead of leaving it to outlive the session.
+    this.pendingConnectFail?.(new Error('Soniox realtime session was closed.'));
     const socket = this.socket;
     if (socket && this.connected) {
       try {
@@ -686,14 +789,20 @@ export class SonioxLiveSession implements LiveSttSession {
 
   private waitForFinished(): Promise<void> {
     if (this.finishedSeen) return Promise.resolve();
+    // Its own cancellation, not the close signal: close() has already latched
+    // by the time we get here, and this drain is exactly what it waits for.
+    // Aborting it once the server replies stops the deadline timer from
+    // outliving close().
+    const drain = new AbortController();
     return new Promise<void>((resolve) => {
       const settle = () => {
         if (this.finishedResolve !== settle) return;
         this.finishedResolve = null;
+        drain.abort();
         resolve();
       };
       this.finishedResolve = settle;
-      void this.sleepFn(CLOSE_DRAIN_TIMEOUT_MS).then(settle);
+      void this.sleepFn(CLOSE_DRAIN_TIMEOUT_MS, drain.signal).then(settle);
     });
   }
 }

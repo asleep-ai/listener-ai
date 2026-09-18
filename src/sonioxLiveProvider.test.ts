@@ -17,14 +17,22 @@ class FakeSocket implements SonioxSocket {
   readonly sent: Array<string | Uint8Array | Buffer> = [];
   closed = false;
   closeCode: number | undefined;
+  /** Every close() call, including the ones that find the socket already shut. */
+  closeCalls = 0;
+  /** Test driver: reply `finished: true` to the empty end-of-stream frame. */
+  autoFinish = false;
   private readonly listeners = new Map<string, Array<(...args: never[]) => void>>();
 
   send(data: string | Uint8Array | Buffer): void {
     if (this.closed) throw new Error('socket is closed');
     this.sent.push(data);
+    if (this.autoFinish && data === '') {
+      queueMicrotask(() => this.deliver({ tokens: [], finished: true }));
+    }
   }
 
   close(code?: number): void {
+    this.closeCalls++;
     if (this.closed) return;
     this.closed = true;
     this.closeCode = code;
@@ -84,6 +92,8 @@ class FakeSocket implements SonioxSocket {
 type SocketScript =
   | 'ok'
   | 'fail'
+  /** Never opens and never closes: a connect attempt that stays in flight. */
+  | 'hang'
   /** Opens, then synchronously delivers a first server message. */
   | { open: SonioxServerMessage };
 
@@ -99,6 +109,7 @@ function scriptSockets(behaviors: SocketScript[] = []) {
         socket.drop(1006);
         return;
       }
+      if (behavior === 'hang') return;
       socket.open();
       if (typeof behavior === 'object') socket.deliver(behavior.open);
     });
@@ -130,6 +141,29 @@ function manualSleep() {
     await new Promise<void>((resolve) => pending.push(resolve));
   };
   return { sleep, fire: (index: number) => pending[index]?.(), pendingCount: () => pending.length };
+}
+
+/**
+ * Sleeps that end only when their signal fires, so anything still `outstanding`
+ * at the end of a test is a timer that would have outlived the session.
+ */
+function cancellableSleep() {
+  const outstanding = new Set<AbortSignal>();
+  const sleep = (ms: number, signal?: AbortSignal): Promise<void> => {
+    if (ms === 0 || !signal || signal.aborted) return Promise.resolve();
+    outstanding.add(signal);
+    return new Promise<void>((resolve) => {
+      signal.addEventListener(
+        'abort',
+        () => {
+          outstanding.delete(signal);
+          resolve();
+        },
+        { once: true },
+      );
+    });
+  };
+  return { sleep, outstanding };
 }
 
 const CONFIG: LiveSttProviderConfig = {
@@ -343,11 +377,11 @@ describe('SonioxLiveSession', () => {
     await session.close();
   });
 
-  it('settles a deferred translation final as soon as new source speech arrives', async () => {
+  it('keeps a held run waiting while the next run starts speaking', async () => {
     const { createWebSocket, sockets } = scriptSockets();
     const { callbacks, of } = recordCallbacks();
-    // A sleep that never settles isolates the "new source speech" flush path
-    // from the grace timer.
+    // A sleep that never settles isolates the "new source speech" path from
+    // the grace timer.
     await SonioxLiveSession.create({ ...CONFIG, translate: true }, callbacks, {
       createWebSocket,
       sleep: async (ms: number) => {
@@ -365,9 +399,60 @@ describe('SonioxLiveSession', () => {
 
     sockets[0].deliver({ tokens: [token('두 번째', { start_ms: 600, is_final: false })] });
 
-    assert.equal(of('final').length, 1);
-    assert.equal((of('final')[0].value as { text: string }).text, '첫 문장');
+    // New speech is not evidence that the previous run's translation is done;
+    // releasing here shipped it untranslated and gave its translation away.
+    assert.equal(of('final').length, 0);
+    // The caption for the new run keeps updating while the old one is held.
     assert.deepEqual(of('interim').at(-1)?.value, { text: '두 번째', offsetMs: 600 });
+  });
+
+  it('attaches a late translation to its own run after the next run has started', async () => {
+    const { createWebSocket, sockets } = scriptSockets();
+    const { callbacks, of } = recordCallbacks();
+    const { sleep, fire } = manualSleep();
+
+    await SonioxLiveSession.create({ ...CONFIG, translate: true }, callbacks, {
+      createWebSocket,
+      sleep,
+    });
+
+    // Run A reaches its endpoint...
+    sockets[0].deliver({
+      tokens: [
+        token('A 문장', { start_ms: 0, end_ms: 400, translation_status: 'original' }),
+        { text: '<end>', is_final: true },
+      ],
+    });
+    // ...run B starts speaking before A's translation lands...
+    sockets[0].deliver({ tokens: [token('B 문', { start_ms: 500, is_final: false })] });
+    // ...A's translation arrives late, with B already in progress...
+    sockets[0].deliver({
+      tokens: [token('A sentence', { language: 'en', translation_status: 'translation' })],
+    });
+    // ...and B's own endpoint is what releases A, ahead of B.
+    sockets[0].deliver({
+      tokens: [
+        token('B 문장', { start_ms: 500, end_ms: 900, translation_status: 'original' }),
+        { text: '<end>', is_final: true },
+      ],
+    });
+    await flush();
+
+    assert.equal(of('final').length, 1, 'run B is now the one waiting for its translation');
+    assert.deepEqual(of('final')[0].value, {
+      text: 'A 문장',
+      offsetMs: 0,
+      durationMs: 400,
+      translation: 'A sentence',
+    });
+
+    // B's grace expires with no translation of its own.
+    fire(1);
+    await flush();
+
+    assert.equal(of('final').length, 2);
+    assert.equal((of('final')[1].value as { text: string }).text, 'B 문장');
+    assert.equal((of('final')[1].value as { translation?: string }).translation, undefined);
   });
 
   it('keeps a run translation that arrives alongside the next run source tokens', async () => {
@@ -427,7 +512,7 @@ describe('SonioxLiveSession', () => {
         { text: '<end>', is_final: true },
       ],
     });
-    // Run B's first source tokens settle run A early; timer #0 is now stale.
+    // Run B's endpoint settles run A ahead of its grace; timer #0 is now stale.
     sockets[0].deliver({
       tokens: [
         token('B 문장', { start_ms: 500, end_ms: 900, translation_status: 'original' }),
@@ -584,6 +669,7 @@ describe('SonioxLiveSession', () => {
       sleep: instantSleep,
     });
 
+    session.sendPcm(pcmFrame(0));
     sockets[0].deliver({ tokens: [token('드랍 직전', { start_ms: 0, end_ms: 300 })] });
     sockets[0].drop(1006);
     await flush();
@@ -598,14 +684,69 @@ describe('SonioxLiveSession', () => {
     );
     assert.equal(of('error').length, 0);
 
-    // The new stream keeps working.
+    // The new stream keeps working, and its token clock -- which Soniox
+    // restarts at 0 on every connection -- is re-anchored by the next frame we
+    // send, so the final lands where the speech actually happened.
+    session.sendPcm(pcmFrame(40));
     sockets[1].deliver({
+      tokens: [token('재연결 후', { start_ms: 0, end_ms: 400 }), { text: '<end>', is_final: true }],
+    });
+    assert.equal(of('final').length, 2);
+    assert.deepEqual(of('final')[1].value, {
+      text: '재연결 후',
+      offsetMs: 400,
+      durationMs: 400,
+      translation: undefined,
+    });
+
+    await session.close();
+  });
+
+  it('keeps post-reconnect finals on the recording timeline', async () => {
+    const { createWebSocket, sockets } = scriptSockets();
+    const { callbacks, of } = recordCallbacks();
+
+    const session = await SonioxLiveSession.create(CONFIG, callbacks, {
+      createWebSocket,
+      sleep: instantSleep,
+    });
+
+    // ~60s of audio on the first stream.
+    for (const sequence of [0, 3_000, 5_999]) session.sendPcm(pcmFrame(sequence));
+    sockets[0].deliver({
       tokens: [
-        token('재연결 후', { start_ms: 400, end_ms: 800 }),
+        token('첫 연결', { start_ms: 100, end_ms: 59_000 }),
         { text: '<end>', is_final: true },
       ],
     });
-    assert.equal(of('final').length, 2);
+    assert.equal((of('final')[0].value as { offsetMs?: number }).offsetMs, 100);
+
+    sockets[0].drop(1006);
+    await flush();
+    assert.equal(sockets.length, 2);
+
+    // The reconnected stream restarts its own clock at 0 while the recording
+    // is already a minute in. Emitting the raw start_ms would put this final
+    // BEFORE the first one, and LiveSessionService orders by offset.
+    session.sendPcm(pcmFrame(6_000));
+    sockets[1].deliver({
+      tokens: [
+        token('재연결 후', { start_ms: 0, end_ms: 1_200 }),
+        { text: '<end>', is_final: true },
+      ],
+    });
+
+    const last = of('final').at(-1)?.value as {
+      text: string;
+      offsetMs?: number;
+      durationMs?: number;
+    };
+    assert.equal(last.text, '재연결 후');
+    assert.ok(
+      (last.offsetMs ?? 0) >= 60_000,
+      `post-reconnect final must not rewind: ${last.offsetMs}`,
+    );
+    assert.equal(last.durationMs, 1_200);
 
     await session.close();
   });
@@ -643,6 +784,89 @@ describe('SonioxLiveSession', () => {
     assert.equal(error.requestId, 'req-1');
 
     await session.close();
+  });
+
+  it('keeps the provider error text out of the message that reaches Sentry', async () => {
+    const { createWebSocket, sockets } = scriptSockets();
+    const { callbacks, of } = recordCallbacks();
+
+    const session = await SonioxLiveSession.create(CONFIG, callbacks, {
+      createWebSocket,
+      sleep: instantSleep,
+    });
+
+    sockets[0].deliver({
+      tokens: [],
+      error_code: 400,
+      error_type: 'bad_request',
+      error_message: 'context.terms rejected: 회의 참석자 명단',
+      request_id: 'req-2',
+    });
+    await flush();
+
+    const error = of('error')[0].value as Error & { detail?: string };
+    // reportError ships Error.message verbatim, so it carries metadata only.
+    assert.equal(error.message, 'Soniox realtime error 400 (bad_request)');
+    // The provider's own wording is kept for local triage, off the message.
+    assert.equal(error.detail, 'context.terms rejected: 회의 참석자 명단');
+
+    await session.close();
+  });
+
+  it('settles an in-flight reconnect on close() instead of leaving it pending', async () => {
+    const { createWebSocket, sockets } = scriptSockets(['ok', 'hang']);
+    const { callbacks, of } = recordCallbacks();
+
+    const session = await SonioxLiveSession.create(CONFIG, callbacks, {
+      createWebSocket,
+      sleep: instantSleep,
+    });
+
+    sockets[0].drop(1006);
+    await flush();
+    assert.equal(sockets.length, 2, 'a reconnect attempt is in flight');
+    assert.equal(sockets[1].closed, false, 'the second socket never opened');
+
+    await session.close();
+    await flush();
+
+    // Tearing the socket down does not settle the attempt (the close handler
+    // ignores a socket we already dropped), so close() settles it explicitly.
+    // connect()'s failure path then closes the socket a second time, which is
+    // the observable proof that its connect-timeout timer was cleared.
+    assert.ok(
+      sockets[1].closeCalls >= 2,
+      `the connect attempt never settled (closeCalls=${sockets[1].closeCalls})`,
+    );
+    assert.equal(sockets.length, 2, 'no further reconnect after close()');
+    assert.equal(of('error').length, 0);
+  });
+
+  it('cancels the translation grace and close-drain waits on close()', async () => {
+    const { createWebSocket, sockets } = scriptSockets();
+    const { callbacks, of } = recordCallbacks();
+    const { sleep, outstanding } = cancellableSleep();
+
+    const session = await SonioxLiveSession.create({ ...CONFIG, translate: true }, callbacks, {
+      createWebSocket,
+      sleep,
+    });
+    sockets[0].autoFinish = true;
+
+    sockets[0].deliver({
+      tokens: [
+        token('마지막', { start_ms: 0, end_ms: 400, translation_status: 'original' }),
+        { text: '<end>', is_final: true },
+      ],
+    });
+    assert.equal(outstanding.size, 1, 'the translation grace wait is armed');
+
+    await session.close();
+    await flush();
+
+    assert.equal(outstanding.size, 0, 'no wait is left running after close()');
+    assert.equal(of('final').length, 1);
+    assert.equal((of('final')[0].value as { text: string }).text, '마지막');
   });
 
   it('reconnects after a retryable error frame', async () => {
