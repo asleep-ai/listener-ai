@@ -594,6 +594,34 @@ describe('listener transcript (CLI integration)', () => {
     }
   });
 
+  // Soniox has no prompt parameter at all -- the glossary rides `context.terms`
+  // instead -- so a --prompt on that backend is silently dropped. Warn once
+  // rather than let the user assume the instruction was applied.
+  it('warns that --prompt is ignored on the Soniox backend', async () => {
+    await runCli(['config', 'set', 'transcriptionProvider', 'soniox']);
+    await runCli(['config', 'set', 'sonioxApiKey', 'soniox-test-key']);
+    try {
+      const audio = makeAudio('soniox-prompt.mp3');
+      const { stdout, stderr, code } = await runCli([
+        'transcript',
+        audio,
+        '--prompt',
+        'Transcribe verbatim',
+      ]);
+      assert.equal(code, 0, stderr);
+      assert.match(stderr, /--prompt is ignored by the Soniox backend/);
+      assert.match(stdout, /Stubbed transcript\./);
+
+      // Same command without --prompt stays quiet.
+      const plain = await runCli(['transcript', audio]);
+      assert.equal(plain.code, 0, plain.stderr);
+      assert.doesNotMatch(plain.stderr, /--prompt is ignored/);
+    } finally {
+      await runCli(['config', 'unset', 'sonioxApiKey']);
+      await runCli(['config', 'set', 'transcriptionProvider', 'auto']);
+    }
+  });
+
   it('errors when transcriptionProvider is soniox without a Soniox key', async () => {
     await runCli(['config', 'set', 'transcriptionProvider', 'soniox']);
     try {

@@ -133,7 +133,7 @@ Goal: answer the one question no benchmark answers, on our own audio.
 New file `src/sonioxLiveProvider.ts` implementing `LiveSttSession`:
 
 - `ws` connection to `wss://stt-rt.soniox.com/transcribe-websocket`; first frame is the JSON config
-  with `api_key`, `model: 'stt-rt-v5'`, `audio_format: 's16le'`, `sample_rate: 16000`,
+  with `api_key`, `model: 'stt-rt-v5'`, `audio_format: 'pcm_s16le'`, `sample_rate: 16000`,
   `num_channels: 1`, `language_hints` from `liveSttLanguage` (+ `en`), `enable_endpoint_detection`,
   `context.terms` from `knownWords`, optional `translation: { type: 'one_way', target_language }`.
 - `sendPcm`: reuse `downsamplePcm16` to a new `SONIOX_PCM_RATE = 16_000`, drop non-mono frames like

@@ -223,7 +223,10 @@ function updateTranscriptionProviderNotice(): void {
     : '';
   transcriptionProviderNotice.textContent = text;
   transcriptionProviderNotice.hidden = text.length === 0;
-  transcriptionProviderNotice.className = 'config-notice is-warning';
+  // Only carry the warning state while there is a warning: a hidden element
+  // that keeps `is-warning` shows up as one in a11y tooling and in any future
+  // styling that reads the class rather than `hidden`.
+  transcriptionProviderNotice.className = warn ? 'config-notice is-warning' : 'config-notice';
 }
 
 function updateLiveProviderNotice(): void {

@@ -235,9 +235,11 @@ export class SonioxLiveSession implements LiveSttSession {
   ): Promise<SonioxLiveSession> {
     const apiKey = config.sonioxApiKey?.trim();
     if (!apiKey) throw new Error('Soniox API key is not configured.');
-    // Unlike Gemini Live, translation is opt-in: a one-way translation stream
-    // is billed on top of transcription, and LiveSessionService always passes
-    // the flag explicitly.
+    // Unlike Gemini Live, translation is opt-in: it changes what the stream
+    // returns (translated text alongside the source), so LiveSessionService
+    // always passes the flag explicitly rather than inferring it. Soniox
+    // bundles translation into the same $0.12/h realtime rate, so the choice
+    // costs nothing extra.
     const translate = config.translate === true;
     const terms = (config.knownWords ?? [])
       .map((word) => word.trim())
@@ -448,7 +450,10 @@ export class SonioxLiveSession implements LiveSttSession {
         }
         if (!reconnected && !this.closed) {
           const error = new Error(this.lastErrorMessage ?? 'Soniox realtime disconnected.');
-          reportError(error, { operation: 'liveSession.soniox', extra: this.lastErrorExtra });
+          reportError(error, {
+            operation: 'liveSession.sonioxReconnectExhausted',
+            extra: this.lastErrorExtra,
+          });
           this.lastErrorExtra = {};
           this.callbacks.onError(error);
           return;
@@ -504,7 +509,10 @@ export class SonioxLiveSession implements LiveSttSession {
     this.flushFinal();
     this.closed = true;
     this.stopKeepalive();
-    reportError(error, { operation: 'liveSession.soniox', extra: this.lastErrorExtra });
+    reportError(error, {
+      operation: 'liveSession.sonioxFatalFrame',
+      extra: this.lastErrorExtra,
+    });
     this.lastErrorExtra = {};
     if (this.firstConnectPending && this.pendingConnectFail) {
       // create() rejects instead, so the caller can fall back without also

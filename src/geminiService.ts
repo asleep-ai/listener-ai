@@ -426,6 +426,11 @@ export function annotateTranscriptionError(
   error: unknown,
   provider: BatchSttBackendId,
 ): TranscriptionError {
+  // Already attributed at a stage boundary. The transcript stage tags its own
+  // failures with the STT backend id, so re-annotating at the outer catch
+  // would relabel a backend failure with the chat provider's credential copy
+  // (or the reverse) -- exactly the mix-up this attribution exists to avoid.
+  if (error instanceof TranscriptionError) return error;
   const rawMessage = error instanceof Error ? error.message : String(error);
   // Provider handled the audio but found no speech -- a user-facing state
   // (silent/noise-only recording), not a failure of the pipeline.
@@ -873,8 +878,11 @@ export class GeminiService {
           signal: params.signal,
           onProgress: params.onProgress,
           // The segment path already retries; only the whole-file path, which
-          // has no retry loop above it, asks this client for its own.
-          maxAttempts: params.wholeFile ? 3 : 1,
+          // has no retry loop above it, asks this client for its own. The
+          // live-snippet caller opts out (`retryTransport: false`): it fires a
+          // fresh job every ~12s, so retrying a failed one just triples the
+          // load on a provider that is already struggling.
+          maxAttempts: params.wholeFile && params.retryTransport !== false ? 3 : 1,
         });
         // Prefer the provider's own measurement: it is what the invoice is
         // computed from, and it exists even when ffprobe returned 0.
@@ -1190,7 +1198,12 @@ export class GeminiService {
       );
     } catch (error) {
       console.error('Error transcribing audio:', error);
-      throw annotateTranscriptionError(error, this.sttBackend.id);
+      // Transcript-stage failures arrive already annotated with the STT
+      // backend id (annotateTranscriptionError is a no-op on those). What
+      // reaches here unannotated ran on the chat provider -- summary, judge,
+      // cleanup -- or on shared plumbing (ffmpeg, file IO), so it is the
+      // chat provider's credentials the user has to check.
+      throw annotateTranscriptionError(error, this.provider);
     } finally {
       prepared.cleanup?.();
     }
@@ -1515,40 +1528,50 @@ Requirements:
         fileSizeInMB,
       );
 
-      // Step 1: Get transcript
-      if (shouldSegment) {
-        // Use segmented approach for long audio
-        console.error('Using segmented transcription...');
-        const gatedTranscript = await this.getSegmentedTranscript(
-          audioFilePath,
-          duration,
-          progressCallback,
-          options.transcriptionPrompt,
-          segmentDuration,
-          signal,
-          costSession,
-          options.includeGlossary !== false,
-          options.qualityRetry !== false,
-        );
-        fullTranscript = gatedTranscript.text;
-        qualityCleaned = gatedTranscript.cleaned;
-        uncertainSegments = gatedTranscript.uncertainSegments;
-      } else {
-        // Get transcript for short audio
-        console.error('Transcribing short audio...');
-        const gatedTranscript = await this.getShortAudioTranscript(
-          audioFilePath,
-          duration,
-          progressCallback,
-          options.transcriptionPrompt,
-          signal,
-          costSession,
-          options.includeGlossary !== false,
-          options.qualityRetry !== false,
-        );
-        fullTranscript = gatedTranscript.text;
-        qualityCleaned = gatedTranscript.cleaned;
-        uncertainSegments = gatedTranscript.uncertain ? [1] : [];
+      // Step 1: Get transcript.
+      //
+      // Attribution boundary: everything inside this try runs against the STT
+      // backend, which is a different vendor than the chat provider whenever
+      // `transcriptionProvider` diverges from `aiProvider`. Tagging here (and
+      // nowhere below) is what keeps a revoked Gemini key during the summary
+      // stage from being reported as a Soniox credential problem.
+      try {
+        if (shouldSegment) {
+          // Use segmented approach for long audio
+          console.error('Using segmented transcription...');
+          const gatedTranscript = await this.getSegmentedTranscript(
+            audioFilePath,
+            duration,
+            progressCallback,
+            options.transcriptionPrompt,
+            segmentDuration,
+            signal,
+            costSession,
+            options.includeGlossary !== false,
+            options.qualityRetry !== false,
+          );
+          fullTranscript = gatedTranscript.text;
+          qualityCleaned = gatedTranscript.cleaned;
+          uncertainSegments = gatedTranscript.uncertainSegments;
+        } else {
+          // Get transcript for short audio
+          console.error('Transcribing short audio...');
+          const gatedTranscript = await this.getShortAudioTranscript(
+            audioFilePath,
+            duration,
+            progressCallback,
+            options.transcriptionPrompt,
+            signal,
+            costSession,
+            options.includeGlossary !== false,
+            options.qualityRetry !== false,
+          );
+          fullTranscript = gatedTranscript.text;
+          qualityCleaned = gatedTranscript.cleaned;
+          uncertainSegments = gatedTranscript.uncertain ? [1] : [];
+        }
+      } catch (error) {
+        throw annotateTranscriptionError(error, this.sttBackend.id);
       }
 
       signal?.throwIfAborted();
@@ -1788,6 +1811,11 @@ Requirements:
           fileHandle,
           onProgress,
           wholeFile: true,
+          // `qualityRetry: false` is the live-snippet mode: one low-signal
+          // blob every ~12s, where a failure is expected and cheap to drop.
+          // The same reasoning that disables the retry ladder disables the
+          // backend's transport retries.
+          retryTransport: qualityRetry,
           session,
           signal,
         });

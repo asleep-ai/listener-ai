@@ -1376,6 +1376,16 @@ async function handleTranscript(args: string[]): Promise<void> {
   const config = new ConfigService(dataPath);
   requireTranscriptionCredentials(config);
 
+  // Soniox takes vocabulary out of band (`context.terms`) and has no prompt
+  // surface at all, so a --prompt on that backend is silently dropped. Say so
+  // once instead of letting the user wonder why the instruction had no effect.
+  if (promptText && config.resolveTranscriptionProvider() === 'soniox') {
+    process.stderr.write(
+      'Warning: --prompt is ignored by the Soniox backend (it has no prompt parameter). ' +
+        'Known words are still applied.\n',
+    );
+  }
+
   // Resolve --output before the expensive transcription so we fail fast on a
   // bad path. Existing directory => <dir>/<basename>.transcript.md.
   // Anything else => the path itself, treated as a file.

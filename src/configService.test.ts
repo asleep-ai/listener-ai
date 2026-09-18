@@ -605,6 +605,47 @@ describe('ConfigService: transcription provider', () => {
     assert.equal(cfg.hasAiAuth(), false);
   });
 
+  // Auto mode gates on hasRequiredConfig/getMissingConfigs before it spends
+  // any transcription work, so a diverging transcription backend has to be
+  // represented there too -- otherwise a missing Soniox key only surfaces as a
+  // pipeline failure after the recording is already done.
+  it('reports the transcription backend credential as a missing config', () => {
+    const cfg = new ConfigService(freshDataPath('missing-soniox'));
+    cfg.setGeminiApiKey('gemini-key');
+    cfg.setNotionApiKey('notion-key');
+    cfg.setNotionDatabaseId('db-id');
+    cfg.setTranscriptionProvider('soniox');
+
+    assert.equal(cfg.hasRequiredConfig(), false);
+    assert.deepEqual(cfg.getMissingConfigs(), ['Soniox API key']);
+
+    cfg.setSonioxApiKey('soniox-key');
+    assert.equal(cfg.hasRequiredConfig(), true);
+    assert.deepEqual(cfg.getMissingConfigs(), []);
+  });
+
+  it('reports a missing Gemini transcription credential while the chat provider is signed in', () => {
+    const cfg = new ConfigService(freshDataPath('missing-gemini-backend'));
+    cfg.setCodexOAuth({ access: 'a', refresh: 'r', expires: Date.now() + 3_600_000 });
+    cfg.setAiProvider('codex');
+    cfg.setNotionApiKey('notion-key');
+    cfg.setNotionDatabaseId('db-id');
+    cfg.setTranscriptionProvider('gemini');
+
+    assert.equal(cfg.hasAiAuth(), true, 'chat provider credentials are fine');
+    assert.equal(cfg.hasRequiredConfig(), false);
+    assert.deepEqual(cfg.getMissingConfigs(), ['Gemini API Key']);
+  });
+
+  it('names one credential when both gates resolve to the same missing provider', () => {
+    const cfg = new ConfigService(freshDataPath('missing-shared'));
+    cfg.setNotionApiKey('notion-key');
+    cfg.setNotionDatabaseId('db-id');
+
+    // aiProvider gemini, transcriptionProvider auto -> both want the same key.
+    assert.deepEqual(cfg.getMissingConfigs(), ['Gemini API Key']);
+  });
+
   it('falls back to SONIOX_API_KEY but never surfaces it to the settings form', () => {
     process.env.SONIOX_API_KEY = 'env-soniox';
 

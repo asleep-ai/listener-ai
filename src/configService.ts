@@ -88,6 +88,20 @@ export interface AppConfig {
   summaryPromptMigratedToStructured?: boolean;
 }
 
+// What the user has to go configure, named per provider. Keyed by
+// `BatchSttProvider` (a superset of `AiProvider`) so both credential gates
+// share one vocabulary and a new backend fails to compile until it says what
+// its credential is called.
+const CREDENTIAL_LABELS: Record<BatchSttProvider, string> = {
+  gemini: 'Gemini API Key',
+  codex: 'Codex OAuth sign-in',
+  soniox: 'Soniox API key',
+};
+
+function credentialLabelFor(provider: BatchSttProvider): string {
+  return CREDENTIAL_LABELS[provider];
+}
+
 const LEGACY_DEFAULT_SUMMARY_PROMPT = `Based on this meeting transcript, provide:
 
 1. A concise meeting title in Korean (10-20 characters that captures the main topic)
@@ -445,14 +459,30 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  // Everything an unattended end-to-end run (auto mode) needs. The
+  // transcription backend is a separate gate from `hasAiAuth()`: with
+  // `transcriptionProvider: soniox` and no Soniox key, the summary credentials
+  // are fine and the run still cannot produce a transcript.
   hasRequiredConfig(): boolean {
-    return this.hasAiAuth() && !!this.getNotionApiKey() && !!this.getNotionDatabaseId();
+    return (
+      this.hasAiAuth() &&
+      this.hasTranscriptionAuth() &&
+      !!this.getNotionApiKey() &&
+      !!this.getNotionDatabaseId()
+    );
   }
 
   getMissingConfigs(): string[] {
     const missing: string[] = [];
     if (!this.hasAiAuth()) {
-      missing.push(this.getAiProvider() === 'codex' ? 'Codex OAuth sign-in' : 'Gemini API Key');
+      missing.push(credentialLabelFor(this.getAiProvider()));
+    }
+    if (!this.hasTranscriptionAuth()) {
+      // Deduped rather than suppressed: when both gates resolve to the same
+      // provider one entry says it all, but a diverging backend has to be
+      // named or the user fixes the chat key and hits the same wall.
+      const label = credentialLabelFor(this.resolveTranscriptionProvider());
+      if (!missing.includes(label)) missing.push(label);
     }
     if (!this.getNotionApiKey()) missing.push('Notion Integration Token');
     if (!this.getNotionDatabaseId()) missing.push('Notion Database ID');

@@ -495,10 +495,14 @@ async function deleteQuietly(params: {
     );
     // Silent cleanup failures accumulate against the 1,000-file / 2,000-job
     // quotas until every transcription starts failing, so they are worth a
-    // report even though the user-visible call succeeded.
+    // report even though the user-visible call succeeded. Throttled: the
+    // chunked live path runs a whole Soniox job per ~12s snippet, and a
+    // provider-side outage would make every one of them report twice (file
+    // plus job) for the length of the meeting.
     reportError(error, {
       operation: 'transcription.soniox.cleanup',
       severity: 'warning',
+      throttleMs: 60_000,
       extra: { status },
     });
   }

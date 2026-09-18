@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
-import { EmptyTranscriptionError } from './transcriptionErrors';
+import { EmptyTranscriptionError, TranscriptionApiError } from './transcriptionErrors';
 import { type BatchSttBackend, planSegmentation, retryTemperaturesFor } from './batchSttBackend';
 import { GeminiService, computeSegmentPlan, segmentOverlapSeconds } from './geminiService';
 import { createCostSession } from './services/usageTracker';
@@ -1615,3 +1615,235 @@ describe(
     });
   },
 );
+
+// Error attribution across the two stages. With `transcriptionProvider` set to
+// a different vendor than `aiProvider`, a single catch-all annotation at the
+// end of `transcribeAudio` blamed the STT backend for every failure --
+// including a revoked Gemini key hit during summarization, which read as
+// "Soniox API key is missing or invalid". Each stage now tags its own.
+describe('GeminiService transcription error attribution', () => {
+  type AttributionHelpers = {
+    transcribeAudio(
+      audioFilePath: string,
+      progressCallback?: (percent: number, message: string) => void,
+      summaryPrompt?: string,
+      liveNotes?: undefined,
+      options?: { transcriptOnly?: boolean },
+    ): Promise<{ transcript: string }>;
+    getAudioDuration(audioFilePath: string, signal?: AbortSignal): Promise<number>;
+    getShortAudioTranscript(
+      ...args: unknown[]
+    ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
+    generateSummary(promptText: string, transcript: string, ...rest: unknown[]): Promise<string>;
+  };
+
+  // Chat provider Gemini, transcription backend Soniox: the configuration the
+  // mixed-up copy only shows up in.
+  function makeMixedService(): AttributionHelpers {
+    const service = new GeminiService({
+      provider: 'gemini',
+      transcriptionProvider: 'soniox',
+      apiKey: 'test-key',
+      sonioxApiKey: 'soniox-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as AttributionHelpers;
+    // Keep the test off ffmpeg; 12s stays under every segmentation threshold.
+    service.getAudioDuration = async () => 12;
+    return service;
+  }
+
+  function makeAudioStub(name: string): string {
+    const filePath = path.join(workDir, name);
+    fs.writeFileSync(filePath, Buffer.alloc(64, 1));
+    return filePath;
+  }
+
+  it('blames the chat provider when the summary stage rejects the credential', async () => {
+    const service = makeMixedService();
+    service.getShortAudioTranscript = async () => ({
+      text: '참가자1: 회의를 시작하겠습니다.',
+      cleaned: false,
+      uncertain: false,
+    });
+    service.generateSummary = async () => {
+      throw new Error('API key not valid. Please pass a valid API key.');
+    };
+
+    await assert.rejects(
+      () => service.transcribeAudio(makeAudioStub('attribution-summary.webm')),
+      (err: unknown) => {
+        const message = (err as { userMessage?: string }).userMessage ?? String(err);
+        assert.match(message, /Gemini/);
+        assert.doesNotMatch(message, /Soniox/);
+        return true;
+      },
+    );
+  });
+
+  it('blames the STT backend when the transcript stage rejects the credential', async () => {
+    const service = makeMixedService();
+    service.getShortAudioTranscript = async () => {
+      throw new TranscriptionApiError('soniox unauthenticated', {
+        status: 401,
+        statusText: 'Unauthorized',
+        errorCode: 'unauthenticated',
+      });
+    };
+    let summaryCalls = 0;
+    service.generateSummary = async () => {
+      summaryCalls += 1;
+      return '{}';
+    };
+
+    await assert.rejects(
+      () => service.transcribeAudio(makeAudioStub('attribution-backend.webm')),
+      (err: unknown) => {
+        const message = (err as { userMessage?: string }).userMessage ?? String(err);
+        assert.match(message, /Soniox/);
+        assert.doesNotMatch(message, /Gemini/);
+        return true;
+      },
+    );
+    assert.equal(summaryCalls, 0, 'the summary stage never runs without a transcript');
+  });
+
+  it('keeps the backend attribution through the outer catch (no re-annotation)', async () => {
+    const service = makeMixedService();
+    service.getShortAudioTranscript = async () => {
+      // The backend's own "not configured" throw: a plain Error whose text
+      // merely mentions an api key, which is what the legacy substring path
+      // would have relabeled with the chat provider's copy.
+      throw new Error('Soniox API key is not configured.');
+    };
+
+    await assert.rejects(
+      () => service.transcribeAudio(makeAudioStub('attribution-nokey.webm')),
+      (err: unknown) => {
+        const message = (err as { userMessage?: string }).userMessage ?? String(err);
+        assert.match(message, /Soniox API key is missing or invalid/);
+        return true;
+      },
+    );
+  });
+});
+
+// The live-snippet path (`qualityRetry: false`) re-cuts a fresh 12s job every
+// ~12s, so the backend must not also retry its own transport: a provider
+// outage would otherwise triple the job count against a caller that treats a
+// single failure as normal.
+describe('GeminiService whole-file transport retries', () => {
+  type RetryHelpers = {
+    sttBackend: BatchSttBackend;
+    getShortAudioTranscript(
+      audioFilePath: string,
+      audioSeconds: number,
+      progressCallback?: (percent: number, message: string) => void,
+      customPrompt?: string,
+      signal?: AbortSignal,
+      session?: unknown,
+      includeGlossary?: boolean,
+      qualityRetry?: boolean,
+    ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
+  };
+
+  function makeService(): RetryHelpers {
+    return new GeminiService({
+      transcriptionProvider: 'soniox',
+      apiKey: 'test-key',
+      sonioxApiKey: 'soniox-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as RetryHelpers;
+  }
+
+  // Record what each call asked for, then fail so the client's retry loop (or
+  // the absence of one) is what decides the attempt count.
+  function captureTranscribeParams(service: RetryHelpers): Array<{
+    wholeFile?: boolean;
+    retryTransport?: boolean;
+  }> {
+    const seen: Array<{ wholeFile?: boolean; retryTransport?: boolean }> = [];
+    const backend = service.sttBackend;
+    service.sttBackend = {
+      ...backend,
+      transcribe: async (params) => {
+        seen.push({ wholeFile: params.wholeFile, retryTransport: params.retryTransport });
+        return '참가자1: 안녕하세요.';
+      },
+    };
+    return seen;
+  }
+
+  it('asks for transport retries on a normal whole-file transcription', async () => {
+    const service = makeService();
+    const seen = captureTranscribeParams(service);
+    const audioPath = path.join(workDir, 'retry-transport-on.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+
+    await service.getShortAudioTranscript(
+      audioPath,
+      10,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      true,
+    );
+
+    assert.deepEqual(seen, [{ wholeFile: true, retryTransport: true }]);
+  });
+
+  it('opts out of transport retries for a live snippet', async () => {
+    const service = makeService();
+    const seen = captureTranscribeParams(service);
+    const audioPath = path.join(workDir, 'retry-transport-off.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+
+    await service.getShortAudioTranscript(
+      audioPath,
+      10,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+    );
+
+    assert.deepEqual(seen, [{ wholeFile: true, retryTransport: false }]);
+  });
+
+  it('collapses the Soniox client to a single attempt when opted out', async () => {
+    const backend = makeService().sttBackend;
+    const originalFetch = globalThis.fetch;
+    let uploads = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET') === 'POST' && url.endsWith('/v1/files')) uploads += 1;
+      // A retryable status: with retries enabled the client would try again.
+      return new Response(JSON.stringify({ error_type: 'internal_error' }), {
+        status: 503,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    const audioPath = path.join(workDir, 'retry-transport-503.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    try {
+      await assert.rejects(
+        backend.transcribe({
+          audioFilePath: audioPath,
+          wholeFile: true,
+          retryTransport: false,
+        }),
+      );
+      assert.equal(uploads, 1, 'no transport retry when the caller opted out');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});

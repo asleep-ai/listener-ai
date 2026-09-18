@@ -229,6 +229,29 @@ export async function processAutoMode(
     return;
   }
 
+  // Pre-flight both credential gates. Auto mode runs unattended right after a
+  // recording stops, so a backend with no key would otherwise surface as a
+  // generic "Transcription failed" only after the upload/ffmpeg work, with
+  // nothing on screen naming the setting that has to change.
+  const configCheck = await window.electronAPI.checkConfig();
+  if (!configCheck.hasAiAuth || !configCheck.hasTranscriptionAuth) {
+    const reason = !configCheck.hasAiAuth
+      ? 'configure your AI provider in Settings'
+      : configCheck.transcriptionProvider === 'soniox'
+        ? 'transcription is set to Soniox but no Soniox API key is saved'
+        : 'the selected transcription backend has no credentials saved';
+    const message = `Auto mode: Skipped -- ${reason}. The recording was saved.`;
+    console.warn(message);
+    statusText.textContent = message;
+    showNotification(message, 'error');
+    setTimeout(() => {
+      if (!state.isRecording && statusText.textContent === message) {
+        statusText.textContent = 'Ready to record';
+      }
+    }, 8000);
+    return;
+  }
+
   state.isAutoModeProcessing = true;
   recordButton.disabled = true;
   recordButton.style.opacity = '0.5';

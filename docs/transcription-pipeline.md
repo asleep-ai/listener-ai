@@ -172,7 +172,7 @@ means adding a backend, not another provider branch.
 | First-attempt temperature | 0.2 | provider default (field omitted) | provider default | no temperature parameter exists |
 | Retry ladder temperatures | 0.4 → 0.8 via `config.temperature` | 0.4 → 0.8 via `temperature` form field | **no temperature knob** — one re-roll relying on provider nondeterminism | **no temperature knob** — one re-roll, same as the diarize model |
 | Empty result semantics | `text === ''` → `EmptyTranscriptionError` | empty `text` → `EmptyTranscriptionError`; missing `text` → malformed-response error | zero/all-empty segments → `EmptyTranscriptionError` | no tokens, or only audio-event/whitespace tokens → `EmptyTranscriptionError` |
-| Speaker labels | prompted `참가자N` | none (plain text) | provider speakers re-labeled to `참가자N` | provider speaker ids re-labeled to `참가자N` by first appearance, consistent across the whole file |
+| Speaker labels | prompted `참가자N` | none (plain text) | provider speakers re-labeled to `참가자N` | provider speaker ids re-labeled to `참가자N` by first appearance, consistent across the whole file below the 300-minute segmentation threshold; a longer file is segmented and renumbers per segment |
 | Segmentation trigger (`maxSegmentSeconds`, `maxBytes`) | > 300s | > 300s or > 24 MB (size-shrunk segment length) | same | > 18,000s (300 min), no byte cap |
 | Pre-conversion (`acceptedExtensions`) | none — `null`, any container ffmpeg reads | remux to `.webm` outside mp3/mp4/mpeg/mpga/m4a/wav/webm | same | remux to `.webm` outside webm/mp3/m4a/mp4/wav/ogg/flac/aac/aiff/amr/asf |
 | Segment re-encode flag (`requiresReencodedSegments`) | false | true | true | true |
@@ -188,7 +188,10 @@ backend is a whole second job: another upload, another transcription, and two
 more entries against the 1,000-stored-file / 2,000-transcription account
 quotas, all deleted as they complete. The whole-file path also retries a
 transient 5xx up to three times on its own, because only the segment path has
-a retry loop above it.
+a retry loop above it. The live-snippet caller (`qualityRetry: false`) opts
+out of that through `retryTransport: false`: it starts a fresh job every ~12s,
+so retrying a failed one only multiplies load on a provider that is already
+failing.
 
 ## Live path (light safety net by design)
 

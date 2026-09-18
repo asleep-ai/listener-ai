@@ -80,6 +80,14 @@ export interface BatchSttTranscribeParams {
    * otherwise multiply the two.
    */
   wholeFile?: boolean;
+  /**
+   * False when the caller does not want the backend to retry its own
+   * transport. The live-snippet path sets it: a 12s snippet is re-cut every
+   * ~12s, so a provider outage would otherwise multiply into three full jobs
+   * per snippet against a caller that treats one failure as normal. Defaults
+   * to true, and only matters together with `wholeFile`.
+   */
+  retryTransport?: boolean;
   session?: CostSession;
   signal?: AbortSignal;
 }
