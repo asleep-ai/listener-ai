@@ -73,6 +73,7 @@ The analyzer (`src/transcriptQuality.ts`) measures:
 | 1–4-word block repeat counting | word/n-gram loops (issue criterion: 4-gram ×4) |
 | KMP smallest-period check | space-less character loops (`감사합니다감사합니다…`) |
 | Local deflate compression ratio (≥ 4 over 200+ chars) | long low-entropy repetition (NOT a provider compression_ratio) |
+| Within-line character / token runs on raw lines (≥ 40 / ≥ 15) | one line holding a single repeated symbol or token (see Defect guards) |
 
 Thresholds are conservative because they remain the fail-open fallback:
 confirmations (`네, 네`), stutters, emphasis, and short chants never flag.
@@ -96,6 +97,11 @@ Otherwise the first result is kept and marked uncertain exactly as before.
 Cleanup does not run when no retries were configured, a rung throws, or any
 rung succeeds. Provider or network errors use a separate three-attempt
 backoff, unrelated to the quality retry ladder.
+
+Issue #197 adds three more per-segment guards inside this stage -- the
+within-line flood detector, the speaker-aware exemption to the block rule, and
+the prompt-echo drop -- plus label normalisation at assembly and a script-mix
+check on the assembled text. See Defect guards below.
 
 Production calibration (2026-07-21/22, real 1h Korean meetings): 0.2 retries
 failed to recover looped segments; the ladder recovered 5 of 6 flagged
@@ -157,11 +163,120 @@ text only -- the transcript itself is never rewritten here.
 
 ### 6. Persistence
 
-`meta.json` →
-`customFields.transcriptQuality = { cleaned?, uncertainSegments?, analyzer?, modelNotes? }` is
-written only when cleanup was accepted, uncertain text was kept, or another quality finding exists.
-The transcript is stored after the retry/cleanup gate and boundary
-reconciliation. Flagged but unrecovered text is kept and marked.
+`meta.json` → `customFields.transcriptQuality = { cleaned?,
+uncertainSegments?, speakerLabels?, analyzer?, modelNotes?, lostSegments?,
+lostSeconds? }` is written only when cleanup was accepted, uncertain text was
+kept, or another quality finding exists. The transcript is stored after the
+retry/cleanup gate and boundary reconciliation. Flagged but unrecovered text
+is kept and marked.
+
+## Defect guards
+
+A store-wide audit of the saved store (2026-09-18; 102 substantive transcripts
+from 85 recordings) found five defect classes the repetition work above does
+not catch, and confirmed that its verdicts never reach the user at all.
+Issue #197 answers them with six provider-independent guards. They are not
+a seventh stage: each one sits inside a stage above, and none of them
+branches on which backend produced the text.
+
+**Within-line token floods** (stage 2). The four detectors above this one in
+the table run on normalized text, which strips punctuation and symbols. One
+line holding a single symbol repeated 30,391 times normalizes to an empty
+string, so it was invisible to all of them; the shape appears in 10 of 102
+transcripts.
+`intraLineRuns` therefore scans the raw lines, with only the speaker label
+stripped, and reports `maxIntraLineCharRun` and `maxIntraLineTokenRun`. A run
+of 40 identical characters or 15 identical whitespace-separated tokens inside
+one line adds the reason `intra-line-token-flood`. Laughter, ellipses and
+short acknowledgement chants stay far below both thresholds.
+
+The same change made the 1-4-word block rule speaker-aware. A genuine meeting
+close where 참가자1 and 참가자2 trade `네.` for twenty turns tokenizes as a period-4
+block and reached the four-repeat rule on entirely real speech (observed in a
+Soniox whole-file eval). A candidate block carrying two or more distinct
+speaker tokens is an exchange between real speakers, not a decoder loop, and
+is exempt; a single-speaker loop still flags.
+
+**Prompt echo** (stage 2). A provider sometimes returns the instructions it
+was given instead of a transcript: the audit found one segment holding the
+whole transcription prompt, positional prefix and the glossary of colleagues'
+names included, and another holding its preamble sentence. That text reached
+the summary, Notion, the Markdown export and Drive sync. `detectPromptEcho`
+matches built-in instruction markers, which survive prompt customisation, plus
+verbatim lines of at least 24 characters from the prompt actually sent, which
+covers a user's custom `--prompt` text and the glossary entries. Short prompt
+lines are excluded on purpose: a one-term glossary bullet is exactly what a
+legitimate mention of that term looks like in speech.
+
+The check runs inside the gate before the judge, so an echo drives the same
+retry ladder as a loop. If every rung is exhausted and the result still
+echoes, the gate returns empty text with `dropped: 'prompt-echo'` and skips
+the cleanup call. This is the one case where the gate deletes text instead of
+keeping it and marking it uncertain: instruction text in a transcript is
+always wrong, never merely suspicious. A dropped segment keeps its time-range
+header over an empty body, so the rest of a long recording survives, while a
+whole-file drop fails the run with `Transcription returned the prompt text
+instead of speech`. Live snippets (`qualityRetry: false`) keep their silent
+path, because an error toast every 12 seconds is worse than a dropped chunk.
+
+**Speaker-label normalisation and id cap** (stage 2, as each segment body is
+assembled).
+Corrupted leading labels -- `참가1:`, `참자2:`, `참참가자1:`, `참가자 3:`, `[참가자1]` --
+appear in 63 of 102 transcripts, and runaway id counters reach `참가자147` where
+the diarizer gave almost every bare `어.` line a new speaker. Owner-grouped
+action items cannot be attributed on that output. `normalizeSpeakerLabels`
+rewrites every Korean variant to the canonical `참가자N: ` shape and requires a
+colon or a closing bracket before it will touch a line, so `참가자 3명이 참석했습니다`
+keeps its first word. English labels and unlabeled lines come back
+byte-identical: `Speaker 2:` arrives well formed, and renaming it would
+destroy the only speaker information an English meeting carries. Distinct ids
+beyond `SPEAKER_ID_CAP` (12) per segment collapse onto the last valid id, and
+a capped segment is marked uncertain -- the text stays, but it must not be
+trusted for owner attribution. The guard runs on both the segmented and the
+whole-file path, and its counts persist as `speakerLabels`.
+
+**Foreign-script insertion** (stage 4). Fabricated but fluent passages in
+another language -- a Portuguese podcast interview as the closing segment of a
+Korean meeting, an English narration, Chinese and Japanese runs -- appear in
+four transcripts plus fragments in a fifth. They pass every repetition-shaped
+detector, and the summary presents them as discussion. `scriptMix` measures
+the Hangul / Latin / other letter shares of a block, and
+`findScriptMixOutliers` calls a block an outlier when it holds at least 120
+letters, the recording has a dominant script at 60% or more, and the block
+holds at most 20% of that script. English jargon and acronyms inside Korean
+speech keep a Hangul share well above that ceiling, so they never flag. A
+segmented run compares real segments; a whole-file run has none, so
+`splitIntoScriptWindows` cuts the transcript into 1,500-letter windows of
+whole turns, which keeps a mid-file foreign run from being diluted by the
+speech around it. Outlier segments join `uncertainSegments`, the finding
+persists under `analyzer.scriptMix` with the reason `foreign-script-segment`,
+and one sentence naming the positions is appended to the summary call's
+quality block so the model treats them as suspected artifacts. Notes only:
+transcript text is never rewritten.
+
+**Silent loss notice** (stages 5 and 6). Everything above is diagnostic
+metadata the user never sees, and that is the failure the audit found most
+damaging: the summary reads as a complete record of the meeting even when a
+quarter of the audio produced nothing. Each segment now carries a `lossReason`
+-- `empty`, `cleaned` when a cleanup call was accepted with empty output, or
+`prompt-echo` -- and `formatTranscriptLossNotice` turns the collected segments
+into one plain sentence: `N minutes of this recording produced no transcript
+(segments: 3 [00:10:00 ~ 00:15:00], ...)`. `transcribeWithTwoSteps` prepends
+that notice to the flat `summary` string and also inserts it as the first
+`summarySections` entry, under the heading `Transcript coverage`, because the
+app summary tab, `listener show` and the Notion page all render the sections;
+a notice written to the flat string alone would be invisible in all three. The
+list persists as `lostSegments` alongside `lostSeconds`. A segment that
+exhausts its provider retries still throws and fails the whole run, so a
+failed segment can never reach a transcript: the notice covers segments that
+came back empty, were cleaned to empty, or had an echoed prompt dropped. It is
+the only part of `transcriptQuality` that is deliberately user-visible.
+
+**Summary grounding rules** (stage 5). The sixth guard constrains the summary
+rather than the transcript: three rules in `DEFAULT_SUMMARY_PROMPT` keep
+hedged dates and amounts hedged, forbid invented English spellings for garbled
+names, and exclude completed work from action items. Described in section 5
+above.
 
 ## Provider matrix
 
