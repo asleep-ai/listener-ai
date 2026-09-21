@@ -153,6 +153,36 @@ function pollTimeoutError(): TranscriptionApiError {
   });
 }
 
+// `fetch` rejects with a bare TypeError -- no Response, no status -- for DNS
+// failures, refused connections and resets mid-request. Raw, those bypass the
+// retry ladder entirely (`isRetryableSonioxFailure` only knows
+// TranscriptionApiError), so one network blip fails a 90-minute recording
+// outright. They are mapped onto a 503 instead, which is what the ladder
+// already does for every other transient transport failure. A cancel and a
+// body-read deadline are decisions, not blips, and pass through untouched.
+const NETWORK_ERROR_TYPE = 'network';
+
+async function fetchOrRetryableFailure(
+  fetchImpl: typeof fetch,
+  url: string,
+  init: RequestInit,
+  operation: string,
+): Promise<Response> {
+  try {
+    return await fetchImpl(url, init);
+  } catch (error) {
+    const name = (error as { name?: unknown } | null)?.name;
+    if (name === 'AbortError' || name === 'TimeoutError') throw error;
+    throw new TranscriptionApiError(`Soniox ${operation} could not reach the service`, {
+      status: 503,
+      statusText: 'network error',
+      errorType: NETWORK_ERROR_TYPE,
+      errorCode: NETWORK_ERROR_TYPE,
+      rawBody: capBody(error instanceof Error ? error.message : String(error)),
+    });
+  }
+}
+
 function isRetryableSonioxFailure(error: unknown): error is TranscriptionApiError {
   if (!(error instanceof TranscriptionApiError)) return false;
   if (error.errorCode === POLL_TIMEOUT_ERROR_TYPE) return false;
@@ -438,10 +468,12 @@ async function fetchAllocation(params: {
   if (params.signal?.aborted) forwardAbort();
   params.signal?.addEventListener('abort', forwardAbort, { once: true });
   try {
-    const response = await params.fetchImpl(params.url, {
-      ...params.init,
-      signal: controller.signal,
-    });
+    const response = await fetchOrRetryableFailure(
+      params.fetchImpl,
+      params.url,
+      { ...params.init, signal: controller.signal },
+      params.operation,
+    );
     // Headers are in: from here the caller's cancel must not reach the body.
     params.signal?.removeEventListener('abort', forwardAbort);
     if (!response.ok) {
@@ -586,13 +618,15 @@ async function pollUntilCompleted(params: {
   let interval = params.pollIntervalMs;
   for (;;) {
     params.signal?.throwIfAborted();
-    const response = await params.fetchImpl(
+    const response = await fetchOrRetryableFailure(
+      params.fetchImpl,
       `${SONIOX_API_BASE_URL}/v1/transcriptions/${params.transcriptionId}`,
       {
         method: 'GET',
         headers: { Authorization: `Bearer ${params.apiKey}` },
         signal: params.signal,
       },
+      'transcription status',
     );
     if (!response.ok) throw await failureFromResponse(response, 'transcription status');
 
@@ -631,13 +665,15 @@ async function fetchTranscript(params: {
   transcriptionId: string;
   signal?: AbortSignal;
 }): Promise<SonioxTranscriptResponse> {
-  const response = await params.fetchImpl(
+  const response = await fetchOrRetryableFailure(
+    params.fetchImpl,
     `${SONIOX_API_BASE_URL}/v1/transcriptions/${params.transcriptionId}/transcript`,
     {
       method: 'GET',
       headers: { Authorization: `Bearer ${params.apiKey}` },
       signal: params.signal,
     },
+    'transcript fetch',
   );
   if (!response.ok) throw await failureFromResponse(response, 'transcript fetch');
   return (await response.json()) as SonioxTranscriptResponse;
@@ -655,13 +691,19 @@ async function deleteQuietly(params: {
   label: string;
 }): Promise<void> {
   try {
-    const response = await params.fetchImpl(`${SONIOX_API_BASE_URL}${params.resourcePath}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${params.apiKey}` },
-      // Its own deadline, never the caller's: cleanup must still run after a
-      // cancel, but a cancel while offline must not stall on two hung DELETEs.
-      signal: AbortSignal.timeout(CLEANUP_TIMEOUT_MS),
-    });
+    const response = await fetchOrRetryableFailure(
+      params.fetchImpl,
+      `${SONIOX_API_BASE_URL}${params.resourcePath}`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${params.apiKey}` },
+        // Its own deadline, never the caller's: cleanup must still run after a
+        // cancel, but a cancel while offline must not stall on two hung
+        // DELETEs.
+        signal: AbortSignal.timeout(CLEANUP_TIMEOUT_MS),
+      },
+      `${params.label} delete`,
+    );
     // 404 means somebody already removed it -- the quota is free either way.
     if (response.ok || response.status === 404) return;
     throw await failureFromResponse(response, `${params.label} delete`);

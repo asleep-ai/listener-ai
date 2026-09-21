@@ -15,7 +15,15 @@ describe('isTranscriptionTempFile', () => {
 
   it('matches codex pre-conversion temps (`_codex_<timestamp>.webm`)', () => {
     assert.equal(isTranscriptionTempFile('Meeting_codex_1715923200000.webm'), true);
-    assert.equal(isTranscriptionTempFile('Talk_codex_1.webm'), true);
+  });
+
+  it('treats only a 13-digit Date.now() as the pre-conversion timestamp', () => {
+    // `prepareAudioForProvider` stamps `Date.now()`, which is 13 digits until
+    // 2286. A loose `\d+` also matched -- and so permanently hid -- a user
+    // recording whose own name happened to end that way.
+    assert.equal(isTranscriptionTempFile('meeting_gemini_1758400000000.webm'), true);
+    assert.equal(isTranscriptionTempFile('meeting_gemini_2026.webm'), false);
+    assert.equal(isTranscriptionTempFile('Talk_codex_1.webm'), false);
   });
 
   // The pre-conversion temp name carries the batch backend id, so every id in

@@ -25,6 +25,17 @@ const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 4_000;
 const RECONNECT_STABLE_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 15_000;
+/**
+ * How long the FIRST connect stays unsettled once the socket is open and the
+ * config frame is away. The server validates the API key only after that frame
+ * crosses the network, so a bad key or an exhausted balance comes back as an
+ * error frame a moment later -- after `create()` had already resolved, which
+ * turned a recoverable startup failure into a fatal error on a session the
+ * caller believed was running. The window ends early on the first real frame,
+ * and a reconnect does not wait at all. Tests collapse it through the `sleep`
+ * seam.
+ */
+export const SONIOX_CONNECT_SETTLE_MS = 2_000;
 // The docs require a control frame at least every 20s of silence.
 const KEEPALIVE_INTERVAL_MS = 10_000;
 // After the empty end-of-stream frame the server replies `finished: true`; cap
@@ -409,18 +420,22 @@ export class SonioxLiveSession implements LiveSttSession {
           ? `Reconnected to Soniox realtime ${this.kind}.`
           : `Connected to Soniox realtime ${this.kind}.`,
       );
-      // Give an immediate rejection (bad key, exhausted balance) one turn to
-      // land so the first connect can reject instead of surfacing an error on
-      // a session the caller already considers started.
-      void this.sleepFn(0).then(() => {
-        if (timedOut || this.socket !== socket) return;
+      // Hold the first connect open long enough for a server-side rejection
+      // (bad key, exhausted balance) to land as a connect failure the caller
+      // can fall back from. A reconnect settles immediately: the key is known
+      // good by then, and waiting would stall PCM that is already queued.
+      const settleDelayMs = isResume ? 0 : SONIOX_CONNECT_SETTLE_MS;
+      void this.sleepFn(settleDelayMs, this.closeController.signal).then(() => {
+        if (timedOut || this.closed || this.socket !== socket) return;
         settleOk();
       });
     });
 
     socket.on('message', (data: unknown) => {
       if (timedOut || this.socket !== socket) return;
-      this.handleRawMessage(socket, data);
+      // A frame the server sent after taking the config frame is proof the
+      // key was accepted, so the settle window has done its job early.
+      if (this.handleRawMessage(socket, data)) settleOk();
     });
 
     socket.on('error', (error: unknown) => {
@@ -541,17 +556,21 @@ export class SonioxLiveSession implements LiveSttSession {
     }
   }
 
-  private handleRawMessage(socket: SonioxSocket, data: unknown): void {
+  /**
+   * @returns true when the frame is proof the stream is live -- parsed, and
+   * not an error. The first connect settles on it (see `connect`).
+   */
+  private handleRawMessage(socket: SonioxSocket, data: unknown): boolean {
     let message: SonioxServerMessage;
     try {
       message = JSON.parse(parseMessageData(data)) as SonioxServerMessage;
     } catch {
       // Non-JSON frames are not part of the protocol; ignore them.
-      return;
+      return false;
     }
     if (typeof message.error_code === 'number' || message.error_message) {
       this.handleErrorFrame(socket, message);
-      return;
+      return false;
     }
     this.handleTokens(message);
     if (message.finished === true) {
@@ -559,6 +578,7 @@ export class SonioxLiveSession implements LiveSttSession {
       this.flushFinal();
       this.finishedResolve?.();
     }
+    return true;
   }
 
   private handleErrorFrame(socket: SonioxSocket, message: SonioxServerMessage): void {

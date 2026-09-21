@@ -778,6 +778,62 @@ describe('transcribeSonioxAudio', () => {
     assert.equal(steps(calls).filter((step) => step === `DELETE /v1/files/${FILE_ID}`).length, 2);
   });
 
+  it('retries a fetch that rejects at the network level', async () => {
+    // `fetch` rejects with a bare TypeError for DNS failures and resets: no
+    // Response and no status, so without a mapping it never reaches the retry
+    // ladder and one blip fails the whole recording.
+    const { impl } = scriptFetch();
+    let uploads = 0;
+    const flaky = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === 'string' ? input : String(input);
+      if ((init?.method ?? 'GET') === 'POST' && url.endsWith('/v1/files')) {
+        uploads++;
+        if (uploads === 1) throw new TypeError('fetch failed');
+      }
+      return await impl(input, init);
+    }) as unknown as typeof fetch;
+
+    const result = await run(flaky, { maxAttempts: 3 });
+
+    assert.ok(result.text.length > 0);
+    assert.equal(uploads, 2);
+  });
+
+  it('surfaces an exhausted network failure as a retryable transport error', async () => {
+    let uploads = 0;
+    const offline = (async (): Promise<Response> => {
+      uploads++;
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+
+    await assert.rejects(run(offline, { maxAttempts: 2 }), (err: unknown) => {
+      assert.ok(err instanceof TranscriptionApiError);
+      assert.equal(err.status, 503);
+      assert.equal(err.errorCode, 'network');
+      // The raw reason stays available for triage; the key never is.
+      assert.equal(err.rawBody, 'fetch failed');
+      assert.doesNotMatch(err.message, new RegExp(API_KEY));
+      return true;
+    });
+    assert.equal(uploads, 2);
+  });
+
+  it('never retries a fetch that rejects because the caller cancelled', async () => {
+    const controller = new AbortController();
+    let uploads = 0;
+    const aborting = (async (): Promise<Response> => {
+      uploads++;
+      controller.abort();
+      throw new DOMException('Aborted', 'AbortError');
+    }) as unknown as typeof fetch;
+
+    await assert.rejects(
+      run(aborting, { maxAttempts: 3, signal: controller.signal }),
+      (err: unknown) => (err as { name?: unknown } | null)?.name === 'AbortError',
+    );
+    assert.equal(uploads, 1);
+  });
+
   it('does not retry a non-retryable failure', async () => {
     let attempts = 0;
     const { impl } = scriptFetch({

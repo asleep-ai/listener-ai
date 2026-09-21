@@ -510,6 +510,11 @@ function sonioxMessageForApiError(error: TranscriptionApiError): string {
   if (status === 429 || code === 'limit_exceeded') {
     return 'Soniox rate or concurrency limit reached. Please retry in a minute.';
   }
+  if (code === 'network') {
+    // Synthesized by the Soniox client for a DNS failure or a reset, which
+    // has no HTTP status of its own -- "HTTP 503" would misname it.
+    return 'Could not reach Soniox. Check your network connection and try again.';
+  }
   if (code !== undefined && code.startsWith('file_download_')) {
     return `Soniox could not read the uploaded audio (${code}). Please try transcribing again.`;
   }

@@ -81,12 +81,15 @@ export function mimeTypeForFile(filename: string): string {
 //     `acceptedExtensions` (e.g. .ogg/.flac/.aac/.opus before OpenAI's
 //     `/v1/audio/transcriptions`) and needs a remux first
 // The backend ids come from BATCH_STT_BACKEND_IDS so a new engine's temp
-// files are recognised without editing this pattern.
+// files are recognised without editing this pattern. The timestamp is matched
+// as exactly 13 digits -- what `Date.now()` returns until the year 2286 --
+// because a loose `\d+` also swallows a user recording that happens to end in
+// `_gemini_2026.webm`, hiding it from the recordings list for good.
 // Used by the recordings watcher to suppress mid-transcription refreshes that
 // would wipe the inline progress row, and by `get-recordings` so these temp
 // files don't appear as ghost recordings while a transcribe is in flight.
 const TRANSCRIPTION_TEMP_FILE_PATTERN = new RegExp(
-  `(?:_segment_\\d{3}|_(?:${BATCH_STT_BACKEND_IDS.join('|')})_\\d+)\\.[A-Za-z0-9]+$`,
+  `(?:_segment_\\d{3}|_(?:${BATCH_STT_BACKEND_IDS.join('|')})_\\d{13})\\.[A-Za-z0-9]+$`,
 );
 
 export function isTranscriptionTempFile(filename: string): boolean {

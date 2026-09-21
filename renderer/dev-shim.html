@@ -24,7 +24,9 @@
           ? { success: true, data: { transcript: 'lorem ipsum', summary: 'demo summary' } }
           : { success: true, data: null };
         if (prop === 'searchTranscriptions' || prop === 'listReleases') return asyncList;
-        if (prop === 'checkConfig') return async () => ({ hasConfig: true, hasAiAuth: true, aiProvider: 'gemini', codexOAuthConfigured: false, missing: [] });
+        // Both credential gates, mirroring the real `check-config` payload:
+        // the transcribe flows require hasAiAuth AND hasTranscriptionAuth.
+        if (prop === 'checkConfig') return async () => ({ hasConfig: true, hasAiAuth: true, hasTranscriptionAuth: true, aiProvider: 'gemini', transcriptionProvider: 'gemini', codexOAuthConfigured: false, missing: [] });
         if (prop === 'getConfig') return async () => ({
           aiProvider: 'gemini',
           globalShortcut: 'CommandOrControl+Shift+R',

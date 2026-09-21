@@ -4,6 +4,7 @@ import type { LiveSttCallbacks, LiveSttPcmFrame, LiveSttProviderConfig } from '.
 import {
   filterSonioxTokens,
   SonioxLiveSession,
+  SONIOX_CONNECT_SETTLE_MS,
   SONIOX_REALTIME_MODEL,
   type SonioxServerMessage,
   type SonioxSocket,
@@ -133,11 +134,11 @@ function recordCallbacks() {
 
 const instantSleep = async (): Promise<void> => {};
 
-/** Instant for the connect grace (0ms), manually released for everything else. */
+/** Instant for the connect settle window, manually released for everything else. */
 function manualSleep() {
   const pending: Array<() => void> = [];
   const sleep = async (ms: number): Promise<void> => {
-    if (ms === 0) return;
+    if (ms === 0 || ms === SONIOX_CONNECT_SETTLE_MS) return;
     await new Promise<void>((resolve) => pending.push(resolve));
   };
   return { sleep, fire: (index: number) => pending[index]?.(), pendingCount: () => pending.length };
@@ -150,7 +151,8 @@ function manualSleep() {
 function cancellableSleep() {
   const outstanding = new Set<AbortSignal>();
   const sleep = (ms: number, signal?: AbortSignal): Promise<void> => {
-    if (ms === 0 || !signal || signal.aborted) return Promise.resolve();
+    if (ms === 0 || ms === SONIOX_CONNECT_SETTLE_MS) return Promise.resolve();
+    if (!signal || signal.aborted) return Promise.resolve();
     outstanding.add(signal);
     return new Promise<void>((resolve) => {
       signal.addEventListener(
@@ -422,12 +424,13 @@ describe('SonioxLiveSession', () => {
   it('keeps a held run waiting while the next run starts speaking', async () => {
     const { createWebSocket, sockets } = scriptSockets();
     const { callbacks, of } = recordCallbacks();
-    // A sleep that never settles isolates the "new source speech" path from
-    // the grace timer.
+    // A sleep that never settles (except the connect window, which has to end
+    // for create() to resolve) isolates the "new source speech" path from the
+    // grace timer.
     await SonioxLiveSession.create({ ...CONFIG, translate: true }, callbacks, {
       createWebSocket,
       sleep: async (ms: number) => {
-        if (ms > 0) await new Promise(() => {});
+        if (ms > 0 && ms !== SONIOX_CONNECT_SETTLE_MS) await new Promise(() => {});
       },
     });
 
@@ -1012,5 +1015,53 @@ describe('SonioxLiveSession', () => {
 
     assert.equal(sockets.length, 1);
     assert.equal(of('error').length, 0, 'the rejection replaces a session-level error callback');
+  });
+
+  it('rejects create when the error frame lands after the socket opened', async () => {
+    // Soniox validates the key only once the config frame has crossed the
+    // network, so a 401/402 comes back a beat after `open`. Settling on that
+    // beat turned a recoverable startup failure into a fatal error on a
+    // session the caller already believed was running.
+    const { createWebSocket, sockets } = scriptSockets();
+    const { callbacks, of } = recordCallbacks();
+    let releaseSettle: (() => void) | undefined;
+    const sleep = (ms: number): Promise<void> =>
+      ms === SONIOX_CONNECT_SETTLE_MS
+        ? new Promise<void>((resolve) => {
+            releaseSettle = resolve;
+          })
+        : Promise.resolve();
+
+    const pending = SonioxLiveSession.create(CONFIG, callbacks, { createWebSocket, sleep });
+    const rejected = assert.rejects(pending, /Soniox realtime error 401/);
+    await flush();
+
+    assert.equal(sockets.length, 1);
+    sockets[0].deliver({
+      error_code: 401,
+      error_type: 'unauthorized',
+      error_message: 'Invalid API key.',
+    });
+    releaseSettle?.();
+
+    await rejected;
+    await flush();
+    assert.equal(of('error').length, 0, 'the rejection replaces a session-level error callback');
+  });
+
+  it('settles the first connect on the first real frame, before the window ends', async () => {
+    const { createWebSocket, sockets } = scriptSockets([
+      { open: { tokens: [token('안녕', { start_ms: 0, end_ms: 100 })] } },
+    ]);
+    const { callbacks } = recordCallbacks();
+    // A settle window that never elapses: only the server frame can end it.
+    const sleep = (ms: number): Promise<void> =>
+      ms === SONIOX_CONNECT_SETTLE_MS ? new Promise<void>(() => {}) : Promise.resolve();
+
+    const session = await SonioxLiveSession.create(CONFIG, callbacks, { createWebSocket, sleep });
+
+    assert.equal(session.provider, 'soniox');
+    assert.equal(sockets.length, 1);
+    await session.close();
   });
 });
