@@ -2,6 +2,14 @@
 // contextBridge. Keep in sync with that file -- the preload TypeScript
 // definition is the source of truth, this is a renderer-side mirror.
 
+import type {
+  AiProvider,
+  BatchSttProvider,
+  GeminiThinkingLevel,
+  LiveSttProvider,
+  TranscriptionProvider,
+} from '../src/aiProvider';
+import type { StreamingLiveSttProvider } from '../src/liveSttProvider';
 import type { FileInfoResult } from '../src/services/fileInfoTypes';
 
 export interface TranscriptionErrorPayload {
@@ -51,7 +59,7 @@ export type LiveSessionStartResult = {
   startedAt: string;
   translate: boolean;
   mode: 'streaming' | 'chunked';
-  provider: 'openai' | 'gemini' | 'chunked';
+  provider: StreamingLiveSttProvider | 'chunked';
   realtimeClient?: {
     transport: 'webrtc';
     endpoint: 'realtime' | 'translation';
@@ -66,7 +74,7 @@ export type LiveSessionSnapshot = {
   active: boolean;
   translate: boolean;
   mode: 'streaming' | 'chunked';
-  provider: 'openai' | 'gemini' | 'chunked';
+  provider: StreamingLiveSttProvider | 'chunked';
   segments: LiveTranscriptSegment[];
   interimTranscript: string;
   interimTranslation: string;
@@ -80,7 +88,7 @@ export type LiveSessionEvent =
       sessionId: string;
       status: string;
       mode?: 'streaming' | 'chunked';
-      provider?: 'openai' | 'gemini' | 'chunked';
+      provider?: StreamingLiveSttProvider | 'chunked';
     }
   | { type: 'interim'; sessionId: string; text: string; offsetMs?: number }
   | { type: 'translationInterim'; sessionId: string; text: string; offsetMs?: number }
@@ -99,15 +107,17 @@ export type AgentConfirmRequest = {
 };
 
 export type ConfigPayload = {
-  aiProvider?: 'gemini' | 'codex';
+  aiProvider?: AiProvider;
+  transcriptionProvider?: TranscriptionProvider;
   geminiApiKey?: string;
   geminiModel?: string;
   geminiFlashModel?: string;
-  geminiThinkingLevel?: 'low' | 'medium' | 'high';
+  geminiThinkingLevel?: GeminiThinkingLevel;
   codexModel?: string;
   codexTranscriptionModel?: string;
-  liveSttProvider?: 'auto' | 'openai' | 'gemini' | 'chunked';
+  liveSttProvider?: LiveSttProvider;
   openaiApiKey?: string;
+  sonioxApiKey?: string;
   openaiLiveTranscriptionModel?: string;
   openaiLiveTranslationModel?: string;
   liveSttLanguage?: string;
@@ -190,7 +200,9 @@ export type ElectronAPI = {
   checkConfig: () => Promise<{
     hasConfig: boolean;
     hasAiAuth: boolean;
-    aiProvider: 'gemini' | 'codex';
+    hasTranscriptionAuth: boolean;
+    aiProvider: AiProvider;
+    transcriptionProvider: BatchSttProvider;
     codexOAuthConfigured: boolean;
     missing: string[];
   }>;

@@ -10,11 +10,16 @@ import {
   DEFAULT_OPENAI_LIVE_TRANSCRIPTION_MODEL,
   DEFAULT_OPENAI_LIVE_TRANSLATION_MODEL,
   type AiProvider,
+  type BatchSttProvider,
   type GeminiThinkingLevel,
   type LiveSttProvider,
+  type TranscriptionProvider,
+  isTranscriptionProvider,
   normalizeAiProvider,
   normalizeGeminiThinkingLevel,
   normalizeLiveSttProvider,
+  normalizeTranscriptionProvider,
+  resolveBatchSttProvider,
 } from './aiProvider';
 import {
   type CodexOAuthCredentialSource,
@@ -30,6 +35,9 @@ import {
 
 export interface AppConfig {
   aiProvider?: AiProvider;
+  // Batch (file) speech-to-text backend. `auto` follows `aiProvider`; summary,
+  // judge and agent calls stay on `aiProvider` whatever this says.
+  transcriptionProvider?: TranscriptionProvider;
   geminiApiKey?: string;
   geminiModel?: string;
   geminiFlashModel?: string;
@@ -38,6 +46,7 @@ export interface AppConfig {
   codexTranscriptionModel?: string;
   liveSttProvider?: LiveSttProvider;
   openaiApiKey?: string;
+  sonioxApiKey?: string;
   openaiLiveTranscriptionModel?: string;
   openaiLiveTranslationModel?: string;
   liveSttLanguage?: string;
@@ -77,6 +86,20 @@ export interface AppConfig {
   // model after upgrade keeps their choice.
   codexTranscriptionMigratedToDiarize?: boolean;
   summaryPromptMigratedToStructured?: boolean;
+}
+
+// What the user has to go configure, named per provider. Keyed by
+// `BatchSttProvider` (a superset of `AiProvider`) so both credential gates
+// share one vocabulary and a new backend fails to compile until it says what
+// its credential is called.
+const CREDENTIAL_LABELS: Record<BatchSttProvider, string> = {
+  gemini: 'Gemini API Key',
+  codex: 'Codex OAuth sign-in',
+  soniox: 'Soniox API key',
+};
+
+function credentialLabelFor(provider: BatchSttProvider): string {
+  return CREDENTIAL_LABELS[provider];
 }
 
 const LEGACY_DEFAULT_SUMMARY_PROMPT = `Based on this meeting transcript, provide:
@@ -293,6 +316,22 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getTranscriptionProvider(): TranscriptionProvider {
+    return normalizeTranscriptionProvider(this.config.transcriptionProvider);
+  }
+
+  setTranscriptionProvider(provider: TranscriptionProvider): void {
+    this.setKey('transcriptionProvider', provider);
+    this.saveConfig();
+  }
+
+  // The backend a transcription actually runs on. `auto` follows the chat
+  // provider so existing installs keep their behavior; everything else is an
+  // explicit opt-in that leaves summary/judge/agent on `aiProvider`.
+  resolveTranscriptionProvider(): BatchSttProvider {
+    return resolveBatchSttProvider(this.getTranscriptionProvider(), this.getAiProvider());
+  }
+
   // Returns the active OAuth credentials whether they came from config, env, or
   // the Codex CLI auth file. Preference is:
   //   1. Fresh config credentials (app sign-in)
@@ -385,8 +424,19 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  // Summary, judge and agent auth. A Soniox key alone never satisfies this:
+  // those calls always run on `aiProvider`.
   hasAiAuth(): boolean {
     const provider = this.getAiProvider();
+    if (provider === 'codex') return this.hasCodexOAuth();
+    return !!this.getGeminiApiKey();
+  }
+
+  // Credentials for the resolved batch transcription backend. Only diverges
+  // from `hasAiAuth()` when `transcriptionProvider` points somewhere else.
+  hasTranscriptionAuth(): boolean {
+    const provider = this.resolveTranscriptionProvider();
+    if (provider === 'soniox') return !!this.getSonioxApiKey();
     if (provider === 'codex') return this.hasCodexOAuth();
     return !!this.getGeminiApiKey();
   }
@@ -409,14 +459,30 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  // Everything an unattended end-to-end run (auto mode) needs. The
+  // transcription backend is a separate gate from `hasAiAuth()`: with
+  // `transcriptionProvider: soniox` and no Soniox key, the summary credentials
+  // are fine and the run still cannot produce a transcript.
   hasRequiredConfig(): boolean {
-    return this.hasAiAuth() && !!this.getNotionApiKey() && !!this.getNotionDatabaseId();
+    return (
+      this.hasAiAuth() &&
+      this.hasTranscriptionAuth() &&
+      !!this.getNotionApiKey() &&
+      !!this.getNotionDatabaseId()
+    );
   }
 
   getMissingConfigs(): string[] {
     const missing: string[] = [];
     if (!this.hasAiAuth()) {
-      missing.push(this.getAiProvider() === 'codex' ? 'Codex OAuth sign-in' : 'Gemini API Key');
+      missing.push(credentialLabelFor(this.getAiProvider()));
+    }
+    if (!this.hasTranscriptionAuth()) {
+      // Deduped rather than suppressed: when both gates resolve to the same
+      // provider one entry says it all, but a diverging backend has to be
+      // named or the user fixes the chat key and hits the same wall.
+      const label = credentialLabelFor(this.resolveTranscriptionProvider());
+      if (!missing.includes(label)) missing.push(label);
     }
     if (!this.getNotionApiKey()) missing.push('Notion Integration Token');
     if (!this.getNotionDatabaseId()) missing.push('Notion Database ID');
@@ -531,6 +597,15 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  getSonioxApiKey(): string | undefined {
+    return this.config.sonioxApiKey || process.env.SONIOX_API_KEY;
+  }
+
+  setSonioxApiKey(apiKey: string): void {
+    this.setKey('sonioxApiKey', apiKey);
+    this.saveConfig();
+  }
+
   getOpenAiLiveTranscriptionModel(): string {
     return this.config.openaiLiveTranscriptionModel || DEFAULT_OPENAI_LIVE_TRANSCRIPTION_MODEL;
   }
@@ -552,7 +627,10 @@ export class ConfigService {
     const hasOpenAiRealtimeAuth = !!this.getOpenAiApiKey();
     if (provider === 'openai') return hasOpenAiRealtimeAuth;
     if (provider === 'gemini') return !!this.getGeminiApiKey();
+    if (provider === 'soniox') return !!this.getSonioxApiKey();
     if (provider === 'chunked') return false;
+    // `auto` deliberately ignores the Soniox key: Soniox stays explicit-only
+    // until the evaluation passes and a release has soaked.
     return hasOpenAiRealtimeAuth || !!this.getGeminiApiKey();
   }
 
@@ -673,6 +751,15 @@ export class ConfigService {
         this.setKey('liveSttProvider', provider);
         continue;
       }
+      if (key === 'transcriptionProvider') {
+        // `normalizeTranscriptionProvider` returns the fallback for junk rather
+        // than undefined, so validate first; otherwise an out-of-domain write
+        // would silently persist as `auto`.
+        const candidate = typeof value === 'string' ? value.trim().toLowerCase() : '';
+        if (!isTranscriptionProvider(candidate)) continue;
+        this.setKey('transcriptionProvider', candidate);
+        continue;
+      }
       if (key === 'defaultSummaryPrompt') continue;
       if (key === 'summaryPrompt') {
         const prompt = typeof value === 'string' ? value.trim() : '';
@@ -695,6 +782,7 @@ export class ConfigService {
   getAllConfig(): AppConfig {
     return {
       aiProvider: this.getAiProvider(),
+      transcriptionProvider: this.getTranscriptionProvider(),
       geminiApiKey: this.getGeminiApiKey(),
       geminiModel: this.getGeminiModel(),
       geminiFlashModel: this.getGeminiFlashModel(),
@@ -705,6 +793,8 @@ export class ConfigService {
       // Stored value only -- never surface the OPENAI_API_KEY env fallback to the
       // settings form, or saving any change would persist an env-only key to config.json.
       openaiApiKey: this.config.openaiApiKey,
+      // Stored value only, for the same reason as openaiApiKey above.
+      sonioxApiKey: this.config.sonioxApiKey,
       openaiLiveTranscriptionModel: this.getOpenAiLiveTranscriptionModel(),
       openaiLiveTranslationModel: this.getOpenAiLiveTranslationModel(),
       liveSttLanguage: this.getLiveSttLanguage(),

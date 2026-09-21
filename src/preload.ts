@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { AiProvider, LiveSttProvider, TranscriptionProvider } from './aiProvider';
 import type { LiveNote } from './outputService';
 import type { SyncProgressEvent } from './services/syncEngine';
 
@@ -20,12 +21,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   checkConfig: () => ipcRenderer.invoke('check-config'),
   saveConfig: (config: {
-    aiProvider?: 'gemini' | 'codex';
+    aiProvider?: AiProvider;
+    transcriptionProvider?: TranscriptionProvider;
     geminiApiKey?: string;
     codexModel?: string;
     codexTranscriptionModel?: string;
-    liveSttProvider?: 'auto' | 'openai' | 'gemini' | 'chunked';
+    liveSttProvider?: LiveSttProvider;
     openaiApiKey?: string;
+    sonioxApiKey?: string;
     openaiLiveTranscriptionModel?: string;
     openaiLiveTranslationModel?: string;
     liveSttLanguage?: string;

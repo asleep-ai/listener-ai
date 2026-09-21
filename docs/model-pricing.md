@@ -14,6 +14,8 @@ When prices drift, update the date in the cell and re-cite from the provider's o
 | Summary + agent (Codex) | `codexModel` | gpt-5.5 (via ChatGPT Codex Responses) | $5.00/M input, $30.00/M output (API price; ChatGPT subscription absorbs cost) | Rejects `temperature`/sampling params (reasoning model). Cached input $0.50/M. |
 | Live transcription (streaming) | `liveSttProvider`, `openaiLiveTranscriptionModel` | gpt-realtime-whisper or gemini-3.1-flash-live-preview | OpenAI: $0.017/min. Gemini: ~$0.005/min input audio | Auto mode tries OpenAI Realtime with a direct OpenAI API key, then Gemini Live, then chunked fallback. |
 | Live translation (streaming captions) | `liveSttProvider`, `openaiLiveTranslationModel`, `liveTranslationLanguage` | gpt-realtime-translate or gemini-3.5-live-translate-preview | OpenAI: $0.034/min. Gemini: $0.0053/min input audio + $0.0315/min output audio | OpenAI Realtime live translation requires a standard OpenAI API key; Codex OAuth is not treated as live translation auth. |
+| Transcription (Soniox, opt-in) | `transcriptionProvider=soniox`, `sonioxApiKey` | stt-async-v5 | $0.10/hr ($0.00167/min) | Diarization, language identification, formatting and translation bundled at that price. Whole file in one job up to 300 min, so speaker ids stay consistent. |
+| Live transcription (Soniox, opt-in) | `liveSttProvider=soniox`, `sonioxApiKey` | stt-rt-v5 | $0.12/hr ($0.002/min) | Explicit opt-in only, never chosen by `auto`. Diarization off in realtime by decision D5. |
 
 ## Provider notes
 
@@ -22,6 +24,8 @@ When prices drift, update the date in the cell and re-cite from the provider's o
 **OpenAI Codex (ChatGPT subscription)** — OAuth via the `@earendil-works/pi-ai` OpenAI Codex provider. Codex GUI usage on Plus/Pro plans is metered against shared 5-hour message-window allowances. Business/Enterprise plans switched to per-token credits aligned with API rates on 2026-04-02. The same models are also accessible directly via API key at the per-token prices below.
 
 **OpenAI Transcription** — API key. Metered separately from the ChatGPT subscription. Listener.AI's OAuth flow currently passes the ChatGPT access token as the Bearer for `/v1/audio/transcriptions`, which OpenAI accepts. End-of-life: `whisper-1` is still available at the same per-minute rate as `gpt-4o-transcribe`.
+
+**Soniox (opt-in)** — separate account and API key at <https://console.soniox.com>, funded by the user; no free credits since 2025-10-27. Enabling it breaks the "ChatGPT subscription only" promise for Codex users, which is why both the batch and live paths are explicit opt-in and never reached by `auto`. Billed by audio duration with diarization and language identification included; see `docs/soniox-adoption-plan.md` for the evaluation gate and risks.
 
 ## Full pricing tables
 
@@ -71,7 +75,7 @@ Source: <https://costgoat.com/pricing/openai-transcription> (verified 2026-05-13
 
 ### Third-party transcription (with diarization)
 
-For comparison only — none of these are wired into Listener.AI today.
+For comparison only — none of these are wired into Listener.AI today, except Soniox, which is wired behind an explicit opt-in.
 
 | Service / Model | Price | Korean | Diarization | Free tier | Source |
 |---|---|---|---|---|---|
@@ -82,6 +86,8 @@ For comparison only — none of these are wired into Listener.AI today.
 | Rev.ai Reverb | $0.20/hr (~$0.0033/min) | Yes | unverified | 5 hr credit | <https://www.rev.ai/pricing> |
 | Rev.ai Reverb Turbo | $0.10/hr (~$0.0017/min) | Yes | unverified | 5 hr credit | <https://www.rev.ai/pricing> |
 | Speechmatics (Pro tier) | from $0.24/hr (~$0.004/min) | Yes | not publicly itemized | 480 min/month | <https://www.speechmatics.com/pricing> |
+| Soniox stt-async-v5 (wired, opt-in) | $0.10/hr (~$0.0017/min) | Yes (4.4% WER on Korean FLEURS) | included | none since 2025-10-27 | <https://soniox.com/pricing> |
+| Soniox stt-rt-v5 (wired, opt-in) | $0.12/hr (~$0.002/min) | Yes | included | none since 2025-10-27 | <https://soniox.com/pricing> |
 
 All verified 2026-05-13.
 

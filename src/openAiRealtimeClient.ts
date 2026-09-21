@@ -34,7 +34,10 @@ export function buildRealtimeClientSecretRequest(config: LiveSttProviderConfig):
   url: string;
   body: unknown;
 } | null {
-  if (config.provider === 'chunked' || config.provider === 'gemini') return null;
+  // Allowlist, not a denylist: this is the OpenAI client-secret path, so every
+  // other provider (gemini, soniox, chunked, and anything added later) must
+  // fall through to its own session instead of silently asking OpenAI.
+  if (config.provider !== 'auto' && config.provider !== 'openai') return null;
 
   const translate = config.translate !== false;
   if (translate) {

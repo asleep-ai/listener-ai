@@ -67,6 +67,9 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   // uses the documented combined input+output effective price.
   'gemini-3.1-flash-live-preview': { audioPerMinute: 0.005 },
   'gemini-3.5-live-translate-preview': { audioPerMinute: 0.0368 },
+  // Soniox bills by audio duration: $0.12/hr realtime, $0.10/hr async.
+  'stt-rt-v5': { audioPerMinute: 0.12 / 60 },
+  'stt-async-v5': { audioPerMinute: 0.1 / 60 },
 };
 
 export type UsageKind = 'summary' | 'transcription' | 'agent' | 'realtime';

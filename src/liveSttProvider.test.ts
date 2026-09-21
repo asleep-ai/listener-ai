@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   GeminiLiveSession,
+  resolveStreamingProvider,
   type LiveSttCallbacks,
   type LiveSttPcmFrame,
   type LiveSttProviderConfig,
@@ -370,5 +371,30 @@ test('GeminiLiveSession still emits a final transcript that arrives during the c
   assert.ok(
     finals.some((e) => JSON.stringify(e.value).includes('final words')),
     'the final transcript from the close drain is captured, not dropped',
+  );
+});
+
+test('resolveStreamingProvider selects Soniox only when it is explicitly configured', () => {
+  assert.equal(
+    resolveStreamingProvider({ provider: 'soniox', sonioxApiKey: 'soniox-key' }),
+    'soniox',
+  );
+  assert.throws(
+    () => resolveStreamingProvider({ provider: 'soniox' }),
+    /Soniox API key is not configured/,
+  );
+});
+
+test('resolveStreamingProvider never resolves auto to Soniox', () => {
+  // D3: Soniox stays explicit-only until the evaluation passes and a release
+  // has soaked, so a Soniox-only install falls through to the chunked path.
+  assert.equal(resolveStreamingProvider({ provider: 'auto', sonioxApiKey: 'soniox-key' }), null);
+  assert.equal(
+    resolveStreamingProvider({
+      provider: 'auto',
+      sonioxApiKey: 'soniox-key',
+      geminiApiKey: 'gemini-key',
+    }),
+    'gemini',
   );
 });

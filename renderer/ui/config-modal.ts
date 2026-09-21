@@ -11,6 +11,15 @@ import {
   chooseInitial,
 } from '../services/model-options';
 import type { GoogleSyncProgress } from '../electronAPI';
+import {
+  type AiProvider,
+  type GeminiThinkingLevel,
+  type LiveSttProvider,
+  type TranscriptionProvider,
+  normalizeAiProvider,
+  normalizeLiveSttProvider,
+  normalizeTranscriptionProvider,
+} from '../../src/aiProvider';
 import { formatUsd } from '../../src/usageFormat';
 
 let configModal: HTMLDialogElement | null = null;
@@ -20,7 +29,10 @@ let aiProviderSelect: HTMLSelectElement | null = null;
 let geminiApiKeyInput: HTMLInputElement | null = null;
 let geminiThinkingLevelSelect: HTMLSelectElement | null = null;
 let liveSttProviderSelect: HTMLSelectElement | null = null;
+let transcriptionProviderSelect: HTMLSelectElement | null = null;
+let transcriptionProviderNotice: HTMLElement | null = null;
 let openaiApiKeyInput: HTMLInputElement | null = null;
+let sonioxApiKeyInput: HTMLInputElement | null = null;
 let liveProviderNotice: HTMLElement | null = null;
 let liveSttLanguageInput: HTMLInputElement | null = null;
 let liveTranslationLanguageInput: HTMLInputElement | null = null;
@@ -183,10 +195,12 @@ function applyCodexOAuthState(config: {
       : null;
 }
 
-function readLiveProvider(): 'auto' | 'openai' | 'gemini' | 'chunked' {
-  const value = liveSttProviderSelect?.value;
-  if (value === 'openai' || value === 'gemini' || value === 'chunked') return value;
-  return 'auto';
+function readLiveProvider(): LiveSttProvider {
+  return normalizeLiveSttProvider(liveSttProviderSelect?.value) ?? 'auto';
+}
+
+function readTranscriptionProvider(): TranscriptionProvider {
+  return normalizeTranscriptionProvider(transcriptionProviderSelect?.value);
 }
 
 function setLiveProviderNotice(
@@ -199,10 +213,37 @@ function setLiveProviderNotice(
   liveProviderNotice.className = `config-notice is-${state}`;
 }
 
+function updateTranscriptionProviderNotice(): void {
+  if (!transcriptionProviderNotice) return;
+  const provider = readTranscriptionProvider();
+  const hasSonioxKey = (sonioxApiKeyInput?.value.trim() ?? '').length > 0;
+  const warn = provider === 'soniox' && !hasSonioxKey;
+  const text = warn
+    ? 'Soniox transcription requires a Soniox API key. Add one below or choose another backend.'
+    : '';
+  transcriptionProviderNotice.textContent = text;
+  transcriptionProviderNotice.hidden = text.length === 0;
+  // Only carry the warning state while there is a warning: a hidden element
+  // that keeps `is-warning` shows up as one in a11y tooling and in any future
+  // styling that reads the class rather than `hidden`.
+  transcriptionProviderNotice.className = warn ? 'config-notice is-warning' : 'config-notice';
+}
+
 function updateLiveProviderNotice(): void {
   const provider = readLiveProvider();
   const hasOpenAiKey = (openaiApiKeyInput?.value.trim() ?? '').length > 0;
   const hasGeminiKey = (geminiApiKeyInput?.value.trim() ?? '').length > 0;
+  const hasSonioxKey = (sonioxApiKeyInput?.value.trim() ?? '').length > 0;
+
+  if (provider === 'soniox') {
+    setLiveProviderNotice(
+      hasSonioxKey
+        ? 'Soniox realtime will handle live captions.'
+        : 'Soniox realtime requires a Soniox API key. Add one below or choose another provider.',
+      hasSonioxKey ? 'success' : 'warning',
+    );
+    return;
+  }
 
   if (provider === 'chunked') {
     setLiveProviderNotice(
@@ -310,15 +351,17 @@ export async function showConfigModal(): Promise<void> {
 
   // Load current config
   const config = (await window.electronAPI.getConfig()) as Record<string, unknown> & {
-    aiProvider?: 'gemini' | 'codex';
+    aiProvider?: AiProvider;
     geminiApiKey?: string;
     geminiModel?: string;
     geminiFlashModel?: string;
-    geminiThinkingLevel?: 'low' | 'medium' | 'high';
+    geminiThinkingLevel?: GeminiThinkingLevel;
     codexModel?: string;
     codexTranscriptionModel?: string;
-    liveSttProvider?: 'auto' | 'openai' | 'gemini' | 'chunked';
+    liveSttProvider?: LiveSttProvider;
+    transcriptionProvider?: TranscriptionProvider;
     openaiApiKey?: string;
+    sonioxApiKey?: string;
     liveSttLanguage?: string;
     liveTranslationLanguage?: string;
     codexOAuthConfigured?: boolean;
@@ -349,8 +392,14 @@ export async function showConfigModal(): Promise<void> {
   if (liveSttProviderSelect) {
     liveSttProviderSelect.value = config.liveSttProvider || 'auto';
   }
+  if (transcriptionProviderSelect) {
+    transcriptionProviderSelect.value = config.transcriptionProvider || 'auto';
+  }
   if (openaiApiKeyInput) {
     openaiApiKeyInput.value = config.openaiApiKey || '';
+  }
+  if (sonioxApiKeyInput) {
+    sonioxApiKeyInput.value = config.sonioxApiKey || '';
   }
   if (liveSttLanguageInput) {
     liveSttLanguageInput.value = config.liveSttLanguage || '';
@@ -457,6 +506,7 @@ export async function showConfigModal(): Promise<void> {
 
   applyAiProviderVisibility();
   updateLiveProviderNotice();
+  updateTranscriptionProviderNotice();
 
   // Refresh "Usage this month" card on each open so the totals stay current
   // even if the user has been recording in the same session. Fire-and-forget;
@@ -616,7 +666,12 @@ export function setupConfigModal(): void {
   aiProviderSelect = document.getElementById('aiProvider') as HTMLSelectElement | null;
   geminiApiKeyInput = document.getElementById('geminiApiKey') as HTMLInputElement | null;
   liveSttProviderSelect = document.getElementById('liveSttProvider') as HTMLSelectElement | null;
+  transcriptionProviderSelect = document.getElementById(
+    'transcriptionProvider',
+  ) as HTMLSelectElement | null;
+  transcriptionProviderNotice = document.getElementById('transcriptionProviderNotice');
   openaiApiKeyInput = document.getElementById('openaiApiKey') as HTMLInputElement | null;
+  sonioxApiKeyInput = document.getElementById('sonioxApiKey') as HTMLInputElement | null;
   liveProviderNotice = document.getElementById('liveProviderNotice');
   liveSttLanguageInput = document.getElementById('liveSttLanguage') as HTMLInputElement | null;
   liveTranslationLanguageInput = document.getElementById(
@@ -707,6 +762,9 @@ export function setupConfigModal(): void {
   }
   liveSttProviderSelect?.addEventListener('change', updateLiveProviderNotice);
   openaiApiKeyInput?.addEventListener('input', updateLiveProviderNotice);
+  sonioxApiKeyInput?.addEventListener('input', updateLiveProviderNotice);
+  transcriptionProviderSelect?.addEventListener('change', updateTranscriptionProviderNotice);
+  sonioxApiKeyInput?.addEventListener('input', updateTranscriptionProviderNotice);
   geminiApiKeyInput?.addEventListener('input', updateLiveProviderNotice);
 
   const openSlackAppCreatorBtn = document.getElementById(
@@ -907,16 +965,12 @@ export function setupConfigModal(): void {
 
   if (saveConfigBtn) {
     saveConfigBtn.addEventListener('click', async () => {
-      const aiProvider = aiProviderSelect?.value === 'codex' ? 'codex' : 'gemini';
+      const aiProvider = normalizeAiProvider(aiProviderSelect?.value) ?? 'gemini';
       const geminiKey = geminiApiKeyInput?.value.trim() ?? '';
-      const liveSttProviderValue = liveSttProviderSelect?.value;
-      const liveSttProvider =
-        liveSttProviderValue === 'openai' ||
-        liveSttProviderValue === 'gemini' ||
-        liveSttProviderValue === 'chunked'
-          ? liveSttProviderValue
-          : 'auto';
+      const liveSttProvider = readLiveProvider();
+      const transcriptionProvider = readTranscriptionProvider();
       const openaiApiKey = openaiApiKeyInput?.value.trim() ?? '';
+      const sonioxApiKey = sonioxApiKeyInput?.value.trim() ?? '';
       const liveSttLanguage = liveSttLanguageInput?.value.trim() ?? '';
       const liveTranslationLanguage = liveTranslationLanguageInput?.value.trim() || 'ko';
       const geminiModel = readModelValue('geminiModel');
@@ -988,7 +1042,9 @@ export function setupConfigModal(): void {
         codexModel: codexModel,
         codexTranscriptionModel: codexTranscriptionModel,
         liveSttProvider: liveSttProvider,
+        transcriptionProvider: transcriptionProvider,
         openaiApiKey: openaiApiKey,
+        sonioxApiKey: sonioxApiKey,
         liveSttLanguage: liveSttLanguage,
         liveTranslationLanguage: liveTranslationLanguage,
         notionApiKey: notionKey,

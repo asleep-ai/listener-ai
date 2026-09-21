@@ -495,6 +495,40 @@ describe('LiveSessionService', () => {
     );
   });
 
+  it('names the failed provider once in the start-failure fallback status', async () => {
+    // The configured provider failed and the fallback landed on the same one,
+    // so naming it on both sides would read as a contradiction.
+    let attempts = 0;
+    const events: LiveSessionEvent[] = [];
+    const fakeStream: LiveSttSession = {
+      provider: 'gemini',
+      kind: 'transcription',
+      sendPcm() {},
+      async close() {},
+    };
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'gemini', geminiApiKey: 'gemini-key' }),
+      emitEvent: (event) => events.push(event),
+      createLiveSttSession: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('gemini live connect failed');
+        return fakeStream;
+      },
+    });
+
+    await service.start({ title: 'Live', translate: false });
+
+    const status = events.find(
+      (event) => event.type === 'status' && /unavailable/.test(event.status),
+    );
+    assert.ok(status && status.type === 'status');
+    assert.equal(status.status, 'Live provider unavailable; using Gemini live transcription.');
+  });
+
   it('records Gemini Live usage when a streaming provider session stops', async () => {
     let now = Date.parse('2026-06-16T03:00:00.000Z');
     const usage: RecordInput[] = [];
@@ -525,6 +559,126 @@ describe('LiveSessionService', () => {
     assert.equal(usage[0].modelId, 'gemini-3.5-live-translate-preview');
     assert.equal(usage[0].kind, 'realtime');
     assert.equal(usage[0].usage.audioSeconds, 60);
+  });
+
+  it('records Soniox realtime usage for an explicitly selected Soniox session', async () => {
+    let now = Date.parse('2026-06-16T03:00:00.000Z');
+    let realtimeClientRequests = 0;
+    const usage: RecordInput[] = [];
+    const fakeStream: LiveSttSession = {
+      provider: 'soniox',
+      kind: 'translation',
+      sendPcm() {},
+      async close() {},
+    };
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'soniox', sonioxApiKey: 'soniox-key' }),
+      now: () => now,
+      recordUsage: (input) => {
+        usage.push(input);
+      },
+      createRealtimeClientConfig: async () => {
+        realtimeClientRequests++;
+        return null;
+      },
+      createLiveSttSession: async () => fakeStream,
+    });
+
+    const session = await service.start({ title: 'Live', translate: true });
+    now += 30_000;
+    await service.stop(session.sessionId);
+
+    // Soniox never routes through the OpenAI realtime client-secret path.
+    assert.equal(realtimeClientRequests, 0);
+    assert.equal(session.provider, 'soniox');
+    assert.equal(usage.length, 1);
+    assert.equal(usage[0].modelId, 'stt-rt-v5');
+    assert.equal(usage[0].kind, 'realtime');
+    assert.equal(usage[0].usage.audioSeconds, 30);
+  });
+
+  it('never calls Gemini translation for a Soniox translation stream', async () => {
+    let translateCalls = 0;
+    const fakeGemini = {
+      async translateText(): Promise<string> {
+        translateCalls++;
+        return '번역';
+      },
+    };
+    const makeService = (stream: LiveSttSession) => {
+      let streamCallbacks: LiveSttCallbacks | undefined;
+      const service = new LiveSessionService({
+        getDataPath: () => workDir,
+        ensureGeminiService: () => fakeGemini as unknown as GeminiService,
+        getAgentService: () => null,
+        formatAiCredentialsError: () => 'missing credentials',
+        getLiveSttConfig: () => ({ provider: stream.provider, sonioxApiKey: 'soniox-key' }),
+        createLiveSttSession: async (_config, callbacks) => {
+          streamCallbacks = callbacks;
+          return stream;
+        },
+      });
+      return { service, finals: () => streamCallbacks };
+    };
+
+    const soniox = makeService({
+      provider: 'soniox',
+      kind: 'translation',
+      sendPcm() {},
+      async close() {},
+    });
+    await soniox.service.start({ title: 'Live', translate: true });
+    // A Soniox final with no translation attached must still not cost a
+    // Gemini call -- the one-way translation stream is the only source (D6).
+    soniox.finals()?.onFinal({ text: 'Good morning' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(translateCalls, 0);
+
+    // Control: the Gemini/OpenAI streams keep the per-final fallback.
+    const gemini = makeService({
+      provider: 'gemini',
+      kind: 'translation',
+      sendPcm() {},
+      async close() {},
+    });
+    await gemini.service.start({ title: 'Live', translate: true });
+    gemini.finals()?.onFinal({ text: 'Good morning' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(translateCalls, 1);
+  });
+
+  it('never selects Soniox in auto mode, even when only a Soniox key is configured', async () => {
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'auto', sonioxApiKey: 'soniox-key' }),
+    });
+
+    const session = await service.start({ title: 'Live' });
+
+    assert.equal(session.mode, 'chunked');
+    assert.equal(session.provider, 'chunked');
+  });
+
+  it('surfaces a missing Soniox key when Soniox is explicitly selected', async () => {
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'soniox' }),
+    });
+
+    await assert.rejects(
+      () => service.start({ title: 'Live' }),
+      /Soniox API key is not configured/,
+    );
   });
 
   it('falls back to Gemini in auto mode when OpenAI WebRTC setup fails', async () => {

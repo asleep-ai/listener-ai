@@ -160,17 +160,28 @@ export function showSavedTranscript(
   }
 }
 
-// Gate transcription on AI provider auth being configured. Returns true when
-// the caller can proceed; false when the user needs to configure first (and
-// the appropriate UI has already been surfaced). Shared by the modal and the
-// inline-row transcribe flows.
+// Gate transcription on both credential sets: the AI provider (summary, quality
+// judge, agent) and the selected transcription backend, which can be a
+// different vendor with its own key. Returns true when the caller can proceed;
+// false when the user needs to configure first (and the appropriate UI has
+// already been surfaced). Checking here keeps a missing backend key from
+// failing only after the ffmpeg work. Shared by the modal and the inline-row
+// transcribe flows.
 export async function requireAiAuth(): Promise<boolean> {
   const configCheck = await window.electronAPI.checkConfig();
-  if (configCheck.hasAiAuth) return true;
+  if (configCheck.hasAiAuth && configCheck.hasTranscriptionAuth) return true;
+  const message = !configCheck.hasAiAuth
+    ? 'Please configure your AI provider first'
+    : configCheck.transcriptionProvider === 'soniox'
+      ? 'Transcription is set to Soniox, but no Soniox API key is saved. Add the key in Settings, or set Transcription back to "Follow AI provider".'
+      : 'The selected transcription backend has no credentials saved. Check the Transcription setting in Settings.';
   if (document.getElementById('configModal')) {
+    // The provider case is self-evident once Settings opens; a missing backend
+    // key is not, so name it before the modal appears.
+    if (configCheck.hasAiAuth) alert(message);
     void showConfigModal();
   } else {
-    alert('Please configure your AI provider first');
+    alert(message);
   }
   return false;
 }

@@ -310,7 +310,9 @@ function createGeminiService(): GeminiService | null {
   const codexOAuthSource = configService.getCodexOAuthSource();
   return new GeminiService({
     provider: configService.getAiProvider(),
+    transcriptionProvider: configService.resolveTranscriptionProvider(),
     apiKey: configService.getGeminiApiKey(),
+    sonioxApiKey: configService.getSonioxApiKey(),
     codexOAuth: codexOAuthSource?.credentials,
     // Persist refreshed tokens only when they came from app config. Env and
     // Codex CLI credentials are external sources and must remain read-only here.
@@ -344,7 +346,10 @@ function ensureGeminiService(): GeminiService | null {
 async function resolveOpenAiRealtimeBearer(
   config: LiveSttProviderConfig,
 ): Promise<OpenAiRealtimeBearer | null> {
-  if (config.provider === 'chunked' || config.provider === 'gemini') return null;
+  // Allowlist, not a denylist: this resolves the OpenAI Realtime bearer, so any
+  // provider that is not an OpenAI path (gemini, soniox, chunked, and anything
+  // added later) must fall through to its own session.
+  if (config.provider !== 'auto' && config.provider !== 'openai') return null;
   const openaiApiKey = config.openaiApiKey?.trim();
   if (openaiApiKey) return { token: openaiApiKey, source: 'apiKey' };
 
@@ -365,10 +370,13 @@ const liveSessionService = new LiveSessionService({
     provider: configService.getLiveSttProvider(),
     openaiApiKey: configService.getOpenAiApiKey(),
     geminiApiKey: configService.getGeminiApiKey(),
+    sonioxApiKey: configService.getSonioxApiKey(),
     openaiLiveTranscriptionModel: configService.getOpenAiLiveTranscriptionModel(),
     openaiLiveTranslationModel: configService.getOpenAiLiveTranslationModel(),
     language: configService.getLiveSttLanguage(),
     translationLanguage: configService.getLiveTranslationLanguage(),
+    // Soniox takes the glossary as `context.terms` on the realtime socket.
+    knownWords: configService.getKnownWords(),
   }),
   createRealtimeClientConfig: createOpenAiRealtimeClientConfigForLive,
   emitEvent: (event) => {
@@ -1196,7 +1204,9 @@ function applyConfigSideEffects(changed: Partial<AppConfig>): void {
     changed.geminiThinkingLevel !== undefined ||
     changed.codexOAuth !== undefined ||
     changed.codexModel !== undefined ||
-    changed.codexTranscriptionModel !== undefined
+    changed.codexTranscriptionModel !== undefined ||
+    changed.transcriptionProvider !== undefined ||
+    changed.sonioxApiKey !== undefined
   ) {
     geminiService = createGeminiService();
     agentService = null;
@@ -1434,7 +1444,11 @@ ipcMain.handle('check-config', async () => {
   return {
     hasConfig: configService.hasRequiredConfig(),
     hasAiAuth: configService.hasAiAuth(),
+    // Separate gate: transcription can run on a backend with its own
+    // credentials, so the renderer must check both before spending ffmpeg work.
+    hasTranscriptionAuth: configService.hasTranscriptionAuth(),
     aiProvider: configService.getAiProvider(),
+    transcriptionProvider: configService.resolveTranscriptionProvider(),
     codexOAuthConfigured: configService.hasCodexOAuth(),
     missing: configService.getMissingConfigs(),
   };

@@ -8,7 +8,9 @@ import { type AgentScope, AgentService, type ConfigProposal } from './agentServi
 import {
   GEMINI_THINKING_LEVELS,
   LIVE_STT_PROVIDERS,
+  TRANSCRIPTION_PROVIDERS,
   isAiProvider,
+  isTranscriptionProvider,
   normalizeGeminiThinkingLevel,
   normalizeLiveSttProvider,
 } from './aiProvider';
@@ -127,6 +129,7 @@ function showHelp(): never {
 
 const KNOWN_CONFIG_KEYS = [
   'aiProvider',
+  'transcriptionProvider',
   'geminiApiKey',
   'geminiModel',
   'geminiFlashModel',
@@ -135,6 +138,7 @@ const KNOWN_CONFIG_KEYS = [
   'codexTranscriptionModel',
   'liveSttProvider',
   'openaiApiKey',
+  'sonioxApiKey',
   'openaiLiveTranscriptionModel',
   'openaiLiveTranslationModel',
   'liveSttLanguage',
@@ -210,6 +214,16 @@ function applyConfigSet(config: ConfigService, key: ConfigKey, value: string): v
       config.setAiProvider(value);
       return;
     }
+    case 'transcriptionProvider': {
+      if (!isTranscriptionProvider(value)) {
+        process.stderr.write(
+          `Error: transcriptionProvider must be one of: ${TRANSCRIPTION_PROVIDERS.join(', ')}\n`,
+        );
+        process.exit(1);
+      }
+      config.setTranscriptionProvider(value);
+      return;
+    }
     case 'geminiApiKey':
       config.setGeminiApiKey(value);
       return;
@@ -249,6 +263,9 @@ function applyConfigSet(config: ConfigService, key: ConfigKey, value: string): v
     }
     case 'openaiApiKey':
       config.setOpenAiApiKey(value);
+      return;
+    case 'sonioxApiKey':
+      config.setSonioxApiKey(value);
       return;
     case 'openaiLiveTranscriptionModel':
       config.updateConfig({ openaiLiveTranscriptionModel: value });
@@ -320,10 +337,52 @@ function formatAiCredentialsError(config: ConfigService): string {
   );
 }
 
+// Credentials for the resolved transcription backend, which `transcriptionProvider`
+// can point at a different vendor than `aiProvider`. Keyed on the backend, not
+// on `aiProvider`, so `transcriptionProvider=codex` on a Gemini install is told
+// to sign in to Codex rather than to add a Gemini key.
+function formatTranscriptionCredentialsError(config: ConfigService): string {
+  switch (config.resolveTranscriptionProvider()) {
+    case 'soniox':
+      return (
+        'Error: Soniox API key not found.\n' +
+        'Set SONIOX_API_KEY env var, run `listener config set sonioxApiKey <key>`, ' +
+        'or run `listener config set transcriptionProvider auto`.\n'
+      );
+    case 'codex':
+      return (
+        'Error: transcriptionProvider is codex, but Codex OAuth is not configured.\n' +
+        'Run `listener codex login` or run `listener config set transcriptionProvider auto`.\n'
+      );
+    default:
+      return (
+        'Error: transcriptionProvider is gemini, but no Gemini API key was found.\n' +
+        'Set GEMINI_API_KEY env var, run `listener config set geminiApiKey <key>`, ' +
+        'or run `listener config set transcriptionProvider auto`.\n'
+      );
+  }
+}
+
+// Transcription can run on a different backend than the rest of the pipeline
+// (see `transcriptionProvider`), so a transcribing command needs both gates:
+// `aiProvider` credentials, which the summary AND the per-segment quality judge
+// both call, plus the transcription backend's own credentials.
+function requireTranscriptionCredentials(config: ConfigService): void {
+  if (!config.hasAiAuth()) {
+    process.stderr.write(formatAiCredentialsError(config));
+    process.exit(1);
+  }
+  if (config.hasTranscriptionAuth()) return;
+  process.stderr.write(formatTranscriptionCredentialsError(config));
+  process.exit(1);
+}
+
 function createTranscriptionService(config: ConfigService, dataPath: string): GeminiService {
   return new GeminiService({
     provider: config.getAiProvider(),
+    transcriptionProvider: config.resolveTranscriptionProvider(),
     apiKey: config.getGeminiApiKey(),
+    sonioxApiKey: config.getSonioxApiKey(),
     codexOAuth: config.getCodexOAuth(),
     // Persist refreshed tokens only when credentials are stored in config.json.
     // Env-only credentials must stay ephemeral; persisting them silently writes
@@ -984,10 +1043,7 @@ async function handleMerge(args: string[]): Promise<void> {
 
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
-  if (!config.hasAiAuth()) {
-    process.stderr.write(formatAiCredentialsError(config));
-    process.exit(1);
-  }
+  requireTranscriptionCredentials(config);
 
   // Resolve every ref to a folder + audio path before doing any expensive work
   // so an early failure (missing audio) doesn't waste a partial concat.
@@ -1318,9 +1374,16 @@ async function handleTranscript(args: string[]): Promise<void> {
 
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
-  if (!config.hasAiAuth()) {
-    process.stderr.write(formatAiCredentialsError(config));
-    process.exit(1);
+  requireTranscriptionCredentials(config);
+
+  // Soniox takes vocabulary out of band (`context.terms`) and has no prompt
+  // surface at all, so a --prompt on that backend is silently dropped. Say so
+  // once instead of letting the user wonder why the instruction had no effect.
+  if (promptText && config.resolveTranscriptionProvider() === 'soniox') {
+    process.stderr.write(
+      'Warning: --prompt is ignored by the Soniox backend (it has no prompt parameter). ' +
+        'Known words are still applied.\n',
+    );
   }
 
   // Resolve --output before the expensive transcription so we fail fast on a
@@ -1508,10 +1571,7 @@ async function main(): Promise<void> {
 
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
-  if (!config.hasAiAuth()) {
-    process.stderr.write(formatAiCredentialsError(config));
-    process.exit(1);
-  }
+  requireTranscriptionCredentials(config);
 
   const gemini = createTranscriptionService(config, dataPath);
 

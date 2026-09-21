@@ -13,12 +13,8 @@ import * as os from 'os';
 import * as path from 'path';
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import {
-  EmptyTranscriptionError,
-  formatDiarizedSegments,
-  isDiarizeModel,
-  transcribeCodexAudio,
-} from './codexTranscription';
+import { formatDiarizedSegments, isDiarizeModel, transcribeCodexAudio } from './codexTranscription';
+import { EmptyTranscriptionError } from './transcriptionErrors';
 
 describe('isDiarizeModel', () => {
   it('matches the diarize model id', () => {

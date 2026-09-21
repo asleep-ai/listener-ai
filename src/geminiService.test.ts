@@ -3,8 +3,16 @@ import * as fs from 'fs';
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
-import { EmptyTranscriptionError } from './codexTranscription';
+import { EmptyTranscriptionError, TranscriptionApiError } from './transcriptionErrors';
+import { type BatchSttBackend, planSegmentation, retryTemperaturesFor } from './batchSttBackend';
 import { GeminiService, computeSegmentPlan, segmentOverlapSeconds } from './geminiService';
+import {
+  SONIOX_MAX_FILE_BYTES,
+  SONIOX_MAX_FILE_SECONDS,
+  type SonioxTranscriptionResult,
+  type TranscribeSonioxAudioParams,
+} from './sonioxTranscription';
+import { createCostSession } from './services/usageTracker';
 import { findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
 const ffmpegPath = findFfmpegSync();
@@ -901,6 +909,311 @@ describe('GeminiService short-audio quality judge wiring', () => {
     assert.equal(result.cleaned, false);
     assert.equal(result.uncertain, true);
   });
+
+  // The batch STT backend is selected independently of the chat provider, so
+  // a Codex user can transcribe on Gemini while summary/judge stay on Codex.
+  it('routes audio to the transcription backend, not the chat provider', async () => {
+    const service = new GeminiService({
+      provider: 'codex',
+      transcriptionProvider: 'gemini',
+      apiKey: 'test-key',
+      codexOAuth: { access: 'x', refresh: 'y', expires: Date.now() + 86_400_000 },
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as ShortAudioHelpers;
+    const audioPath = path.join(workDir, 'short-mixed-provider.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    const text = '참가자1: 제미나이 백엔드가 받은 오디오입니다.';
+    let geminiCalls = 0;
+    service.generateGeminiTranscript = async () => {
+      geminiCalls++;
+      return text;
+    };
+    service.judgeTranscriptQuality = async () => ({ flagged: false, reason: 'natural speech' });
+
+    const result = await service.getShortAudioTranscript(audioPath, 10);
+
+    assert.equal(geminiCalls, 1);
+    assert.equal(result.text, text);
+  });
+});
+
+// Soniox is the third batch backend. Its distinguishing properties are the
+// 300-minute single-file window (whole-meeting diarization is the reason to
+// pick it) and the absence of prompt/temperature knobs.
+describe('GeminiService Soniox batch backend', () => {
+  type SonioxHelpers = {
+    sttBackend: BatchSttBackend;
+    getShortAudioTranscript(
+      audioFilePath: string,
+      audioSeconds: number,
+      progressCallback?: (percent: number, message: string) => void,
+      customPrompt?: string,
+      signal?: AbortSignal,
+      session?: unknown,
+      includeGlossary?: boolean,
+      qualityRetry?: boolean,
+    ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
+    judgeTranscriptQuality(
+      text: string,
+      signal?: AbortSignal,
+    ): Promise<{ flagged: boolean; reason?: string }>;
+    cleanupTranscriptQuality(text: string, signal?: AbortSignal): Promise<string>;
+    transcribeWithSoniox(params: TranscribeSonioxAudioParams): Promise<SonioxTranscriptionResult>;
+  };
+
+  const originalFetch = globalThis.fetch;
+
+  // Minimal scripted Soniox API. The full protocol is covered in
+  // sonioxTranscription.test.ts; here it only has to let the backend run.
+  function stubSonioxFetch(options: { audioDurationMs?: number; model?: string }): Array<{
+    method: string;
+    url: string;
+    body?: unknown;
+  }> {
+    const requests: Array<{ method: string; url: string; body?: unknown }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      requests.push({
+        method,
+        url,
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+      });
+      const reply = (payload: unknown) =>
+        new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      if (method === 'POST' && url.endsWith('/v1/files')) return reply({ id: 'file_x' });
+      if (method === 'POST' && url.endsWith('/v1/transcriptions')) return reply({ id: 'tr_x' });
+      if (method === 'GET' && url.endsWith('/transcript')) {
+        return reply({ tokens: [{ text: '회의 시작합니다', speaker: '2' }] });
+      }
+      if (method === 'GET') {
+        return reply({
+          status: 'completed',
+          audio_duration_ms: options.audioDurationMs,
+          model: options.model,
+        });
+      }
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    return requests;
+  }
+
+  function makeSonioxService(options: { sonioxApiKey?: string; knownWords?: string[] } = {}) {
+    return new GeminiService({
+      transcriptionProvider: 'soniox',
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+      ...options,
+    }) as unknown as SonioxHelpers;
+  }
+
+  after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('selects a whole-file backend with no prompt or temperature surface', () => {
+    const backend = makeSonioxService({ sonioxApiKey: 'soniox-key' }).sttBackend;
+    assert.equal(backend.id, 'soniox');
+    assert.equal(backend.modelId, 'stt-async-v5');
+    assert.equal(backend.maxSegmentSeconds, 18_000);
+    assert.equal(backend.supportsPrompt, false);
+    assert.equal(backend.supportsTemperature, false);
+    assert.equal(backend.maxBytes, SONIOX_MAX_FILE_BYTES);
+    assert.equal(backend.requiresReencodedSegments, true);
+    // No prompt/temperature knob collapses the ladder to one re-roll.
+    assert.deepEqual(retryTemperaturesFor(backend), [undefined]);
+  });
+
+  it('sends a two-hour meeting as one file instead of segmenting it', () => {
+    const backend = makeSonioxService({ sonioxApiKey: 'soniox-key' }).sttBackend;
+    assert.equal(planSegmentation(backend, 7200, 60).shouldSegment, false);
+    // Only past the provider's own 300-minute cap does the segment plan run.
+    assert.equal(planSegmentation(backend, 18_001, 400).shouldSegment, true);
+  });
+
+  it('segments an oversize recording whose duration ffprobe could not measure', () => {
+    const backend = makeSonioxService({ sonioxApiKey: 'soniox-key' }).sttBackend;
+    // Duration 0 means ffprobe failed, and a duration cap cannot be applied to
+    // a duration nobody knows. Without the byte cap a six-hour file would go
+    // whole-file and be rejected only after a full upload.
+    assert.equal(planSegmentation(backend, 0, 200).shouldSegment, true);
+    assert.equal(planSegmentation(backend, 0, 100).shouldSegment, false);
+  });
+
+  it('rejects a recording past the 300-minute cap before uploading it', async () => {
+    const service = makeSonioxService({ sonioxApiKey: 'soniox-key' });
+    const audioPath = path.join(workDir, 'soniox-too-long.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    const requests = stubSonioxFetch({});
+
+    await assert.rejects(
+      service.sttBackend.transcribe({
+        audioFilePath: audioPath,
+        audioSeconds: SONIOX_MAX_FILE_SECONDS + 1,
+        wholeFile: true,
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof TranscriptionApiError);
+        // The server's own shape for this refusal, so the user-facing copy is
+        // the existing "too long or undecodable" message.
+        assert.equal(err.status, 413);
+        assert.equal(err.errorCode, 'max_duration_reached');
+        return true;
+      },
+    );
+    // Nothing was uploaded, so no file and no job quota slot was spent.
+    assert.deepEqual(requests, []);
+  });
+
+  it('uploads once and creates at most two jobs for a flagged whole-file run', async () => {
+    const service = makeSonioxService({ sonioxApiKey: 'soniox-key' });
+    const audioPath = path.join(workDir, 'soniox-flagged.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    const requests = stubSonioxFetch({ audioDurationMs: 12_000 });
+
+    // Flag everything so the whole bounded ladder runs: the first call, the
+    // single re-roll a knob-less backend gets, then the cleanup pass.
+    service.judgeTranscriptQuality = async () => ({ flagged: true, reason: 'looping' });
+    service.cleanupTranscriptQuality = async (text: string) => text;
+
+    await service.getShortAudioTranscript(audioPath, 10);
+
+    const count = (method: string, match: (url: string) => boolean): number =>
+      requests.filter((req) => req.method === method && match(req.url)).length;
+    // One upload for the run, reused by the rung; one job per attempt.
+    assert.equal(
+      count('POST', (url) => url.endsWith('/v1/files')),
+      1,
+    );
+    assert.equal(
+      count('POST', (url) => url.endsWith('/v1/transcriptions')),
+      2,
+    );
+    assert.equal(
+      count('DELETE', (url) => url.includes('/v1/transcriptions/')),
+      2,
+    );
+    // The shared file is released once, when the run ends.
+    assert.equal(
+      count('DELETE', (url) => url.includes('/v1/files/')),
+      1,
+    );
+  });
+
+  it('scales the poll budget to the clip on the live-snippet path', async () => {
+    const service = makeSonioxService({ sonioxApiKey: 'soniox-key' });
+    const audioPath = path.join(workDir, 'soniox-snippet.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    const budgets: Array<number | undefined> = [];
+    service.transcribeWithSoniox = async (params) => {
+      budgets.push(params.maxPollWaitMs);
+      return { text: '참가자1: 안녕하세요.', modelId: 'stt-async-v5' };
+    };
+
+    // A snippet: a wedged job must fail inside the cadence of the caption
+    // stream, not two hours later.
+    await service.sttBackend.transcribe({
+      audioFilePath: audioPath,
+      audioSeconds: 12,
+      wholeFile: true,
+      retryTransport: false,
+    });
+    // A normal whole-file run keeps the client's own default.
+    await service.sttBackend.transcribe({
+      audioFilePath: audioPath,
+      audioSeconds: 3_600,
+      wholeFile: true,
+    });
+
+    assert.deepEqual(budgets, [120_000, undefined]);
+  });
+
+  it('constructs without a Soniox key and fails only when transcription starts', async () => {
+    const backend = makeSonioxService().sttBackend;
+    await assert.rejects(
+      backend.transcribe({ audioFilePath: path.join(workDir, 'missing.webm') }),
+      /Soniox API key is not configured/,
+    );
+  });
+
+  it('forwards the glossary as context.terms and records provider-measured usage', async () => {
+    const service = makeSonioxService({
+      sonioxApiKey: 'soniox-key',
+      knownWords: ['Listener.AI', 'Asleep'],
+    });
+    const audioPath = path.join(workDir, 'soniox-short.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+
+    const requests = stubSonioxFetch({ audioDurationMs: 12_000 });
+
+    service.judgeTranscriptQuality = async () => ({ flagged: false, reason: 'natural speech' });
+    const session = createCostSession();
+    const result = await service.getShortAudioTranscript(
+      audioPath,
+      10,
+      undefined,
+      undefined,
+      undefined,
+      session,
+    );
+
+    assert.equal(result.text, '참가자1: 회의 시작합니다');
+    // Usage is billed from the provider's own measurement (12s), not the
+    // ffprobe number the caller passed (10s).
+    assert.deepEqual(
+      session.snapshot().breakdown.map(({ modelId, kind, usage }) => ({ modelId, kind, usage })),
+      [{ modelId: 'stt-async-v5', kind: 'transcription', usage: { audioSeconds: 12 } }],
+    );
+    const create = requests.find((req) => req.url.endsWith('/v1/transcriptions'));
+    assert.ok(create, 'expected a transcription-create request');
+    assert.deepEqual((create.body as { context?: unknown }).context, {
+      terms: ['Listener.AI', 'Asleep'],
+    });
+    // Both server-side objects are cleaned up on the happy path (quota).
+    assert.deepEqual(
+      requests.filter((req) => req.method === 'DELETE').map((req) => req.url),
+      ['https://api.soniox.com/v1/transcriptions/tr_x', 'https://api.soniox.com/v1/files/file_x'],
+    );
+  });
+
+  it('bills the model the server reported, not the one that was requested', async () => {
+    // Soniox re-routes a retired id to its successor without saying so. A
+    // usage row naming the requested id would hide the re-route and price the
+    // wrong model.
+    const service = makeSonioxService({ sonioxApiKey: 'soniox-key' });
+    const audioPath = path.join(workDir, 'soniox-rerouted.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    stubSonioxFetch({ audioDurationMs: 30_000, model: 'stt-async-v6' });
+
+    service.judgeTranscriptQuality = async () => ({ flagged: false, reason: 'natural speech' });
+    const session = createCostSession();
+    await service.getShortAudioTranscript(audioPath, 30, undefined, undefined, undefined, session);
+
+    assert.deepEqual(
+      session.snapshot().breakdown.map(({ modelId, usage }) => ({ modelId, usage })),
+      [{ modelId: 'stt-async-v6', usage: { audioSeconds: 30 } }],
+    );
+  });
+
+  it('falls back to the ffprobe duration when the API omits audio_duration_ms', async () => {
+    const service = makeSonioxService({ sonioxApiKey: 'soniox-key' });
+    const audioPath = path.join(workDir, 'soniox-no-duration.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    stubSonioxFetch({});
+
+    service.judgeTranscriptQuality = async () => ({ flagged: false, reason: 'natural speech' });
+    const session = createCostSession();
+    await service.getShortAudioTranscript(audioPath, 42, undefined, undefined, undefined, session);
+
+    assert.deepEqual(session.snapshot().breakdown[0].usage, { audioSeconds: 42 });
+  });
 });
 
 // transcribeLiveSnippet maps the typed no-speech error to '' so a silent 12s
@@ -1430,3 +1743,279 @@ describe(
     });
   },
 );
+
+// Error attribution across the two stages. With `transcriptionProvider` set to
+// a different vendor than `aiProvider`, a single catch-all annotation at the
+// end of `transcribeAudio` blamed the STT backend for every failure --
+// including a revoked Gemini key hit during summarization, which read as
+// "Soniox API key is missing or invalid". Each stage now tags its own.
+describe('GeminiService transcription error attribution', () => {
+  type AttributionHelpers = {
+    transcribeAudio(
+      audioFilePath: string,
+      progressCallback?: (percent: number, message: string) => void,
+      summaryPrompt?: string,
+      liveNotes?: undefined,
+      options?: { transcriptOnly?: boolean },
+    ): Promise<{ transcript: string }>;
+    getAudioDuration(audioFilePath: string, signal?: AbortSignal): Promise<number>;
+    getShortAudioTranscript(
+      ...args: unknown[]
+    ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
+    generateSummary(promptText: string, transcript: string, ...rest: unknown[]): Promise<string>;
+  };
+
+  // Chat provider Gemini, transcription backend Soniox: the configuration the
+  // mixed-up copy only shows up in.
+  function makeMixedService(): AttributionHelpers {
+    const service = new GeminiService({
+      provider: 'gemini',
+      transcriptionProvider: 'soniox',
+      apiKey: 'test-key',
+      sonioxApiKey: 'soniox-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as AttributionHelpers;
+    // Keep the test off ffmpeg; 12s stays under every segmentation threshold.
+    service.getAudioDuration = async () => 12;
+    return service;
+  }
+
+  function makeAudioStub(name: string): string {
+    const filePath = path.join(workDir, name);
+    fs.writeFileSync(filePath, Buffer.alloc(64, 1));
+    return filePath;
+  }
+
+  it('blames the chat provider when the summary stage rejects the credential', async () => {
+    const service = makeMixedService();
+    service.getShortAudioTranscript = async () => ({
+      text: '참가자1: 회의를 시작하겠습니다.',
+      cleaned: false,
+      uncertain: false,
+    });
+    service.generateSummary = async () => {
+      throw new Error('API key not valid. Please pass a valid API key.');
+    };
+
+    await assert.rejects(
+      () => service.transcribeAudio(makeAudioStub('attribution-summary.webm')),
+      (err: unknown) => {
+        const message = (err as { userMessage?: string }).userMessage ?? String(err);
+        assert.match(message, /Gemini/);
+        assert.doesNotMatch(message, /Soniox/);
+        return true;
+      },
+    );
+  });
+
+  it('blames the STT backend when the transcript stage rejects the credential', async () => {
+    const service = makeMixedService();
+    service.getShortAudioTranscript = async () => {
+      throw new TranscriptionApiError('soniox unauthenticated', {
+        status: 401,
+        statusText: 'Unauthorized',
+        errorCode: 'unauthenticated',
+      });
+    };
+    let summaryCalls = 0;
+    service.generateSummary = async () => {
+      summaryCalls += 1;
+      return '{}';
+    };
+
+    await assert.rejects(
+      () => service.transcribeAudio(makeAudioStub('attribution-backend.webm')),
+      (err: unknown) => {
+        const message = (err as { userMessage?: string }).userMessage ?? String(err);
+        assert.match(message, /Soniox/);
+        assert.doesNotMatch(message, /Gemini/);
+        return true;
+      },
+    );
+    assert.equal(summaryCalls, 0, 'the summary stage never runs without a transcript');
+  });
+
+  it('keeps the backend attribution through the outer catch (no re-annotation)', async () => {
+    const service = makeMixedService();
+    service.getShortAudioTranscript = async () => {
+      // The backend's own "not configured" throw: a plain Error whose text
+      // merely mentions an api key, which is what the legacy substring path
+      // would have relabeled with the chat provider's copy.
+      throw new Error('Soniox API key is not configured.');
+    };
+
+    await assert.rejects(
+      () => service.transcribeAudio(makeAudioStub('attribution-nokey.webm')),
+      (err: unknown) => {
+        const message = (err as { userMessage?: string }).userMessage ?? String(err);
+        assert.match(message, /Soniox API key is missing or invalid/);
+        return true;
+      },
+    );
+  });
+});
+
+// The live-snippet path (`qualityRetry: false`) re-cuts a fresh 12s job every
+// ~12s, so the backend must not also retry its own transport: a provider
+// outage would otherwise triple the job count against a caller that treats a
+// single failure as normal.
+describe('GeminiService whole-file transport retries', () => {
+  type RetryHelpers = {
+    sttBackend: BatchSttBackend;
+    getShortAudioTranscript(
+      audioFilePath: string,
+      audioSeconds: number,
+      progressCallback?: (percent: number, message: string) => void,
+      customPrompt?: string,
+      signal?: AbortSignal,
+      session?: unknown,
+      includeGlossary?: boolean,
+      qualityRetry?: boolean,
+    ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
+    judgeTranscriptQuality(
+      text: string,
+      signal?: AbortSignal,
+    ): Promise<{ flagged: boolean; reason?: string }>;
+    cleanupTranscriptQuality(text: string, signal?: AbortSignal): Promise<string>;
+  };
+
+  function makeService(): RetryHelpers {
+    return new GeminiService({
+      transcriptionProvider: 'soniox',
+      apiKey: 'test-key',
+      sonioxApiKey: 'soniox-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as RetryHelpers;
+  }
+
+  // Record what each call asked for. The provider-side upload is stubbed too:
+  // these cases are about the flags the ladder passes down, not the transport.
+  function captureTranscribeParams(service: RetryHelpers): Array<{
+    wholeFile?: boolean;
+    retryTransport?: boolean;
+    qualityRetryRung?: boolean;
+  }> {
+    const seen: Array<{
+      wholeFile?: boolean;
+      retryTransport?: boolean;
+      qualityRetryRung?: boolean;
+    }> = [];
+    const backend = service.sttBackend;
+    service.sttBackend = {
+      ...backend,
+      prepareWholeFile: async () => 'file_stub',
+      releaseWholeFile: async () => {},
+      transcribe: async (params) => {
+        seen.push({
+          wholeFile: params.wholeFile,
+          retryTransport: params.retryTransport,
+          qualityRetryRung: params.qualityRetryRung,
+        });
+        return '참가자1: 안녕하세요.';
+      },
+    };
+    return seen;
+  }
+
+  it('asks for transport retries on a normal whole-file transcription', async () => {
+    const service = makeService();
+    const seen = captureTranscribeParams(service);
+    const audioPath = path.join(workDir, 'retry-transport-on.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+
+    await service.getShortAudioTranscript(
+      audioPath,
+      10,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      true,
+    );
+
+    assert.deepEqual(seen, [{ wholeFile: true, retryTransport: true, qualityRetryRung: false }]);
+  });
+
+  it('opts out of transport retries for a live snippet', async () => {
+    const service = makeService();
+    const seen = captureTranscribeParams(service);
+    const audioPath = path.join(workDir, 'retry-transport-off.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+
+    await service.getShortAudioTranscript(
+      audioPath,
+      10,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+    );
+
+    assert.deepEqual(seen, [{ wholeFile: true, retryTransport: false, qualityRetryRung: false }]);
+  });
+
+  it('marks a quality-retry rung so the backend skips its transport ladder', async () => {
+    const service = makeService();
+    const seen = captureTranscribeParams(service);
+    const audioPath = path.join(workDir, 'retry-transport-rung.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    // Flag every verdict so the single re-roll a knob-less backend gets runs.
+    service.judgeTranscriptQuality = async () => ({ flagged: true, reason: 'looping' });
+    service.cleanupTranscriptQuality = async (text: string) => text;
+
+    await service.getShortAudioTranscript(audioPath, 10);
+
+    assert.deepEqual(seen, [
+      { wholeFile: true, retryTransport: true, qualityRetryRung: false },
+      { wholeFile: true, retryTransport: true, qualityRetryRung: true },
+    ]);
+  });
+
+  it('collapses the Soniox client to a single attempt when opted out', async () => {
+    const backend = makeService().sttBackend;
+    const originalFetch = globalThis.fetch;
+    let uploads = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET') === 'POST' && url.endsWith('/v1/files')) uploads += 1;
+      // A retryable status: with retries enabled the client would try again.
+      return new Response(JSON.stringify({ error_type: 'internal_error' }), {
+        status: 503,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    const audioPath = path.join(workDir, 'retry-transport-503.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    try {
+      await assert.rejects(
+        backend.transcribe({
+          audioFilePath: audioPath,
+          wholeFile: true,
+          retryTransport: false,
+        }),
+      );
+      assert.equal(uploads, 1, 'no transport retry when the caller opted out');
+      uploads = 0;
+      // A rung re-rolls a call that already returned; retrying its transport
+      // would buy a second job for the same evidence.
+      await assert.rejects(
+        backend.transcribe({
+          audioFilePath: audioPath,
+          wholeFile: true,
+          qualityRetryRung: true,
+        }),
+      );
+      assert.equal(uploads, 1, 'no transport retry on a quality-retry rung');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});

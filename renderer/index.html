@@ -228,6 +228,17 @@
                 <option value="codex">Codex (ChatGPT Plus/Pro)</option>
               </select>
             </div>
+            <div class="form-group">
+              <label for="transcriptionProvider">Transcription</label>
+              <select id="transcriptionProvider">
+                <option value="auto">Follow AI provider</option>
+                <option value="gemini">Gemini</option>
+                <option value="codex">Codex (OpenAI transcription)</option>
+                <option value="soniox">Soniox (stt-async-v5)</option>
+              </select>
+              <small>Backend for transcribing recorded files. Summaries and Ask Listener always use the active provider above.</small>
+              <div id="transcriptionProviderNotice" class="config-notice" role="status" aria-live="polite"></div>
+            </div>
             <fieldset class="config-subgroup">
               <legend>Live transcription</legend>
               <div class="form-group">
@@ -236,6 +247,7 @@
                   <option value="auto">Auto (OpenAI key, Gemini Live, then fallback)</option>
                   <option value="openai">OpenAI Realtime</option>
                   <option value="gemini">Gemini Live</option>
+                  <option value="soniox">Soniox (stt-rt-v5)</option>
                   <option value="chunked">12s fallback</option>
                 </select>
                 <small>Used only while recording. Auto tries a direct OpenAI key first, then Gemini Live, then 12-second chunks.</small>
@@ -255,6 +267,14 @@
                 <label for="liveTranslationLanguage">Translation Target</label>
                 <input type="text" id="liveTranslationLanguage" placeholder="ko">
                 <small>BCP-47 target language for live translated captions. Default: ko.</small>
+              </div>
+            </fieldset>
+            <fieldset class="config-subgroup">
+              <legend>Soniox</legend>
+              <div class="form-group">
+                <label for="sonioxApiKey">API Key <span class="config-optional">optional</span></label>
+                <input type="password" id="sonioxApiKey" placeholder="Enter your Soniox API key">
+                <small>Opt-in only. Needed when Transcription or the live provider is set to Soniox. Requires a separate Soniox account at <a href="https://console.soniox.com" target="_blank">console.soniox.com</a>; billed by them at about $0.10/hour for recorded files and $0.12/hour for live captions.</small>
               </div>
             </fieldset>
             <fieldset class="config-subgroup" data-provider="gemini">

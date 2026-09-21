@@ -52,6 +52,17 @@ describe('coerceConfigValue', () => {
     if (targetLanguage.ok) assert.equal(targetLanguage.value, 'ko');
   });
 
+  it('accepts transcription provider values and rejects unknown backends', () => {
+    const soniox = coerceConfigValue('transcriptionProvider', 'Soniox');
+    const auto = coerceConfigValue('transcriptionProvider', 'auto');
+    const bogus = coerceConfigValue('transcriptionProvider', 'whisper');
+    assert.equal(soniox.ok, true);
+    assert.equal(auto.ok, true);
+    assert.equal(bogus.ok, false);
+    if (soniox.ok) assert.equal(soniox.value, 'soniox');
+    if (!bogus.ok) assert.match(bogus.error, /auto, gemini, codex, soniox/);
+  });
+
   it('accepts numeric strings and numbers for minute keys, floors them, rejects negatives', () => {
     const num = coerceConfigValue('maxRecordingMinutes', 30);
     const str = coerceConfigValue('recordingReminderMinutes', '45');
@@ -71,7 +82,13 @@ describe('coerceConfigValue', () => {
 
 describe('config key whitelists', () => {
   it('does not include API credentials or database IDs in writable keys', () => {
-    const dangerous = ['geminiApiKey', 'openaiApiKey', 'notionApiKey', 'notionDatabaseId'];
+    const dangerous = [
+      'geminiApiKey',
+      'openaiApiKey',
+      'sonioxApiKey',
+      'notionApiKey',
+      'notionDatabaseId',
+    ];
     for (const k of dangerous) {
       assert.equal(
         (WRITABLE_CONFIG_KEYS as readonly string[]).includes(k),
@@ -98,6 +115,7 @@ describe('config key whitelists', () => {
       'liveSttProvider',
       'liveSttLanguage',
       'liveTranslationLanguage',
+      'transcriptionProvider',
     ];
     for (const k of expected) {
       assert.ok((WRITABLE_CONFIG_KEYS as readonly string[]).includes(k), `${k} should be writable`);

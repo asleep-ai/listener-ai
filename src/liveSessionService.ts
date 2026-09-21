@@ -3,10 +3,12 @@ import * as path from 'path';
 import { extensionForMimeType } from './audioFormats';
 import type { AgentChatMessage, AgentRunResult, AgentService } from './agentService';
 import {
+  type LiveSttProvider,
   DEFAULT_GEMINI_LIVE_TRANSCRIPTION_MODEL,
   DEFAULT_GEMINI_LIVE_TRANSLATION_MODEL,
   DEFAULT_OPENAI_LIVE_TRANSCRIPTION_MODEL,
   DEFAULT_OPENAI_LIVE_TRANSLATION_MODEL,
+  SONIOX_REALTIME_MODEL,
 } from './aiProvider';
 import type { GeminiService } from './geminiService';
 import {
@@ -118,6 +120,8 @@ type LiveSessionState = {
   realtimeClient: LiveRealtimeClientConfig | null;
   usageModelId: string | null;
   usageRecorded: boolean;
+  /** The stream itself returns the translation, so no Gemini call per final. */
+  nativeTranslation: boolean;
   lastFinal?: { normalized: string; atMs: number };
 };
 
@@ -174,6 +178,8 @@ function resolveLiveUsageModelId(
       ? config.openaiLiveTranslationModel || DEFAULT_OPENAI_LIVE_TRANSLATION_MODEL
       : config.openaiLiveTranscriptionModel || DEFAULT_OPENAI_LIVE_TRANSCRIPTION_MODEL;
   }
+  // One realtime model covers both kinds; translation rides the same stream.
+  if (provider === 'soniox') return SONIOX_REALTIME_MODEL;
   return kind === 'translation'
     ? DEFAULT_GEMINI_LIVE_TRANSLATION_MODEL
     : DEFAULT_GEMINI_LIVE_TRANSCRIPTION_MODEL;
@@ -195,6 +201,15 @@ const LIVE_TRANSLATION_LANGUAGE_NAMES: Record<string, string> = {
   id: 'Indonesian',
   hi: 'Hindi',
   ar: 'Arabic',
+};
+
+// Provider ids are internal identifiers; a status line the user reads spells
+// them the way the vendor does.
+const LIVE_PROVIDER_DISPLAY_NAMES: Record<Exclude<LiveSttProvider, 'auto'>, string> = {
+  openai: 'OpenAI',
+  gemini: 'Gemini',
+  soniox: 'Soniox',
+  chunked: 'chunked fallback',
 };
 
 // The live translation target is stored as a BCP-47 code (e.g. `ja`) but the
@@ -239,10 +254,17 @@ export class LiveSessionService {
       realtimeClient: null,
       usageModelId: null,
       usageRecorded: false,
+      nativeTranslation: false,
     };
     this.session = session;
     let config = { ...this.opts.getLiveSttConfig(), translate: session.translate };
-    if (config.provider !== 'chunked' && this.opts.createRealtimeClientConfig) {
+    // The realtime client-secret path is OpenAI's; `soniox` and `chunked` never
+    // route through it.
+    if (
+      config.provider !== 'chunked' &&
+      config.provider !== 'soniox' &&
+      this.opts.createRealtimeClientConfig
+    ) {
       try {
         session.realtimeClient = await this.opts.createRealtimeClientConfig(config);
       } catch (error) {
@@ -393,6 +415,10 @@ export class LiveSessionService {
     if (!session.stream) return;
     session.mode = 'streaming';
     session.provider = session.stream.provider;
+    // D6: Soniox one-way translation rides the transcription stream, so its
+    // finals arrive already translated and must never cost a Gemini call.
+    session.nativeTranslation =
+      session.stream.provider === 'soniox' && session.stream.kind === 'translation';
     session.usageModelId = resolveLiveUsageModelId(config, session.provider, session.stream.kind);
   }
 
@@ -427,15 +453,26 @@ export class LiveSessionService {
     });
     if (fallbackConfigs.length === 0) return false;
 
+    // `auto` picked the provider for the user, so there is no name of theirs
+    // to report; and a provider that failed and then succeeded on its own
+    // fallback config must not be named on both sides of the sentence.
+    const failedProvider = config.provider === 'auto' ? undefined : config.provider;
     this.handleStreamError(session, error);
     for (const fallbackConfig of fallbackConfigs) {
       try {
         await this.startStreamingProvider(session, fallbackConfig);
         if (session.stream) {
+          const recoveredName = LIVE_PROVIDER_DISPLAY_NAMES[session.provider];
+          const failedName =
+            failedProvider !== undefined && failedProvider !== session.provider
+              ? LIVE_PROVIDER_DISPLAY_NAMES[failedProvider]
+              : undefined;
           this.emit({
             type: 'status',
             sessionId: session.id,
-            status: `OpenAI live provider unavailable; using ${session.provider} live transcription.`,
+            status: failedName
+              ? `${failedName} live provider unavailable; using ${recoveredName} live transcription.`
+              : `Live provider unavailable; using ${recoveredName} live transcription.`,
             mode: session.mode,
             provider: session.provider,
           });
@@ -735,6 +772,7 @@ export class LiveSessionService {
     this.emit({ type: 'segment', sessionId: session.id, segment });
 
     if (!session.active || !session.translate || segment.translation) return;
+    if (session.nativeTranslation) return;
     const geminiService = this.opts.ensureGeminiService();
     if (!geminiService) {
       segment.translationError = this.opts.formatAiCredentialsError();
