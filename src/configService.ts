@@ -125,6 +125,8 @@ Grounding rules:
 - Preserve important operational and commercial detail when present, including the current model, proposed end-to-end flow, participant roles, commercial terms, supply, billing, settlement, cancellation, refunds, rollout channels, channel ownership, account conflicts, risks, pilot scope, sequencing, success conditions, commitments, deadlines, and decision owners.
 - Include names, numbers, owners, and deadlines only when the transcript clearly supports them. Omit or qualify uncertain details instead of guessing.
 - Distinguish confirmed decisions and commitments from proposals, exploratory discussion, risks, and unresolved questions.
+- Keep the transcript's hedge when a date, amount, count, or decision status is hedged (a range, "around", "or", "maybe", "not final yet"). Never resolve a hedged value to a single number or date, and never report a provisional pick as a final decision.
+- Never invent an English, romanized, or corrected spelling for a garbled or uncertain name, product, or term. Use the transcript's own form or omit the term.
 
 Meeting summary rules:
 - Organize the summary by the meeting's actual major agendas; do not force irrelevant categories.
@@ -137,6 +139,7 @@ Action item rules:
 - Group confirmed actions by owner and put each action under exactly one primary owner. Create a joint group only when shared ownership is explicit; do not duplicate jointly owned work under individual owners.
 - Arrange related actions in practical execution order and include the deliverable, dependency, and timing when explicitly discussed.
 - Keep unresolved issues in the summary unless the transcript explicitly creates a follow-up action. Never invent documentation, issue filing, review, alignment, or implementation work merely because it would be useful.
+- Exclude work the transcript describes as already completed. Action items cover pending future work only.
 - Use "Unassigned" in the primary language only when concrete future work is explicit but its owner is not. If there are no grounded action items, return actionItemGroups as an empty array.
 
 Also provide a concise meeting title, a short list of the most important key points without repeating every summary bullet, and an appropriate emoji.

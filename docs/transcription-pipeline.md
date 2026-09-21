@@ -127,6 +127,18 @@ that look like transcription artifacts. These are notes only. The model keeps
 suspected artifacts out of the summary but never rewrites the transcript.
 This adds no API calls.
 
+`DEFAULT_SUMMARY_PROMPT` (`src/configService.ts`) also carries three grounding rules
+aimed at defects the transcript carries into the summary. A store-wide audit found the
+summariser laundering transcript defects into confident claims: hedged dates and amounts
+were resolved to one value, a provisional pick was written up as a final decision,
+garbled proper nouns acquired invented English spellings, and work the transcript
+described as already finished reappeared as a pending action item. The prompt now
+requires the summary to keep a hedge wherever the transcript hedges a date, amount,
+count, or decision status; to never invent an English, romanized, or corrected spelling
+for a garbled or uncertain name, product, or term; and to exclude completed work from
+action items, which cover pending future work only. These rules constrain the summary
+text only -- the transcript itself is never rewritten here.
+
 > **Decision history:**
 > - *LLM text cleanup.* A broad cleanup pass was removed by user decision on
 >   2026-07-22 after a production incident: the cleanup model entered its own
