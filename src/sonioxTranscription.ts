@@ -376,7 +376,9 @@ function failureFromJobStatus(status: SonioxTranscriptionStatus): TranscriptionA
  * (diarization off or unassigned) produce an unlabeled line.
  *
  * Token text carries its own leading whitespace, so it is concatenated
- * verbatim and trimmed once per turn.
+ * verbatim and trimmed once per turn. Some of that whitespace arrives as a
+ * token of its own (see the loop), which is why the concatenation has to take
+ * every token's text, not only the ones that look like words.
  */
 export function formatSonioxTokens(tokens?: SonioxAsyncToken[]): string {
   if (!tokens || tokens.length === 0) return '';
@@ -399,7 +401,19 @@ export function formatSonioxTokens(tokens?: SonioxAsyncToken[]): string {
     // as a phantom speaker turn.
     if (token.is_audio_event) continue;
     const text = token.text ?? '';
-    if (text.trim().length === 0) continue;
+    if (text.length === 0) continue;
+
+    // Soniox emits standalone whitespace as a token in its own right, with its
+    // own timings, confidence and sometimes its own speaker id (a 5-minute
+    // probe: 51 of 1,436 tokens). Its text is real spacing -- dropping it glued
+    // adjacent words together, ~1,900 missing spaces on a 120-minute file --
+    // but it is not speech: it must not open a turn, and it must not claim a
+    // speaker number for a voice that never said anything. `flush` trims, so a
+    // run of them still cannot be emitted as a turn of its own.
+    if (text.trim().length === 0) {
+      if (started) buffer += text;
+      continue;
+    }
 
     const speaker = token.speaker?.trim();
     let label: string | undefined;

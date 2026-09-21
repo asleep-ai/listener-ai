@@ -201,21 +201,23 @@ function pcmFrame(sequence: number, channelCount = 1, sampleRate = 16_000): Live
 }
 
 describe('filterSonioxTokens', () => {
-  it('drops control tokens and blank tokens, counting the blanks', () => {
+  it('drops control tokens and textless tokens, keeping standalone whitespace', () => {
     const { speech, endpoint, dropped } = filterSonioxTokens([
       token('안녕', { start_ms: 0, end_ms: 100 }),
       { text: '<end>', is_final: true },
-      { text: '   ', is_final: true },
+      // Real spacing the provider sent as its own token: dropping it would
+      // glue the words on either side together.
+      { text: ' ', is_final: true },
       { text: '', is_final: true },
     ]);
 
     assert.equal(endpoint, true);
     assert.deepEqual(
       speech.map((t) => t.text),
-      ['안녕'],
+      ['안녕', ' '],
     );
-    // The endpoint marker is a signal, not a loss; the two blanks are.
-    assert.equal(dropped, 2);
+    // The endpoint marker is a signal, not a loss; the textless token is.
+    assert.equal(dropped, 1);
   });
 
   it('keeps a speech token that arrives without a language tag', () => {
@@ -350,7 +352,7 @@ describe('SonioxLiveSession', () => {
     sockets[0].deliver({
       tokens: [
         { text: '<fin>', is_final: true },
-        { text: '  ', is_final: true },
+        { text: '', is_final: true },
         token('Hello', { language: 'en', start_ms: 0, end_ms: 100 }),
         { text: '<end>', is_final: true },
       ],
@@ -377,8 +379,34 @@ describe('SonioxLiveSession', () => {
     }
     const dropLines = logged.filter((line) => line.includes('dropped'));
     assert.equal(dropLines.length, 1);
-    assert.match(dropLines[0], /dropped 1 empty tokens/);
+    assert.match(dropLines[0], /dropped 1 textless tokens/);
     assert.equal(dropLines[0].includes('Hello'), false);
+  });
+
+  it('keeps standalone whitespace tokens so adjacent words stay apart', async () => {
+    // Soniox sends spacing as its own token, with its own timings. Filtering
+    // it out glued the words on either side of it together in the captions.
+    const { createWebSocket, sockets } = scriptSockets();
+    const { callbacks, of } = recordCallbacks();
+
+    const session = await SonioxLiveSession.create(CONFIG, callbacks, {
+      createWebSocket,
+      sleep: instantSleep,
+    });
+
+    sockets[0].deliver({
+      tokens: [
+        token('회의', { start_ms: 0, end_ms: 100 }),
+        token(' ', { start_ms: 100, end_ms: 120 }),
+        token('시작합니다', { start_ms: 120, end_ms: 400 }),
+        { text: '<end>', is_final: true },
+      ],
+    });
+
+    const finalEvent = of('final')[0]?.value as { text: string };
+    assert.equal(finalEvent.text, '회의 시작합니다');
+
+    await session.close();
   });
 
   it('attaches translation finals that arrive after the endpoint', async () => {

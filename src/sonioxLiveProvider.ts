@@ -133,13 +133,16 @@ export class SonioxRealtimeError extends Error {
  *
  * A token is dropped only by its own shape: a control token (`<end>`, `<fin>`),
  * which the diarization audit in issue #195 showed turning into a phantom
- * speaker/word once it reached turn assembly, or a token with nothing left
- * after trimming, which can carry no speech by definition. A token with no
- * `language` tag is KEPT: `enable_language_identification` is expected to tag
- * real speech, but filtering on that provider invariant would silently delete
+ * speaker/word once it reached turn assembly, or a token carrying no text at
+ * all. Whitespace-only tokens are KEPT: Soniox emits standalone spacing as a
+ * token of its own, and dropping it glues adjacent words together in the
+ * caption text (`joinTokenText` concatenates verbatim and trims once, so a run
+ * of them can still never be emitted on its own). A token with no `language`
+ * tag is KEPT too: `enable_language_identification` is expected to tag real
+ * speech, but filtering on that provider invariant would silently delete
  * meeting speech the day it stops holding, with nothing in the transcript to
- * show for it. `dropped` counts the blank tokens so a session can report the
- * shape it saw instead of hiding it.
+ * show for it. `dropped` counts the textless tokens so a session can report
+ * the shape it saw instead of hiding it.
  */
 export function filterSonioxTokens(tokens: readonly SonioxToken[] | undefined): {
   speech: SonioxToken[];
@@ -154,8 +157,8 @@ export function filterSonioxTokens(tokens: readonly SonioxToken[] | undefined): 
       dropped++;
       continue;
     }
-    const text = (token.text ?? '').trim();
-    if (CONTROL_TOKEN_TEXTS.has(text)) {
+    const text = token.text ?? '';
+    if (CONTROL_TOKEN_TEXTS.has(text.trim())) {
       endpoint = true;
       continue;
     }
@@ -823,7 +826,7 @@ export class SonioxLiveSession implements LiveSttSession {
     // One line per session, and a count only: the tokens themselves are
     // meeting content and never reach a log.
     if (this.droppedTokens > 0) {
-      console.error(`[soniox-live] dropped ${this.droppedTokens} empty tokens`);
+      console.error(`[soniox-live] dropped ${this.droppedTokens} textless tokens`);
     }
   }
 

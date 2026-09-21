@@ -150,13 +150,39 @@ describe('formatSonioxTokens', () => {
     assert.equal(out, '참가자1: 회의 시작');
   });
 
-  it('drops whitespace-only tokens without breaking the current turn', () => {
+  it('keeps a standalone whitespace token inside the current turn', () => {
+    // Soniox emits spacing as a token in its own right. Dropping it glued the
+    // words on either side together -- ~1,900 missing spaces on a 120-minute
+    // recording, measured against the provider's own verbatim text.
+    const out = formatSonioxTokens([
+      { text: '회의', speaker: '1' },
+      { text: ' ', speaker: '1' },
+      { text: '시작합니다', speaker: '1' },
+    ]);
+    assert.equal(out, '참가자1: 회의 시작합니다');
+  });
+
+  it('never lets a whitespace token open a turn or claim a speaker number', () => {
+    // The blank carries a speaker id of its own, but a voice that only ever
+    // emitted whitespace is not a participant: numbering it would shift every
+    // label after it, and switching on it would split one turn in two.
     const out = formatSonioxTokens([
       { text: '첫', speaker: '1' },
-      { text: '   ', speaker: '2' },
-      { text: ' 문장', speaker: '1' },
+      { text: ' ', speaker: '7' },
+      { text: '문장', speaker: '1' },
+      { text: '네', speaker: '2' },
     ]);
-    assert.equal(out, '참가자1: 첫 문장');
+    assert.equal(out, '참가자1: 첫 문장\n\n참가자2: 네');
+  });
+
+  it('never turns leading or trailing whitespace tokens into empty turns', () => {
+    const out = formatSonioxTokens([
+      { text: '   ', speaker: '4' },
+      { text: '본론', speaker: '1' },
+      { text: ' ', speaker: '1' },
+      { text: '  ', speaker: '9' },
+    ]);
+    assert.equal(out, '참가자1: 본론');
   });
 
   it('emits unlabeled lines when diarization returned no speakers', () => {
