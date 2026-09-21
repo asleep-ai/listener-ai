@@ -6,6 +6,12 @@ import * as path from 'path';
 import { EmptyTranscriptionError, TranscriptionApiError } from './transcriptionErrors';
 import { type BatchSttBackend, planSegmentation, retryTemperaturesFor } from './batchSttBackend';
 import { GeminiService, computeSegmentPlan, segmentOverlapSeconds } from './geminiService';
+import {
+  SONIOX_MAX_FILE_BYTES,
+  SONIOX_MAX_FILE_SECONDS,
+  type SonioxTranscriptionResult,
+  type TranscribeSonioxAudioParams,
+} from './sonioxTranscription';
 import { createCostSession } from './services/usageTracker';
 import { findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
@@ -953,6 +959,8 @@ describe('GeminiService Soniox batch backend', () => {
       text: string,
       signal?: AbortSignal,
     ): Promise<{ flagged: boolean; reason?: string }>;
+    cleanupTranscriptQuality(text: string, signal?: AbortSignal): Promise<string>;
+    transcribeWithSoniox(params: TranscribeSonioxAudioParams): Promise<SonioxTranscriptionResult>;
   };
 
   const originalFetch = globalThis.fetch;
@@ -1017,7 +1025,7 @@ describe('GeminiService Soniox batch backend', () => {
     assert.equal(backend.maxSegmentSeconds, 18_000);
     assert.equal(backend.supportsPrompt, false);
     assert.equal(backend.supportsTemperature, false);
-    assert.equal(backend.maxBytes, undefined);
+    assert.equal(backend.maxBytes, SONIOX_MAX_FILE_BYTES);
     assert.equal(backend.requiresReencodedSegments, true);
     // No prompt/temperature knob collapses the ladder to one re-roll.
     assert.deepEqual(retryTemperaturesFor(backend), [undefined]);
@@ -1028,6 +1036,103 @@ describe('GeminiService Soniox batch backend', () => {
     assert.equal(planSegmentation(backend, 7200, 60).shouldSegment, false);
     // Only past the provider's own 300-minute cap does the segment plan run.
     assert.equal(planSegmentation(backend, 18_001, 400).shouldSegment, true);
+  });
+
+  it('segments an oversize recording whose duration ffprobe could not measure', () => {
+    const backend = makeSonioxService({ sonioxApiKey: 'soniox-key' }).sttBackend;
+    // Duration 0 means ffprobe failed, and a duration cap cannot be applied to
+    // a duration nobody knows. Without the byte cap a six-hour file would go
+    // whole-file and be rejected only after a full upload.
+    assert.equal(planSegmentation(backend, 0, 200).shouldSegment, true);
+    assert.equal(planSegmentation(backend, 0, 100).shouldSegment, false);
+  });
+
+  it('rejects a recording past the 300-minute cap before uploading it', async () => {
+    const service = makeSonioxService({ sonioxApiKey: 'soniox-key' });
+    const audioPath = path.join(workDir, 'soniox-too-long.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    const requests = stubSonioxFetch({});
+
+    await assert.rejects(
+      service.sttBackend.transcribe({
+        audioFilePath: audioPath,
+        audioSeconds: SONIOX_MAX_FILE_SECONDS + 1,
+        wholeFile: true,
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof TranscriptionApiError);
+        // The server's own shape for this refusal, so the user-facing copy is
+        // the existing "too long or undecodable" message.
+        assert.equal(err.status, 413);
+        assert.equal(err.errorCode, 'max_duration_reached');
+        return true;
+      },
+    );
+    // Nothing was uploaded, so no file and no job quota slot was spent.
+    assert.deepEqual(requests, []);
+  });
+
+  it('uploads once and creates at most two jobs for a flagged whole-file run', async () => {
+    const service = makeSonioxService({ sonioxApiKey: 'soniox-key' });
+    const audioPath = path.join(workDir, 'soniox-flagged.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    const requests = stubSonioxFetch({ audioDurationMs: 12_000 });
+
+    // Flag everything so the whole bounded ladder runs: the first call, the
+    // single re-roll a knob-less backend gets, then the cleanup pass.
+    service.judgeTranscriptQuality = async () => ({ flagged: true, reason: 'looping' });
+    service.cleanupTranscriptQuality = async (text: string) => text;
+
+    await service.getShortAudioTranscript(audioPath, 10);
+
+    const count = (method: string, match: (url: string) => boolean): number =>
+      requests.filter((req) => req.method === method && match(req.url)).length;
+    // One upload for the run, reused by the rung; one job per attempt.
+    assert.equal(
+      count('POST', (url) => url.endsWith('/v1/files')),
+      1,
+    );
+    assert.equal(
+      count('POST', (url) => url.endsWith('/v1/transcriptions')),
+      2,
+    );
+    assert.equal(
+      count('DELETE', (url) => url.includes('/v1/transcriptions/')),
+      2,
+    );
+    // The shared file is released once, when the run ends.
+    assert.equal(
+      count('DELETE', (url) => url.includes('/v1/files/')),
+      1,
+    );
+  });
+
+  it('scales the poll budget to the clip on the live-snippet path', async () => {
+    const service = makeSonioxService({ sonioxApiKey: 'soniox-key' });
+    const audioPath = path.join(workDir, 'soniox-snippet.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    const budgets: Array<number | undefined> = [];
+    service.transcribeWithSoniox = async (params) => {
+      budgets.push(params.maxPollWaitMs);
+      return { text: '참가자1: 안녕하세요.', modelId: 'stt-async-v5' };
+    };
+
+    // A snippet: a wedged job must fail inside the cadence of the caption
+    // stream, not two hours later.
+    await service.sttBackend.transcribe({
+      audioFilePath: audioPath,
+      audioSeconds: 12,
+      wholeFile: true,
+      retryTransport: false,
+    });
+    // A normal whole-file run keeps the client's own default.
+    await service.sttBackend.transcribe({
+      audioFilePath: audioPath,
+      audioSeconds: 3_600,
+      wholeFile: true,
+    });
+
+    assert.deepEqual(budgets, [120_000, undefined]);
   });
 
   it('constructs without a Soniox key and fails only when transcription starts', async () => {
@@ -1769,6 +1874,11 @@ describe('GeminiService whole-file transport retries', () => {
       includeGlossary?: boolean,
       qualityRetry?: boolean,
     ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
+    judgeTranscriptQuality(
+      text: string,
+      signal?: AbortSignal,
+    ): Promise<{ flagged: boolean; reason?: string }>;
+    cleanupTranscriptQuality(text: string, signal?: AbortSignal): Promise<string>;
   };
 
   function makeService(): RetryHelpers {
@@ -1782,18 +1892,29 @@ describe('GeminiService whole-file transport retries', () => {
     }) as unknown as RetryHelpers;
   }
 
-  // Record what each call asked for, then fail so the client's retry loop (or
-  // the absence of one) is what decides the attempt count.
+  // Record what each call asked for. The provider-side upload is stubbed too:
+  // these cases are about the flags the ladder passes down, not the transport.
   function captureTranscribeParams(service: RetryHelpers): Array<{
     wholeFile?: boolean;
     retryTransport?: boolean;
+    qualityRetryRung?: boolean;
   }> {
-    const seen: Array<{ wholeFile?: boolean; retryTransport?: boolean }> = [];
+    const seen: Array<{
+      wholeFile?: boolean;
+      retryTransport?: boolean;
+      qualityRetryRung?: boolean;
+    }> = [];
     const backend = service.sttBackend;
     service.sttBackend = {
       ...backend,
+      prepareWholeFile: async () => 'file_stub',
+      releaseWholeFile: async () => {},
       transcribe: async (params) => {
-        seen.push({ wholeFile: params.wholeFile, retryTransport: params.retryTransport });
+        seen.push({
+          wholeFile: params.wholeFile,
+          retryTransport: params.retryTransport,
+          qualityRetryRung: params.qualityRetryRung,
+        });
         return '참가자1: 안녕하세요.';
       },
     };
@@ -1817,7 +1938,7 @@ describe('GeminiService whole-file transport retries', () => {
       true,
     );
 
-    assert.deepEqual(seen, [{ wholeFile: true, retryTransport: true }]);
+    assert.deepEqual(seen, [{ wholeFile: true, retryTransport: true, qualityRetryRung: false }]);
   });
 
   it('opts out of transport retries for a live snippet', async () => {
@@ -1837,7 +1958,24 @@ describe('GeminiService whole-file transport retries', () => {
       false,
     );
 
-    assert.deepEqual(seen, [{ wholeFile: true, retryTransport: false }]);
+    assert.deepEqual(seen, [{ wholeFile: true, retryTransport: false, qualityRetryRung: false }]);
+  });
+
+  it('marks a quality-retry rung so the backend skips its transport ladder', async () => {
+    const service = makeService();
+    const seen = captureTranscribeParams(service);
+    const audioPath = path.join(workDir, 'retry-transport-rung.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    // Flag every verdict so the single re-roll a knob-less backend gets runs.
+    service.judgeTranscriptQuality = async () => ({ flagged: true, reason: 'looping' });
+    service.cleanupTranscriptQuality = async (text: string) => text;
+
+    await service.getShortAudioTranscript(audioPath, 10);
+
+    assert.deepEqual(seen, [
+      { wholeFile: true, retryTransport: true, qualityRetryRung: false },
+      { wholeFile: true, retryTransport: true, qualityRetryRung: true },
+    ]);
   });
 
   it('collapses the Soniox client to a single attempt when opted out', async () => {
@@ -1865,6 +2003,17 @@ describe('GeminiService whole-file transport retries', () => {
         }),
       );
       assert.equal(uploads, 1, 'no transport retry when the caller opted out');
+      uploads = 0;
+      // A rung re-rolls a call that already returned; retrying its transport
+      // would buy a second job for the same evidence.
+      await assert.rejects(
+        backend.transcribe({
+          audioFilePath: audioPath,
+          wholeFile: true,
+          qualityRetryRung: true,
+        }),
+      );
+      assert.equal(uploads, 1, 'no transport retry on a quality-retry rung');
     } finally {
       globalThis.fetch = originalFetch;
     }

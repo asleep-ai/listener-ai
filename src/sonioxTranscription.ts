@@ -16,7 +16,18 @@
 // and both server-side objects count against hard account quotas (2,000
 // transcriptions, 1,000 stored files, 100 pending). Deleting them is
 // therefore part of the happy path, not a nicety: the `finally` block below
-// removes the job and the file on success, failure, and cancellation alike.
+// removes every id this client learned -- on success, failure and
+// cancellation alike -- and the whole-file caller owns the shared upload it
+// passed in (see `uploadSonioxFile`).
+//
+// What no `finally` can remove is an object whose id never reached us. Three
+// residual cases leak one quota slot each: an upload or a create that answers
+// 2xx with no usable `id` in the body, a body read that hits its own deadline
+// after the server already allocated the object, and a cancel that lands
+// mid-upload (the file may exist, and the response we would have learned its
+// id from is gone). Reclaiming those needs a list-and-sweep over the account,
+// which this client deliberately does not do: the listing is account-wide, so
+// a sweep would delete objects belonging to another run or another device.
 //
 // Diarization is on, and the whole meeting is sent as one file (see
 // `SONIOX_MAX_FILE_SECONDS` and the backend's `maxSegmentSeconds`), because
@@ -59,6 +70,13 @@ export const SONIOX_TRANSCRIPTION_EXTENSIONS: ReadonlySet<string> = new Set([
 /** Hard per-file cap: 300 minutes. Longer recordings go through the segment plan. */
 export const SONIOX_MAX_FILE_SECONDS = 18_000;
 
+// Byte stand-in for that cap, for the recording ffprobe could not measure:
+// `planSegmentation` can only compare a duration it was given, so with no byte
+// cap an unmeasurable six-hour file would be uploaded whole and rejected by
+// the server. 300 minutes of the app's own 64 kbps mono Opus is ~144 MB, and
+// the extra 10% covers container overhead and slightly denser encodings.
+export const SONIOX_MAX_FILE_BYTES = Math.round(SONIOX_MAX_FILE_SECONDS * (64_000 / 8) * 1.1);
+
 const DEFAULT_LANGUAGE_HINTS = ['ko', 'en'];
 
 // Progress checkpoints inside the pipeline's 15-85% transcription window.
@@ -73,12 +91,28 @@ const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_MAX_POLL_INTERVAL_MS = 10_000;
 const POLL_BACKOFF_FACTOR = 1.5;
 
-// Ceiling on the whole poll loop. A 300-minute file (the provider's own cap)
-// came back in ~3 minutes at the measured ~40x realtime, so two hours is a
-// wide margin that still fails a wedged job instead of hanging the pipeline
-// forever when nobody is watching to cancel it. It bounds the polling, not a
-// single request that never responds.
+// Budget for the polling of a WHOLE `transcribeSonioxAudio` call, shared by
+// every transport attempt rather than granted afresh to each one: three
+// attempts of two hours each is not a bound anyone would wait out, and a job
+// that burned the budget has nothing left to retry into. A 300-minute file
+// (the provider's own cap) came back in ~3 minutes at the measured ~40x
+// realtime, so two hours is a wide margin that still fails a wedged job
+// instead of hanging the pipeline forever when nobody is watching to cancel
+// it. It bounds the polling, not a single request that never responds.
 const DEFAULT_MAX_POLL_WAIT_MS = 2 * 60 * 60 * 1_000;
+
+// Poll ceiling for the chunked live path, where one whole Soniox job covers a
+// ~12s snippet. The whole-file budget would let a wedged job stall the caption
+// stream for two hours while the next clips are already being recorded, so the
+// snippet ceiling scales with the clip instead: 10x realtime is ~4x the
+// measured turnaround, floored so a one-second clip still tolerates queueing.
+const SNIPPET_POLL_WAIT_FACTOR = 10;
+const SNIPPET_MIN_POLL_WAIT_MS = 30_000;
+
+/** Poll budget for a live snippet of `audioSeconds` (0 when unknown). */
+export function snippetPollWaitMs(audioSeconds: number): number {
+  return Math.max(SNIPPET_MIN_POLL_WAIT_MS, SNIPPET_POLL_WAIT_FACTOR * audioSeconds * 1_000);
+}
 
 // Statuses that mean "keep waiting". Anything else -- a renamed state, a
 // missing field -- fails fast instead of polling to the two-hour ceiling.
@@ -102,6 +136,28 @@ const RAW_BODY_CAP = 1500;
 // caller's cancel is deliberately detached at that point (see
 // `fetchAllocation`), so these small bodies need a deadline of their own.
 const BODY_READ_TIMEOUT_MS = 10_000;
+
+// The poll budget covers the whole call, so a job that outlives it leaves
+// nothing for another attempt: a fresh upload would start with zero budget and
+// time out on its first poll. It is reported as the timeout it is (408) but
+// excluded from this module's retry classification, so `isRetryableStatus`
+// keeps treating a real transport 408 as retryable for every other caller.
+const POLL_TIMEOUT_ERROR_TYPE = 'poll_timeout';
+
+function pollTimeoutError(): TranscriptionApiError {
+  return new TranscriptionApiError('Soniox transcription did not finish in time', {
+    status: 408,
+    statusText: 'transcription timed out',
+    errorType: POLL_TIMEOUT_ERROR_TYPE,
+    errorCode: POLL_TIMEOUT_ERROR_TYPE,
+  });
+}
+
+function isRetryableSonioxFailure(error: unknown): error is TranscriptionApiError {
+  if (!(error instanceof TranscriptionApiError)) return false;
+  if (error.errorCode === POLL_TIMEOUT_ERROR_TYPE) return false;
+  return isRetryableStatus(error.status);
+}
 
 // A job that fails with one of these will fail again on a retry -- the input
 // is wrong, not the service. Everything else (capacity, internal errors) is
@@ -160,8 +216,18 @@ export interface TranscribeSonioxAudioParams {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   pollIntervalMs?: number;
   maxPollIntervalMs?: number;
-  /** Ceiling on the poll loop; defaults to two hours. */
+  /**
+   * Budget for the polling of this whole call, every transport attempt
+   * included; defaults to two hours.
+   */
   maxPollWaitMs?: number;
+  /**
+   * Id of a file the caller already uploaded with `uploadSonioxFile`. The
+   * call then creates and deletes only the job, and the file outlives it as
+   * the caller's to delete -- which is what lets the whole-file quality ladder
+   * reuse one upload across every attempt and every retry rung.
+   */
+  fileId?: string;
   /**
    * Transport attempts for the whole upload/job cycle. Defaults to 1 (no
    * retry) because the segment path is already wrapped in its own bounded
@@ -178,6 +244,9 @@ export interface SonioxTranscriptionResult {
   /** Model the server actually ran, which may differ from the requested id. */
   modelId: string;
 }
+
+const defaultFetchImpl: typeof fetch = (input: RequestInfo | URL, init?: RequestInit) =>
+  globalThis.fetch(input, init);
 
 /** Rejects with AbortError the moment the signal fires, instead of one poll later. */
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -418,6 +487,47 @@ async function uploadAudioFile(params: {
   return { fileId: payload.id, sizeBytes: blob.size };
 }
 
+/**
+ * Upload one audio file and return the stored-file id, without creating a
+ * transcription job.
+ *
+ * The caller owns the id from here: it passes it to `transcribeSonioxAudio` as
+ * `fileId` for as many attempts and retry rungs as it needs, then hands it to
+ * `deleteSonioxFile` when the run is over. Skipping that release leaks one of
+ * the 1,000 stored-file slots.
+ */
+export async function uploadSonioxFile(params: {
+  apiKey: string;
+  audioFilePath: string;
+  signal?: AbortSignal;
+  fetchImpl?: typeof fetch;
+}): Promise<{ fileId: string; sizeBytes: number }> {
+  return await uploadAudioFile({
+    fetchImpl: params.fetchImpl ?? defaultFetchImpl,
+    apiKey: params.apiKey,
+    audioFilePath: params.audioFilePath,
+    signal: params.signal,
+  });
+}
+
+/**
+ * Release a file from `uploadSonioxFile`. Runs off any caller signal and never
+ * throws, so it is safe in a `finally` on the cancellation path (see
+ * `deleteQuietly`).
+ */
+export async function deleteSonioxFile(params: {
+  apiKey: string;
+  fileId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<void> {
+  await deleteQuietly({
+    fetchImpl: params.fetchImpl ?? defaultFetchImpl,
+    apiKey: params.apiKey,
+    resourcePath: `/v1/files/${params.fileId}`,
+    label: 'file',
+  });
+}
+
 async function createTranscription(params: {
   fetchImpl: typeof fetch;
   apiKey: string;
@@ -508,14 +618,7 @@ async function pollUntilCompleted(params: {
     );
 
     if (Date.now() - startedAt >= params.maxPollWaitMs) {
-      // 408 so `isRetryableStatus` lets the caller's bounded retry take one
-      // more shot with a fresh job rather than failing the recording outright.
-      throw new TranscriptionApiError('Soniox transcription did not finish in time', {
-        status: 408,
-        statusText: 'transcription timed out',
-        errorType: 'poll_timeout',
-        errorCode: 'poll_timeout',
-      });
+      throw pollTimeoutError();
     }
     await params.sleep(interval, params.signal);
     interval = Math.min(params.maxPollIntervalMs, Math.round(interval * POLL_BACKOFF_FACTOR));
@@ -595,23 +698,31 @@ export async function transcribeSonioxAudio(
 ): Promise<SonioxTranscriptionResult> {
   const sleep = params.sleep ?? abortableSleep;
   const maxAttempts = Math.max(1, params.maxAttempts ?? 1);
+  // One budget for the call rather than one per attempt: the clock starts
+  // here, and each attempt polls against whatever is left of it.
+  const pollBudgetMs = Math.max(0, params.maxPollWaitMs ?? DEFAULT_MAX_POLL_WAIT_MS);
+  const budgetStartedAt = Date.now();
+  const remainingPollBudgetMs = (): number =>
+    Math.max(0, pollBudgetMs - (Date.now() - budgetStartedAt));
   for (let attempt = 1; ; attempt++) {
     try {
-      return await runSonioxJob(params);
+      return await runSonioxJob(params, remainingPollBudgetMs());
     } catch (error) {
       // A cancel is the user's decision, never a transport failure to retry.
       if (params.signal?.aborted || (error as { name?: unknown } | null)?.name === 'AbortError') {
         throw error;
       }
-      const retryable = error instanceof TranscriptionApiError && isRetryableStatus(error.status);
-      if (!retryable || attempt >= maxAttempts) throw error;
+      if (!isRetryableSonioxFailure(error) || attempt >= maxAttempts) throw error;
+      // An attempt that cannot poll is a wasted upload and a wasted job slot,
+      // so a spent budget ends the call here instead of allocating more quota.
+      if (remainingPollBudgetMs() <= 0) throw pollTimeoutError();
       console.error(
         `[soniox-transcribe] attempt ${attempt}/${maxAttempts} failed with HTTP ${error.status}; retrying`,
       );
-      // The previous attempt's file and job are already deleted, so a retry
-      // is a fresh upload -- hence the percent returns to the upload stage.
+      // A retry re-uploads only when this call owns the upload; with a shared
+      // file it re-creates just the job, so the bar must not rewind to it.
       params.onProgress?.(
-        SONIOX_UPLOAD_PERCENT,
+        params.fileId ? SONIOX_TRANSCRIBE_PERCENT : SONIOX_UPLOAD_PERCENT,
         `Retrying Soniox transcription (${attempt + 1}/${maxAttempts})...`,
       );
       await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), params.signal);
@@ -619,14 +730,15 @@ export async function transcribeSonioxAudio(
   }
 }
 
-// One upload/job/transcript cycle. Separate from the retry wrapper so every
-// attempt gets its own server-side objects and its own cleanup.
+// One job/transcript cycle, with its own upload unless the caller supplied a
+// file. Separate from the retry wrapper so every attempt gets its own job and
+// its own cleanup, and takes the poll budget left for it rather than reading
+// the caller's ceiling itself.
 async function runSonioxJob(
   params: TranscribeSonioxAudioParams,
+  maxPollWaitMs: number,
 ): Promise<SonioxTranscriptionResult> {
-  const fetchImpl =
-    params.fetchImpl ??
-    ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
+  const fetchImpl = params.fetchImpl ?? defaultFetchImpl;
   const sleep = params.sleep ?? abortableSleep;
   const apiKey = params.apiKey;
   const model = params.model?.trim() || SONIOX_ASYNC_MODEL;
@@ -638,26 +750,36 @@ async function runSonioxJob(
 
   signal?.throwIfAborted();
 
-  let fileId: string | undefined;
+  let fileId = params.fileId;
+  // A caller-supplied file is shared with the other attempts and retry rungs
+  // of the same run, so only the caller may delete it.
+  const ownsFile = fileId === undefined;
+  let uploadedBytes: number | undefined;
   let transcriptionId: string | undefined;
   const startedAt = Date.now();
   try {
-    params.onProgress?.(SONIOX_UPLOAD_PERCENT, 'Uploading audio to Soniox...');
-    const uploaded = await uploadAudioFile({
-      fetchImpl,
-      apiKey,
-      audioFilePath: params.audioFilePath,
-      signal,
-    });
-    fileId = uploaded.fileId;
-    // Honor a cancel only once the id is recorded, so `finally` can delete the
-    // object the server already allocated for us.
-    signal?.throwIfAborted();
+    if (fileId === undefined) {
+      params.onProgress?.(SONIOX_UPLOAD_PERCENT, 'Uploading audio to Soniox...');
+      const uploaded = await uploadAudioFile({
+        fetchImpl,
+        apiKey,
+        audioFilePath: params.audioFilePath,
+        signal,
+      });
+      fileId = uploaded.fileId;
+      uploadedBytes = uploaded.sizeBytes;
+      // Honor a cancel only once the id is recorded, so `finally` can delete
+      // the object the server already allocated for us.
+      signal?.throwIfAborted();
+    }
     // stderr, not stdout: `listener transcript <file>` writes the transcript
     // itself to stdout, and a diagnostic line there would corrupt it.
     console.error(
-      `[soniox-transcribe] -> ${(uploaded.sizeBytes / (1024 * 1024)).toFixed(2)}MB model=${model} ` +
-        `hints=${languageHints.join('+')} terms=${params.terms?.length ?? 0}`,
+      `[soniox-transcribe] -> ${
+        uploadedBytes === undefined
+          ? 'reused upload'
+          : `${(uploadedBytes / (1024 * 1024)).toFixed(2)}MB`
+      } model=${model} ` + `hints=${languageHints.join('+')} terms=${params.terms?.length ?? 0}`,
     );
 
     transcriptionId = await createTranscription({
@@ -680,7 +802,7 @@ async function runSonioxJob(
       sleep,
       pollIntervalMs: params.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
       maxPollIntervalMs: params.maxPollIntervalMs ?? DEFAULT_MAX_POLL_INTERVAL_MS,
-      maxPollWaitMs: params.maxPollWaitMs ?? DEFAULT_MAX_POLL_WAIT_MS,
+      maxPollWaitMs,
       signal,
       onProgress: params.onProgress,
     });
@@ -719,7 +841,7 @@ async function runSonioxJob(
         label: 'transcription',
       });
     }
-    if (fileId) {
+    if (ownsFile && fileId) {
       await deleteQuietly({
         fetchImpl,
         apiKey,

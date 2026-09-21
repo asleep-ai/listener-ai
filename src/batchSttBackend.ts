@@ -65,8 +65,8 @@ export interface BatchSttTranscribeParams {
   fileHandle?: unknown;
   /**
    * Progress sink for a backend whose `transcribe` call is itself the
-   * long-running step -- Soniox uploads, creates and polls an async job
-   * inside one call, with no `prepareWholeFile` to narrate it. Passed only on
+   * long-running step -- Soniox creates and polls an async job inside one
+   * call, long after `prepareWholeFile` narrated the upload. Passed only on
    * the first whole-file attempt; the segment loop and the quality-retry
    * rungs report their own progress and leave this undefined so the bar never
    * jumps backwards.
@@ -80,6 +80,14 @@ export interface BatchSttTranscribeParams {
    * otherwise multiply the two.
    */
   wholeFile?: boolean;
+  /**
+   * True when this call is a rung of the quality-retry ladder rather than the
+   * caller's first attempt. A rung re-rolls a call that already returned a
+   * result, so a backend that retries its own transport must not spend a
+   * second full cycle -- for an upload-and-poll backend, another upload and
+   * another job -- on the same piece of evidence.
+   */
+  qualityRetryRung?: boolean;
   /**
    * False when the caller does not want the backend to retry its own
    * transport. The live-snippet path sets it: a 12s snippet is re-cut every
@@ -129,6 +137,13 @@ export interface BatchSttBackend {
    * upload instead of re-uploading per rung. Segments never call this.
    */
   prepareWholeFile?(params: BatchSttPrepareParams): Promise<unknown>;
+  /**
+   * Release whatever `prepareWholeFile` allocated, once the whole-file run is
+   * over -- success, failure or cancel. Required for a backend whose upload
+   * holds a hard account quota slot until it is deleted; a backend whose
+   * upload expires on its own leaves this undefined.
+   */
+  releaseWholeFile?(handle: unknown): Promise<void>;
   transcribe(params: BatchSttTranscribeParams): Promise<string>;
   /**
    * Record one usage row for a completed `transcribe` call. Called by the

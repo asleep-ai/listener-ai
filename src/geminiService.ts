@@ -20,10 +20,16 @@ import {
   transcribeCodexAudio,
 } from './codexTranscription';
 import {
+  deleteSonioxFile,
   SONIOX_ASYNC_MODEL,
+  SONIOX_MAX_FILE_BYTES,
   SONIOX_MAX_FILE_SECONDS,
   SONIOX_TRANSCRIPTION_EXTENSIONS,
+  snippetPollWaitMs,
+  type SonioxTranscriptionResult,
+  type TranscribeSonioxAudioParams,
   transcribeSonioxAudio,
+  uploadSonioxFile,
 } from './sonioxTranscription';
 import {
   EmptyTranscriptionError,
@@ -859,16 +865,54 @@ export class GeminiService {
       acceptedExtensions: SONIOX_TRANSCRIPTION_EXTENSIONS,
       supportsPrompt: false,
       supportsTemperature: false,
+      // Duration is the provider's real cap; the byte cap stands in for it
+      // when ffprobe produced no duration for `planSegmentation` to compare
+      // (see SONIOX_MAX_FILE_BYTES). It also switches on the plan's size
+      // shrink, so a recording past the 300-minute cap is cut into ~20MB
+      // segments rather than 300-minute ones.
+      maxBytes: SONIOX_MAX_FILE_BYTES,
       maxSegmentSeconds: SONIOX_MAX_FILE_SECONDS,
       requiresReencodedSegments: true,
+      // One upload per whole-file run, shared by every transport attempt and
+      // every quality-retry rung: the file is tens of MB and holds one of the
+      // 1,000 stored-file slots, while the job it feeds is cheap to recreate.
+      prepareWholeFile: async (params) => {
+        const apiKey = this.requireSonioxApiKey();
+        // Same checkpoint the client reports for an upload it does itself, so
+        // the bar reads identically either way.
+        params.onProgress?.(25, 'Uploading audio to Soniox...');
+        const { fileId } = await uploadSonioxFile({
+          apiKey,
+          audioFilePath: params.audioFilePath,
+          signal: params.signal,
+        });
+        return fileId;
+      },
+      releaseWholeFile: async (handle) => {
+        if (typeof handle !== 'string' || handle.length === 0) return;
+        await deleteSonioxFile({ apiKey: this.requireSonioxApiKey(), fileId: handle });
+      },
       transcribe: async (params) => {
-        const apiKey = this.sonioxApiKey?.trim();
-        if (!apiKey) {
-          throw new Error(
-            'Soniox API key is not configured. Add your Soniox API key in Settings to transcribe with Soniox.',
+        const apiKey = this.requireSonioxApiKey();
+        const audioSeconds = params.audioSeconds ?? 0;
+        if (audioSeconds > SONIOX_MAX_FILE_SECONDS) {
+          // Pre-upload: the server rejects this file anyway, but only after we
+          // have spent the whole upload plus one file and one job quota slot
+          // on it. Same error shape the server answers with, so the
+          // user-facing copy is the existing "too long" one.
+          throw new TranscriptionApiError(
+            `Recording is ${Math.round(audioSeconds / 60)} minutes long; Soniox accepts at most ${SONIOX_MAX_FILE_SECONDS / 60} minutes per file.`,
+            {
+              status: 413,
+              statusText: 'audio too long',
+              errorType: 'max_duration_reached',
+              errorCode: 'max_duration_reached',
+            },
           );
         }
-        const result = await transcribeSonioxAudio({
+        // `retryTransport: false` is the live-snippet path and nothing else.
+        const liveSnippet = params.retryTransport === false;
+        const result = await this.transcribeWithSoniox({
           apiKey,
           audioFilePath: params.audioFilePath,
           terms: params.glossary,
@@ -877,24 +921,31 @@ export class GeminiService {
           clientReferenceId: telemetryHash(path.basename(params.audioFilePath)),
           signal: params.signal,
           onProgress: params.onProgress,
+          // Reuse the run's single upload when the caller made one.
+          fileId: typeof params.fileHandle === 'string' ? params.fileHandle : undefined,
           // The segment path already retries; only the whole-file path, which
-          // has no retry loop above it, asks this client for its own. The
-          // live-snippet caller opts out (`retryTransport: false`): it fires a
-          // fresh job every ~12s, so retrying a failed one just triples the
-          // load on a provider that is already struggling.
-          maxAttempts: params.wholeFile && params.retryTransport !== false ? 3 : 1,
+          // has no retry loop above it, asks this client for its own. Two
+          // callers opt out: the live-snippet path (`retryTransport: false`)
+          // fires a fresh job every ~12s, so retrying a failed one just
+          // triples the load on a provider that is already struggling, and a
+          // quality-retry rung is already a re-roll of a call that returned --
+          // a transport retry of a re-roll buys a second job for the same
+          // evidence.
+          maxAttempts:
+            params.wholeFile && params.retryTransport !== false && !params.qualityRetryRung ? 3 : 1,
+          // A snippet must fail inside the cadence of the caption stream
+          // rather than sit on the two-hour whole-file budget.
+          maxPollWaitMs: liveSnippet ? snippetPollWaitMs(audioSeconds) : undefined,
         });
         // Prefer the provider's own measurement: it is what the invoice is
         // computed from, and it exists even when ffprobe returned 0.
-        const audioSeconds =
-          result.audioDurationMs !== undefined
-            ? result.audioDurationMs / 1000
-            : (params.audioSeconds ?? 0);
+        const billedSeconds =
+          result.audioDurationMs !== undefined ? result.audioDurationMs / 1000 : audioSeconds;
         // Bill the model the SERVER ran, not the one we asked for: Soniox
         // silently re-routes a retired id to its successor, and a usage row
         // naming the requested id would hide the re-route and price the wrong
         // model.
-        backend.recordUsage(params.session, audioSeconds, result.modelId);
+        backend.recordUsage(params.session, billedSeconds, result.modelId);
         return result.text;
       },
       recordUsage: (session, audioSeconds, extra) =>
@@ -919,6 +970,24 @@ export class GeminiService {
       throw new Error('Codex OAuth holder is not configured.');
     }
     return await this.codexAuth.getToken();
+  }
+
+  private requireSonioxApiKey(): string {
+    const apiKey = this.sonioxApiKey?.trim();
+    if (!apiKey) {
+      throw new Error(
+        'Soniox API key is not configured. Add your Soniox API key in Settings to transcribe with Soniox.',
+      );
+    }
+    return apiKey;
+  }
+
+  // Resolved at call time, like `generateGeminiTranscript`, so the backend
+  // closure above picks up a replacement instead of capturing the import.
+  private transcribeWithSoniox(
+    params: TranscribeSonioxAudioParams,
+  ): Promise<SonioxTranscriptionResult> {
+    return transcribeSonioxAudio(params);
   }
 
   private requireGeminiApiKey(): string {
@@ -1801,66 +1870,78 @@ Requirements:
         onProgress: progressCallback,
       });
 
-      const retryPrompt = backend.supportsPrompt ? QUALITY_RETRY_TRANSCRIPT_PROMPT : undefined;
-      const run = (
-        prompt: string | undefined,
-        temperature?: number,
-        glossary?: string[],
-        // Only the first attempt narrates: a retry rung has already reported
-        // its own progress and must not rewind the bar.
-        onProgress?: (percent: number, message: string) => void,
-      ): Promise<string> =>
-        backend.transcribe({
-          audioFilePath,
-          prompt,
-          temperature,
-          glossary,
-          audioSeconds,
-          fileHandle,
-          onProgress,
-          wholeFile: true,
-          // `qualityRetry: false` is the live-snippet mode: one low-signal
-          // blob every ~12s, where a failure is expected and cheap to drop.
-          // The same reasoning that disables the retry ladder disables the
-          // backend's transport retries.
-          retryTransport: qualityRetry,
-          session,
-          signal,
-        });
+      try {
+        const retryPrompt = backend.supportsPrompt ? QUALITY_RETRY_TRANSCRIPT_PROMPT : undefined;
+        const run = (
+          prompt: string | undefined,
+          temperature?: number,
+          glossary?: string[],
+          // Only the first attempt narrates: a retry rung has already reported
+          // its own progress and must not rewind the bar.
+          onProgress?: (percent: number, message: string) => void,
+          // A rung is a re-roll of a call that already returned, so a backend
+          // that retries its own transport must not spend a second cycle on it.
+          qualityRetryRung = false,
+        ): Promise<string> =>
+          backend.transcribe({
+            audioFilePath,
+            prompt,
+            temperature,
+            glossary,
+            audioSeconds,
+            fileHandle,
+            onProgress,
+            wholeFile: true,
+            qualityRetryRung,
+            // `qualityRetry: false` is the live-snippet mode: one low-signal
+            // blob every ~12s, where a failure is expected and cheap to drop.
+            // The same reasoning that disables the retry ladder disables the
+            // backend's transport retries.
+            retryTransport: qualityRetry,
+            session,
+            signal,
+          });
 
-      // The retry prompt is context-cleared on purpose, so no glossary is
-      // handed to the rungs either.
-      const retryTemperatures = retryTemperaturesFor(backend);
-      const gated = await applyTranscriptQualityGate({
-        text: stripNoSpeechSentinel(
-          await run(
-            transcriptPrompt,
-            undefined,
-            includeGlossary ? this.knownWords : undefined,
-            progressCallback,
+        // The retry prompt is context-cleared on purpose, so no glossary is
+        // handed to the rungs either.
+        const retryTemperatures = retryTemperaturesFor(backend);
+        const gated = await applyTranscriptQualityGate({
+          text: stripNoSpeechSentinel(
+            await run(
+              transcriptPrompt,
+              undefined,
+              includeGlossary ? this.knownWords : undefined,
+              progressCallback,
+            ),
           ),
-        ),
-        label: `short audio (${backend.id})`,
-        judge: qualityJudge,
-        cleanup: qualityCleanup,
-        retries: qualityRetry
-          ? retryTemperatures.map((temperature, index) => () => {
-              reportQualityRetry(index + 1, retryTemperatures.length);
-              return run(retryPrompt, temperature)
-                .then(stripNoSpeechSentinel)
-                .catch(emptyTranscriptionAsBlank);
-            })
-          : undefined,
-        log: (message) => console.error(message),
-      });
-      if (!gated.text.trim()) {
-        throw new EmptyTranscriptionError('Transcription produced no speech content');
+          label: `short audio (${backend.id})`,
+          judge: qualityJudge,
+          cleanup: qualityCleanup,
+          retries: qualityRetry
+            ? retryTemperatures.map((temperature, index) => () => {
+                reportQualityRetry(index + 1, retryTemperatures.length);
+                return run(retryPrompt, temperature, undefined, undefined, true)
+                  .then(stripNoSpeechSentinel)
+                  .catch(emptyTranscriptionAsBlank);
+              })
+            : undefined,
+          log: (message) => console.error(message),
+        });
+        if (!gated.text.trim()) {
+          throw new EmptyTranscriptionError('Transcription produced no speech content');
+        }
+        return {
+          text: gated.text,
+          cleaned: gated.cleaned === true,
+          uncertain: gated.flagged,
+        };
+      } finally {
+        // Release the shared upload once per run, on every exit path: a
+        // provider-side file can hold a hard account quota slot until it is
+        // deleted, and a cancelled run is the most likely way to reach here
+        // with one still alive.
+        if (fileHandle !== undefined) await backend.releaseWholeFile?.(fileHandle);
       }
-      return {
-        text: gated.text,
-        cleaned: gated.cleaned === true,
-        uncertain: gated.flagged,
-      };
     } catch (error) {
       console.error('Error transcribing short audio:', error);
       throw error;

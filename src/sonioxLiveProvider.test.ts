@@ -199,12 +199,12 @@ function pcmFrame(sequence: number, channelCount = 1, sampleRate = 16_000): Live
 }
 
 describe('filterSonioxTokens', () => {
-  it('drops control tokens and tokens without a language tag', () => {
-    const { speech, endpoint } = filterSonioxTokens([
+  it('drops control tokens and blank tokens, counting the blanks', () => {
+    const { speech, endpoint, dropped } = filterSonioxTokens([
       token('안녕', { start_ms: 0, end_ms: 100 }),
       { text: '<end>', is_final: true },
-      { text: '???', is_final: true },
-      { text: 'noise', is_final: true, language: '  ' },
+      { text: '   ', is_final: true },
+      { text: '', is_final: true },
     ]);
 
     assert.equal(endpoint, true);
@@ -212,18 +212,45 @@ describe('filterSonioxTokens', () => {
       speech.map((t) => t.text),
       ['안녕'],
     );
+    // The endpoint marker is a signal, not a loss; the two blanks are.
+    assert.equal(dropped, 2);
+  });
+
+  it('keeps a speech token that arrives without a language tag', () => {
+    // Language identification is a provider invariant, not a truth: filtering
+    // on it would silently delete meeting speech the day it stops holding.
+    const { speech, endpoint, dropped } = filterSonioxTokens([
+      { text: '중요한 단어', is_final: true },
+      { text: 'noise', is_final: true, language: '  ' },
+    ]);
+
+    assert.equal(endpoint, false);
+    assert.deepEqual(
+      speech.map((t) => t.text),
+      ['중요한 단어', 'noise'],
+    );
+    assert.equal(dropped, 0);
   });
 
   it('treats <fin> as an endpoint without contributing text', () => {
-    const { speech, endpoint } = filterSonioxTokens([{ text: '<fin>', is_final: true }]);
+    const { speech, endpoint, dropped } = filterSonioxTokens([{ text: '<fin>', is_final: true }]);
     assert.equal(endpoint, true);
     assert.equal(speech.length, 0);
+    assert.equal(dropped, 0);
   });
 
-  it('reports no endpoint for an unknown control token', () => {
-    const { speech, endpoint } = filterSonioxTokens([{ text: '<unknown>', is_final: true }]);
+  it('keeps an unrecognised marker as text rather than guessing it away', () => {
+    // Only `<end>` and `<fin>` are known control tokens. Anything else is
+    // kept: a visible artifact is recoverable, deleted speech is not.
+    const { speech, endpoint, dropped } = filterSonioxTokens([
+      { text: '<unknown>', is_final: true },
+    ]);
     assert.equal(endpoint, false);
-    assert.equal(speech.length, 0);
+    assert.deepEqual(
+      speech.map((t) => t.text),
+      ['<unknown>'],
+    );
+    assert.equal(dropped, 0);
   });
 });
 
@@ -309,7 +336,7 @@ describe('SonioxLiveSession', () => {
     await session.close();
   });
 
-  it('never leaks control tokens or language-less tokens into the emitted text', async () => {
+  it('never leaks control tokens into the emitted text and counts blanks once', async () => {
     const { createWebSocket, sockets } = scriptSockets();
     const { callbacks, of } = recordCallbacks();
 
@@ -321,7 +348,7 @@ describe('SonioxLiveSession', () => {
     sockets[0].deliver({
       tokens: [
         { text: '<fin>', is_final: true },
-        { text: '???', is_final: true },
+        { text: '  ', is_final: true },
         token('Hello', { language: 'en', start_ms: 0, end_ms: 100 }),
         { text: '<end>', is_final: true },
       ],
@@ -331,10 +358,25 @@ describe('SonioxLiveSession', () => {
     assert.equal(finalEvent.text, 'Hello');
     for (const event of [...of('interim'), ...of('final')]) {
       const { text } = event.value as { text: string };
-      assert.equal(/<end>|<fin>|\?\?\?/.test(text), false, `control token leaked: ${text}`);
+      assert.equal(/<end>|<fin>/.test(text), false, `control token leaked: ${text}`);
     }
 
-    await session.close();
+    // One line per session at close, carrying the count and nothing else: the
+    // tokens themselves are meeting content.
+    const logged: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    };
+    try {
+      await session.close();
+    } finally {
+      console.error = originalError;
+    }
+    const dropLines = logged.filter((line) => line.includes('dropped'));
+    assert.equal(dropLines.length, 1);
+    assert.match(dropLines[0], /dropped 1 empty tokens/);
+    assert.equal(dropLines[0].includes('Hello'), false);
   });
 
   it('attaches translation finals that arrive after the endpoint', async () => {

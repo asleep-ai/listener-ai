@@ -3,6 +3,7 @@ import * as path from 'path';
 import { extensionForMimeType } from './audioFormats';
 import type { AgentChatMessage, AgentRunResult, AgentService } from './agentService';
 import {
+  type LiveSttProvider,
   DEFAULT_GEMINI_LIVE_TRANSCRIPTION_MODEL,
   DEFAULT_GEMINI_LIVE_TRANSLATION_MODEL,
   DEFAULT_OPENAI_LIVE_TRANSCRIPTION_MODEL,
@@ -200,6 +201,15 @@ const LIVE_TRANSLATION_LANGUAGE_NAMES: Record<string, string> = {
   id: 'Indonesian',
   hi: 'Hindi',
   ar: 'Arabic',
+};
+
+// Provider ids are internal identifiers; a status line the user reads spells
+// them the way the vendor does.
+const LIVE_PROVIDER_DISPLAY_NAMES: Record<Exclude<LiveSttProvider, 'auto'>, string> = {
+  openai: 'OpenAI',
+  gemini: 'Gemini',
+  soniox: 'Soniox',
+  chunked: 'chunked fallback',
 };
 
 // The live translation target is stored as a BCP-47 code (e.g. `ja`) but the
@@ -443,16 +453,26 @@ export class LiveSessionService {
     });
     if (fallbackConfigs.length === 0) return false;
 
-    const failedProvider = config.provider === 'auto' ? 'The selected' : config.provider;
+    // `auto` picked the provider for the user, so there is no name of theirs
+    // to report; and a provider that failed and then succeeded on its own
+    // fallback config must not be named on both sides of the sentence.
+    const failedProvider = config.provider === 'auto' ? undefined : config.provider;
     this.handleStreamError(session, error);
     for (const fallbackConfig of fallbackConfigs) {
       try {
         await this.startStreamingProvider(session, fallbackConfig);
         if (session.stream) {
+          const recoveredName = LIVE_PROVIDER_DISPLAY_NAMES[session.provider];
+          const failedName =
+            failedProvider !== undefined && failedProvider !== session.provider
+              ? LIVE_PROVIDER_DISPLAY_NAMES[failedProvider]
+              : undefined;
           this.emit({
             type: 'status',
             sessionId: session.id,
-            status: `${failedProvider} live provider unavailable; using ${session.provider} live transcription.`,
+            status: failedName
+              ? `${failedName} live provider unavailable; using ${recoveredName} live transcription.`
+              : `Live provider unavailable; using ${recoveredName} live transcription.`,
             mode: session.mode,
             provider: session.provider,
           });

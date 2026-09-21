@@ -16,10 +16,14 @@ import * as path from 'path';
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import {
+  deleteSonioxFile,
   formatSonioxTokens,
+  SONIOX_MAX_FILE_BYTES,
   SONIOX_MAX_FILE_SECONDS,
   SONIOX_TRANSCRIPTION_EXTENSIONS,
+  snippetPollWaitMs,
   transcribeSonioxAudio,
+  uploadSonioxFile,
   type SonioxAsyncToken,
 } from './sonioxTranscription';
 import { EmptyTranscriptionError, TranscriptionApiError } from './transcriptionErrors';
@@ -176,6 +180,20 @@ describe('Soniox backend constants', () => {
     assert.ok(SONIOX_TRANSCRIPTION_EXTENSIONS.has('.webm'));
     assert.ok(!SONIOX_TRANSCRIPTION_EXTENSIONS.has('.opus'));
   });
+
+  it('turns the 300-minute cap into a byte cap for unmeasurable recordings', () => {
+    // 300 minutes of 64 kbps mono Opus (~144 MB) plus 10% headroom: anything
+    // bigger cannot be a file the provider would have accepted.
+    assert.equal(SONIOX_MAX_FILE_BYTES, 158_400_000);
+    assert.ok(SONIOX_MAX_FILE_BYTES > SONIOX_MAX_FILE_SECONDS * 8_000);
+  });
+
+  it('scales the live-snippet poll budget to the clip, with a floor', () => {
+    assert.equal(snippetPollWaitMs(12), 120_000);
+    // A one-second clip still tolerates a little provider-side queueing.
+    assert.equal(snippetPollWaitMs(1), 30_000);
+    assert.equal(snippetPollWaitMs(0), 30_000);
+  });
 });
 
 describe('transcribeSonioxAudio', () => {
@@ -204,6 +222,26 @@ describe('transcribeSonioxAudio', () => {
       ...overrides,
     });
   }
+
+  it('uploads a file on its own and releases it on its own', async () => {
+    // The whole-file caller owns the upload: it allocates one stored-file
+    // slot here and gives it back once the run (attempts and rungs) is done.
+    const { impl, calls } = scriptFetch();
+
+    const uploaded = await uploadSonioxFile({
+      apiKey: API_KEY,
+      audioFilePath: audioPath,
+      fetchImpl: impl,
+    });
+    assert.equal(uploaded.fileId, FILE_ID);
+    assert.ok(uploaded.sizeBytes > 0);
+
+    await deleteSonioxFile({ apiKey: API_KEY, fileId: FILE_ID, fetchImpl: impl });
+    assert.deepEqual(steps(calls), ['POST /v1/files', `DELETE /v1/files/${FILE_ID}`]);
+    for (const call of calls) {
+      assert.equal(call.authorization, `Bearer ${API_KEY}`);
+    }
+  });
 
   it('walks upload -> create -> poll -> transcript -> delete both objects', async () => {
     const { impl, calls } = scriptFetch({
@@ -527,7 +565,6 @@ describe('transcribeSonioxAudio', () => {
     const { impl, calls } = scriptFetch({ statuses: [{ status: 'processing' }] });
     await assert.rejects(run(impl, { maxPollWaitMs: 0 }), (err: unknown) => {
       assert.ok(err instanceof TranscriptionApiError);
-      // 408 is retryable, so the caller's bounded retry may start a fresh job.
       assert.equal(err.status, 408);
       assert.equal(err.errorCode, 'poll_timeout');
       return true;
@@ -536,6 +573,62 @@ describe('transcribeSonioxAudio', () => {
       `DELETE /v1/transcriptions/${TRANSCRIPTION_ID}`,
       `DELETE /v1/files/${FILE_ID}`,
     ]);
+  });
+
+  it('spends one poll budget for the whole call, not one per attempt', async () => {
+    // The ceiling used to bound a single attempt, so a job that never
+    // completed re-uploaded the recording and polled again -- three times two
+    // hours for one whole-file transcription.
+    const { impl, calls } = scriptFetch({ statuses: [{ status: 'processing' }] });
+
+    await assert.rejects(run(impl, { maxPollWaitMs: 0, maxAttempts: 3 }), (err: unknown) => {
+      assert.ok(err instanceof TranscriptionApiError);
+      assert.equal(err.errorCode, 'poll_timeout');
+      return true;
+    });
+
+    assert.equal(steps(calls).filter((step) => step === 'POST /v1/files').length, 1);
+    assert.equal(steps(calls).filter((step) => step === 'POST /v1/transcriptions').length, 1);
+    assert.deepEqual(steps(calls).slice(-2), [
+      `DELETE /v1/transcriptions/${TRANSCRIPTION_ID}`,
+      `DELETE /v1/files/${FILE_ID}`,
+    ]);
+  });
+
+  it('reuses a caller-supplied file and leaves that file to the caller', async () => {
+    // The whole-file path uploads once and hands the id to every attempt and
+    // every retry rung, so this call may create and delete only the job.
+    const { impl, calls } = scriptFetch();
+
+    const result = await run(impl, { fileId: FILE_ID });
+
+    assert.ok(result.text.length > 0);
+    assert.deepEqual(steps(calls), [
+      'POST /v1/transcriptions',
+      `GET /v1/transcriptions/${TRANSCRIPTION_ID}`,
+      `GET /v1/transcriptions/${TRANSCRIPTION_ID}/transcript`,
+      `DELETE /v1/transcriptions/${TRANSCRIPTION_ID}`,
+    ]);
+    const create = calls.find((call) => call.url.endsWith('/v1/transcriptions'));
+    assert.equal((create?.body as { file_id?: string } | undefined)?.file_id, FILE_ID);
+  });
+
+  it('re-creates only the job when a retry runs against a shared file', async () => {
+    let attempts = 0;
+    const { impl, calls } = scriptFetch({
+      createResponse: () => {
+        attempts++;
+        return attempts === 1
+          ? json({ status_code: 500, error_type: 'internal_error' }, 500)
+          : json({ id: TRANSCRIPTION_ID, status: 'queued' });
+      },
+    });
+
+    await run(impl, { fileId: FILE_ID, maxAttempts: 3 });
+
+    assert.equal(attempts, 2);
+    assert.equal(steps(calls).filter((step) => step === 'POST /v1/files').length, 0);
+    assert.equal(steps(calls).filter((step) => step === `DELETE /v1/files/${FILE_ID}`).length, 0);
   });
 
   it('keeps a missing tokens field a malformed-response error, not silence', async () => {

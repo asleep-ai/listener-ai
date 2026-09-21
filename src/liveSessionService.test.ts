@@ -495,6 +495,40 @@ describe('LiveSessionService', () => {
     );
   });
 
+  it('names the failed provider once in the start-failure fallback status', async () => {
+    // The configured provider failed and the fallback landed on the same one,
+    // so naming it on both sides would read as a contradiction.
+    let attempts = 0;
+    const events: LiveSessionEvent[] = [];
+    const fakeStream: LiveSttSession = {
+      provider: 'gemini',
+      kind: 'transcription',
+      sendPcm() {},
+      async close() {},
+    };
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'gemini', geminiApiKey: 'gemini-key' }),
+      emitEvent: (event) => events.push(event),
+      createLiveSttSession: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('gemini live connect failed');
+        return fakeStream;
+      },
+    });
+
+    await service.start({ title: 'Live', translate: false });
+
+    const status = events.find(
+      (event) => event.type === 'status' && /unavailable/.test(event.status),
+    );
+    assert.ok(status && status.type === 'status');
+    assert.equal(status.status, 'Live provider unavailable; using Gemini live transcription.');
+  });
+
   it('records Gemini Live usage when a streaming provider session stops', async () => {
     let now = Date.parse('2026-06-16T03:00:00.000Z');
     const usage: RecordInput[] = [];

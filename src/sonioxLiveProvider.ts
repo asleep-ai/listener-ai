@@ -120,28 +120,41 @@ export class SonioxRealtimeError extends Error {
 /**
  * Split a Soniox message's tokens into real speech and the endpoint signal.
  *
- * Control tokens (`<end>`, `<fin>`) and any token without a language tag are
- * dropped before assembly: the diarization audit in issue #195 showed the
- * endpoint marker turning into a phantom speaker/word when it reached turn
- * assembly. `enable_language_identification` is what guarantees real speech
- * tokens carry a language, so it stays on.
+ * A token is dropped only by its own shape: a control token (`<end>`, `<fin>`),
+ * which the diarization audit in issue #195 showed turning into a phantom
+ * speaker/word once it reached turn assembly, or a token with nothing left
+ * after trimming, which can carry no speech by definition. A token with no
+ * `language` tag is KEPT: `enable_language_identification` is expected to tag
+ * real speech, but filtering on that provider invariant would silently delete
+ * meeting speech the day it stops holding, with nothing in the transcript to
+ * show for it. `dropped` counts the blank tokens so a session can report the
+ * shape it saw instead of hiding it.
  */
 export function filterSonioxTokens(tokens: readonly SonioxToken[] | undefined): {
   speech: SonioxToken[];
   endpoint: boolean;
+  dropped: number;
 } {
   const speech: SonioxToken[] = [];
   let endpoint = false;
+  let dropped = 0;
   for (const token of tokens ?? []) {
-    if (!token) continue;
-    if (CONTROL_TOKEN_TEXTS.has((token.text ?? '').trim())) {
+    if (!token) {
+      dropped++;
+      continue;
+    }
+    const text = (token.text ?? '').trim();
+    if (CONTROL_TOKEN_TEXTS.has(text)) {
       endpoint = true;
       continue;
     }
-    if (!token.language?.trim()) continue;
+    if (text.length === 0) {
+      dropped++;
+      continue;
+    }
     speech.push(token);
   }
-  return { speech, endpoint };
+  return { speech, endpoint, dropped };
 }
 
 function isTranslationToken(token: SonioxToken): boolean {
@@ -272,6 +285,7 @@ export class SonioxLiveSession implements LiveSttSession {
   private firstConnectPending = true;
   private pendingConnectFail: ((error: Error) => void) | null = null;
   private lastConnectedAt = 0;
+  private droppedTokens = 0;
   private lastErrorMessage: string | undefined;
   private lastErrorExtra: Record<string, unknown> = {};
 
@@ -589,7 +603,8 @@ export class SonioxLiveSession implements LiveSttSession {
   }
 
   private handleTokens(message: SonioxServerMessage): void {
-    const { speech, endpoint } = filterSonioxTokens(message.tokens);
+    const { speech, endpoint, dropped } = filterSonioxTokens(message.tokens);
+    this.droppedTokens += dropped;
     const finalSource: SonioxToken[] = [];
     const finalTranslation: SonioxToken[] = [];
     const nonFinalSource: SonioxToken[] = [];
@@ -785,6 +800,11 @@ export class SonioxLiveSession implements LiveSttSession {
     }
     this.flushFinal();
     this.teardownSocket();
+    // One line per session, and a count only: the tokens themselves are
+    // meeting content and never reach a log.
+    if (this.droppedTokens > 0) {
+      console.error(`[soniox-live] dropped ${this.droppedTokens} empty tokens`);
+    }
   }
 
   private waitForFinished(): Promise<void> {
