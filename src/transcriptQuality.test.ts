@@ -16,6 +16,7 @@ import {
   analyzeAssembledTranscript,
   analyzeTranscriptQuality,
   applyTranscriptQualityGate,
+  detectPromptEcho,
   normalizeForComparison,
   normalizeTranscriptQualityNotes,
   reconcileOverlappingSegments,
@@ -282,6 +283,65 @@ describe('stripNoSpeechSentinel', () => {
   it('never touches lines that contain other content', () => {
     const line = '참가자1: NO_SPEECH 상태라고 말했습니다.';
     assert.equal(stripNoSpeechSentinel(line), line);
+  });
+});
+
+// Prompt echo (issue #197): the provider returns the instructions it was
+// given instead of a transcription. The built-in markers cover every prompt
+// the pipeline assembles; `promptLines` covers a user's custom prompt and
+// glossary. Legitimate speech that merely mentions a glossary term must stay
+// unflagged, which is why short prompt lines never participate.
+describe('detectPromptEcho', () => {
+  it('flags the built-in prompt markers', () => {
+    const echoes = [
+      '[Audio segment 4 of 12]',
+      'The following proper nouns, names, and terms may appear in the audio. Transcribe them exactly as spelled:',
+      'Please transcribe this audio recording with proper speaker identification.',
+      'Transcribe the speech in this audio exactly as spoken.',
+      'Format requirements:',
+      '- Return ONLY the transcription text, no JSON formatting',
+      '- Return only the transcript text.',
+    ];
+    for (const echo of echoes) {
+      assert.equal(detectPromptEcho(echo).echoed, true, `should flag: ${echo}`);
+      assert.deepEqual(detectPromptEcho(echo).reasons, ['prompt-echo']);
+    }
+  });
+
+  it('matches markers across line breaks and casing', () => {
+    const wrapped =
+      'please transcribe this audio\n  recording with proper\nspeaker identification.';
+    assert.equal(detectPromptEcho(wrapped).echoed, true);
+  });
+
+  it('keeps clean speech that mentions a glossary term unflagged', () => {
+    const promptLines = [
+      'The following proper nouns, names, and terms may appear in the audio. Transcribe them exactly as spelled:',
+      '- Listener.AI',
+      '- 김한결',
+    ];
+    const transcript = '참가자1: Listener.AI 배포 일정은 김한결 님이 정리해 주세요.';
+    assert.equal(detectPromptEcho(transcript, promptLines).echoed, false);
+    assert.deepEqual(detectPromptEcho(transcript, promptLines).reasons, []);
+  });
+
+  it('flags a verbatim line of the custom prompt that was actually sent', () => {
+    const promptLines = ['Write down every product code that is spoken aloud.'];
+    const transcript = '참가자1: write down every product code   that is spoken ALOUD.';
+    assert.equal(detectPromptEcho(transcript, promptLines).echoed, true);
+    assert.equal(detectPromptEcho(transcript).echoed, false, 'needs the prompt to match');
+  });
+
+  it('never flags on a short prompt line', () => {
+    assert.equal(detectPromptEcho('참가자1: Foo 관련 이슈입니다.', ['- Foo']).echoed, false);
+    assert.equal(detectPromptEcho('참가자1: 네, 맞습니다.', ['- 네, 맞습니다.']).echoed, false);
+  });
+
+  it('returns no verdict for empty text', () => {
+    assert.equal(
+      detectPromptEcho('   ', ['Write down every product code that is spoken.']).echoed,
+      false,
+    );
   });
 });
 
@@ -852,6 +912,99 @@ describe('applyTranscriptQualityGate', () => {
       logs.every((line) => !line.includes('++')),
       'logs must never carry transcript text',
     );
+  });
+
+  // Prompt echo is the one defect the gate deletes instead of marking
+  // uncertain: instruction text in a transcript is always wrong, and it would
+  // otherwise reach the summary, Notion, the export and Drive sync.
+  const echoedPrompt = 'Please transcribe this audio recording with proper speaker identification.';
+
+  it('drops persistently echoed text and skips both judge and cleanup', async () => {
+    let judgeCalls = 0;
+    let cleanupCalls = 0;
+    const logs: string[] = [];
+    const result = await applyTranscriptQualityGate({
+      text: echoedPrompt,
+      label: 'segment 3/8',
+      promptLines: [echoedPrompt, 'Format requirements:'],
+      judge: async () => {
+        judgeCalls++;
+        return { flagged: false };
+      },
+      retries: [async () => echoedPrompt, async () => `[Audio segment 3 of 8]\n\n${echoedPrompt}`],
+      cleanup: async () => {
+        cleanupCalls++;
+        return cleanText;
+      },
+      log: (message) => logs.push(message),
+    });
+
+    assert.equal(result.text, '');
+    assert.equal(result.flagged, true);
+    assert.deepEqual(result.reasons, ['prompt-echo']);
+    assert.equal(result.dropped, 'prompt-echo');
+    assert.equal(result.retried, true);
+    assert.equal(result.retriesAttempted, 2);
+    assert.equal(judgeCalls, 0, 'the judge only knows loop shapes');
+    assert.equal(cleanupCalls, 0, 'cleaning instruction text cannot recover speech');
+    assert.ok(logs.some((line) => line.includes('prompt echo persisted')));
+    assert.ok(logs.some((line) => line.includes('flagged by echo (prompt-echo;')));
+    assert.ok(
+      logs.every(
+        (line) => !line.includes('transcribe this audio') && !line.includes('Audio segment'),
+      ),
+      'logs must never carry prompt or transcript text',
+    );
+  });
+
+  it('drops echoed text when no retry is available', async () => {
+    let cleanupCalls = 0;
+    const result = await applyTranscriptQualityGate({
+      text: `[Audio segment 1 of 4]\n\n${echoedPrompt}`,
+      label: 'short audio (gemini)',
+      cleanup: async () => {
+        cleanupCalls++;
+        return cleanText;
+      },
+      log: () => {},
+    });
+
+    assert.equal(result.text, '');
+    assert.equal(result.dropped, 'prompt-echo');
+    assert.equal(result.retried, false);
+    assert.equal(result.retriesAttempted, 0);
+    assert.equal(cleanupCalls, 0);
+  });
+
+  it('accepts a clean retry after an echoed first result', async () => {
+    const result = await applyTranscriptQualityGate({
+      text: echoedPrompt,
+      label: 'segment 1/2',
+      promptLines: [echoedPrompt],
+      retries: [async () => cleanText, async () => loopText],
+      log: () => {},
+    });
+
+    assert.equal(result.text, cleanText);
+    assert.equal(result.flagged, false);
+    assert.deepEqual(result.reasons, []);
+    assert.equal(result.retried, true);
+    assert.equal(result.retriesAttempted, 1);
+    assert.equal(result.dropped, undefined);
+  });
+
+  it('never returns a retry result that echoes the prompt', async () => {
+    const result = await applyTranscriptQualityGate({
+      text: loopText,
+      label: 'segment 2/2',
+      promptLines: [echoedPrompt],
+      retries: [async () => echoedPrompt],
+      log: () => {},
+    });
+
+    assert.equal(result.text, loopText, 'the flagged first result is kept, not the echo');
+    assert.equal(result.flagged, true);
+    assert.equal(result.dropped, undefined);
   });
 });
 

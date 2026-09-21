@@ -547,6 +547,59 @@ export function stripNoSpeechSentinel(text: string): string {
     .trim();
 }
 
+// Prompt echo (issue #197). A provider sometimes returns the instructions it
+// was given instead of a transcription of the audio: a store audit found one
+// segment holding the whole transcription prompt -- positional prefix,
+// glossary block (company, product and colleague names) and instruction list
+// -- and another holding its preamble sentence. That text reached the
+// summary, Notion, the Markdown export and Drive sync. Two provider-
+// independent signals:
+//   1. Built-in markers that exist regardless of prompt customisation.
+//   2. Verbatim lines of the prompt ACTUALLY sent with the call, which also
+//      covers a user's custom `--prompt` text and glossary entries.
+// Short prompt lines are excluded on purpose: a glossary bullet (`- Foo`) is
+// exactly what a legitimate mention of that term looks like in speech.
+const PROMPT_ECHO_REASON = 'prompt-echo';
+const MIN_ECHOED_PROMPT_LINE_CHARS = 24;
+const PROMPT_ECHO_MARKERS: Array<string | RegExp> = [
+  /\[audio segment \d+ of \d+\]/u,
+  'the following proper nouns, names, and terms may appear in the audio',
+  'please transcribe this audio recording with proper speaker identification',
+  'transcribe the speech in this audio exactly as spoken',
+  'format requirements:',
+  'return only the transcription text',
+  'return only the transcript text',
+];
+
+// Echo comparison form: lowercase NFC with whitespace collapsed to single
+// spaces. Punctuation is KEPT (unlike normalizeForComparison) -- the markers
+// are instruction sentences whose punctuation is part of the evidence, and a
+// line break inside an echoed instruction must still match.
+function normalizeForEcho(text: string): string {
+  return text.normalize('NFC').toLowerCase().replace(/\s+/gu, ' ').trim();
+}
+
+export function detectPromptEcho(
+  text: string,
+  promptLines?: string[],
+): { echoed: boolean; reasons: string[] } {
+  const haystack = normalizeForEcho(text);
+  if (!haystack) return { echoed: false, reasons: [] };
+  for (const marker of PROMPT_ECHO_MARKERS) {
+    if (typeof marker === 'string' ? haystack.includes(marker) : marker.test(haystack)) {
+      return { echoed: true, reasons: [PROMPT_ECHO_REASON] };
+    }
+  }
+  for (const line of promptLines ?? []) {
+    const needle = normalizeForEcho(line);
+    if (needle.length < MIN_ECHOED_PROMPT_LINE_CHARS) continue;
+    if (haystack.includes(needle)) {
+      return { echoed: true, reasons: [PROMPT_ECHO_REASON] };
+    }
+  }
+  return { echoed: false, reasons: [] };
+}
+
 export interface QualityGateInput {
   /** First transcription result (sentinel already stripped by the caller). */
   text: string;
@@ -574,6 +627,12 @@ export interface QualityGateInput {
    * when it does not grow and the normal verdict path considers it clean.
    */
   cleanup?: (text: string) => Promise<string>;
+  /**
+   * Lines of every prompt this call could echo back (issue #197): the prompt
+   * sent with the first attempt plus the retry prompt the ladder uses. Used
+   * only by `detectPromptEcho`; omit it to rely on the built-in markers.
+   */
+  promptLines?: string[];
   log?: (message: string) => void;
 }
 
@@ -586,9 +645,15 @@ export interface QualityGateResult {
   retriesAttempted: number;
   /** Present only when an exhaustion cleanup was accepted. */
   cleaned?: boolean;
+  /**
+   * Present only when the gate returned empty text because the result echoed
+   * the prompt. Prompt text must never reach a transcript, so this is the one
+   * case where the gate deletes rather than marks uncertain.
+   */
+  dropped?: 'prompt-echo';
 }
 
-type QualityVerdictSource = 'judge' | 'analyzer' | 'empty';
+type QualityVerdictSource = 'judge' | 'analyzer' | 'empty' | 'echo';
 
 interface QualityVerdict {
   flagged: boolean;
@@ -630,11 +695,13 @@ export async function applyTranscriptQualityGate(
   const log = input.log ?? ((message: string) => console.warn(message));
   const describe = (report: TranscriptQualityReport, source: QualityVerdictSource): string => {
     const reasons =
-      report.reasons.length > 0
-        ? report.reasons.join(', ')
-        : source === 'judge'
-          ? 'judge-loop-verdict'
-          : 'no-analyzer-reasons';
+      source === 'echo'
+        ? PROMPT_ECHO_REASON
+        : report.reasons.length > 0
+          ? report.reasons.join(', ')
+          : source === 'judge'
+            ? 'judge-loop-verdict'
+            : 'no-analyzer-reasons';
     return (
       `${reasons}; normalizedLength=${report.metrics.normalizedLength}, ` +
       `duplicateLines=${report.metrics.maxConsecutiveDuplicateLines}, ` +
@@ -648,6 +715,13 @@ export async function applyTranscriptQualityGate(
     const report = analyzeTranscriptQuality(text);
     if (!text.trim()) {
       return { flagged: false, reasons: [], source: 'empty', report };
+    }
+    // Prompt echo is decided before the judge: the judge only knows loop
+    // shapes, and instruction text is a different defect that no amount of
+    // semantic loop judgement would catch.
+    const echo = detectPromptEcho(text, input.promptLines);
+    if (echo.echoed) {
+      return { flagged: true, reasons: echo.reasons, source: 'echo', report };
     }
     if (!input.judge) {
       return { flagged: report.flagged, reasons: report.reasons, source: 'analyzer', report };
@@ -671,6 +745,21 @@ export async function applyTranscriptQualityGate(
     }
   };
 
+  // The gate never returns text that echoes the prompt: an exhausted ladder
+  // drops it instead of keeping it marked uncertain, because instruction text
+  // in a transcript is always wrong, never merely suspicious.
+  const dropEchoedText = (retried: boolean, retriesAttempted: number): QualityGateResult => {
+    log(`[transcript-quality] ${input.label}: prompt echo persisted; dropping segment text`);
+    return {
+      text: '',
+      flagged: true,
+      reasons: [PROMPT_ECHO_REASON],
+      retried,
+      retriesAttempted,
+      dropped: PROMPT_ECHO_REASON,
+    };
+  };
+
   const first = await verdictFor(input.text);
   if (!first.flagged) {
     return {
@@ -687,6 +776,7 @@ export async function applyTranscriptQualityGate(
   );
 
   if (!input.retries?.length) {
+    if (first.source === 'echo') return dropEchoedText(false, 0);
     log(`[transcript-quality] ${input.label}: no retry available; keeping flagged text`);
     return {
       text: input.text,
@@ -743,6 +833,10 @@ export async function applyTranscriptQualityGate(
         `${retryVerdict.source} (${describe(retryVerdict.report, retryVerdict.source)})`,
     );
   }
+  // Cleanup is skipped for an echoed first result: rewriting instruction text
+  // cannot recover speech that was never transcribed, and the only acceptable
+  // output here is no text at all.
+  if (first.source === 'echo') return dropEchoedText(true, totalRetries);
   if (input.cleanup && allRetriesFlagged) {
     try {
       const cleanedText = await input.cleanup(input.text);

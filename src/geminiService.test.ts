@@ -13,6 +13,7 @@ import {
   type TranscribeSonioxAudioParams,
 } from './sonioxTranscription';
 import { createCostSession } from './services/usageTracker';
+import { detectPromptEcho } from './transcriptQuality';
 import { findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
 const ffmpegPath = findFfmpegSync();
@@ -189,6 +190,13 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       signal?: AbortSignal,
     ): Promise<{ flagged: boolean; reason?: string }>;
     cleanupTranscriptQuality(text: string, signal?: AbortSignal): Promise<string>;
+    buildGlossaryBlock(): string;
+    createSegmentPrompt(
+      segmentIndex: number,
+      totalSegments: number,
+      customPrompt?: string,
+      includeGlossary?: boolean,
+    ): string;
     transcribeSegmentRaw(
       segmentFile: string,
       promptText: string,
@@ -482,6 +490,94 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     assert.equal(rawCalls, 2);
     assert.deepEqual(judgedTexts, [loopText, loopText]);
     assert.deepEqual(qualityRetryCalls, [[1, 1]]);
+  });
+
+  // Prompt echo (issue #197). A store audit found the app's own transcription
+  // prompt saved as a segment result -- glossary block (company, product and
+  // colleague names), positional prefix and instruction list -- which then
+  // flowed into the summary, Notion, the Markdown export and Drive sync.
+  // These tests are tripwires: the prompts this pipeline actually assembles
+  // must stay detectable, so editing a prompt without updating the markers in
+  // transcriptQuality.ts fails here instead of shipping silently.
+  function makeEchoingService(replyWithPrompt: (call: number) => boolean): {
+    service: SegmentHelpers;
+    prompts: string[];
+    judgeCalls: () => number;
+    cleanupCalls: () => number;
+  } {
+    const { service, prompts } = makeGatedService([]);
+    let judgeCalls = 0;
+    let cleanupCalls = 0;
+    let call = 0;
+    // The defect shape: the provider hands the prompt back as "transcript".
+    service.transcribeSegmentRaw = async (_file, promptText) => {
+      prompts.push(promptText);
+      call++;
+      return replyWithPrompt(call) ? promptText : cleanText;
+    };
+    service.judgeTranscriptQuality = async () => {
+      judgeCalls++;
+      return { flagged: false };
+    };
+    service.cleanupTranscriptQuality = async (text) => {
+      cleanupCalls++;
+      return text;
+    };
+    return { service, prompts, judgeCalls: () => judgeCalls, cleanupCalls: () => cleanupCalls };
+  }
+
+  it('detects every prompt this pipeline assembles as a prompt echo', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+      knownWords: ['Listener.AI', '김한결'],
+    }) as unknown as SegmentHelpers;
+
+    const glossaryBlock = service.buildGlossaryBlock();
+    assert.ok(glossaryBlock.includes('Listener.AI'), 'glossary must carry the known words');
+    assert.equal(detectPromptEcho(glossaryBlock).echoed, true);
+
+    const segmentPrompt = service.createSegmentPrompt(3, 12);
+    assert.match(segmentPrompt, /\[Audio segment 4 of 12\]/);
+    assert.equal(detectPromptEcho(segmentPrompt).echoed, true);
+
+    // The retry prompt is module-private; take the one a real run sent.
+    const { service: gated, prompts } = makeGatedService([loopText, cleanText]);
+    await gated.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+    assert.equal(prompts.length, 2);
+    assert.doesNotMatch(prompts[1], /Audio segment/, 'retry prompt must drop positional context');
+    assert.equal(detectPromptEcho(prompts[1]).echoed, true);
+  });
+
+  it('drops a segment whose first result and every retry echo the prompt', async () => {
+    const { service, prompts, judgeCalls, cleanupCalls } = makeEchoingService(() => true);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 3, 12, 900, 1200);
+
+    assert.equal(prompts.length, 3, 'an echo still advances through both retry rungs');
+    assert.match(prompts[0], /Audio segment 4 of 12/);
+    assert.equal(result.body, '', 'prompt text must never be returned as transcript');
+    assert.equal(result.empty, true);
+    assert.equal(result.uncertain, true);
+    assert.equal(result.cleaned, false);
+    assert.match(result.header, /^\[Segment 4: /);
+    assert.equal(judgeCalls(), 0, 'an echo is decided before the judge');
+    assert.equal(cleanupCalls(), 0, 'cleaning instruction text cannot recover speech');
+  });
+
+  it('uses the clean retry when only the first result echoes the prompt', async () => {
+    const { service, prompts } = makeEchoingService((call) => call === 1);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(prompts.length, 2);
+    assert.doesNotMatch(prompts[1], /Audio segment/, 'retry prompt must drop positional context');
+    assert.doesNotMatch(prompts[1], /proper nouns, names, and terms/, 'retry drops the glossary');
+    assert.equal(result.body, cleanText);
+    assert.equal(result.empty, false);
+    assert.equal(result.uncertain, false);
   });
 });
 
@@ -936,6 +1032,78 @@ describe('GeminiService short-audio quality judge wiring', () => {
 
     assert.equal(geminiCalls, 1);
     assert.equal(result.text, text);
+  });
+
+  // Prompt echo (issue #197) on the whole-file path is a transcription
+  // failure, not silence: "no speech" would tell the user their recording was
+  // empty when the provider simply handed the instructions back.
+  const echoedPrompt =
+    'Please transcribe this audio recording with proper speaker identification.\n\nFormat requirements:';
+
+  it('fails the whole-file run when the result echoes the prompt', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as ShortAudioHelpers;
+    const audioPath = path.join(workDir, 'short-echo.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    let transportCalls = 0;
+    let judgeCalls = 0;
+    service.generateGeminiTranscript = async () => {
+      transportCalls++;
+      return echoedPrompt;
+    };
+    service.judgeTranscriptQuality = async () => {
+      judgeCalls++;
+      return { flagged: false };
+    };
+
+    await assert.rejects(
+      () => service.getShortAudioTranscript(audioPath, 10),
+      (error: unknown) =>
+        error instanceof Error &&
+        !(error instanceof EmptyTranscriptionError) &&
+        /prompt text instead of speech/.test(error.message),
+    );
+    assert.equal(transportCalls, 3, 'an echo still advances through both retry rungs');
+    assert.equal(judgeCalls, 0, 'an echo is decided before the judge');
+  });
+
+  // Live snippets keep the silent path: `transcribeLiveSnippet` maps a typed
+  // no-speech error to '', and an error toast every 12 seconds is worse than
+  // one dropped chunk.
+  it('treats an echoed live snippet as silence, not a failure', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as ShortAudioHelpers;
+    const audioPath = path.join(workDir, 'short-echo-live.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    let transportCalls = 0;
+    service.generateGeminiTranscript = async () => {
+      transportCalls++;
+      return echoedPrompt;
+    };
+
+    await assert.rejects(
+      () =>
+        service.getShortAudioTranscript(
+          audioPath,
+          10,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          false,
+        ),
+      (error: unknown) => error instanceof EmptyTranscriptionError,
+    );
+    assert.equal(transportCalls, 1, 'live snippets never re-send the same blob');
   });
 });
 

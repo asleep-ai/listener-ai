@@ -1215,6 +1215,27 @@ export class GeminiService {
     return `The following proper nouns, names, and terms may appear in the audio. Transcribe them exactly as spelled:\n${wordList}\n\n`;
   }
 
+  // Every prompt line a transcription call could echo back as "transcript"
+  // (issue #197): the prompt actually sent plus the context-cleared retry
+  // prompt the quality ladder uses. A backend with no prompt surface gets the
+  // built-in instructions and the glossary block instead -- its vocabulary
+  // arrives out of band, so its output can still echo those terms.
+  private echoPromptLines(sentPrompt: string | undefined, includeGlossary: boolean): string[] {
+    const sources =
+      sentPrompt !== undefined
+        ? [sentPrompt]
+        : [includeGlossary ? this.buildGlossaryBlock() : '', DEFAULT_TRANSCRIPT_PROMPT];
+    sources.push(QUALITY_RETRY_TRANSCRIPT_PROMPT);
+    const lines = new Set<string>();
+    for (const source of sources) {
+      for (const line of source.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed) lines.add(trimmed);
+      }
+    }
+    return [...lines];
+  }
+
   async transcribeAudio(
     audioFilePath: string,
     progressCallback?: (percent: number, message: string) => void,
@@ -1922,6 +1943,7 @@ Requirements:
           label: `short audio (${backend.id})`,
           judge: qualityJudge,
           cleanup: qualityCleanup,
+          promptLines: this.echoPromptLines(transcriptPrompt, includeGlossary),
           retries: qualityRetry
             ? retryTemperatures.map((temperature, index) => () => {
                 reportQualityRetry(index + 1, retryTemperatures.length);
@@ -1932,6 +1954,17 @@ Requirements:
             : undefined,
           log: (message) => console.error(message),
         });
+        // A dropped echo is a transcription failure, not silence: reporting
+        // it as "no speech" would tell the user their recording was empty
+        // when the provider simply handed the prompt back. Live snippets keep
+        // the silent path -- `qualityRetry: false` is the every-12s chunk
+        // mode, where an error toast per chunk is worse than a dropped one.
+        if (gated.dropped && qualityRetry) {
+          console.error(
+            `[transcript-quality] short audio (${backend.id}): dropped transcript that echoed the prompt`,
+          );
+          throw new Error('Transcription returned the prompt text instead of speech');
+        }
         if (!gated.text.trim()) {
           throw new EmptyTranscriptionError('Transcription produced no speech content');
         }
@@ -2135,6 +2168,7 @@ Requirements:
     const retryPrompt = this.sttBackend.supportsPrompt
       ? QUALITY_RETRY_TRANSCRIPT_PROMPT
       : undefined;
+    const echoPromptLines = this.echoPromptLines(segmentPrompt, includeGlossary);
     const segmentSeconds = Math.max(0, segmentEndTime - segmentStartTime);
     const segmentHeader = this.createSegmentHeader(segmentIndex, segmentStartTime, segmentEndTime);
     const qualityJudge = qualityRetry
@@ -2178,6 +2212,7 @@ Requirements:
           label: `segment ${segmentIndex + 1}/${totalSegments}`,
           judge: qualityJudge,
           cleanup: qualityCleanup,
+          promptLines: echoPromptLines,
           retries: qualityRetry
             ? retryTemperatures.map((temperature, index) => () => {
                 onQualityRetry?.(index + 1, retryTemperatures.length);
@@ -2195,6 +2230,15 @@ Requirements:
             : undefined,
           log: (message) => console.error(message),
         });
+
+        // An echoed prompt leaves the segment empty rather than failing the
+        // run: a long recording keeps its other segments, and the time-range
+        // header still marks where the lost audio was.
+        if (gated.dropped) {
+          console.error(
+            `Segment ${segmentIndex + 1}/${totalSegments} returned prompt text instead of speech; dropping its body.`,
+          );
+        }
 
         return {
           index: segmentIndex,
