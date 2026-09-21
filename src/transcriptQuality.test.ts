@@ -20,6 +20,7 @@ import {
   detectPromptEcho,
   normalizeForComparison,
   findScriptMixOutliers,
+  formatTranscriptLossNotice,
   normalizeSpeakerLabels,
   normalizeTranscriptQualityNotes,
   reconcileOverlappingSegments,
@@ -1424,6 +1425,84 @@ describe('splitIntoScriptWindows', () => {
     for (const index of outliers) {
       assert.equal(scriptMix(windows[index]).latin, 1);
     }
+  });
+});
+
+describe('formatTranscriptLossNotice', () => {
+  // Same HH:MM:SS clock the segment headers use.
+  const clock = (seconds: number): string =>
+    [Math.floor(seconds / 3600), Math.floor((seconds % 3600) / 60), Math.floor(seconds % 60)]
+      .map((part) => String(part).padStart(2, '0'))
+      .join(':');
+
+  it('returns nothing when no segment was lost', () => {
+    assert.equal(formatTranscriptLossNotice([], clock), '');
+  });
+
+  it('names a single lost segment with its time range', () => {
+    assert.equal(
+      formatTranscriptLossNotice([{ segment: 3, start: 600, end: 900, reason: 'empty' }], clock),
+      '5 minutes of this recording produced no transcript (segments: 3 [00:10:00 ~ 00:15:00]).',
+    );
+  });
+
+  it('lists several lost segments and sums their duration', () => {
+    assert.equal(
+      formatTranscriptLossNotice(
+        [
+          { segment: 3, start: 600, end: 900, reason: 'empty' },
+          { segment: 7, start: 1800, end: 2100, reason: 'prompt-echo' },
+        ],
+        clock,
+      ),
+      '10 minutes of this recording produced no transcript ' +
+        '(segments: 3 [00:10:00 ~ 00:15:00], 7 [00:30:00 ~ 00:35:00]).',
+    );
+  });
+
+  it('uses the singular for one minute', () => {
+    assert.match(
+      formatTranscriptLossNotice([{ segment: 1, start: 0, end: 60, reason: 'cleaned' }], clock),
+      /^1 minute of this recording/,
+    );
+  });
+
+  it('never rounds a real loss down to zero minutes', () => {
+    assert.match(
+      formatTranscriptLossNotice([{ segment: 2, start: 30, end: 45, reason: 'empty' }], clock),
+      /^1 minute of this recording/,
+    );
+  });
+
+  it('rounds the total to the nearest minute', () => {
+    assert.match(
+      formatTranscriptLossNotice([{ segment: 2, start: 0, end: 100, reason: 'empty' }], clock),
+      /^2 minutes of this recording/,
+    );
+    assert.match(
+      formatTranscriptLossNotice([{ segment: 2, start: 0, end: 89, reason: 'empty' }], clock),
+      /^1 minute of this recording/,
+    );
+  });
+
+  it('ignores a segment whose bounds are inverted instead of subtracting time', () => {
+    assert.match(
+      formatTranscriptLossNotice(
+        [
+          { segment: 1, start: 900, end: 600, reason: 'empty' },
+          { segment: 2, start: 600, end: 900, reason: 'empty' },
+        ],
+        clock,
+      ),
+      /^5 minutes of this recording/,
+    );
+  });
+
+  it('crosses the hour mark in the rendered ranges', () => {
+    assert.match(
+      formatTranscriptLossNotice([{ segment: 13, start: 3600, end: 3900, reason: 'empty' }], clock),
+      /13 \[01:00:00 ~ 01:05:00\]/,
+    );
   });
 });
 

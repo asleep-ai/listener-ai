@@ -13,7 +13,7 @@ import {
   type TranscribeSonioxAudioParams,
 } from './sonioxTranscription';
 import { createCostSession } from './services/usageTracker';
-import { type SpeakerLabelStats, detectPromptEcho } from './transcriptQuality';
+import { type LostSegment, detectPromptEcho, type SpeakerLabelStats } from './transcriptQuality';
 import { findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
 const ffmpegPath = findFfmpegSync();
@@ -683,6 +683,9 @@ describe('GeminiService segmented quality aggregation', () => {
       cleaned: boolean;
       uncertain: boolean;
       speakerLabels: { distinctIds: number; normalizedLines: number; capped: boolean };
+      startTime: number;
+      endTime: number;
+      lossReason?: LostSegment['reason'];
     }>;
     getSegmentedTranscript(
       audioFilePath: string,
@@ -695,6 +698,7 @@ describe('GeminiService segmented quality aggregation', () => {
         normalizedLines: number;
         cappedSegments: Array<{ segment: number; distinctIds: number }>;
       };
+      lostSegments: LostSegment[];
     }>;
   };
 
@@ -721,6 +725,8 @@ describe('GeminiService segmented quality aggregation', () => {
       cleaned: false,
       uncertain: segmentIndex === 1,
       speakerLabels: { distinctIds: 1, normalizedLines: 0, capped: false },
+      startTime: segmentIndex * 300,
+      endTime: (segmentIndex + 1) * 300,
     });
 
     const result = await service.getSegmentedTranscript(
@@ -760,6 +766,8 @@ describe('GeminiService segmented quality aggregation', () => {
           normalizedLines: segmentIndex === 0 ? 3 : 4,
           capped,
         },
+        startTime: segmentIndex * 300,
+        endTime: (segmentIndex + 1) * 300,
       };
     };
 
@@ -773,6 +781,46 @@ describe('GeminiService segmented quality aggregation', () => {
       normalizedLines: 7,
       cappedSegments: [{ segment: 2, distinctIds: 15 }],
     });
+  });
+
+  it('collects segments that produced no body, with their reason and time range', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as SegmentedHelpers;
+    const segmentFiles = [0, 1, 2].map((i) => path.join(workDir, `lost_segment_00${i}.webm`));
+    for (const segmentFile of segmentFiles) {
+      fs.writeFileSync(segmentFile, Buffer.alloc(8, 1));
+    }
+    service.splitAudioIntoSegments = async () => segmentFiles;
+    service.transcribeSingleSegment = async (_segmentFile, segmentIndex) => {
+      const lossReason =
+        segmentIndex === 1 ? 'empty' : segmentIndex === 2 ? 'prompt-echo' : undefined;
+      return {
+        index: segmentIndex,
+        header: `[Segment ${segmentIndex + 1}]\n`,
+        body: lossReason ? '' : '참가자1: 첫 번째 안건부터 살펴보겠습니다.',
+        empty: Boolean(lossReason),
+        cleaned: false,
+        uncertain: false,
+        speakerLabels: { distinctIds: 1, normalizedLines: 0, capped: false },
+        startTime: segmentIndex * 300,
+        endTime: (segmentIndex + 1) * 300,
+        lossReason,
+      };
+    };
+
+    const result = await service.getSegmentedTranscript(
+      path.join(workDir, 'lost-source.webm'),
+      900,
+    );
+
+    assert.deepEqual(result.lostSegments, [
+      { segment: 2, start: 300, end: 600, reason: 'empty' },
+      { segment: 3, start: 600, end: 900, reason: 'prompt-echo' },
+    ]);
   });
 });
 
@@ -1596,6 +1644,7 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       uncertainSegments: number[];
       speakerLabels: SpeakerLabelAggregate;
       bodies: string[];
+      lostSegments: LostSegment[];
     }>;
     generateSummary(promptText: string, transcript: string, ...rest: unknown[]): Promise<string>;
   };
@@ -1609,6 +1658,7 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     speakerLabels?: SpeakerLabelStats;
     segmentedSpeakerLabels?: SpeakerLabelAggregate;
     bodies?: string[];
+    lostSegments?: LostSegment[];
   }): {
     service: TwoStepHelpers;
     summaryPrompts: string[];
@@ -1632,6 +1682,7 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       uncertainSegments: opts.uncertainSegments ?? [],
       speakerLabels: opts.segmentedSpeakerLabels ?? { normalizedLines: 0, cappedSegments: [] },
       bodies: opts.bodies ?? [opts.transcript],
+      lostSegments: opts.lostSegments ?? [],
     });
     service.generateSummary = async (promptText) => {
       summaryPrompts.push(promptText);
@@ -2060,6 +2111,61 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
 
     assert.equal(result.customFields, undefined);
     assert.doesNotMatch(summaryPrompts[0], /An automated check found/);
+  });
+
+  it('prepends a coverage notice to both summary representations when segments were lost', async () => {
+    const notice =
+      '10 minutes of this recording produced no transcript ' +
+      '(segments: 3 [00:10:00 ~ 00:15:00], 7 [00:30:00 ~ 00:35:00]).';
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 첫 번째 안건부터 살펴보겠습니다.',
+      lostSegments: [
+        { segment: 3, start: 600, end: 900, reason: 'empty' },
+        { segment: 7, start: 1800, end: 2100, reason: 'prompt-echo' },
+      ],
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summarySections: [{ heading: 'Agenda', bullets: ['Discussed the roadmap'] }],
+        keyPoints: ['One'],
+        actionItemGroups: [{ owner: 'Team', items: ['Follow up'] }],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('lost-long.webm'), 600);
+
+    assert.ok(result.summary.startsWith(notice), 'the flat summary leads with the notice');
+    assert.equal(result.summary.split(notice).length, 2, 'the notice appears exactly once');
+    assert.deepEqual(result.summarySections?.[0], {
+      heading: 'Transcript coverage',
+      bullets: [notice],
+    });
+    assert.equal(result.summarySections?.[1]?.heading, 'Agenda');
+    assert.deepEqual(result.customFields?.transcriptQuality, {
+      lostSegments: [
+        { segment: 3, start: 600, end: 900, reason: 'empty' },
+        { segment: 7, start: 1800, end: 2100, reason: 'prompt-echo' },
+      ],
+      lostSeconds: 600,
+    });
+  });
+
+  it('adds no coverage notice when every segment produced a transcript', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 첫 번째 안건부터 살펴보겠습니다.',
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summarySections: [{ heading: 'Agenda', bullets: ['Discussed the roadmap'] }],
+        keyPoints: ['One'],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('kept-long.webm'), 600);
+
+    assert.doesNotMatch(result.summary, /produced no transcript/);
+    assert.equal(result.summarySections?.[0]?.heading, 'Agenda');
+    assert.equal(result.customFields, undefined);
   });
 
   it('omits speakerLabels when the guard had nothing to report', async () => {

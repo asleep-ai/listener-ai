@@ -45,16 +45,19 @@ import {
   retryTemperaturesFor,
 } from './batchSttBackend';
 import {
+  type LostSegment,
   NO_SPEECH_SENTINEL,
   SPEAKER_ID_CAP,
   type SpeakerLabelStats,
   analyzeAssembledTranscript,
   applyTranscriptQualityGate,
   findScriptMixOutliers,
+  formatTranscriptLossNotice,
   normalizeSpeakerLabels,
   normalizeTranscriptQualityNotes,
   reconcileOverlappingSegments,
   splitIntoScriptWindows,
+  type TranscriptLossReason,
   stripNoSpeechSentinel,
 } from './transcriptQuality';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
@@ -307,6 +310,8 @@ interface SegmentedQualityGatedTranscript {
   speakerLabels: SpeakerLabelAggregate;
   /** Reconciled per-segment bodies, headers excluded, for script-mix review. */
   bodies: string[];
+  /** Segments that ended up with no body at all (issue #197 guard 5). */
+  lostSegments: LostSegment[];
 }
 
 const NO_SPEAKER_LABELS: SpeakerLabelStats = {
@@ -619,6 +624,11 @@ const TRANSCRIPT_QUALITY_PROMPT_BLOCK = `Additionally, before summarizing, revie
 - Base the summary, key points, and action items only on content you judge to be genuine speech; do not summarize suspected artifacts as if they were discussion content.`;
 
 const FOREIGN_SCRIPT_REASON = 'foreign-script-segment';
+
+// Heading for the coverage notice prepended to structured summaries. The app
+// tab, `listener show` and Notion all render summarySections and ignore the
+// flat summary string when sections exist, so the notice has to live in both.
+const TRANSCRIPT_COVERAGE_HEADING = 'Transcript coverage';
 
 // Script shares are advisory, so keep meta.json readable instead of carrying
 // full floating-point precision.
@@ -1670,6 +1680,9 @@ Requirements:
       // them, letter-budget windows otherwise.
       let scriptBlocks: string[] = [];
       let scriptSegmented = false;
+      // Stretches that produced no transcript at all. The short path never
+      // contributes: an empty whole file throws instead of saving a note.
+      let lostSegments: LostSegment[] = [];
       const stats = await fs.promises.stat(audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
       // Segment intentionally for parallelism: even when the API would
@@ -1714,6 +1727,7 @@ Requirements:
           speakerLabels = gatedTranscript.speakerLabels;
           scriptBlocks = gatedTranscript.bodies;
           scriptSegmented = true;
+          lostSegments = gatedTranscript.lostSegments;
         } else {
           // Get transcript for short audio
           console.error('Transcribing short audio...');
@@ -1891,6 +1905,32 @@ Requirements:
         throw new Error('The summary model returned invalid JSON.', { cause: e });
       }
 
+      // Silent transcript loss (issue #197). The gate already knew which
+      // stretches produced nothing, and the stored summary still read as if
+      // the whole meeting had been captured. Put one plain sentence at the top
+      // of both summary representations: consumers that render structured
+      // sections ignore the flat string entirely, and vice versa. Runs once,
+      // on the linear path after the summary JSON is parsed, so the notice
+      // cannot be added twice. `transcriptOnly` returned long before this.
+      const lossNotice = formatTranscriptLossNotice(lostSegments, (seconds) =>
+        this.formatTime(seconds),
+      );
+      if (lossNotice) {
+        console.error(
+          `[transcript-quality] ${lostSegments.length} segment(s) produced no transcript; ` +
+            'prepending a coverage notice to the summary',
+        );
+        summaryData.summary = summaryData.summary
+          ? `${lossNotice}\n\n${summaryData.summary}`
+          : lossNotice;
+        if (summaryData.summarySections?.length) {
+          summaryData.summarySections = [
+            { heading: TRANSCRIPT_COVERAGE_HEADING, bullets: [lossNotice] },
+            ...summaryData.summarySections,
+          ];
+        }
+      }
+
       const highlights = mergeHighlights(liveNotes, rawHighlights);
 
       // Persist the final-stage quality picture on the note (meta.json
@@ -1900,6 +1940,10 @@ Requirements:
       const speakerLabelsRecorded =
         speakerLabels.normalizedLines > 0 || speakerLabels.cappedSegments.length > 0;
       const scriptOutliersFound = scriptOutlierPositions.length > 0;
+      const lostSeconds = lostSegments.reduce(
+        (total, segment) => total + Math.max(0, segment.end - segment.start),
+        0,
+      );
       // The analyzer block now carries two independent findings, so it is
       // written when either of them has something to say.
       const analyzerRecorded = assembledQuality.flagged || scriptOutliersFound;
@@ -1907,6 +1951,7 @@ Requirements:
         qualityCleaned ||
         uncertainSegments.length > 0 ||
         speakerLabelsRecorded ||
+        lostSegments.length > 0 ||
         analyzerRecorded ||
         modelQualityNotes.length > 0
       ) {
@@ -1914,6 +1959,7 @@ Requirements:
           ...(qualityCleaned ? { cleaned: true } : {}),
           ...(uncertainSegments.length > 0 ? { uncertainSegments } : {}),
           ...(speakerLabelsRecorded ? { speakerLabels } : {}),
+          ...(lostSegments.length > 0 ? { lostSegments, lostSeconds } : {}),
           ...(analyzerRecorded
             ? {
                 analyzer: {
@@ -2293,6 +2339,10 @@ Requirements:
     cleaned: boolean;
     uncertain: boolean;
     speakerLabels: SpeakerLabelStats;
+    startTime: number;
+    endTime: number;
+    /** Set only when the segment ended up with no body at all. */
+    lossReason?: TranscriptLossReason;
   }> {
     const maxRetries = 3;
     let lastError: any = null;
@@ -2379,17 +2429,27 @@ Requirements:
 
         const speakerLabels = normalizeSpeakerLabels(gated.text);
         this.reportSpeakerLabelCap(speakerLabels, `Segment ${segmentIndex + 1}/${totalSegments}`);
+        const empty = speakerLabels.text.trim().length === 0;
         return {
           index: segmentIndex,
           header: segmentHeader,
           body: speakerLabels.text,
-          empty: speakerLabels.text.trim().length === 0,
+          empty,
           cleaned: gated.cleaned === true,
           // A runaway id counter means the diarizer stopped tracking who is
           // speaking, so the text stays but must not be trusted for owner
           // attribution.
           uncertain: gated.flagged || speakerLabels.capped,
           speakerLabels,
+          startTime: segmentStartTime,
+          endTime: segmentEndTime,
+          lossReason: !empty
+            ? undefined
+            : gated.dropped
+              ? 'prompt-echo'
+              : gated.cleaned === true
+                ? 'cleaned'
+                : 'empty',
         };
       } catch (segmentError) {
         // Abort surfaces here too; don't burn through retries when the caller
@@ -2412,6 +2472,9 @@ Requirements:
             cleaned: false,
             uncertain: false,
             speakerLabels: NO_SPEAKER_LABELS,
+            startTime: segmentStartTime,
+            endTime: segmentEndTime,
+            lossReason: 'empty',
           };
         }
         lastError = segmentError;
@@ -2560,6 +2623,9 @@ Requirements:
         cleaned: boolean;
         uncertain: boolean;
         speakerLabels: SpeakerLabelStats;
+        startTime: number;
+        endTime: number;
+        lossReason?: TranscriptLossReason;
       }[];
       try {
         segmentResults = await Promise.all(progressTrackedPromises);
@@ -2582,6 +2648,18 @@ Requirements:
       const uncertainSegments = segmentResults
         .filter((result) => result.uncertain)
         .map((result) => result.index + 1);
+      const lostSegments: LostSegment[] = segmentResults.flatMap((result) =>
+        result.lossReason
+          ? [
+              {
+                segment: result.index + 1,
+                start: result.startTime,
+                end: result.endTime,
+                reason: result.lossReason,
+              },
+            ]
+          : [],
+      );
       const speakerLabels: SpeakerLabelAggregate = {
         normalizedLines: segmentResults.reduce(
           (total, result) => total + result.speakerLabels.normalizedLines,
@@ -2633,6 +2711,7 @@ Requirements:
         uncertainSegments,
         speakerLabels,
         bodies: reconciledBodies,
+        lostSegments,
       };
     } catch (error) {
       console.error('Error in segmented transcription:', error);

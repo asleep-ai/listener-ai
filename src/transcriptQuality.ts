@@ -625,6 +625,53 @@ export function splitIntoScriptWindows(
   return windows;
 }
 
+// Silent transcript loss (issue #197). A store audit found 15 of 102
+// transcripts holding at least one empty segment -- a time-range header with
+// no body -- while the stored summary read as if the whole meeting had been
+// captured. The pipeline already knew which stretches produced nothing; this
+// turns that knowledge into one plain sentence the user actually sees.
+//
+// A segment that exhausts its provider retries never reaches here: it throws
+// and fails the whole run, because a partial note that looks complete is worse
+// than an error. What this covers is a segment that came back empty (the
+// [NO_SPEECH] sentinel or EmptyTranscriptionError), one the exhaustion cleanup
+// rewrote to nothing, and one dropped because it echoed the prompt.
+export type TranscriptLossReason = 'empty' | 'cleaned' | 'prompt-echo';
+
+export interface LostSegment {
+  /** 1-based segment number, matching the transcript's segment headers. */
+  segment: number;
+  /** Nominal segment bounds in seconds, as the headers report them. */
+  start: number;
+  end: number;
+  reason: TranscriptLossReason;
+}
+
+// One sentence, plain English, safe to put at the top of a summary. The caller
+// supplies the clock formatter so the times match the segment headers exactly.
+export function formatTranscriptLossNotice(
+  lost: LostSegment[],
+  formatTime: (seconds: number) => string,
+): string {
+  if (lost.length === 0) return '';
+  const totalSeconds = lost.reduce(
+    (total, segment) => total + Math.max(0, segment.end - segment.start),
+    0,
+  );
+  // Never say "0 minutes": any loss at all is worth a minute of the user's
+  // attention, and the segment list carries the exact ranges anyway.
+  const minutes = Math.max(1, Math.round(totalSeconds / 60));
+  const ranges = lost
+    .map(
+      (segment) => `${segment.segment} [${formatTime(segment.start)} ~ ${formatTime(segment.end)}]`,
+    )
+    .join(', ');
+  return (
+    `${minutes} minute${minutes === 1 ? '' : 's'} of this recording produced no transcript ` +
+    `(segments: ${ranges}).`
+  );
+}
+
 const MAX_QUALITY_NOTES = 10;
 const MAX_QUALITY_NOTE_CHARS = 300;
 
