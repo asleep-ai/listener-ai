@@ -547,6 +547,83 @@ export function stripNoSpeechSentinel(text: string): string {
     .trim();
 }
 
+// Speaker-label normalisation (issue #197). A store audit found corrupted
+// leading labels in 63 of 102 transcripts -- `참가1:`, `참자2:`, `참참가자1:`,
+// `참가자 3:`, `[참가자1]`, `[ 참가자1 ]` -- and runaway id counters reaching
+// `참가자147`, where a diarizer gave almost every bare `어.` line a new
+// speaker (150 distinct ids in one segment). Owner-grouped action items
+// cannot be attributed on that output, so labels are rewritten to one
+// canonical shape and the id space is bounded before the transcript reaches
+// the summary stage. Pure and total: odd input is left alone, never thrown on.
+export const SPEAKER_ID_CAP = 12;
+
+// A leading Korean speaker label in any of the observed corrupted shapes.
+// Groups: 1 open bracket, 2 name, 3 hash, 4 id digits, 5 close bracket,
+// 6 colon. English labels ("Speaker 2:", "Participant 5:") are deliberately
+// not matched -- they arrive well-formed and renaming them would destroy the
+// only speaker information an English meeting carries.
+const SPEAKER_LABEL_VARIANT =
+  /^[ \t]*(\[[ \t]*)?(참참가자|참가자|참가|참자)[ \t]*(#[ \t]*)?(\d+)[ \t]*(\][ \t]*)?([:：][ \t]*)?/u;
+
+export interface SpeakerLabelStats {
+  /** Distinct ids seen in the body, counted BEFORE the cap is applied. */
+  distinctIds: number;
+  /** Lines whose label text was rewritten by normalisation. */
+  normalizedLines: number;
+  /** True when ids past the cap were collapsed onto the last valid id. */
+  capped: boolean;
+}
+
+export interface SpeakerLabelNormalization extends SpeakerLabelStats {
+  text: string;
+}
+
+// Canonical form: `참가자N: `, single ASCII colon and one space. A label with
+// nothing after it keeps no trailing space, so a bare label line does not
+// gain invisible whitespace on every pass.
+function canonicalSpeakerLabel(id: string, rest: string): string {
+  return rest.length > 0 ? `참가자${id}: ` : `참가자${id}:`;
+}
+
+export function normalizeSpeakerLabels(
+  body: string,
+  options?: { maxDistinctIds?: number },
+): SpeakerLabelNormalization {
+  const maxDistinctIds = Math.max(1, Math.floor(options?.maxDistinctIds ?? SPEAKER_ID_CAP));
+  // Split keeping the separators, so line endings survive the round trip and
+  // unlabelled lines come back byte-identical.
+  const parts = body.split(/(\r\n|[\n\r])/u);
+  const labels = new Map<number, { id: string; rest: string; original: string }>();
+  const order: string[] = [];
+
+  for (let i = 0; i < parts.length; i += 2) {
+    const match = SPEAKER_LABEL_VARIANT.exec(parts[i]);
+    if (!match) continue;
+    // A terminator is required: `참가자 3명이 참석했습니다` is a sentence, not
+    // a label, and rewriting it would eat the first word of real speech.
+    const bracketed = Boolean(match[1]) && Boolean(match[5]);
+    if (!bracketed && !match[6]) continue;
+    const id = match[4];
+    if (!order.includes(id)) order.push(id);
+    labels.set(i, { id, rest: parts[i].slice(match[0].length), original: match[0] });
+  }
+
+  const capped = order.length > maxDistinctIds;
+  const lastValidId = capped ? order[maxDistinctIds - 1] : undefined;
+  let normalizedLines = 0;
+
+  for (const [i, label] of labels) {
+    if (label.original !== canonicalSpeakerLabel(label.id, label.rest)) normalizedLines++;
+    const id =
+      lastValidId !== undefined && order.indexOf(label.id) >= maxDistinctIds
+        ? lastValidId
+        : label.id;
+    parts[i] = canonicalSpeakerLabel(id, label.rest) + label.rest;
+  }
+
+  return { text: parts.join(''), distinctIds: order.length, normalizedLines, capped };
+}
+
 // Prompt echo (issue #197). A provider sometimes returns the instructions it
 // was given instead of a transcription of the audio: a store audit found one
 // segment holding the whole transcription prompt -- positional prefix,

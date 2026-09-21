@@ -13,12 +13,25 @@ import {
   type TranscribeSonioxAudioParams,
 } from './sonioxTranscription';
 import { createCostSession } from './services/usageTracker';
-import { detectPromptEcho } from './transcriptQuality';
+import { type SpeakerLabelStats, detectPromptEcho } from './transcriptQuality';
 import { findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
 const ffmpegPath = findFfmpegSync();
 
 let workDir: string;
+
+// Mirrors the service-internal shape that transcribeWithTwoSteps assembles
+// from per-segment speaker-label stats (issue #197).
+type SpeakerLabelAggregate = {
+  normalizedLines: number;
+  cappedSegments: Array<{ segment: number; distinctIds: number }>;
+};
+
+const NO_SPEAKER_LABELS: SpeakerLabelStats = {
+  distinctIds: 0,
+  normalizedLines: 0,
+  capped: false,
+};
 
 type GeminiServiceFfmpegHelpers = {
   getAudioDuration(audioFilePath: string, signal?: AbortSignal): Promise<number>;
@@ -224,6 +237,7 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       empty: boolean;
       cleaned: boolean;
       uncertain: boolean;
+      speakerLabels: { distinctIds: number; normalizedLines: number; capped: boolean };
     }>;
   };
 
@@ -283,6 +297,38 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     assert.deepEqual(temperatures, [undefined, 0.4]);
     assert.ok(result.body.includes(retryText));
     assert.equal(result.uncertain, false);
+  });
+
+  it('rewrites corrupted speaker labels in the segment body', async () => {
+    const raw = ['참가1: 안녕하세요.', '참자2: 반갑습니다.', '[참가자1] 시작하겠습니다.'].join(
+      '\n',
+    );
+    const { service } = makeGatedService([raw]);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(
+      result.body,
+      ['참가자1: 안녕하세요.', '참가자2: 반갑습니다.', '참가자1: 시작하겠습니다.'].join('\n'),
+    );
+    assert.equal(result.speakerLabels.normalizedLines, 3);
+    assert.equal(result.speakerLabels.distinctIds, 2);
+    assert.equal(result.speakerLabels.capped, false);
+    assert.equal(result.uncertain, false, 'normalisation alone is not a quality defect');
+  });
+
+  it('caps a runaway speaker id counter and marks the segment uncertain', async () => {
+    // The audit shape: a diarizer hands nearly every short line its own id.
+    const raw = Array.from({ length: 15 }, (_, i) => `참가자${i + 1}: 어.`).join('\n');
+    const { service } = makeGatedService([raw]);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(result.speakerLabels.capped, true);
+    assert.equal(result.speakerLabels.distinctIds, 15);
+    assert.equal(result.uncertain, true, 'owner attribution cannot be trusted past the cap');
+    assert.ok(!result.body.includes('참가자13'));
+    assert.ok(result.body.endsWith('참가자12: 어.'));
   });
 
   it('replaces a flagged segment with the clean context-cleared retry result', async () => {
@@ -594,6 +640,7 @@ describe('GeminiService segmented quality aggregation', () => {
       empty: boolean;
       cleaned: boolean;
       uncertain: boolean;
+      speakerLabels: { distinctIds: number; normalizedLines: number; capped: boolean };
     }>;
     getSegmentedTranscript(
       audioFilePath: string,
@@ -602,6 +649,10 @@ describe('GeminiService segmented quality aggregation', () => {
       text: string;
       cleaned: boolean;
       uncertainSegments: number[];
+      speakerLabels: {
+        normalizedLines: number;
+        cappedSegments: Array<{ segment: number; distinctIds: number }>;
+      };
     }>;
   };
 
@@ -627,6 +678,7 @@ describe('GeminiService segmented quality aggregation', () => {
       empty: false,
       cleaned: false,
       uncertain: segmentIndex === 1,
+      speakerLabels: { distinctIds: 1, normalizedLines: 0, capped: false },
     });
 
     const result = await service.getSegmentedTranscript(
@@ -635,6 +687,50 @@ describe('GeminiService segmented quality aggregation', () => {
     );
 
     assert.deepEqual(result.uncertainSegments, [2]);
+  });
+
+  it('aggregates speaker-label stats and reports capped segments as uncertain', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as SegmentedHelpers;
+    const segmentFiles = [
+      path.join(workDir, 'labels_segment_000.webm'),
+      path.join(workDir, 'labels_segment_001.webm'),
+    ];
+    for (const segmentFile of segmentFiles) {
+      fs.writeFileSync(segmentFile, Buffer.alloc(8, 1));
+    }
+    service.splitAudioIntoSegments = async () => segmentFiles;
+    service.transcribeSingleSegment = async (_segmentFile, segmentIndex) => {
+      const capped = segmentIndex === 1;
+      return {
+        index: segmentIndex,
+        header: `[Segment ${segmentIndex + 1}]\n`,
+        body: `참가자1: 세그먼트 ${segmentIndex + 1}의 정상 발화입니다.`,
+        empty: false,
+        cleaned: false,
+        uncertain: capped,
+        speakerLabels: {
+          distinctIds: capped ? 15 : 2,
+          normalizedLines: segmentIndex === 0 ? 3 : 4,
+          capped,
+        },
+      };
+    };
+
+    const result = await service.getSegmentedTranscript(
+      path.join(workDir, 'labels-source.webm'),
+      600,
+    );
+
+    assert.deepEqual(result.uncertainSegments, [2]);
+    assert.deepEqual(result.speakerLabels, {
+      normalizedLines: 7,
+      cappedSegments: [{ segment: 2, distinctIds: 15 }],
+    });
   });
 });
 
@@ -1446,13 +1542,17 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       actionItemGroups?: Array<{ owner: string; items: string[] }>;
       customFields?: Record<string, unknown>;
     }>;
-    getShortAudioTranscript(
-      ...args: unknown[]
-    ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
+    getShortAudioTranscript(...args: unknown[]): Promise<{
+      text: string;
+      cleaned: boolean;
+      uncertain: boolean;
+      speakerLabels: SpeakerLabelStats;
+    }>;
     getSegmentedTranscript(...args: unknown[]): Promise<{
       text: string;
       cleaned: boolean;
       uncertainSegments: number[];
+      speakerLabels: SpeakerLabelAggregate;
     }>;
     generateSummary(promptText: string, transcript: string, ...rest: unknown[]): Promise<string>;
   };
@@ -1463,6 +1563,8 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     cleaned?: boolean;
     uncertain?: boolean;
     uncertainSegments?: number[];
+    speakerLabels?: SpeakerLabelStats;
+    segmentedSpeakerLabels?: SpeakerLabelAggregate;
   }): {
     service: TwoStepHelpers;
     summaryPrompts: string[];
@@ -1478,11 +1580,13 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       text: opts.transcript,
       cleaned: opts.cleaned ?? false,
       uncertain: opts.uncertain ?? false,
+      speakerLabels: opts.speakerLabels ?? NO_SPEAKER_LABELS,
     });
     service.getSegmentedTranscript = async () => ({
       text: opts.transcript,
       cleaned: opts.cleaned ?? false,
       uncertainSegments: opts.uncertainSegments ?? [],
+      speakerLabels: opts.segmentedSpeakerLabels ?? { normalizedLines: 0, cappedSegments: [] },
     });
     service.generateSummary = async (promptText) => {
       summaryPrompts.push(promptText);
@@ -1749,6 +1853,91 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     });
   });
 
+  it('persists the segmented speaker-label guard on customFields', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
+      uncertainSegments: [2],
+      segmentedSpeakerLabels: {
+        normalizedLines: 7,
+        cappedSegments: [{ segment: 2, distinctIds: 15 }],
+      },
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('labels-long.webm'), 600);
+
+    assert.deepEqual(result.customFields?.transcriptQuality, {
+      uncertainSegments: [2],
+      speakerLabels: { normalizedLines: 7, cappedSegments: [{ segment: 2, distinctIds: 15 }] },
+    });
+  });
+
+  it('persists a capped whole-file transcript as segment 1', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
+      uncertain: true,
+      speakerLabels: { distinctIds: 15, normalizedLines: 7, capped: true },
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('labels-short.webm'), 10);
+
+    assert.deepEqual(result.customFields?.transcriptQuality, {
+      uncertainSegments: [1],
+      speakerLabels: { normalizedLines: 7, cappedSegments: [{ segment: 1, distinctIds: 15 }] },
+    });
+  });
+
+  it('persists normalized label counts even when nothing else is wrong', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
+      speakerLabels: { distinctIds: 2, normalizedLines: 3, capped: false },
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('labels-only.webm'), 10);
+
+    assert.deepEqual(result.customFields?.transcriptQuality, {
+      speakerLabels: { normalizedLines: 3, cappedSegments: [] },
+    });
+  });
+
+  it('omits speakerLabels when the guard had nothing to report', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
+      cleaned: true,
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('clean-labels.webm'), 10);
+
+    assert.deepEqual(result.customFields?.transcriptQuality, { cleaned: true });
+  });
+
   it('persists short-audio uncertainty as segment 1', async () => {
     const { service } = makeTwoStepService({
       transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
@@ -1927,9 +2116,12 @@ describe('GeminiService transcription error attribution', () => {
       options?: { transcriptOnly?: boolean },
     ): Promise<{ transcript: string }>;
     getAudioDuration(audioFilePath: string, signal?: AbortSignal): Promise<number>;
-    getShortAudioTranscript(
-      ...args: unknown[]
-    ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
+    getShortAudioTranscript(...args: unknown[]): Promise<{
+      text: string;
+      cleaned: boolean;
+      uncertain: boolean;
+      speakerLabels: SpeakerLabelStats;
+    }>;
     generateSummary(promptText: string, transcript: string, ...rest: unknown[]): Promise<string>;
   };
 
@@ -1962,6 +2154,7 @@ describe('GeminiService transcription error attribution', () => {
       text: '참가자1: 회의를 시작하겠습니다.',
       cleaned: false,
       uncertain: false,
+      speakerLabels: NO_SPEAKER_LABELS,
     });
     service.generateSummary = async () => {
       throw new Error('API key not valid. Please pass a valid API key.');

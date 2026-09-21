@@ -13,14 +13,17 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  SPEAKER_ID_CAP,
   analyzeAssembledTranscript,
   analyzeTranscriptQuality,
   applyTranscriptQualityGate,
   detectPromptEcho,
   normalizeForComparison,
+  normalizeSpeakerLabels,
   normalizeTranscriptQualityNotes,
   reconcileOverlappingSegments,
   stripNoSpeechSentinel,
+  stripSpeakerLabel,
 } from './transcriptQuality';
 
 describe('normalizeForComparison', () => {
@@ -263,6 +266,164 @@ describe('analyzeTranscriptQuality: loop shapes are flagged', () => {
     assert.equal(report.flagged, true);
     assert.ok(report.reasons.includes('high-text-compression'));
     assert.ok(report.metrics.textCompressionRatio > 4);
+  });
+});
+
+describe('normalizeSpeakerLabels', () => {
+  const idLine = (id: number, text: string) => `참가자${id}: ${text}`;
+
+  it('rewrites every corrupted label shape found in the store audit', () => {
+    for (const [raw, expected] of [
+      ['참가1: 안녕하세요.', '참가자1: 안녕하세요.'],
+      ['참자2: 안녕하세요.', '참가자2: 안녕하세요.'],
+      ['참참가자1: 안녕하세요.', '참가자1: 안녕하세요.'],
+      ['참가자 3: 안녕하세요.', '참가자3: 안녕하세요.'],
+      ['참가자4 : 안녕하세요.', '참가자4: 안녕하세요.'],
+      ['참가자5：안녕하세요.', '참가자5: 안녕하세요.'],
+      ['[참가자6] 안녕하세요.', '참가자6: 안녕하세요.'],
+      ['[ 참가자7 ] 안녕하세요.', '참가자7: 안녕하세요.'],
+      ['참가자#8: 안녕하세요.', '참가자8: 안녕하세요.'],
+      ['[참가자 #9]: 안녕하세요.', '참가자9: 안녕하세요.'],
+    ] as const) {
+      const result = normalizeSpeakerLabels(raw);
+      assert.equal(result.text, expected, `failed on: ${raw}`);
+      assert.equal(result.normalizedLines, 1, `should count a rewrite for: ${raw}`);
+      assert.equal(result.capped, false);
+    }
+  });
+
+  it('keeps the id digits as given instead of renumbering', () => {
+    const result = normalizeSpeakerLabels(
+      '참가7: 먼저 말씀드리겠습니다.\n참가3: 이어서 말씀드립니다.',
+    );
+    assert.equal(result.text, '참가자7: 먼저 말씀드리겠습니다.\n참가자3: 이어서 말씀드립니다.');
+    assert.equal(result.distinctIds, 2);
+  });
+
+  it('counts no rewrite for labels that are already canonical', () => {
+    const body = [idLine(1, '오늘 회의를 시작하겠습니다.'), idLine(2, '네, 준비되었습니다.')].join(
+      '\n',
+    );
+    const result = normalizeSpeakerLabels(body);
+    assert.equal(result.text, body);
+    assert.equal(result.normalizedLines, 0);
+    assert.equal(result.distinctIds, 2);
+    assert.equal(result.capped, false);
+  });
+
+  it('leaves English speaker labels untouched', () => {
+    const body = 'Speaker 1: We approved the launch.\nParticipant 2: Acme will publish it.';
+    const result = normalizeSpeakerLabels(body);
+    assert.equal(result.text, body);
+    assert.equal(result.normalizedLines, 0);
+    assert.equal(result.distinctIds, 0);
+  });
+
+  it('leaves unlabeled lines and label-shaped prose untouched', () => {
+    // No colon and no bracket means no label: rewriting this would eat the
+    // first word of real speech.
+    const body = '오늘 회의를 시작하겠습니다.\n참가자 3명이 참석했습니다.\n\n감사합니다.';
+    const result = normalizeSpeakerLabels(body);
+    assert.equal(result.text, body);
+    assert.equal(result.normalizedLines, 0);
+    assert.equal(result.distinctIds, 0);
+  });
+
+  it('returns an empty body unchanged with zeroed counts', () => {
+    assert.deepEqual(normalizeSpeakerLabels(''), {
+      text: '',
+      distinctIds: 0,
+      normalizedLines: 0,
+      capped: false,
+    });
+  });
+
+  it('normalizes a bare label line without adding trailing whitespace', () => {
+    assert.equal(normalizeSpeakerLabels('[ 참가자1 ]').text, '참가자1:');
+  });
+
+  it('collapses ids past the cap onto the last valid id', () => {
+    const body = Array.from({ length: 15 }, (_, i) => idLine(i + 1, '어.')).join('\n');
+    const result = normalizeSpeakerLabels(body);
+    assert.equal(result.capped, true);
+    assert.equal(result.distinctIds, 15, 'distinctIds reports the pre-cap count');
+    const ids = result.text.split('\n').map((line) => line.slice(0, line.indexOf(':')));
+    assert.deepEqual(ids.slice(0, SPEAKER_ID_CAP), [
+      '참가자1',
+      '참가자2',
+      '참가자3',
+      '참가자4',
+      '참가자5',
+      '참가자6',
+      '참가자7',
+      '참가자8',
+      '참가자9',
+      '참가자10',
+      '참가자11',
+      '참가자12',
+    ]);
+    assert.deepEqual(ids.slice(SPEAKER_ID_CAP), ['참가자12', '참가자12', '참가자12']);
+  });
+
+  it('does not cap exactly the cap many ids', () => {
+    const body = Array.from({ length: SPEAKER_ID_CAP }, (_, i) => idLine(i + 1, '어.')).join('\n');
+    const result = normalizeSpeakerLabels(body);
+    assert.equal(result.capped, false);
+    assert.equal(result.distinctIds, SPEAKER_ID_CAP);
+    assert.equal(result.text, body);
+  });
+
+  it('orders ids by first appearance, not by number', () => {
+    const body = ['참가자9: 먼저.', '참가자4: 다음.', '참가자9: 다시.', '참가자7: 마지막.'].join(
+      '\n',
+    );
+    const result = normalizeSpeakerLabels(body, { maxDistinctIds: 2 });
+    assert.equal(result.capped, true);
+    assert.equal(result.distinctIds, 3);
+    assert.equal(result.text, '참가자9: 먼저.\n참가자4: 다음.\n참가자9: 다시.\n참가자4: 마지막.');
+  });
+
+  it('applies the cap after normalisation, so a variant id counts as itself', () => {
+    const body = Array.from({ length: 13 }, (_, i) => `참가${i + 1}: 어.`).join('\n');
+    const result = normalizeSpeakerLabels(body);
+    assert.equal(result.distinctIds, 13);
+    assert.equal(result.normalizedLines, 13);
+    assert.equal(result.capped, true);
+    assert.ok(result.text.endsWith('참가자12: 어.'));
+  });
+
+  it('honors an explicit maxDistinctIds override', () => {
+    const body = ['참가자1: 하나.', '참가자2: 둘.', '참가자3: 셋.'].join('\n');
+    assert.equal(normalizeSpeakerLabels(body, { maxDistinctIds: 3 }).capped, false);
+    const capped = normalizeSpeakerLabels(body, { maxDistinctIds: 2 });
+    assert.equal(capped.capped, true);
+    assert.equal(capped.text, '참가자1: 하나.\n참가자2: 둘.\n참가자2: 셋.');
+  });
+
+  it('is idempotent: normalizing twice equals normalizing once', () => {
+    const body = [
+      '참가1: 안녕하세요.',
+      '[ 참자2 ] 반갑습니다.',
+      ...Array.from({ length: 13 }, (_, i) => `참가자${i + 3}：어.`),
+      'Speaker 1: Unchanged.',
+      '그냥 문장입니다.',
+    ].join('\n');
+    const once = normalizeSpeakerLabels(body);
+    const twice = normalizeSpeakerLabels(once.text);
+    assert.equal(twice.text, once.text);
+    assert.equal(twice.normalizedLines, 0);
+    assert.equal(twice.capped, false);
+  });
+
+  it('preserves CRLF line endings', () => {
+    const result = normalizeSpeakerLabels('참가1: 안녕하세요.\r\n참가2: 반갑습니다.');
+    assert.equal(result.text, '참가자1: 안녕하세요.\r\n참가자2: 반갑습니다.');
+  });
+
+  it('produces labels that stripSpeakerLabel accepts', () => {
+    const result = normalizeSpeakerLabels('[ 참참가자11 ] 정리하겠습니다.');
+    assert.equal(result.text, '참가자11: 정리하겠습니다.');
+    assert.equal(stripSpeakerLabel(result.text), '정리하겠습니다.');
   });
 });
 

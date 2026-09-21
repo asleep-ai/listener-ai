@@ -46,8 +46,11 @@ import {
 } from './batchSttBackend';
 import {
   NO_SPEECH_SENTINEL,
+  SPEAKER_ID_CAP,
+  type SpeakerLabelStats,
   analyzeAssembledTranscript,
   applyTranscriptQualityGate,
+  normalizeSpeakerLabels,
   normalizeTranscriptQualityNotes,
   reconcileOverlappingSegments,
   stripNoSpeechSentinel,
@@ -284,13 +287,29 @@ interface QualityGatedTranscript {
   text: string;
   cleaned: boolean;
   uncertain: boolean;
+  speakerLabels: SpeakerLabelStats;
+}
+
+// Whole-recording view of the speaker-label guard (issue #197), assembled
+// from the per-segment stats and persisted on the note when it has anything
+// to report.
+interface SpeakerLabelAggregate {
+  normalizedLines: number;
+  cappedSegments: Array<{ segment: number; distinctIds: number }>;
 }
 
 interface SegmentedQualityGatedTranscript {
   text: string;
   cleaned: boolean;
   uncertainSegments: number[];
+  speakerLabels: SpeakerLabelAggregate;
 }
+
+const NO_SPEAKER_LABELS: SpeakerLabelStats = {
+  distinctIds: 0,
+  normalizedLines: 0,
+  capped: false,
+};
 
 export interface HighlightEntry {
   offsetMs: number;
@@ -1615,6 +1634,7 @@ Requirements:
       let fullTranscript = '';
       let qualityCleaned = false;
       let uncertainSegments: number[] = [];
+      let speakerLabels: SpeakerLabelAggregate = { normalizedLines: 0, cappedSegments: [] };
       const stats = await fs.promises.stat(audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
       // Segment intentionally for parallelism: even when the API would
@@ -1656,6 +1676,7 @@ Requirements:
           fullTranscript = gatedTranscript.text;
           qualityCleaned = gatedTranscript.cleaned;
           uncertainSegments = gatedTranscript.uncertainSegments;
+          speakerLabels = gatedTranscript.speakerLabels;
         } else {
           // Get transcript for short audio
           console.error('Transcribing short audio...');
@@ -1672,6 +1693,13 @@ Requirements:
           fullTranscript = gatedTranscript.text;
           qualityCleaned = gatedTranscript.cleaned;
           uncertainSegments = gatedTranscript.uncertain ? [1] : [];
+          // A whole-file transcript is segment 1 of 1.
+          speakerLabels = {
+            normalizedLines: gatedTranscript.speakerLabels.normalizedLines,
+            cappedSegments: gatedTranscript.speakerLabels.capped
+              ? [{ segment: 1, distinctIds: gatedTranscript.speakerLabels.distinctIds }]
+              : [],
+          };
         }
       } catch (error) {
         throw annotateTranscriptionError(error, this.sttBackend.id);
@@ -1803,15 +1831,19 @@ Requirements:
       // customFields) when cleanup, kept uncertainty, the analyzer, or the
       // summary review reports an artifact.
       const modelQualityNotes = normalizeTranscriptQualityNotes(rawQualityNotes);
+      const speakerLabelsRecorded =
+        speakerLabels.normalizedLines > 0 || speakerLabels.cappedSegments.length > 0;
       if (
         qualityCleaned ||
         uncertainSegments.length > 0 ||
+        speakerLabelsRecorded ||
         assembledQuality.flagged ||
         modelQualityNotes.length > 0
       ) {
         customFields.transcriptQuality = {
           ...(qualityCleaned ? { cleaned: true } : {}),
           ...(uncertainSegments.length > 0 ? { uncertainSegments } : {}),
+          ...(speakerLabelsRecorded ? { speakerLabels } : {}),
           ...(assembledQuality.flagged
             ? {
                 analyzer: {
@@ -1968,10 +2000,13 @@ Requirements:
         if (!gated.text.trim()) {
           throw new EmptyTranscriptionError('Transcription produced no speech content');
         }
+        const speakerLabels = normalizeSpeakerLabels(gated.text);
+        this.reportSpeakerLabelCap(speakerLabels, `Short audio (${backend.id})`);
         return {
-          text: gated.text,
+          text: speakerLabels.text,
           cleaned: gated.cleaned === true,
-          uncertain: gated.flagged,
+          uncertain: gated.flagged || speakerLabels.capped,
+          speakerLabels,
         };
       } finally {
         // Release the shared upload once per run, on every exit path: a
@@ -2136,6 +2171,15 @@ Requirements:
     });
   }
 
+  // Metrics only, never transcript text (the analyzer's logging rule).
+  private reportSpeakerLabelCap(labels: SpeakerLabelStats, label: string): void {
+    if (!labels.capped) return;
+    console.error(
+      `[transcript-quality] ${label}: ${labels.distinctIds} speaker ids exceed the cap of ` +
+        `${SPEAKER_ID_CAP}; collapsing the rest onto the last valid id`,
+    );
+  }
+
   // Transcribe a single segment with retry logic
   private async transcribeSingleSegment(
     segmentFile: string,
@@ -2156,6 +2200,7 @@ Requirements:
     empty: boolean;
     cleaned: boolean;
     uncertain: boolean;
+    speakerLabels: SpeakerLabelStats;
   }> {
     const maxRetries = 3;
     let lastError: any = null;
@@ -2240,13 +2285,19 @@ Requirements:
           );
         }
 
+        const speakerLabels = normalizeSpeakerLabels(gated.text);
+        this.reportSpeakerLabelCap(speakerLabels, `Segment ${segmentIndex + 1}/${totalSegments}`);
         return {
           index: segmentIndex,
           header: segmentHeader,
-          body: gated.text,
-          empty: gated.text.trim().length === 0,
+          body: speakerLabels.text,
+          empty: speakerLabels.text.trim().length === 0,
           cleaned: gated.cleaned === true,
-          uncertain: gated.flagged,
+          // A runaway id counter means the diarizer stopped tracking who is
+          // speaking, so the text stays but must not be trusted for owner
+          // attribution.
+          uncertain: gated.flagged || speakerLabels.capped,
+          speakerLabels,
         };
       } catch (segmentError) {
         // Abort surfaces here too; don't burn through retries when the caller
@@ -2268,6 +2319,7 @@ Requirements:
             empty: true,
             cleaned: false,
             uncertain: false,
+            speakerLabels: NO_SPEAKER_LABELS,
           };
         }
         lastError = segmentError;
@@ -2415,6 +2467,7 @@ Requirements:
         empty: boolean;
         cleaned: boolean;
         uncertain: boolean;
+        speakerLabels: SpeakerLabelStats;
       }[];
       try {
         segmentResults = await Promise.all(progressTrackedPromises);
@@ -2437,6 +2490,18 @@ Requirements:
       const uncertainSegments = segmentResults
         .filter((result) => result.uncertain)
         .map((result) => result.index + 1);
+      const speakerLabels: SpeakerLabelAggregate = {
+        normalizedLines: segmentResults.reduce(
+          (total, result) => total + result.speakerLabels.normalizedLines,
+          0,
+        ),
+        cappedSegments: segmentResults
+          .filter((result) => result.speakerLabels.capped)
+          .map((result) => ({
+            segment: result.index + 1,
+            distinctIds: result.speakerLabels.distinctIds,
+          })),
+      };
 
       // Update progress
       if (progressCallback) {
@@ -2474,6 +2539,7 @@ Requirements:
           .join('\n\n---\n\n'),
         cleaned: segmentResults.some((result) => result.cleaned),
         uncertainSegments,
+        speakerLabels,
       };
     } catch (error) {
       console.error('Error in segmented transcription:', error);
