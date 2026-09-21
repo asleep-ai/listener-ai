@@ -16,7 +16,17 @@
 //   3. Korean-aware: comparisons strip whitespace entirely so spacing
 //      variants of the same phrase compare equal, and loop detection works
 //      on character periods too (Korean loops often contain no spaces).
-//   4. Logs must never contain transcript text -- metrics and reasons only.
+//   4. Speaker-aware: an alternating exchange between two or more labelled
+//      speakers is a conversation, not a decoder loop, so it is exempt from
+//      word-block scoring and from the whole-text character-period check.
+//      Line-level checks instead compare what each speaker actually said,
+//      with the label stripped, and an endless exchange is still caught by
+//      the compression metric. This is what keeps a meeting close where two
+//      participants trade `네.` for twenty turns unflagged end to end.
+//   5. Logs must never contain transcript text -- metrics and reasons only.
+//   6. Normalization strips punctuation and symbols, so a flood made of them
+//      is invisible to the normalized checks. The within-line run detector
+//      therefore reads the raw line and runs regardless of normalized length.
 
 import * as zlib from 'zlib';
 
@@ -41,6 +51,15 @@ const CHAR_PERIOD_MIN_REPEATS = 4;
 // we measure our own. Natural prose stays well under 4x at this length.
 const COMPRESSION_MIN_CHARS = 200;
 const COMPRESSION_FLAG_RATIO = 4;
+// Within-line floods: ONE line holding the same character or token thousands
+// of times. Every detector above works on normalized text, which strips
+// punctuation and symbols -- a line of `+` x30,000 normalizes to an empty
+// string and is invisible to all of them (found in 10 of 102 stored
+// transcripts). These thresholds stay far above legitimate repetition:
+// laughter (`ㅋㅋㅋㅋㅋㅋㅋㅋ`), ellipses (`......`), `네 네 네 네 네` and
+// short chants must never reach them.
+const INTRA_LINE_CHAR_RUN_FLAG = 40;
+const INTRA_LINE_TOKEN_RUN_FLAG = 15;
 
 export const NO_SPEECH_SENTINEL = '[NO_SPEECH]';
 
@@ -53,6 +72,10 @@ export interface TranscriptQualityMetrics {
   maxWordBlockRepeats: number;
   /** deflate ratio of the normalized text; 0 below COMPRESSION_MIN_CHARS. */
   textCompressionRatio: number;
+  /** Longest run of one repeated non-whitespace character inside a line. */
+  maxIntraLineCharRun: number;
+  /** Longest run of identical consecutive tokens inside a line. */
+  maxIntraLineTokenRun: number;
 }
 
 export interface TranscriptQualityReport {
@@ -84,10 +107,14 @@ function normalizeKeepSpaces(text: string): string {
     .trim();
 }
 
+// A leading speaker label as it appears in a raw line.
+const SPEAKER_LABEL_PREFIX = /^\s*(?:참가자|speaker)\s*\d+\s*[:：]\s*/iu;
+
 // Strip a leading speaker label ("참가자1:", "Speaker 2:") before per-line
-// loop checks so the label doesn't mask a purely periodic payload.
+// loop and duplicate checks, so the label neither masks a purely periodic
+// payload nor holds two speakers' identical sentences apart.
 export function stripSpeakerLabel(line: string): string {
-  return line.replace(/^\s*(?:참가자|speaker)\s*\d+\s*[:：]\s*/iu, '');
+  return line.replace(SPEAKER_LABEL_PREFIX, '');
 }
 
 // Character-bigram Dice coefficient on normalized strings. Cheap, order-two,
@@ -113,9 +140,14 @@ function bigramSimilarity(a: string, b: string): number {
   return (2 * shared) / (a.length - 1 + (b.length - 1));
 }
 
-// Longest run of consecutive near-identical lines. Lines shorter than
-// MIN_DUPLICATE_LINE_CHARS (normalized) break the run so real short
-// acknowledgements ("네", "맞아요") never accumulate into a flag.
+// Longest run of consecutive near-identical lines. Lines arrive with their
+// speaker label stripped, so one sentence repeated under alternating ids
+// ("참가자1: 시청해주셔서 감사합니다." / "참가자2: 시청해주셔서 감사합니다.")
+// still reads as a duplicate run -- keeping the labels dragged similarity
+// below NEAR_DUPLICATE_SIMILARITY and hid that hallucination shape. Lines
+// shorter than MIN_DUPLICATE_LINE_CHARS (normalized) break the run, so real
+// short acknowledgements ("네", "맞아요") never accumulate into a flag no
+// matter how many turns they span.
 function maxConsecutiveDuplicateLines(lines: string[]): number {
   let best = 1;
   let run = 1;
@@ -134,9 +166,45 @@ function maxConsecutiveDuplicateLines(lines: string[]): number {
   return best;
 }
 
+// A speaker label as it survives normalization ("참가자1:" -> "참가자1").
+// Only this joined shape can sit inside a block of period <= 4; the split
+// shape ("Speaker 2:" -> "speaker 2") costs three tokens per turn, so an
+// alternating exchange written that way never forms a qualifying block.
+const SPEAKER_LABEL_TOKEN = /^(?:참가자|speaker)\d+$/u;
+
+// Distinct speaker labels inside one candidate block. Two or more means the
+// "loop" is an exchange between real speakers, not a decoder loop: a meeting
+// close where two participants trade `네.` for twenty turns tokenizes as
+// `참가자1 네 참가자2 네`, a period-4 block that reaches the 4-repeat rule on
+// entirely genuine speech (observed in a Soniox whole-file eval).
+function distinctSpeakerLabels(words: string[], start: number, period: number): number {
+  const labels = new Set<string>();
+  for (let i = start; i < start + period; i++) {
+    if (SPEAKER_LABEL_TOKEN.test(words[i])) labels.add(words[i]);
+  }
+  return labels.size;
+}
+
+// Distinct speaker labels across the whole text. Labels are read from raw
+// lines in the shapes `stripSpeakerLabel` accepts, then reduced to the same
+// token shape `SPEAKER_LABEL_TOKEN` matches, so "Speaker 2:" and "참가자2:"
+// are counted identically here and inside a candidate word block.
+function distinctLineSpeakerLabels(text: string): number {
+  const labels = new Set<string>();
+  for (const rawLine of text.split(/\r?\n/)) {
+    const match = SPEAKER_LABEL_PREFIX.exec(rawLine);
+    if (!match) continue;
+    const token = normalizeForComparison(match[0]);
+    if (SPEAKER_LABEL_TOKEN.test(token)) labels.add(token);
+  }
+  return labels.size;
+}
+
 // Highest consecutive repeat count of any word block of period 1..4.
 // "빨리 빨리 빨리" -> period 1 repeated 3x. A period-4 block repeated 4x is
 // the issue's "same normalized 4-gram four consecutive times" criterion.
+// Multi-speaker blocks are exempt (see distinctSpeakerLabels); a loop from a
+// single speaker ("참가자1 네" x20) still flags.
 function maxWordBlockRepeats(words: string[]): {
   period: number;
   repeats: number;
@@ -160,13 +228,17 @@ function maxWordBlockRepeats(words: string[]): {
         repeats++;
         next += period;
       }
-      if (
-        (period === WORD_BLOCK_MAX_PERIOD && repeats >= NGRAM_FLAG_REPEATS) ||
-        (period < WORD_BLOCK_MAX_PERIOD && repeats >= SHORT_BLOCK_FLAG_REPEATS)
-      ) {
-        flagged = true;
+      // An alternating exchange between speakers may neither flag nor drive
+      // the reported metric; everything else is scored as before.
+      if (distinctSpeakerLabels(words, start, period) < 2) {
+        if (
+          (period === WORD_BLOCK_MAX_PERIOD && repeats >= NGRAM_FLAG_REPEATS) ||
+          (period < WORD_BLOCK_MAX_PERIOD && repeats >= SHORT_BLOCK_FLAG_REPEATS)
+        ) {
+          flagged = true;
+        }
+        if (repeats > best.repeats) best = { period, repeats };
       }
-      if (repeats > best.repeats) best = { period, repeats };
       // Skip past this run; restarting inside it can't do better.
       if (repeats > 1) start = next - period;
     }
@@ -193,6 +265,55 @@ function hasCharPeriodLoop(normalized: string): boolean {
   return n % period === 0 && n / period >= CHAR_PERIOD_MIN_REPEATS;
 }
 
+// Longest run of the same non-whitespace character in one line, counted by
+// code point. Whitespace breaks a run. Input is already NFC.
+function maxCharRun(line: string): number {
+  let best = 0;
+  let run = 0;
+  let previous = '';
+  for (const char of line) {
+    if (/\s/u.test(char)) {
+      run = 0;
+      previous = '';
+      continue;
+    }
+    run = char === previous ? run + 1 : 1;
+    previous = char;
+    if (run > best) best = run;
+  }
+  return best;
+}
+
+// Longest run of identical consecutive whitespace-separated tokens in one
+// line. Matching is exact (no punctuation stripping), so a `요` or `I` flood
+// is caught by the raw text it actually carries. Input is already NFC.
+function maxTokenRun(line: string): number {
+  const tokens = line.split(/\s+/u).filter(Boolean);
+  let best = 0;
+  let run = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    run = i > 0 && tokens[i] === tokens[i - 1] ? run + 1 : 1;
+    if (run > best) best = run;
+  }
+  return best;
+}
+
+// Per-line flood scan over RAW text (only the speaker label is stripped).
+// Deliberately skips normalizeForComparison: the symbol floods this detector
+// exists for have zero normalized length.
+function intraLineRuns(text: string): { charRun: number; tokenRun: number } {
+  let charRun = 0;
+  let tokenRun = 0;
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = stripSpeakerLabel(rawLine).normalize('NFC');
+    const lineCharRun = maxCharRun(line);
+    if (lineCharRun > charRun) charRun = lineCharRun;
+    const lineTokenRun = maxTokenRun(line);
+    if (lineTokenRun > tokenRun) tokenRun = lineTokenRun;
+  }
+  return { charRun, tokenRun };
+}
+
 function textCompressionRatio(normalized: string): number {
   if (normalized.length < COMPRESSION_MIN_CHARS) return 0;
   const raw = Buffer.from(normalized, 'utf8');
@@ -205,20 +326,30 @@ export function analyzeTranscriptQuality(text: string): TranscriptQualityReport 
   const normalized = normalizeForComparison(text);
   const lines = text
     .split(/\r?\n+/)
-    .map((line) => normalizeForComparison(line))
+    .map((line) => normalizeForComparison(stripSpeakerLabel(line)))
     .filter((line) => line.length > 0);
   const words = normalizeKeepSpaces(text).split(' ').filter(Boolean);
 
   const duplicateLines = maxConsecutiveDuplicateLines(lines);
   const blockRepeats = maxWordBlockRepeats(words);
   const compressionRatio = textCompressionRatio(normalized);
+  // Runs on the raw text, so it still fires when `normalized` is empty or
+  // below the compression floor -- the shape a symbol flood always has.
+  const intraLine = intraLineRuns(text);
 
   const reasons: string[] = [];
   if (duplicateLines >= CONSECUTIVE_DUPLICATE_LINE_FLAG) {
     reasons.push('consecutive-duplicate-lines');
   }
+  // Cross-line exact periodicity is loop evidence only for a SINGLE speaker.
+  // `참가자1: 네.` / `참가자2: 네.` traded at a meeting close concatenates to a
+  // perfectly periodic `참가자1네참가자2네...`, which reached this check on
+  // entirely genuine speech in a Soniox whole-file eval. Hundreds of
+  // alternating turns are still caught by the compression ratio. The per-line
+  // check is unaffected: one speaker looping inside their own turn flags.
+  const multiSpeaker = distinctLineSpeakerLabels(text) >= 2;
   const charLoop =
-    hasCharPeriodLoop(normalized) ||
+    (!multiSpeaker && hasCharPeriodLoop(normalized)) ||
     text
       .split(/\r?\n+/)
       .some((line) => hasCharPeriodLoop(normalizeForComparison(stripSpeakerLabel(line))));
@@ -227,6 +358,12 @@ export function analyzeTranscriptQuality(text: string): TranscriptQualityReport 
   }
   if (compressionRatio >= COMPRESSION_FLAG_RATIO) {
     reasons.push('high-text-compression');
+  }
+  if (
+    intraLine.charRun >= INTRA_LINE_CHAR_RUN_FLAG ||
+    intraLine.tokenRun >= INTRA_LINE_TOKEN_RUN_FLAG
+  ) {
+    reasons.push('intra-line-token-flood');
   }
 
   return {
@@ -237,6 +374,8 @@ export function analyzeTranscriptQuality(text: string): TranscriptQualityReport 
       maxConsecutiveDuplicateLines: duplicateLines,
       maxWordBlockRepeats: blockRepeats.repeats,
       textCompressionRatio: compressionRatio,
+      maxIntraLineCharRun: intraLine.charRun,
+      maxIntraLineTokenRun: intraLine.tokenRun,
     },
   };
 }
@@ -500,7 +639,9 @@ export async function applyTranscriptQualityGate(
       `${reasons}; normalizedLength=${report.metrics.normalizedLength}, ` +
       `duplicateLines=${report.metrics.maxConsecutiveDuplicateLines}, ` +
       `blockRepeats=${report.metrics.maxWordBlockRepeats}, ` +
-      `compression=${report.metrics.textCompressionRatio.toFixed(2)}`
+      `compression=${report.metrics.textCompressionRatio.toFixed(2)}, ` +
+      `intraLineCharRun=${report.metrics.maxIntraLineCharRun}, ` +
+      `intraLineTokenRun=${report.metrics.maxIntraLineTokenRun}`
     );
   };
   const verdictFor = async (text: string): Promise<QualityVerdict> => {

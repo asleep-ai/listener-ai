@@ -79,6 +79,30 @@ Speaker 2: Good. For the next milestone, we need to decide whether to prioritize
     }
   });
 
+  it('does not score a two-speaker acknowledgement exchange as a word-block loop', () => {
+    // `참가자1: 네.` / `참가자2: 네.` tokenizes as the period-4 block
+    // `참가자1 네 참가자2 네`, which reached the 4-repeat rule on genuine
+    // speech in a Soniox whole-file eval. Two distinct speakers make it an
+    // exchange, so it may neither flag nor inflate the metric.
+    const exchange = Array.from({ length: 20 }, (_, i) => `참가자${(i % 2) + 1}: 네.`).join('\n\n');
+    assert.equal(analyzeTranscriptQuality(exchange).metrics.maxWordBlockRepeats, 1);
+  });
+
+  it('keeps a bare alternating acknowledgement exchange clean at twenty and thirty turns', () => {
+    // The Soniox whole-file false positive: with nothing else in the text the
+    // whitespace-stripped concatenation `참가자1네참가자2네...` is exactly
+    // periodic, so the whole-text character-period check fired on a genuine
+    // meeting close. Two distinct speakers make it an exchange.
+    for (const turns of [20, 30]) {
+      const exchange = Array.from({ length: turns }, (_, i) => `참가자${(i % 2) + 1}: 네.`).join(
+        '\n\n',
+      );
+      const report = analyzeTranscriptQuality(exchange);
+      assert.deepEqual(report.reasons, [], `${turns} alternating turns should stay clean`);
+      assert.equal(report.flagged, false);
+    }
+  });
+
   it('does not accumulate short acknowledgement lines into a duplicate run', () => {
     const report = analyzeTranscriptQuality('참가자1: 네\n\n참가자2: 네\n\n참가자1: 네');
     assert.equal(report.flagged, false);
@@ -87,6 +111,41 @@ Speaker 2: Good. For the next milestone, we need to decide whether to prioritize
   it('accepts empty and trivial input', () => {
     assert.equal(analyzeTranscriptQuality('').flagged, false);
     assert.equal(analyzeTranscriptQuality('네.').flagged, false);
+  });
+
+  it('accepts ellipses and a five-word acknowledgement run', () => {
+    assert.equal(
+      analyzeTranscriptQuality('참가자1: 음...... 그건 조금 더 고민해보겠습니다.').flagged,
+      false,
+    );
+    assert.equal(analyzeTranscriptQuality('참가자2: 네 네 네 네 네').flagged, false);
+  });
+
+  it('does not treat benign within-line repetition as a flood', () => {
+    // Laughter is flagged by the existing char-period loop check; what matters
+    // here is that the within-line flood detector stays far above these shapes.
+    for (const text of [
+      `참가자1: ${'ㅋ'.repeat(20)}`,
+      '참가자1: 음...... 그건 조금 더 고민해보겠습니다.',
+      '참가자2: 네 네 네 네 네 네',
+      '참가자1: 다음 주 화요일까지 초안을 공유드리겠습니다.',
+    ]) {
+      const report = analyzeTranscriptQuality(text);
+      assert.ok(
+        !report.reasons.includes('intra-line-token-flood'),
+        `should not report a flood: ${text}`,
+      );
+    }
+  });
+
+  it('reports zero intra-line runs for empty text and one for a single occurrence', () => {
+    const empty = analyzeTranscriptQuality('').metrics;
+    assert.equal(empty.maxIntraLineCharRun, 0);
+    assert.equal(empty.maxIntraLineTokenRun, 0);
+
+    const single = analyzeTranscriptQuality('참가자1: 네.').metrics;
+    assert.equal(single.maxIntraLineCharRun, 1);
+    assert.equal(single.maxIntraLineTokenRun, 1);
   });
 });
 
@@ -139,6 +198,37 @@ describe('analyzeTranscriptQuality: loop shapes are flagged', () => {
     assert.equal(report.flagged, false);
   });
 
+  it('flags the same twenty turns when they all come from one speaker', () => {
+    const loop = Array.from({ length: 20 }, () => '참가자1: 네.').join('\n\n');
+    const report = analyzeTranscriptQuality(loop);
+    assert.equal(report.flagged, true);
+    assert.ok(report.reasons.includes('repeated-ngram-loop'));
+  });
+
+  it('flags one sentence repeated under alternating speaker ids', () => {
+    // A hallucinated dialogue, not an exchange: the payload is identical on
+    // every turn. Only the duplicate-line check can see this shape -- the
+    // six-token block exceeds WORD_BLOCK_MAX_PERIOD and the text is too short
+    // for the compression metric.
+    const hallucination = Array.from(
+      { length: 6 },
+      (_, i) => `참가자${(i % 2) + 1}: 시청해주셔서 감사합니다.`,
+    ).join('\n\n');
+    const report = analyzeTranscriptQuality(hallucination);
+    assert.equal(report.flagged, true);
+    assert.ok(report.reasons.includes('consecutive-duplicate-lines'));
+    assert.ok(report.metrics.maxConsecutiveDuplicateLines >= 6);
+  });
+
+  it('flags a character loop that only the whole-text check can see', () => {
+    // The period straddles the line break, so neither line is periodic on its
+    // own and the two lines are not near-duplicates. Single-speaker text keeps
+    // the whole-text character-period check live; only an exchange skips it.
+    const report = analyzeTranscriptQuality('감사합니다감사합니다감사\n\n합니다감사합니다');
+    assert.equal(report.flagged, true);
+    assert.ok(report.reasons.includes('repeated-ngram-loop'));
+  });
+
   it('flags space-less Korean character loops behind a speaker label', () => {
     const report = analyzeTranscriptQuality('참가자1: 감사합니다감사합니다감사합니다감사합니다');
     assert.equal(report.flagged, true);
@@ -148,6 +238,23 @@ describe('analyzeTranscriptQuality: loop shapes are flagged', () => {
   it('accepts a genuine triple emphasis behind a speaker label', () => {
     const report = analyzeTranscriptQuality('참가자1: 감사합니다감사합니다감사합니다');
     assert.equal(report.flagged, false);
+  });
+
+  it('flags a single line flooded with one repeated symbol', () => {
+    const report = analyzeTranscriptQuality('+'.repeat(30000));
+    assert.equal(report.flagged, true);
+    assert.deepEqual(report.reasons, ['intra-line-token-flood']);
+    assert.equal(report.metrics.maxIntraLineCharRun, 30000);
+    // Exactly why the raw-line pass exists: normalization strips symbols, so
+    // every other detector here sees an empty string.
+    assert.equal(report.metrics.normalizedLength, 0);
+  });
+
+  it('flags a line repeating one token behind a speaker label', () => {
+    const report = analyzeTranscriptQuality(`참가자1: ${Array(1309).fill('I').join(' ')}`);
+    assert.equal(report.flagged, true);
+    assert.ok(report.reasons.includes('intra-line-token-flood'));
+    assert.equal(report.metrics.maxIntraLineTokenRun, 1309);
   });
 
   it('flags long repetitive text via the local compression metric', () => {
@@ -723,6 +830,29 @@ describe('applyTranscriptQualityGate', () => {
     assert.equal(result.retriesAttempted, 0);
     assert.equal(cleanupCalls, 0);
   });
+
+  it('lets the analyzer flag a symbol flood and accepts the clean retry', async () => {
+    const floodText = `참가자1: ${'+'.repeat(1200)}`;
+    const logs: string[] = [];
+    const result = await applyTranscriptQualityGate({
+      text: floodText,
+      label: 'segment 2/4',
+      retries: [async () => cleanText],
+      log: (message) => logs.push(message),
+    });
+
+    assert.equal(result.text, cleanText);
+    assert.equal(result.flagged, false);
+    assert.equal(result.retried, true);
+    assert.equal(result.retriesAttempted, 1);
+    assert.ok(logs.some((line) => line.includes('flagged by analyzer')));
+    assert.ok(logs.some((line) => line.includes('intra-line-token-flood')));
+    assert.ok(logs.some((line) => line.includes('intraLineCharRun=1200')));
+    assert.ok(
+      logs.every((line) => !line.includes('++')),
+      'logs must never carry transcript text',
+    );
+  });
 });
 
 describe('analyzeAssembledTranscript', () => {
@@ -755,6 +885,51 @@ describe('analyzeAssembledTranscript', () => {
     const report = analyzeAssembledTranscript(assembled);
     assert.equal(report.flagged, true);
     assert.ok(report.reasons.includes('consecutive-duplicate-lines'));
+  });
+
+  it('keeps a two-speaker acknowledgement exchange at a meeting close unflagged', () => {
+    const exchange = Array.from({ length: 20 }, (_, i) => `참가자${(i % 2) + 1}: 네.`).join('\n\n');
+    const assembled = [
+      header(5, '00:20:00', '00:25:00'),
+      '참가자1: 오늘 논의한 내용은 여기까지입니다. 다음 회의는 다음 주 화요일 오후 두 시에 진행하겠습니다.',
+      exchange,
+      '참가자2: 네, 다들 고생 많으셨습니다.',
+    ].join('\n\n');
+    const report = analyzeAssembledTranscript(assembled);
+    assert.equal(report.flagged, false);
+    assert.deepEqual(report.reasons, []);
+  });
+
+  it('keeps a bare alternating exchange clean at twenty and thirty turns', () => {
+    for (const turns of [20, 30]) {
+      const exchange = Array.from({ length: turns }, (_, i) => `참가자${(i % 2) + 1}: 네.`).join(
+        '\n\n',
+      );
+      const report = analyzeAssembledTranscript(
+        `${header(5, '00:20:00', '00:25:00')}\n\n${exchange}`,
+      );
+      assert.equal(report.flagged, false, `${turns} alternating turns should stay clean`);
+      assert.deepEqual(report.reasons, []);
+    }
+  });
+
+  it('still flags the same twenty turns when they all come from one speaker', () => {
+    const loop = Array.from({ length: 20 }, () => '참가자1: 네.').join('\n\n');
+    const report = analyzeAssembledTranscript(`${header(5, '00:20:00', '00:25:00')}\n\n${loop}`);
+    assert.equal(report.flagged, true);
+    assert.ok(report.reasons.includes('repeated-ngram-loop'));
+    assert.ok(report.metrics.maxWordBlockRepeats >= 6);
+  });
+
+  it('flags a symbol flood inside one segment body', () => {
+    const assembled = [
+      `${header(1, '00:00:00', '00:05:00')}\n\n참가자1: 오늘 회의를 시작하겠습니다.`,
+      `${header(2, '00:05:00', '00:10:00')}\n\n참가자1: ${'+'.repeat(500)}`,
+    ].join('\n\n---\n\n');
+    const report = analyzeAssembledTranscript(assembled);
+    assert.equal(report.flagged, true);
+    assert.ok(report.reasons.includes('intra-line-token-flood'));
+    assert.equal(report.metrics.maxIntraLineCharRun, 500);
   });
 });
 
