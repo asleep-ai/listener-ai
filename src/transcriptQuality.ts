@@ -502,6 +502,129 @@ export function reconcileOverlappingSegments(bodies: string[]): {
   return { bodies: out, removedPerBoundary };
 }
 
+// Foreign-script insertion (issue #197). A store audit found four transcripts
+// plus fragments in a fifth carrying a fluent, fabricated foreign-language
+// passage inside a Korean meeting: a Portuguese podcast interview as the
+// closing segment, a Portuguese AI-podcast intro, an English racing
+// narration, and a run mixing Chinese characters, Japanese katakana and a
+// cooking instruction. Every other detector here is repetition-shaped, so
+// invented but fluent prose passes all of them and the summary presents it as
+// discussion. This measures script composition instead. It is notes-only: it
+// never rewrites or removes transcript text, and it reports positions and
+// counts, never the text itself.
+
+export interface ScriptMix {
+  /** Share of letters written in Hangul, 0 when the text has no letters. */
+  hangul: number;
+  /** Share of letters written in Latin script. */
+  latin: number;
+  /** Share of letters in any other script (Han, Kana, Cyrillic, ...). */
+  other: number;
+  /** Total letter code points counted. */
+  letters: number;
+}
+
+type ScriptName = 'hangul' | 'latin' | 'other';
+
+const LETTER = /\p{L}/u;
+const HANGUL_LETTER = /\p{Script=Hangul}/u;
+const LATIN_LETTER = /\p{Script=Latin}/u;
+
+// Thresholds. Deliberately far apart so ordinary code-switching cannot reach
+// them: a Korean meeting segment that is 30-50% Latin (product names, English
+// jargon, acronyms) keeps a Hangul share well above OUTLIER_MAX_DOMINANT_SHARE
+// and never flags. Only a block that has almost none of the recording's
+// dominant script qualifies, which is the shape the audit found -- a whole
+// segment of fluent Portuguese or Chinese.
+//   MIN_SCRIPT_MIX_LETTERS     a block must be long enough for its mix to mean
+//                              anything; a one-line English aside is noise.
+//   DOMINANT_SCRIPT_MIN_SHARE  the recording must HAVE a dominant script;
+//                              a genuinely bilingual meeting has none and is
+//                              left alone entirely.
+//   OUTLIER_MAX_DOMINANT_SHARE the block must be almost entirely something
+//                              else before it counts as an insertion.
+const MIN_SCRIPT_MIX_LETTERS = 120;
+const DOMINANT_SCRIPT_MIN_SHARE = 0.6;
+const OUTLIER_MAX_DOMINANT_SHARE = 0.2;
+
+// Default window size for the whole-file path: a few minutes of speech, large
+// enough to be well over MIN_SCRIPT_MIX_LETTERS and small enough that a
+// three-minute foreign run is not diluted by the Korean around it.
+export const SCRIPT_WINDOW_LETTERS = 1500;
+
+// Letter composition of one block. Speaker labels are stripped first: they are
+// Hangul and would pull a short block's mix toward Korean no matter what the
+// speech actually is.
+export function scriptMix(text: string): ScriptMix {
+  let hangul = 0;
+  let latin = 0;
+  let other = 0;
+  for (const line of text.split(/\r?\n/)) {
+    for (const char of stripSpeakerLabel(line)) {
+      if (!LETTER.test(char)) continue;
+      if (HANGUL_LETTER.test(char)) hangul++;
+      else if (LATIN_LETTER.test(char)) latin++;
+      else other++;
+    }
+  }
+  const letters = hangul + latin + other;
+  if (letters === 0) return { hangul: 0, latin: 0, other: 0, letters: 0 };
+  return { hangul: hangul / letters, latin: latin / letters, other: other / letters, letters };
+}
+
+function dominantScript(mix: ScriptMix): ScriptName | undefined {
+  for (const script of ['hangul', 'latin', 'other'] as const) {
+    if (mix[script] >= DOMINANT_SCRIPT_MIN_SHARE) return script;
+  }
+  return undefined;
+}
+
+// Blocks whose script composition does not belong to this recording, as
+// 0-based indices. Symmetric by construction: an English meeting with one
+// Korean-only block flags the same way a Korean meeting with one Portuguese
+// block does, because the test is always "almost none of the DOMINANT script".
+export function findScriptMixOutliers(blocks: string[]): {
+  outliers: number[];
+  overall: ScriptMix;
+} {
+  const overall = scriptMix(blocks.join('\n\n'));
+  const dominant = dominantScript(overall);
+  if (!dominant) return { outliers: [], overall };
+  const outliers: number[] = [];
+  blocks.forEach((block, index) => {
+    const mix = scriptMix(block);
+    if (mix.letters < MIN_SCRIPT_MIX_LETTERS) return;
+    if (mix[dominant] <= OUTLIER_MAX_DOMINANT_SHARE) outliers.push(index);
+  });
+  return { outliers, overall };
+}
+
+// Whole-file transcripts have no segment structure, so group consecutive turns
+// into windows of roughly `targetLetters` letters and test those instead. A
+// turn is never split: the smallest unit anyone can review is one speaker's
+// turn, and cutting mid-turn would manufacture a mixed block out of two clean
+// ones. Windows exist only for detection -- nothing is ever written back.
+export function splitIntoScriptWindows(
+  text: string,
+  targetLetters = SCRIPT_WINDOW_LETTERS,
+): string[] {
+  const budget = Math.max(1, Math.floor(targetLetters));
+  const windows: string[] = [];
+  let current: string[] = [];
+  let letters = 0;
+  for (const turn of splitTurns(text)) {
+    current.push(turn);
+    letters += scriptMix(turn).letters;
+    if (letters >= budget) {
+      windows.push(current.join('\n\n'));
+      current = [];
+      letters = 0;
+    }
+  }
+  if (current.length > 0) windows.push(current.join('\n\n'));
+  return windows;
+}
+
 const MAX_QUALITY_NOTES = 10;
 const MAX_QUALITY_NOTE_CHARS = 300;
 

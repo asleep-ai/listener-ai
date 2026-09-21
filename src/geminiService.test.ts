@@ -33,6 +33,48 @@ const NO_SPEAKER_LABELS: SpeakerLabelStats = {
   capped: false,
 };
 
+// Synthetic transcript fixtures for the foreign-script guard (issue #197).
+// Generic sentences written for the test; nothing is copied from the audited
+// recordings and no real names appear.
+const KOREAN_MEETING_LINES = [
+  '오늘 회의에서는 다음 분기 일정을 함께 검토하겠습니다.',
+  '예산 배분은 지난번 논의대로 유지하는 편이 좋겠습니다.',
+  '담당자는 각 팀에서 한 명씩 지정해 주시기 바랍니다.',
+  '일정이 지연되면 즉시 공유해 주시면 감사하겠습니다.',
+  '다음 주까지 초안을 정리해서 다시 안내드리겠습니다.',
+  '추가로 논의할 안건이 있으면 말씀해 주시기 바랍니다.',
+  '지난 분기 지표는 전반적으로 개선된 흐름을 보였습니다.',
+  '고객 문의가 늘어나서 응대 인력을 보강해야 합니다.',
+  '보안 점검 결과는 별도 문서로 정리해 두었습니다.',
+  '출시 일정은 품질 검증이 끝난 뒤에 확정하겠습니다.',
+  '외부 협력사와의 계약 조건도 다시 확인이 필요합니다.',
+  '회의록은 오늘 중으로 공유 드라이브에 올리겠습니다.',
+];
+
+const PORTUGUESE_LINES = [
+  'Hoje vamos conversar sobre o futuro da tecnologia e o impacto dela no trabalho.',
+  'Antes disso, quero agradecer a todos que acompanham o programa toda semana.',
+  'A convidada vai explicar como comecou a trabalhar com inteligencia artificial.',
+  'Depois vamos responder as perguntas enviadas pelos ouvintes durante a semana.',
+  'O tema de hoje interessa a quem trabalha com dados e automacao de processos.',
+  'Fique conosco ate o final porque teremos uma novidade importante no programa.',
+];
+
+function koreanBody(start: number, count: number): string {
+  return Array.from(
+    { length: count },
+    (_, i) =>
+      `참가자${(i % 2) + 1}: ${KOREAN_MEETING_LINES[(start + i) % KOREAN_MEETING_LINES.length]}`,
+  ).join('\n\n');
+}
+
+function portugueseBody(count: number): string {
+  return Array.from(
+    { length: count },
+    (_, i) => `참가자${(i % 2) + 1}: ${PORTUGUESE_LINES[i % PORTUGUESE_LINES.length]}`,
+  ).join('\n\n');
+}
+
 type GeminiServiceFfmpegHelpers = {
   getAudioDuration(audioFilePath: string, signal?: AbortSignal): Promise<number>;
   splitAudioIntoSegments(audioFilePath: string, segmentDurationSeconds: number): Promise<string[]>;
@@ -1553,6 +1595,7 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       cleaned: boolean;
       uncertainSegments: number[];
       speakerLabels: SpeakerLabelAggregate;
+      bodies: string[];
     }>;
     generateSummary(promptText: string, transcript: string, ...rest: unknown[]): Promise<string>;
   };
@@ -1565,6 +1608,7 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     uncertainSegments?: number[];
     speakerLabels?: SpeakerLabelStats;
     segmentedSpeakerLabels?: SpeakerLabelAggregate;
+    bodies?: string[];
   }): {
     service: TwoStepHelpers;
     summaryPrompts: string[];
@@ -1587,6 +1631,7 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       cleaned: opts.cleaned ?? false,
       uncertainSegments: opts.uncertainSegments ?? [],
       speakerLabels: opts.segmentedSpeakerLabels ?? { normalizedLines: 0, cappedSegments: [] },
+      bodies: opts.bodies ?? [opts.transcript],
     });
     service.generateSummary = async (promptText) => {
       summaryPrompts.push(promptText);
@@ -1918,6 +1963,103 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     assert.deepEqual(result.customFields?.transcriptQuality, {
       speakerLabels: { normalizedLines: 3, cappedSegments: [] },
     });
+  });
+
+  it('marks a foreign-script segment uncertain and warns the summary model', async () => {
+    const bodies = [koreanBody(0, 12), koreanBody(4, 12), portugueseBody(6), koreanBody(8, 12)];
+    const transcript = bodies
+      .map((body, i) => `[Segment ${i + 1}: 00:0${i}:00 ~ 00:0${i + 1}:00]\n\n${body}`)
+      .join('\n\n---\n\n');
+    const { service, summaryPrompts } = makeTwoStepService({
+      transcript,
+      bodies,
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('foreign-long.webm'), 600);
+
+    const quality = result.customFields?.transcriptQuality as {
+      uncertainSegments?: number[];
+      analyzer?: {
+        reasons: string[];
+        scriptMix?: {
+          overall: { hangul: number; latin: number; other: number };
+          outlierSegments?: number[];
+          outlierWindows?: Array<{ index: number; total: number }>;
+        };
+      };
+    };
+    assert.deepEqual(quality.uncertainSegments, [3], 'the Portuguese segment is segment 3');
+    assert.deepEqual(quality.analyzer?.reasons, ['foreign-script-segment']);
+    assert.deepEqual(quality.analyzer?.scriptMix?.outlierSegments, [3]);
+    assert.equal(quality.analyzer?.scriptMix?.outlierWindows, undefined);
+    assert.ok((quality.analyzer?.scriptMix?.overall.hangul ?? 0) >= 0.6);
+    assert.match(summaryPrompts[0], /segment 3 carries a script mix unlike the rest/);
+    assert.equal(result.transcript, transcript, 'the transcript is never rewritten');
+  });
+
+  it('records a foreign window for a whole-file transcript', async () => {
+    // No segments on the short path, so the guard works on letter-budget
+    // windows. The generated fixture repeats a small sentence pool, which also
+    // trips the compression metric -- the script finding is the subject here.
+    const transcript = [koreanBody(0, 60), portugueseBody(24), koreanBody(6, 60)].join('\n\n');
+    const { service, summaryPrompts } = makeTwoStepService({
+      transcript,
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('foreign-short.webm'), 10);
+
+    const quality = result.customFields?.transcriptQuality as {
+      uncertainSegments?: number[];
+      analyzer?: {
+        reasons: string[];
+        scriptMix?: {
+          outlierSegments?: number[];
+          outlierWindows?: Array<{ index: number; total: number }>;
+        };
+      };
+    };
+    assert.ok(quality.analyzer?.reasons.includes('foreign-script-segment'));
+    assert.deepEqual(quality.analyzer?.scriptMix?.outlierWindows, [{ index: 2, total: 3 }]);
+    assert.equal(quality.analyzer?.scriptMix?.outlierSegments, undefined);
+    assert.equal(quality.uncertainSegments, undefined, 'windows are not segment indices');
+    assert.match(summaryPrompts[0], /one or more stretches of the transcript carry a script mix/);
+  });
+
+  it('writes no script finding for a Korean meeting carrying English jargon', async () => {
+    const transcript = [
+      koreanBody(0, 12),
+      '참가자1: 이번 sprint 에서 feature flag rollout percentage 를 staging 에서 QA 합니다.',
+      koreanBody(6, 12),
+    ].join('\n\n');
+    const { service, summaryPrompts } = makeTwoStepService({
+      transcript,
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('jargon.webm'), 10);
+
+    assert.equal(result.customFields, undefined);
+    assert.doesNotMatch(summaryPrompts[0], /An automated check found/);
   });
 
   it('omits speakerLabels when the guard had nothing to report', async () => {

@@ -50,9 +50,11 @@ import {
   type SpeakerLabelStats,
   analyzeAssembledTranscript,
   applyTranscriptQualityGate,
+  findScriptMixOutliers,
   normalizeSpeakerLabels,
   normalizeTranscriptQualityNotes,
   reconcileOverlappingSegments,
+  splitIntoScriptWindows,
   stripNoSpeechSentinel,
 } from './transcriptQuality';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
@@ -303,6 +305,8 @@ interface SegmentedQualityGatedTranscript {
   cleaned: boolean;
   uncertainSegments: number[];
   speakerLabels: SpeakerLabelAggregate;
+  /** Reconciled per-segment bodies, headers excluded, for script-mix review. */
+  bodies: string[];
 }
 
 const NO_SPEAKER_LABELS: SpeakerLabelStats = {
@@ -613,6 +617,33 @@ const TRANSCRIPT_QUALITY_PROMPT_BLOCK = `Additionally, before summarizing, revie
 - If there are none, omit the field.
 - Never rewrite or remove transcript content based on this review.
 - Base the summary, key points, and action items only on content you judge to be genuine speech; do not summarize suspected artifacts as if they were discussion content.`;
+
+const FOREIGN_SCRIPT_REASON = 'foreign-script-segment';
+
+// Script shares are advisory, so keep meta.json readable instead of carrying
+// full floating-point precision.
+function roundShare(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+// Extra instruction appended to the quality prompt block when the script-mix
+// check found outliers (issue #197), so the summary model treats them as
+// suspected artifacts rather than discussion. Positions and counts only --
+// never transcript text. TRANSCRIPT_QUALITY_PROMPT_BLOCK itself stays fixed.
+function buildScriptMixPromptLine(outliers: number[], kind: 'segment' | 'window'): string {
+  if (outliers.length === 0) return '';
+  const subject =
+    kind === 'window'
+      ? 'one or more stretches of the transcript carry'
+      : outliers.length === 1
+        ? `segment ${outliers[0]} carries`
+        : `segments ${outliers.join(', ')} carry`;
+  return (
+    `\n- An automated check found that ${subject} a script mix unlike the rest of the ` +
+    'recording (possible fabricated foreign-language content); review that content as a ' +
+    'suspected artifact and do not summarize it as discussion.'
+  );
+}
 
 // Context-cleared prompt for the bounded quality retry ladder (issue #182):
 // no glossary, no positional prefix, no format examples -- so a retry after a
@@ -1635,6 +1666,10 @@ Requirements:
       let qualityCleaned = false;
       let uncertainSegments: number[] = [];
       let speakerLabels: SpeakerLabelAggregate = { normalizedLines: 0, cappedSegments: [] };
+      // Blocks handed to the foreign-script check: real segments when we have
+      // them, letter-budget windows otherwise.
+      let scriptBlocks: string[] = [];
+      let scriptSegmented = false;
       const stats = await fs.promises.stat(audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
       // Segment intentionally for parallelism: even when the API would
@@ -1677,6 +1712,8 @@ Requirements:
           qualityCleaned = gatedTranscript.cleaned;
           uncertainSegments = gatedTranscript.uncertainSegments;
           speakerLabels = gatedTranscript.speakerLabels;
+          scriptBlocks = gatedTranscript.bodies;
+          scriptSegmented = true;
         } else {
           // Get transcript for short audio
           console.error('Transcribing short audio...');
@@ -1718,6 +1755,30 @@ Requirements:
         );
       }
 
+      // Foreign-script insertion (issue #197). Fabricated but fluent passages
+      // in another language pass every repetition-shaped detector, so compare
+      // each block's script composition against the recording as a whole. A
+      // whole-file transcript has no segments, so it is chopped into windows
+      // that keep a mid-file foreign run from being diluted by the speech
+      // around it. Notes-only: positions are recorded, text is never touched.
+      if (!scriptSegmented) scriptBlocks = splitIntoScriptWindows(fullTranscript);
+      const scriptOutliers = findScriptMixOutliers(scriptBlocks);
+      const scriptOutlierPositions = scriptOutliers.outliers.map((index) => index + 1);
+      if (scriptOutlierPositions.length > 0) {
+        console.error(
+          `[transcript-quality] ${scriptOutlierPositions.length} of ${scriptBlocks.length} ` +
+            `${scriptSegmented ? 'segments' : 'windows'} carry a script mix unlike the rest of ` +
+            `the recording (hangul=${scriptOutliers.overall.hangul.toFixed(2)}, ` +
+            `latin=${scriptOutliers.overall.latin.toFixed(2)}, ` +
+            `other=${scriptOutliers.overall.other.toFixed(2)})`,
+        );
+        if (scriptSegmented) {
+          uncertainSegments = [...new Set([...uncertainSegments, ...scriptOutlierPositions])].sort(
+            (a, b) => a - b,
+          );
+        }
+      }
+
       if (options.transcriptOnly) {
         if (progressCallback) {
           progressCallback(100, 'Transcript ready');
@@ -1736,7 +1797,12 @@ Requirements:
       const highlightsBlock = buildHighlightsPromptBlock(enrichableNotes);
       // Same additive pattern as the highlights block: appended to custom
       // summary prompts too, since the shared parser tolerates the extra key.
-      const summaryPrompt = [basePrompt, highlightsBlock, TRANSCRIPT_QUALITY_PROMPT_BLOCK]
+      const summaryPrompt = [
+        basePrompt,
+        highlightsBlock,
+        TRANSCRIPT_QUALITY_PROMPT_BLOCK +
+          buildScriptMixPromptLine(scriptOutlierPositions, scriptSegmented ? 'segment' : 'window'),
+      ]
         .filter(Boolean)
         .join('\n\n');
 
@@ -1833,22 +1899,48 @@ Requirements:
       const modelQualityNotes = normalizeTranscriptQualityNotes(rawQualityNotes);
       const speakerLabelsRecorded =
         speakerLabels.normalizedLines > 0 || speakerLabels.cappedSegments.length > 0;
+      const scriptOutliersFound = scriptOutlierPositions.length > 0;
+      // The analyzer block now carries two independent findings, so it is
+      // written when either of them has something to say.
+      const analyzerRecorded = assembledQuality.flagged || scriptOutliersFound;
       if (
         qualityCleaned ||
         uncertainSegments.length > 0 ||
         speakerLabelsRecorded ||
-        assembledQuality.flagged ||
+        analyzerRecorded ||
         modelQualityNotes.length > 0
       ) {
         customFields.transcriptQuality = {
           ...(qualityCleaned ? { cleaned: true } : {}),
           ...(uncertainSegments.length > 0 ? { uncertainSegments } : {}),
           ...(speakerLabelsRecorded ? { speakerLabels } : {}),
-          ...(assembledQuality.flagged
+          ...(analyzerRecorded
             ? {
                 analyzer: {
-                  reasons: assembledQuality.reasons,
+                  reasons: [
+                    ...assembledQuality.reasons,
+                    ...(scriptOutliersFound ? [FOREIGN_SCRIPT_REASON] : []),
+                  ],
                   metrics: assembledQuality.metrics,
+                  ...(scriptOutliersFound
+                    ? {
+                        scriptMix: {
+                          overall: {
+                            hangul: roundShare(scriptOutliers.overall.hangul),
+                            latin: roundShare(scriptOutliers.overall.latin),
+                            other: roundShare(scriptOutliers.overall.other),
+                          },
+                          ...(scriptSegmented
+                            ? { outlierSegments: scriptOutlierPositions }
+                            : {
+                                outlierWindows: scriptOutlierPositions.map((index) => ({
+                                  index,
+                                  total: scriptBlocks.length,
+                                })),
+                              }),
+                        },
+                      }
+                    : {}),
                 },
               }
             : {}),
@@ -2540,6 +2632,7 @@ Requirements:
         cleaned: segmentResults.some((result) => result.cleaned),
         uncertainSegments,
         speakerLabels,
+        bodies: reconciledBodies,
       };
     } catch (error) {
       console.error('Error in segmented transcription:', error);

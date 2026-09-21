@@ -19,9 +19,12 @@ import {
   applyTranscriptQualityGate,
   detectPromptEcho,
   normalizeForComparison,
+  findScriptMixOutliers,
   normalizeSpeakerLabels,
   normalizeTranscriptQualityNotes,
   reconcileOverlappingSegments,
+  scriptMix,
+  splitIntoScriptWindows,
   stripNoSpeechSentinel,
   stripSpeakerLabel,
 } from './transcriptQuality';
@@ -1244,6 +1247,183 @@ describe('analyzeAssembledTranscript', () => {
     assert.equal(report.flagged, true);
     assert.ok(report.reasons.includes('intra-line-token-flood'));
     assert.equal(report.metrics.maxIntraLineCharRun, 500);
+  });
+});
+
+// Synthetic fixtures only: generic sentences written for the test, no real
+// names, no text copied from the audited recordings.
+const KOREAN_LINES = [
+  '오늘 회의에서는 다음 분기 일정을 함께 검토하겠습니다.',
+  '예산 배분은 지난번 논의대로 유지하는 편이 좋겠습니다.',
+  '담당자는 각 팀에서 한 명씩 지정해 주시기 바랍니다.',
+  '일정 지연이 발생하면 즉시 공유해 주시면 감사하겠습니다.',
+  '다음 주까지 초안을 정리해서 다시 안내드리겠습니다.',
+  '추가로 논의할 안건이 있으면 말씀해 주시기 바랍니다.',
+];
+
+const PORTUGUESE_LINES = [
+  'Hoje vamos conversar sobre o futuro da tecnologia e o impacto dela no trabalho.',
+  'Antes disso, quero agradecer a todos que acompanham o programa toda semana.',
+  'A convidada vai explicar como comecou a trabalhar com inteligencia artificial.',
+  'Depois vamos responder as perguntas enviadas pelos ouvintes durante a semana.',
+];
+
+const ENGLISH_LINES = [
+  'Let us review the quarterly roadmap and confirm the delivery dates for each team.',
+  'The migration finished early, so we have room for the analytics work this month.',
+  'Please send your updates before Friday so the report can go out on time.',
+];
+
+const CHINESE_LINES = [
+  '今天我们来谈谈人工智能技术的发展和未来的方向。',
+  '首先请大家注意这个问题的重要性以及解决的方法。',
+  '接下来我们会介绍几个具体的例子来说明这个观点。',
+];
+
+function turns(lines: string[], count: number): string {
+  return Array.from(
+    { length: count },
+    (_, i) => `참가자${(i % 2) + 1}: ${lines[i % lines.length]}`,
+  ).join('\n\n');
+}
+
+describe('scriptMix', () => {
+  it('reports a pure Hangul block as entirely Hangul', () => {
+    const mix = scriptMix(turns(KOREAN_LINES, 3));
+    assert.equal(mix.hangul, 1);
+    assert.equal(mix.latin, 0);
+    assert.equal(mix.other, 0);
+    assert.ok(mix.letters > 0);
+  });
+
+  it('reports a pure Latin block as entirely Latin', () => {
+    const mix = scriptMix(turns(ENGLISH_LINES, 3));
+    assert.equal(mix.latin, 1);
+    assert.equal(mix.hangul, 0);
+  });
+
+  it('counts Han characters as other', () => {
+    const mix = scriptMix(turns(CHINESE_LINES, 3));
+    assert.equal(mix.other, 1);
+    assert.equal(mix.hangul, 0);
+    assert.equal(mix.latin, 0);
+  });
+
+  it('splits a mixed block across shares that sum to one', () => {
+    const mix = scriptMix('참가자1: 이번 sprint 에서는 feature flag rollout 을 조정합니다.');
+    assert.ok(mix.hangul > 0 && mix.latin > 0);
+    assert.ok(Math.abs(mix.hangul + mix.latin + mix.other - 1) < 1e-9);
+  });
+
+  it('ignores digits, punctuation and whitespace', () => {
+    assert.equal(scriptMix('1234 !@#$ ... 56').letters, 0);
+  });
+
+  it('returns zeroed shares for empty text', () => {
+    assert.deepEqual(scriptMix(''), { hangul: 0, latin: 0, other: 0, letters: 0 });
+  });
+
+  it('strips the speaker label so it cannot bias a short block', () => {
+    const mix = scriptMix('참가자1: hello world');
+    assert.equal(mix.latin, 1);
+    assert.equal(mix.hangul, 0);
+  });
+});
+
+describe('findScriptMixOutliers', () => {
+  it('flags a Portuguese block dropped into a Korean recording', () => {
+    const blocks = [
+      turns(KOREAN_LINES, 6),
+      turns(KOREAN_LINES, 6),
+      turns(PORTUGUESE_LINES, 4),
+      turns(KOREAN_LINES, 6),
+    ];
+    const result = findScriptMixOutliers(blocks);
+    assert.deepEqual(result.outliers, [2]);
+    assert.ok(result.overall.hangul >= 0.6);
+  });
+
+  it('flags a Chinese block dropped into a Korean recording', () => {
+    const blocks = [turns(KOREAN_LINES, 6), turns(CHINESE_LINES, 6), turns(KOREAN_LINES, 6)];
+    assert.deepEqual(findScriptMixOutliers(blocks).outliers, [1]);
+  });
+
+  it('flags a Korean block dropped into an English recording (symmetric)', () => {
+    const blocks = [turns(ENGLISH_LINES, 6), turns(KOREAN_LINES, 6), turns(ENGLISH_LINES, 6)];
+    assert.deepEqual(findScriptMixOutliers(blocks).outliers, [1]);
+  });
+
+  it('does not flag a Korean block carrying heavy English jargon', () => {
+    const jargon = Array.from(
+      { length: 4 },
+      () =>
+        '참가자1: 이번 sprint 에서 feature flag rollout percentage 를 staging 환경에서 QA 하고 production 배포를 준비합니다.',
+    ).join('\n\n');
+    const mix = scriptMix(jargon);
+    assert.ok(mix.latin > 0.3, 'fixture must actually be jargon-heavy');
+    assert.ok(mix.letters >= 120, 'fixture must clear the length floor');
+    const blocks = [turns(KOREAN_LINES, 6), jargon, turns(KOREAN_LINES, 6)];
+    assert.deepEqual(findScriptMixOutliers(blocks).outliers, []);
+  });
+
+  it('does not flag anything when the recording has no dominant script', () => {
+    // Korean turns carry ~22 letters each against ~64 for English, so a
+    // genuinely balanced bilingual recording needs roughly 3x as many.
+    const blocks = [turns(KOREAN_LINES, 9), turns(ENGLISH_LINES, 3)];
+    const result = findScriptMixOutliers(blocks);
+    assert.ok(result.overall.hangul < 0.6 && result.overall.latin < 0.6);
+    assert.deepEqual(result.outliers, []);
+  });
+
+  it('does not flag a foreign block below the length floor', () => {
+    const short = `참가자1: ${PORTUGUESE_LINES[0]}`;
+    assert.ok(scriptMix(short).letters < 120, 'fixture must stay under the floor');
+    const blocks = [turns(KOREAN_LINES, 6), short, turns(KOREAN_LINES, 6)];
+    assert.deepEqual(findScriptMixOutliers(blocks).outliers, []);
+  });
+
+  it('returns no outliers for empty input', () => {
+    assert.deepEqual(findScriptMixOutliers([]), {
+      outliers: [],
+      overall: { hangul: 0, latin: 0, other: 0, letters: 0 },
+    });
+  });
+});
+
+describe('splitIntoScriptWindows', () => {
+  it('groups consecutive turns and never splits one', () => {
+    const lines = Array.from({ length: 6 }, (_, i) => `참가자1: ${KOREAN_LINES[i]}`);
+    const windows = splitIntoScriptWindows(lines.join('\n\n'), 50);
+    assert.ok(windows.length > 1, 'a small budget must produce several windows');
+    assert.deepEqual(
+      windows.flatMap((window) => window.split('\n\n')),
+      lines,
+      'every turn survives whole and in order',
+    );
+  });
+
+  it('keeps a turn larger than the budget whole in its own window', () => {
+    const long = `참가자1: ${KOREAN_LINES.join(' ')}`;
+    const windows = splitIntoScriptWindows(`${long}\n\n참가자2: ${KOREAN_LINES[0]}`, 20);
+    assert.equal(windows[0], long);
+  });
+
+  it('returns no windows for empty text', () => {
+    assert.deepEqual(splitIntoScriptWindows(''), []);
+  });
+
+  it('isolates a foreign run in the middle of a whole-file transcript', () => {
+    const transcript = [
+      turns(KOREAN_LINES, 30),
+      turns(PORTUGUESE_LINES, 8),
+      turns(KOREAN_LINES, 30),
+    ].join('\n\n');
+    const windows = splitIntoScriptWindows(transcript, 250);
+    const { outliers } = findScriptMixOutliers(windows);
+    assert.ok(outliers.length > 0, 'the Portuguese run must surface as its own window');
+    for (const index of outliers) {
+      assert.equal(scriptMix(windows[index]).latin, 1);
+    }
   });
 });
 
