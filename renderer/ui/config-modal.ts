@@ -12,14 +12,11 @@ import {
 } from '../services/model-options';
 import type { ConfigPayload, GoogleSyncProgress } from '../electronAPI';
 import {
-  type AiProvider,
-  type GeminiThinkingLevel,
   type LiveSttProvider,
   type TranscriptionProvider,
-  normalizeAiProvider,
-  normalizeLiveSttProvider,
   normalizeTranscriptionProvider,
 } from '../../src/aiProvider';
+import { applySettingsFields, parseLiveSttProvider, readSettingsFields } from './settings-fields';
 import { formatUsd } from '../../src/usageFormat';
 
 let configModal: HTMLDialogElement | null = null;
@@ -27,29 +24,21 @@ let saveConfigBtn: HTMLButtonElement | null = null;
 let cancelConfigBtn: HTMLButtonElement | null = null;
 let aiProviderSelect: HTMLSelectElement | null = null;
 let geminiApiKeyInput: HTMLInputElement | null = null;
-let geminiThinkingLevelSelect: HTMLSelectElement | null = null;
 let liveSttProviderSelect: HTMLSelectElement | null = null;
 let transcriptionProviderSelect: HTMLSelectElement | null = null;
 let transcriptionProviderNotice: HTMLElement | null = null;
 let openaiApiKeyInput: HTMLInputElement | null = null;
 let sonioxApiKeyInput: HTMLInputElement | null = null;
 let liveProviderNotice: HTMLElement | null = null;
-let liveSttLanguageInput: HTMLInputElement | null = null;
-let liveTranslationLanguageInput: HTMLInputElement | null = null;
 let loginCodexOAuthBtn: HTMLButtonElement | null = null;
 let clearCodexOAuthBtn: HTMLButtonElement | null = null;
 let codexOAuthStatus: HTMLElement | null = null;
 let loginGoogleOAuthBtn: HTMLButtonElement | null = null;
 let clearGoogleOAuthBtn: HTMLButtonElement | null = null;
 let googleOAuthStatus: HTMLElement | null = null;
-let googleDriveEnabledInput: HTMLInputElement | null = null;
 let googleDriveSyncNowBtn: HTMLButtonElement | null = null;
 let googleDriveSyncStatusEl: HTMLElement | null = null;
-let crashReportingEnabledInput: HTMLInputElement | null = null;
-let notionApiKeyInput: HTMLInputElement | null = null;
-let notionDatabaseIdInput: HTMLInputElement | null = null;
 let slackWebhookUrlInput: HTMLInputElement | null = null;
-let slackAutoShareInput: HTMLInputElement | null = null;
 let testSlackWebhookBtn: HTMLButtonElement | null = null;
 let slackWebhookStatus: HTMLElement | null = null;
 let globalShortcutInput: HTMLInputElement | null = null;
@@ -196,7 +185,7 @@ function applyCodexOAuthState(config: {
 }
 
 function readLiveProvider(): LiveSttProvider {
-  return normalizeLiveSttProvider(liveSttProviderSelect?.value) ?? 'auto';
+  return parseLiveSttProvider(liveSttProviderSelect?.value);
 }
 
 function readTranscriptionProvider(): TranscriptionProvider {
@@ -349,72 +338,20 @@ export async function showConfigModal(): Promise<void> {
   // discarding the user's in-progress edits by re-fetching config.
   if (configModal && configModal.open) return;
 
-  // Load current config
-  const config = (await window.electronAPI.getConfig()) as Record<string, unknown> & {
-    aiProvider?: AiProvider;
-    geminiApiKey?: string;
-    geminiModel?: string;
-    geminiFlashModel?: string;
-    geminiThinkingLevel?: GeminiThinkingLevel;
-    codexModel?: string;
-    codexTranscriptionModel?: string;
-    liveSttProvider?: LiveSttProvider;
-    transcriptionProvider?: TranscriptionProvider;
-    openaiApiKey?: string;
-    sonioxApiKey?: string;
-    liveSttLanguage?: string;
-    liveTranslationLanguage?: string;
+  // Load current config. ConfigPayload doubles as the load shape -- main
+  // returns the same field set it accepts -- plus the read-only OAuth flags.
+  const config = (await window.electronAPI.getConfig()) as ConfigPayload & {
     codexOAuthConfigured?: boolean;
     codexOAuthSource?: 'config' | 'env' | 'codexCli';
-    notionApiKey?: string;
-    notionDatabaseId?: string;
-    slackWebhookUrl?: string;
-    slackAutoShare?: boolean;
     googleOAuthConfigured?: boolean;
-    googleDriveEnabled?: boolean;
-    crashReportingEnabled?: boolean;
-    globalShortcut?: string;
-    knownWords?: string[];
-    maxRecordingMinutes?: number | string;
-    recordingReminderMinutes?: number | string;
-    minRecordingSeconds?: number | string;
-    summaryPrompt?: string;
-    defaultSummaryPrompt?: string;
   };
 
   // Pre-fill the form if values exist
-  if (aiProviderSelect) {
-    aiProviderSelect.value = config.aiProvider || 'gemini';
-  }
-  if (geminiApiKeyInput && config.geminiApiKey) {
-    geminiApiKeyInput.value = config.geminiApiKey;
-  }
-  if (liveSttProviderSelect) {
-    liveSttProviderSelect.value = config.liveSttProvider || 'auto';
-  }
-  if (transcriptionProviderSelect) {
-    transcriptionProviderSelect.value = config.transcriptionProvider || 'auto';
-  }
-  if (openaiApiKeyInput) {
-    openaiApiKeyInput.value = config.openaiApiKey || '';
-  }
-  if (sonioxApiKeyInput) {
-    sonioxApiKeyInput.value = config.sonioxApiKey || '';
-  }
-  if (liveSttLanguageInput) {
-    liveSttLanguageInput.value = config.liveSttLanguage || '';
-  }
-  if (liveTranslationLanguageInput) {
-    liveTranslationLanguageInput.value = config.liveTranslationLanguage || 'ko';
-  }
+  applySettingsFields(config);
   applyModelValue('geminiModel', config.geminiModel);
   applyModelValue('geminiFlashModel', config.geminiFlashModel);
   applyModelValue('codexModel', config.codexModel);
   applyModelValue('codexTranscriptionModel', config.codexTranscriptionModel);
-  if (geminiThinkingLevelSelect) {
-    // Defensive fallback; backend's getGeminiThinkingLevel normalizes first.
-    geminiThinkingLevelSelect.value = config.geminiThinkingLevel || 'medium';
-  }
   applyCodexOAuthState(config);
   setCodexOAuthStatus(
     codexOAuthConfigured ? codexOAuthStatusLabel(codexOAuthSource) : 'Not signed in',
@@ -424,13 +361,6 @@ export async function showConfigModal(): Promise<void> {
     config.googleOAuthConfigured ? 'Signed in' : 'Not signed in',
     config.googleOAuthConfigured ? 'success' : 'idle',
   );
-  if (googleDriveEnabledInput) {
-    googleDriveEnabledInput.checked = !!config.googleDriveEnabled;
-  }
-  if (crashReportingEnabledInput) {
-    // Opt-out: default ON, so only an explicit false leaves it unchecked.
-    crashReportingEnabledInput.checked = config.crashReportingEnabled !== false;
-  }
   // Pull the current sync status (last synced, in-flight, current progress)
   // so the modal is accurate on open even if no event has fired since boot.
   // If we land mid-sync with a known progress event, render that immediately
@@ -445,48 +375,15 @@ export async function showConfigModal(): Promise<void> {
       }
     })
     .catch(() => {});
-  if (notionApiKeyInput && config.notionApiKey) {
-    notionApiKeyInput.value = config.notionApiKey;
-  }
-  if (notionDatabaseIdInput && config.notionDatabaseId) {
-    notionDatabaseIdInput.value = config.notionDatabaseId;
-  }
-  if (slackWebhookUrlInput) {
-    slackWebhookUrlInput.value = config.slackWebhookUrl || '';
-  }
-  if (slackAutoShareInput) {
-    slackAutoShareInput.checked = !!config.slackAutoShare;
-  }
   if (slackWebhookStatus) {
     slackWebhookStatus.textContent = '';
     slackWebhookStatus.className = 'slack-webhook-status';
-  }
-  if (globalShortcutInput && config.globalShortcut) {
-    globalShortcutInput.value = config.globalShortcut;
   }
   knownWordsValues = (config.knownWords || []).filter(
     (w): w is string => typeof w === 'string' && w.trim().length > 0,
   );
   if (knownWordsField) knownWordsField.value = '';
   renderKnownWordsChips();
-  const maxRecordingMinutesInput = document.getElementById(
-    'maxRecordingMinutes',
-  ) as HTMLInputElement | null;
-  if (maxRecordingMinutesInput) {
-    maxRecordingMinutesInput.value = String(config.maxRecordingMinutes || '');
-  }
-  const recordingReminderMinutesInput = document.getElementById(
-    'recordingReminderMinutes',
-  ) as HTMLInputElement | null;
-  if (recordingReminderMinutesInput) {
-    recordingReminderMinutesInput.value = String(config.recordingReminderMinutes || '');
-  }
-  const minRecordingSecondsInput = document.getElementById(
-    'minRecordingSeconds',
-  ) as HTMLInputElement | null;
-  if (minRecordingSecondsInput) {
-    minRecordingSecondsInput.value = String(config.minRecordingSeconds || '');
-  }
 
   // Pre-fill summary prompt
   const summaryPromptInput = document.getElementById('summaryPrompt') as HTMLTextAreaElement | null;
@@ -673,32 +570,16 @@ export function setupConfigModal(): void {
   openaiApiKeyInput = document.getElementById('openaiApiKey') as HTMLInputElement | null;
   sonioxApiKeyInput = document.getElementById('sonioxApiKey') as HTMLInputElement | null;
   liveProviderNotice = document.getElementById('liveProviderNotice');
-  liveSttLanguageInput = document.getElementById('liveSttLanguage') as HTMLInputElement | null;
-  liveTranslationLanguageInput = document.getElementById(
-    'liveTranslationLanguage',
-  ) as HTMLInputElement | null;
   setupModelControls();
-  geminiThinkingLevelSelect = document.getElementById(
-    'geminiThinkingLevel',
-  ) as HTMLSelectElement | null;
   loginCodexOAuthBtn = document.getElementById('loginCodexOAuth') as HTMLButtonElement | null;
   clearCodexOAuthBtn = document.getElementById('clearCodexOAuth') as HTMLButtonElement | null;
   codexOAuthStatus = document.getElementById('codexOAuthStatus');
   loginGoogleOAuthBtn = document.getElementById('loginGoogleOAuth') as HTMLButtonElement | null;
   clearGoogleOAuthBtn = document.getElementById('clearGoogleOAuth') as HTMLButtonElement | null;
   googleOAuthStatus = document.getElementById('googleOAuthStatus');
-  googleDriveEnabledInput = document.getElementById(
-    'googleDriveEnabled',
-  ) as HTMLInputElement | null;
   googleDriveSyncNowBtn = document.getElementById('googleDriveSyncNow') as HTMLButtonElement | null;
   googleDriveSyncStatusEl = document.getElementById('googleDriveSyncStatus');
-  crashReportingEnabledInput = document.getElementById(
-    'crashReportingEnabled',
-  ) as HTMLInputElement | null;
-  notionApiKeyInput = document.getElementById('notionApiKey') as HTMLInputElement | null;
-  notionDatabaseIdInput = document.getElementById('notionDatabaseId') as HTMLInputElement | null;
   slackWebhookUrlInput = document.getElementById('slackWebhookUrl') as HTMLInputElement | null;
-  slackAutoShareInput = document.getElementById('slackAutoShare') as HTMLInputElement | null;
   testSlackWebhookBtn = document.getElementById('testSlackWebhook') as HTMLButtonElement | null;
   slackWebhookStatus = document.getElementById('slackWebhookStatus');
   globalShortcutInput = document.getElementById('globalShortcut') as HTMLInputElement | null;
@@ -965,32 +846,7 @@ export function setupConfigModal(): void {
 
   if (saveConfigBtn) {
     saveConfigBtn.addEventListener('click', async () => {
-      const aiProvider = normalizeAiProvider(aiProviderSelect?.value) ?? 'gemini';
-      const geminiKey = geminiApiKeyInput?.value.trim() ?? '';
-      const liveSttProvider = readLiveProvider();
-      const transcriptionProvider = readTranscriptionProvider();
-      const openaiApiKey = openaiApiKeyInput?.value.trim() ?? '';
-      const sonioxApiKey = sonioxApiKeyInput?.value.trim() ?? '';
-      const liveSttLanguage = liveSttLanguageInput?.value.trim() ?? '';
-      const liveTranslationLanguage = liveTranslationLanguageInput?.value.trim() || 'ko';
-      const geminiModel = readModelValue('geminiModel');
-      const geminiFlashModel = readModelValue('geminiFlashModel');
-      const codexModel = readModelValue('codexModel');
-      const codexTranscriptionModel = readModelValue('codexTranscriptionModel');
-      // Coerce to one of the three valid levels; an out-of-range selection
-      // (e.g. extension-injected DOM, stale form state) becomes the default.
-      // Include 'medium' explicitly so a future change to the default doesn't
-      // silently turn user-selected 'medium' into the new default.
-      const rawThinkingLevel = geminiThinkingLevelSelect?.value;
-      const geminiThinkingLevel =
-        rawThinkingLevel === 'low' || rawThinkingLevel === 'medium' || rawThinkingLevel === 'high'
-          ? rawThinkingLevel
-          : 'medium';
-      const notionKey = notionApiKeyInput?.value.trim() ?? '';
-      const notionDb = notionDatabaseIdInput?.value.trim() ?? '';
-      const slackWebhookUrl = slackWebhookUrlInput?.value.trim() ?? '';
-      const slackAutoShare = !!slackAutoShareInput?.checked;
-      const globalShortcut = globalShortcutInput?.value.trim() ?? '';
+      const fields = readSettingsFields();
       // Flush any uncommitted typing in the chip field before saving so the
       // user doesn't lose what they typed but never pressed comma/Enter on.
       if (knownWordsField && knownWordsField.value.trim().length > 0) {
@@ -1002,59 +858,20 @@ export function setupConfigModal(): void {
         'summaryPrompt',
       ) as HTMLTextAreaElement | null;
       const summaryPrompt = summaryPromptInput ? summaryPromptInput.value.trim() : '';
-      const maxRecordingMinutesEl = document.getElementById(
-        'maxRecordingMinutes',
-      ) as HTMLInputElement | null;
-      const maxRecordingMinutes = Math.max(
-        0,
-        Math.floor(Number.parseInt(maxRecordingMinutesEl?.value || '') || 0),
-      );
-      const recordingReminderMinutesEl = document.getElementById(
-        'recordingReminderMinutes',
-      ) as HTMLInputElement | null;
-      const recordingReminderMinutes = Math.max(
-        0,
-        Math.floor(Number.parseInt(recordingReminderMinutesEl?.value || '') || 0),
-      );
-      const minRecordingSecondsEl = document.getElementById(
-        'minRecordingSeconds',
-      ) as HTMLInputElement | null;
-      const minRecordingSeconds = Math.max(
-        0,
-        Math.floor(Number.parseInt(minRecordingSecondsEl?.value || '') || 0),
-      );
 
-      if (aiProvider === 'gemini' && !geminiKey) {
+      if (fields.aiProvider === 'gemini' && !fields.geminiApiKey) {
         alert('Please enter at least the Gemini API key');
         return;
       }
 
       const payload: ConfigPayload = {
-        aiProvider,
-        geminiApiKey: geminiKey,
-        geminiModel: geminiModel,
-        geminiFlashModel: geminiFlashModel,
-        geminiThinkingLevel: geminiThinkingLevel,
-        codexModel: codexModel,
-        codexTranscriptionModel: codexTranscriptionModel,
-        liveSttProvider: liveSttProvider,
-        transcriptionProvider: transcriptionProvider,
-        openaiApiKey: openaiApiKey,
-        sonioxApiKey: sonioxApiKey,
-        liveSttLanguage: liveSttLanguage,
-        liveTranslationLanguage: liveTranslationLanguage,
-        notionApiKey: notionKey,
-        notionDatabaseId: notionDb,
-        slackWebhookUrl: slackWebhookUrl,
-        slackAutoShare: slackAutoShare,
-        googleDriveEnabled: !!googleDriveEnabledInput?.checked,
-        crashReportingEnabled: !!crashReportingEnabledInput?.checked,
-        globalShortcut: globalShortcut,
+        ...fields,
+        geminiModel: readModelValue('geminiModel'),
+        geminiFlashModel: readModelValue('geminiFlashModel'),
+        codexModel: readModelValue('codexModel'),
+        codexTranscriptionModel: readModelValue('codexTranscriptionModel'),
         knownWords: knownWords,
         summaryPrompt: summaryPrompt === defaultSummaryPrompt ? '' : summaryPrompt,
-        maxRecordingMinutes: maxRecordingMinutes,
-        recordingReminderMinutes: recordingReminderMinutes,
-        minRecordingSeconds: minRecordingSeconds,
       };
       await window.electronAPI.saveConfig(payload);
       hideConfig();
