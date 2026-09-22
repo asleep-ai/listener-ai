@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { SONIOX_REALTIME_MODEL } from './aiProvider';
+import { CONNECT_TIMEOUT_MS, LiveReconnectController } from './liveReconnect';
 import type {
   LiveSttCallbacks,
   LiveSttPcmFrame,
@@ -15,16 +16,6 @@ export const SONIOX_REALTIME_URL = 'wss://stt-rt.soniox.com/transcribe-websocket
 /** Soniox realtime takes raw little-endian 16-bit PCM; we downsample to 16 kHz. */
 export const SONIOX_PCM_RATE = 16_000;
 
-// Same reconnect policy as GeminiLiveSession (see liveSttProvider.ts): Soniox
-// publishes no resumption handle, so a reconnect opens a brand-new stream with
-// a fresh config frame and accepts the short gap. A sustained processing
-// backlog closes the socket with code 1006 and no error frame, which is why a
-// plain close is a reconnect trigger rather than a fatal error.
-const MAX_RECONNECT_ATTEMPTS = 5;
-const RECONNECT_BASE_DELAY_MS = 500;
-const RECONNECT_MAX_DELAY_MS = 4_000;
-const RECONNECT_STABLE_MS = 30_000;
-const CONNECT_TIMEOUT_MS = 15_000;
 /**
  * How long the FIRST connect stays unsettled once the socket is open and the
  * config frame is away. The server validates the API key only after that frame
@@ -293,20 +284,16 @@ export class SonioxLiveSession implements LiveSttSession {
   private keepaliveTimer: NodeJS.Timeout | null = null;
   private lastSendAt = 0;
 
-  private reconnectAttempts = 0;
-  private reconnecting = false;
-  private pendingReconnect = false;
+  private readonly reconnector: LiveReconnectController;
   private firstConnectPending = true;
   private pendingConnectFail: ((error: Error) => void) | null = null;
-  private lastConnectedAt = 0;
   private droppedTokens = 0;
-  private lastErrorMessage: string | undefined;
   private lastErrorExtra: Record<string, unknown> = {};
 
   private constructor(
     private readonly createWebSocketFn: (url: string) => SonioxSocket,
     private readonly sleepFn: (ms: number, signal?: AbortSignal) => Promise<void>,
-    private readonly connectTimeoutMs: number,
+    connectTimeoutMs: number,
     private readonly keepaliveIntervalMs: number,
     private readonly nowFn: () => number,
     private readonly configFrame: string,
@@ -314,6 +301,33 @@ export class SonioxLiveSession implements LiveSttSession {
     private readonly callbacks: LiveSttCallbacks,
   ) {
     this.kind = kind;
+    // Same reconnect policy as GeminiLiveSession (see liveReconnect.ts): Soniox
+    // publishes no resumption handle, so a reconnect opens a brand-new stream with
+    // a fresh config frame and accepts the short gap. A sustained processing
+    // backlog closes the socket with code 1006 and no error frame, which is why a
+    // plain close is a reconnect trigger rather than a fatal error.
+    this.reconnector = new LiveReconnectController({
+      label: 'Soniox realtime',
+      kind,
+      connectTimeoutMs,
+      sleep: sleepFn,
+      // close() aborts every pending wait, the backoff included.
+      abortSignal: this.closeController.signal,
+      isClosed: () => this.closed,
+      connect: () => this.connect(true),
+      teardown: () => this.teardownSocket(),
+      onStatus: (status) => this.callbacks.onStatus?.(status),
+      onError: (error) => this.callbacks.onError(error),
+      // Don't lose the run that was in flight when the socket dropped.
+      onBeforeReconnect: () => this.flushFinal(),
+      onExhausted: (error) => {
+        reportError(error, {
+          operation: 'liveSession.sonioxReconnectExhausted',
+          extra: this.lastErrorExtra,
+        });
+        this.lastErrorExtra = {};
+      },
+    });
   }
 
   static async create(
@@ -375,8 +389,7 @@ export class SonioxLiveSession implements LiveSttSession {
   }
 
   private async connect(isResume: boolean): Promise<void> {
-    let established = false;
-    let timedOut = false;
+    const attempt = this.reconnector.beginConnect();
     let settled = false;
     let settleOk: () => void = () => {};
     let settleFail: (error: Error) => void = () => {};
@@ -405,7 +418,7 @@ export class SonioxLiveSession implements LiveSttSession {
     this.streamBaseOffsetMs = null;
 
     socket.on('open', () => {
-      if (timedOut || this.closed || this.socket !== socket) return;
+      if (attempt.timedOut || this.closed || this.socket !== socket) return;
       try {
         socket.send(this.configFrame);
       } catch (error) {
@@ -414,9 +427,7 @@ export class SonioxLiveSession implements LiveSttSession {
       }
       this.lastSendAt = this.nowFn();
       this.connected = true;
-      // Monotonic clock: connection-stability timing must not be skewed by
-      // wall-clock adjustments.
-      this.lastConnectedAt = performance.now();
+      this.reconnector.markConnected();
       this.startKeepalive();
       this.callbacks.onStatus?.(
         isResume
@@ -429,13 +440,13 @@ export class SonioxLiveSession implements LiveSttSession {
       // good by then, and waiting would stall PCM that is already queued.
       const settleDelayMs = isResume ? 0 : SONIOX_CONNECT_SETTLE_MS;
       void this.sleepFn(settleDelayMs, this.closeController.signal).then(() => {
-        if (timedOut || this.closed || this.socket !== socket) return;
+        if (attempt.timedOut || this.closed || this.socket !== socket) return;
         settleOk();
       });
     });
 
     socket.on('message', (data: unknown) => {
-      if (timedOut || this.socket !== socket) return;
+      if (attempt.timedOut || this.socket !== socket) return;
       // A frame the server sent after taking the config frame is proof the
       // key was accepted, so the settle window has done its job early.
       if (this.handleRawMessage(socket, data)) settleOk();
@@ -444,7 +455,7 @@ export class SonioxLiveSession implements LiveSttSession {
     socket.on('error', (error: unknown) => {
       // Let the close event drive reconnection; keep the message so a give-up
       // surfaces something meaningful.
-      this.lastErrorMessage =
+      this.reconnector.lastErrorMessage =
         error instanceof Error && error.message
           ? error.message
           : 'Soniox realtime connection failed.';
@@ -456,31 +467,21 @@ export class SonioxLiveSession implements LiveSttSession {
       this.stopKeepalive();
       // Unblock a close() that is draining for `finished: true`.
       this.finishedResolve?.();
-      if (timedOut || this.closed) return;
-      if (established) {
-        void this.handleDisconnect();
+      if (attempt.timedOut || this.closed) return;
+      if (attempt.established) {
+        void this.reconnector.handleDisconnect();
       } else {
         settleFail(
           new Error(
-            this.lastErrorMessage ??
+            this.reconnector.lastErrorMessage ??
               'Soniox realtime closed before the connection was established.',
           ),
         );
       }
     });
 
-    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([
-        settlement,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            timedOut = true;
-            reject(new Error('Timed out connecting to Soniox realtime.'));
-          }, this.connectTimeoutMs);
-        }),
-      ]);
-      established = true;
+      await attempt.establish(settlement);
     } catch (error) {
       this.pendingConnectFail = null;
       this.stopKeepalive();
@@ -492,70 +493,6 @@ export class SonioxLiveSession implements LiveSttSession {
         // The socket may already be gone.
       }
       throw error;
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-
-  private async handleDisconnect(): Promise<void> {
-    if (this.closed) return;
-    // Don't lose the run that was in flight when the socket dropped.
-    this.flushFinal();
-    if (this.reconnecting) {
-      this.pendingReconnect = true;
-      return;
-    }
-    this.reconnecting = true;
-    try {
-      do {
-        this.pendingReconnect = false;
-        // A connection that stayed up comfortably is a fresh failure, not a
-        // flapping retry storm -- reset the counter so a long session can keep
-        // reconnecting indefinitely.
-        if (
-          this.lastConnectedAt &&
-          performance.now() - this.lastConnectedAt > RECONNECT_STABLE_MS
-        ) {
-          this.reconnectAttempts = 0;
-        }
-        let reconnected = false;
-        while (!this.closed && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-          this.reconnectAttempts++;
-          const delayMs = Math.min(
-            RECONNECT_MAX_DELAY_MS,
-            RECONNECT_BASE_DELAY_MS * 2 ** (this.reconnectAttempts - 1),
-          );
-          this.callbacks.onStatus?.(
-            `Reconnecting to Soniox realtime ${this.kind} (attempt ${this.reconnectAttempts})...`,
-          );
-          await this.sleepFn(delayMs, this.closeController.signal);
-          if (this.closed) return;
-          try {
-            await this.connect(true);
-            if (this.closed) {
-              // close() landed during the reconnect; don't leak the new socket.
-              this.teardownSocket();
-              return;
-            }
-            reconnected = true;
-            break;
-          } catch (error) {
-            this.lastErrorMessage = error instanceof Error ? error.message : String(error);
-          }
-        }
-        if (!reconnected && !this.closed) {
-          const error = new Error(this.lastErrorMessage ?? 'Soniox realtime disconnected.');
-          reportError(error, {
-            operation: 'liveSession.sonioxReconnectExhausted',
-            extra: this.lastErrorExtra,
-          });
-          this.lastErrorExtra = {};
-          this.callbacks.onError(error);
-          return;
-        }
-      } while (this.pendingReconnect && !this.closed);
-    } finally {
-      this.reconnecting = false;
     }
   }
 
@@ -586,7 +523,7 @@ export class SonioxLiveSession implements LiveSttSession {
 
   private handleErrorFrame(socket: SonioxSocket, message: SonioxServerMessage): void {
     const error = toSonioxRealtimeError(message);
-    this.lastErrorMessage = error.message;
+    this.reconnector.lastErrorMessage = error.message;
     this.lastErrorExtra = {
       status: error.status,
       errorType: error.errorType,
@@ -787,7 +724,7 @@ export class SonioxLiveSession implements LiveSttSession {
   }
 
   sendPcm(frame: LiveSttPcmFrame): void {
-    if (this.closed || this.reconnecting || !this.connected || !this.socket) return;
+    if (this.closed || this.reconnector.reconnecting || !this.connected || !this.socket) return;
     if (frame.channelCount !== 1) return;
     const pcm = downsamplePcm16(asUint8Array(frame.audioData), frame.sampleRate, SONIOX_PCM_RATE);
     if (pcm.byteLength === 0) return;

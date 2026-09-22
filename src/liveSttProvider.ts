@@ -6,6 +6,7 @@ import type {
 } from '@google/genai';
 import WebSocket, { type RawData } from 'ws';
 import { importEsm } from './esmImport';
+import { CONNECT_TIMEOUT_MS, LiveReconnectController } from './liveReconnect';
 import { asUint8Array, downsamplePcm16, parseMessageData } from './liveSttUtils';
 import { SonioxLiveSession } from './sonioxLiveProvider';
 import {
@@ -443,24 +444,6 @@ class OpenAiRealtimeTranslationSession implements LiveSttSession {
   }
 }
 
-// Gemini Live caps an audio-only session at 15 minutes and the underlying
-// WebSocket connection at ~10 minutes (sending a GoAway first), so a live
-// caption stream is severed roughly every 10 minutes. Session resumption plus
-// sliding-window context compression let one logical session outlive that cap;
-// on an unexpected socket close we transparently reconnect with the last
-// resumption handle instead of surfacing a fatal error.
-const MAX_RECONNECT_ATTEMPTS = 5;
-const RECONNECT_BASE_DELAY_MS = 500;
-const RECONNECT_MAX_DELAY_MS = 4_000;
-const RECONNECT_STABLE_MS = 30_000;
-// @google/genai (2.16) resolves ai.live.connect only after the server's
-// setupComplete message and never settles it when the socket errors/closes
-// first -- whether that close lands before onopen or in the open-but-not-set-up
-// window. Our onclose handler fails the attempt for both cases; the timeout
-// bounds the remaining silent hangs (dead network, no close event) so a wedged
-// attempt fails and the loop can retry or give up.
-const CONNECT_TIMEOUT_MS = 15_000;
-
 export type GeminiLiveConnect = (params: LiveConnectParameters) => Promise<Session>;
 
 export interface GeminiLiveSessionDeps {
@@ -472,6 +455,12 @@ export interface GeminiLiveSessionDeps {
   connectTimeoutMs?: number;
 }
 
+// Gemini Live caps an audio-only session at 15 minutes and the underlying
+// WebSocket connection at ~10 minutes (sending a GoAway first), so a live
+// caption stream is severed roughly every 10 minutes. Session resumption plus
+// sliding-window context compression let one logical session outlive that cap;
+// on an unexpected socket close we transparently reconnect with the last
+// resumption handle instead of surfacing a fatal error.
 export class GeminiLiveSession implements LiveSttSession {
   readonly provider = 'gemini' as const;
   readonly kind: 'transcription' | 'translation';
@@ -480,22 +469,31 @@ export class GeminiLiveSession implements LiveSttSession {
   private outputTranscript = '';
   private closed = false;
   private resumeHandle: string | undefined;
-  private reconnectAttempts = 0;
-  private reconnecting = false;
-  private pendingReconnect = false;
-  private lastConnectedAt = 0;
-  private lastErrorMessage: string | undefined;
+  private readonly reconnector: LiveReconnectController;
 
   private constructor(
     private readonly connectFn: GeminiLiveConnect,
     private readonly sleepFn: (ms: number) => Promise<void>,
-    private readonly connectTimeoutMs: number,
+    connectTimeoutMs: number,
     private readonly model: string,
     private readonly baseConfig: LiveConnectConfig,
     kind: 'transcription' | 'translation',
     private readonly callbacks: LiveSttCallbacks,
   ) {
     this.kind = kind;
+    this.reconnector = new LiveReconnectController({
+      label: 'Gemini Live',
+      kind,
+      connectTimeoutMs,
+      sleep: sleepFn,
+      isClosed: () => this.closed,
+      connect: () => this.connect(true),
+      teardown: () => {
+        this.session?.close();
+      },
+      onStatus: (status) => this.callbacks.onStatus?.(status),
+      onError: (error) => this.callbacks.onError(error),
+    });
   }
 
   static async create(
@@ -569,12 +567,7 @@ export class GeminiLiveSession implements LiveSttSession {
     // that connection's terminal onclose, so connections never overlap and the
     // callbacks need no further per-connection guard (a GoAway pre-handoff
     // would change that).
-    let established = false;
-    let timedOut = false;
-    let failConnect: (error: Error) => void = () => {};
-    const connectFailure = new Promise<never>((_, reject) => {
-      failConnect = reject;
-    });
+    const attempt = this.reconnector.beginConnect();
     const connectPromise = this.connectFn({
       model: this.model,
       // Pass the handle only when present -- an explicit `handle: undefined` could
@@ -587,10 +580,8 @@ export class GeminiLiveSession implements LiveSttSession {
         onopen: () => {
           // Ignore a late open from an attempt we already abandoned (timed out)
           // or from any attempt once the session has been closed.
-          if (timedOut || this.closed) return;
-          // Monotonic clock: connection-stability timing must not be skewed by
-          // wall-clock adjustments (NTP, manual changes).
-          this.lastConnectedAt = performance.now();
+          if (attempt.timedOut || this.closed) return;
+          this.reconnector.markConnected();
           this.callbacks.onStatus?.(
             isResume
               ? `Reconnected to Gemini Live ${this.kind}.`
@@ -602,25 +593,25 @@ export class GeminiLiveSession implements LiveSttSession {
           // before the 2s audioStreamEnd flush, and the final transcript arrives
           // in that window. Only drop messages from an attempt we abandoned on
           // timeout (a closed socket delivers nothing more once close() returns).
-          if (timedOut) return;
+          if (attempt.timedOut) return;
           this.handleMessage(message);
         },
         onerror: (event) => {
           // Let onclose drive reconnection; retain the message so the surfaced
           // error is meaningful if the reconnect budget is exhausted.
-          this.lastErrorMessage = event.message || 'Gemini Live connection failed.';
+          this.reconnector.lastErrorMessage = event.message || 'Gemini Live connection failed.';
         },
         onclose: () => {
           // A timed-out attempt's late close (including our own timeout cleanup
           // close) must not drive a reconnect over the connection that already
           // replaced it; likewise once the session is closed.
-          if (timedOut || this.closed) return;
-          if (established) {
-            void this.handleDisconnect();
+          if (attempt.timedOut || this.closed) return;
+          if (attempt.established) {
+            void this.reconnector.handleDisconnect();
           } else {
-            failConnect(
+            attempt.fail(
               new Error(
-                this.lastErrorMessage ??
+                this.reconnector.lastErrorMessage ??
                   'Gemini Live closed before the connection was established.',
               ),
             );
@@ -632,86 +623,16 @@ export class GeminiLiveSession implements LiveSttSession {
     // late socket so it doesn't leak.
     connectPromise
       .then((late) => {
-        if (timedOut) late.close();
+        if (attempt.timedOut) late.close();
       })
       .catch(() => {});
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      this.session = await Promise.race([
-        connectPromise,
-        connectFailure,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            timedOut = true;
-            reject(new Error('Timed out connecting to Gemini Live.'));
-          }, this.connectTimeoutMs);
-        }),
-      ]);
-      established = true;
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-
-  private async handleDisconnect(): Promise<void> {
-    if (this.closed) return;
-    if (this.reconnecting) {
-      // A close fired while we were already reconnecting; re-run once we settle.
-      this.pendingReconnect = true;
-      return;
-    }
-    this.reconnecting = true;
-    try {
-      do {
-        this.pendingReconnect = false;
-        // A connection that stayed up comfortably (e.g. the ~10-min cap) is a
-        // fresh failure, not a flapping retry storm -- reset the counter so a
-        // long-running session can keep reconnecting indefinitely.
-        if (
-          this.lastConnectedAt &&
-          performance.now() - this.lastConnectedAt > RECONNECT_STABLE_MS
-        ) {
-          this.reconnectAttempts = 0;
-        }
-        let reconnected = false;
-        while (!this.closed && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-          this.reconnectAttempts++;
-          const delayMs = Math.min(
-            RECONNECT_MAX_DELAY_MS,
-            RECONNECT_BASE_DELAY_MS * 2 ** (this.reconnectAttempts - 1),
-          );
-          this.callbacks.onStatus?.(
-            `Reconnecting to Gemini Live ${this.kind} (attempt ${this.reconnectAttempts})...`,
-          );
-          await this.sleepFn(delayMs);
-          if (this.closed) return;
-          try {
-            await this.connect(true);
-            if (this.closed) {
-              // close() landed during the reconnect; don't leak the new socket.
-              this.session?.close();
-              return;
-            }
-            reconnected = true;
-            break;
-          } catch (error) {
-            // Keep the latest failure so the give-up error below is fresh and
-            // accurate, not a stale message from an earlier, already-recovered blip.
-            this.lastErrorMessage = error instanceof Error ? error.message : String(error);
-          }
-        }
-        if (!reconnected && !this.closed) {
-          this.callbacks.onError(new Error(this.lastErrorMessage ?? 'Gemini Live disconnected.'));
-          return;
-        }
-      } while (this.pendingReconnect && !this.closed);
-    } finally {
-      this.reconnecting = false;
-    }
+    await attempt.establish(connectPromise, (session) => {
+      this.session = session;
+    });
   }
 
   sendPcm(frame: LiveSttPcmFrame): void {
-    if (this.closed || this.reconnecting || !this.session) return;
+    if (this.closed || this.reconnector.reconnecting || !this.session) return;
     if (frame.channelCount !== 1) return;
     const audio = pcmFrameToGeminiBase64(frame);
     if (!audio) return;
