@@ -113,6 +113,8 @@ export const CONFIG_KEYS = [
     payload: true,
   },
   {
+    // Batch (file) speech-to-text backend. `auto` follows `aiProvider`;
+    // summary, judge and agent calls stay on `aiProvider` whatever this says.
     key: 'transcriptionProvider',
     kind: 'enum',
     values: TRANSCRIPTION_PROVIDERS,
@@ -242,6 +244,9 @@ export const CONFIG_KEYS = [
     payload: true,
   },
   {
+    // When true, the app periodically syncs transcription folders to Drive
+    // (and auto-syncs after each new transcription completes). When false,
+    // sync only runs on explicit user trigger (CLI or "Sync now" button).
     key: 'googleDriveEnabled',
     kind: 'bool',
     default: false,
@@ -353,6 +358,7 @@ export const CONFIG_KEYS = [
     payload: true,
   },
   {
+    // Crash/error reporting to Sentry, and never agent-writable.
     key: 'crashReportingEnabled',
     kind: 'bool',
     // Opt-out: absence means ON, only an explicit `false` disables reporting.
