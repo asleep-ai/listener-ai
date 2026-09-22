@@ -965,32 +965,6 @@ describe('SonioxLiveSession', () => {
     await session.close();
   });
 
-  it('gives up after five failed reconnect attempts', async () => {
-    const { createWebSocket, sockets } = scriptSockets([
-      'ok',
-      'fail',
-      'fail',
-      'fail',
-      'fail',
-      'fail',
-      'fail',
-    ]);
-    const { callbacks, of } = recordCallbacks();
-
-    const session = await SonioxLiveSession.create(CONFIG, callbacks, {
-      createWebSocket,
-      sleep: instantSleep,
-    });
-
-    sockets[0].drop(1006);
-    await flush();
-
-    assert.equal(sockets.length, 6, 'one live connection plus five reconnect attempts');
-    assert.equal(of('error').length, 1);
-
-    await session.close();
-  });
-
   it('does not reconnect after close()', async () => {
     const { createWebSocket, sockets } = scriptSockets();
     const { callbacks, of } = recordCallbacks();

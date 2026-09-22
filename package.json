@@ -25,6 +25,7 @@
     "dist/googleOAuth.js",
     "dist/liveSessionService.js",
     "dist/transcriptQuality.js",
+    "dist/liveReconnect.js",
     "dist/liveSttProvider.js",
     "dist/sonioxLiveProvider.js",
     "dist/sonioxTranscription.js",

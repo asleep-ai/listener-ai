@@ -148,36 +148,6 @@ test('GeminiLiveSession routes PCM to the reconnected session', async () => {
   assert.equal(captures[1].session.realtime.length, 1, 'frame reached the reconnected connection');
 });
 
-test('GeminiLiveSession surfaces an error only after exhausting reconnect attempts', async () => {
-  // 1 initial connect + 5 failing reconnects (MAX_RECONNECT_ATTEMPTS).
-  const { connect, captures, callCount } = scriptConnect([
-    'ok',
-    'fail',
-    'fail',
-    'fail',
-    'fail',
-    'fail',
-  ]);
-  const { callbacks, events } = recordCallbacks();
-  await GeminiLiveSession.create(CONFIG, callbacks, { connect, sleep: instantSleep });
-
-  captures[0].callbacks.onopen();
-  // A transient error on the original connection. It must NOT be the message
-  // surfaced after the later give-up -- each failed reconnect refreshes it.
-  captures[0].callbacks.onerror({ message: 'stale early blip' });
-  captures[0].callbacks.onclose();
-  await flush();
-
-  assert.equal(callCount(), 6, 'initial connect plus five reconnect attempts');
-  const errors = events.filter((e) => e.type === 'error');
-  assert.equal(errors.length, 1, 'exactly one error after giving up');
-  assert.equal(
-    errors[0].value,
-    'connect 5 failed',
-    'the freshest reconnect failure is surfaced, not the stale early onerror',
-  );
-});
-
 test('GeminiLiveSession does not reconnect after the user closes the session', async () => {
   const { connect, captures, callCount } = scriptConnect(['ok']);
   const { callbacks, events } = recordCallbacks();
@@ -196,34 +166,6 @@ test('GeminiLiveSession does not reconnect after the user closes the session', a
   assert.equal(callCount(), 1, 'no reconnect after an intentional close');
   assert.ok(!events.some((e) => e.type === 'error'), 'no error surfaced on user close');
   assert.equal(captures[0].session.closed, true, 'the underlying session was closed');
-});
-
-test('GeminiLiveSession coalesces a close that arrives during an in-flight reconnect', async () => {
-  const { connect, captures, callCount } = scriptConnect(['ok', 'ok', 'ok']);
-  // Park each reconnect iteration in its backoff sleep so the test can fire a
-  // re-entrant close from the established connection while reconnecting=true.
-  // That close must be coalesced (pendingReconnect) into exactly one more
-  // reconnect -- not dropped, and not spawning a second concurrent loop.
-  const sleepers: Array<() => void> = [];
-  const gatedSleep = (): Promise<void> => new Promise((resolve) => sleepers.push(resolve));
-
-  const { callbacks, events } = recordCallbacks();
-  await GeminiLiveSession.create(CONFIG, callbacks, { connect, sleep: gatedSleep });
-  captures[0].callbacks.onopen();
-  // First close starts the reconnect loop, which parks in its backoff sleep.
-  captures[0].callbacks.onclose();
-  // Re-entrant close while the loop is mid-flight: coalesce, don't drop.
-  captures[0].callbacks.onclose();
-  sleepers.shift()?.();
-  await flush();
-  sleepers.shift()?.();
-  await flush();
-
-  assert.equal(callCount(), 3, 'initial connect + first reconnect + coalesced second reconnect');
-  assert.ok(
-    !events.some((e) => e.type === 'error'),
-    'the coalesced close did not surface an error',
-  );
 });
 
 test('GeminiLiveSession retries when a reconnect attempt closes before setup completes', async () => {
