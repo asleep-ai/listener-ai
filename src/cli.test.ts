@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 // transcribe -> saveTranscription, and the mergedFrom round-trip.
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
+import { KNOWN_CONFIG_KEYS } from './configKeys';
 import { __saveTranscriptionLegacyV1ForTests, saveTranscription } from './outputService';
 import { execFileAsync, findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
@@ -193,6 +194,32 @@ describe('listener CLI basics', () => {
     const { code, stderr } = await runCli(['config', 'unset', 'bogusKey']);
     assert.equal(code, 1);
     assert.match(stderr, /Unknown key/);
+  });
+
+  it('config list emits every known key, once, in declaration order', async () => {
+    const { stdout, code } = await runCli(['config', 'list']);
+    assert.equal(code, 0);
+    const printed = stdout
+      .split('\n')
+      .filter((l) => l.length > 0)
+      .map((l) => l.slice(0, l.indexOf('=')));
+    assert.deepStrictEqual(printed, [...KNOWN_CONFIG_KEYS]);
+  });
+
+  it('config set + get round-trips geminiThinkingLevel and rejects unknown levels', async () => {
+    const set = await runCli(['config', 'set', 'geminiThinkingLevel', 'high']);
+    assert.equal(set.code, 0);
+    const get = await runCli(['config', 'get', 'geminiThinkingLevel']);
+    assert.equal(get.stdout.trim(), 'high');
+    const bad = await runCli(['config', 'set', 'geminiThinkingLevel', 'deep']);
+    assert.equal(bad.code, 1);
+    assert.match(bad.stderr, /geminiThinkingLevel must be one of: low, medium, high/);
+  });
+
+  it('config set rejects a non-canonical integer spelling', async () => {
+    const { code, stderr } = await runCli(['config', 'set', 'maxRecordingMinutes', '5.9']);
+    assert.equal(code, 1);
+    assert.match(stderr, /maxRecordingMinutes must be a non-negative integer/);
   });
 
   it('usage prints empty summary when no usage.jsonl exists', async () => {

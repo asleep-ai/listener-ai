@@ -24,6 +24,12 @@ const CODEX_ENV_KEYS = [
   'GEMINI_API_KEY',
   'LISTENER_AI_PROVIDER',
   'LISTENER_CODEX_AUTH_PATH',
+  'NOTION_API_KEY',
+  'NOTION_DATABASE_ID',
+  'SLACK_WEBHOOK_URL',
+  'GOOGLE_OAUTH_ACCESS_TOKEN',
+  'GOOGLE_OAUTH_REFRESH_TOKEN',
+  'GOOGLE_OAUTH_EXPIRES',
 ];
 const savedEnv = new Map<string, string | undefined>();
 
@@ -734,5 +740,115 @@ describe('ConfigService: codexTranscriptionModel migration to diarize default', 
     const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     // Marker already there -> user's explicit choice is preserved.
     assert.equal(onDisk.codexTranscriptionModel, 'gpt-4o-transcribe');
+  });
+});
+
+// Pins the full `getAllConfig()` projection: which keys it emits, and the
+// stored/env/default resolution behind each one. The trivial getters are
+// derived from the `configKeys.ts` registry, so this literal is the regression
+// guard that the generic resolution still reproduces the hand-written getters
+// (including the `||` vs `??` distinction and the two deliberately stored-only
+// API keys).
+describe('ConfigService: getAllConfig projection', () => {
+  function writeFixture(dataPath: string, extra: Record<string, unknown> = {}): void {
+    fs.writeFileSync(
+      path.join(dataPath, 'config.json'),
+      JSON.stringify({
+        aiProvider: 'codex',
+        transcriptionProvider: 'soniox',
+        geminiModel: 'custom-gemini',
+        geminiThinkingLevel: 'high',
+        liveSttProvider: 'soniox',
+        // Stored empty string: the getter falls through to OPENAI_API_KEY but
+        // getAllConfig must still report the stored value.
+        openaiApiKey: '',
+        liveSttLanguage: '  en  ',
+        liveTranslationLanguage: '   ',
+        notionDatabaseId: 'stored-db',
+        autoMode: true,
+        meetingDetection: false,
+        globalShortcut: '',
+        knownWords: ['alpha', 'beta'],
+        maxRecordingMinutes: 90,
+        minRecordingSeconds: 0,
+        recordSystemAudio: true,
+        audioDeviceId: '',
+        lastSeenVersion: '2.0.0',
+        slackAutoShare: true,
+        ...extra,
+      }),
+    );
+  }
+
+  function setEnv(dataPath: string): void {
+    process.env.GEMINI_API_KEY = 'env-gemini-key';
+    process.env.OPENAI_API_KEY = 'env-openai-key';
+    process.env.SONIOX_API_KEY = 'env-soniox-key';
+    process.env.NOTION_API_KEY = 'env-notion-key';
+    process.env.NOTION_DATABASE_ID = 'env-db';
+    process.env.SLACK_WEBHOOK_URL = 'https://hooks.example/env';
+    // Keep the Codex CLI auth file out of the picture so the derived
+    // codexOAuth* fields stay deterministic on developer machines.
+    process.env.LISTENER_CODEX_AUTH_PATH = path.join(dataPath, 'no-such-codex-auth.json');
+  }
+
+  const expected = {
+    aiProvider: 'codex',
+    transcriptionProvider: 'soniox',
+    geminiApiKey: 'env-gemini-key',
+    geminiModel: 'custom-gemini',
+    geminiFlashModel: 'gemini-2.5-flash',
+    geminiThinkingLevel: 'high',
+    codexModel: 'gpt-5.5',
+    codexTranscriptionModel: 'gpt-4o-transcribe-diarize',
+    liveSttProvider: 'soniox',
+    openaiApiKey: '',
+    sonioxApiKey: undefined,
+    openaiLiveTranscriptionModel: 'gpt-realtime-whisper',
+    openaiLiveTranslationModel: 'gpt-realtime-translate',
+    liveSttLanguage: 'en',
+    liveTranslationLanguage: 'ko',
+    codexOAuthConfigured: false,
+    codexOAuthSource: undefined,
+    googleOAuthConfigured: false,
+    googleDriveEnabled: false,
+    notionApiKey: 'env-notion-key',
+    notionDatabaseId: 'stored-db',
+    autoMode: true,
+    meetingDetection: false,
+    displayDetection: false,
+    globalShortcut: 'CommandOrControl+Shift+L',
+    knownWords: ['alpha', 'beta'],
+    summaryPrompt: DEFAULT_SUMMARY_PROMPT,
+    defaultSummaryPrompt: DEFAULT_SUMMARY_PROMPT,
+    maxRecordingMinutes: 90,
+    recordingReminderMinutes: 0,
+    minRecordingSeconds: 0,
+    recordSystemAudio: true,
+    crashReportingEnabled: true,
+    audioDeviceId: '',
+    lastSeenVersion: '2.0.0',
+    slackWebhookUrl: 'https://hooks.example/env',
+    slackAutoShare: true,
+  };
+
+  it('resolves stored, env and default values across every key kind', () => {
+    const dataPath = freshDataPath('all-config-projection');
+    writeFixture(dataPath);
+    setEnv(dataPath);
+
+    const config = new ConfigService(dataPath);
+
+    assert.deepStrictEqual(config.getAllConfig(), expected);
+  });
+
+  it('reports crashReportingEnabled false only when explicitly disabled', () => {
+    const dataPath = freshDataPath('all-config-crash-off');
+    writeFixture(dataPath, { crashReportingEnabled: false });
+    setEnv(dataPath);
+
+    const config = new ConfigService(dataPath);
+
+    assert.deepStrictEqual(config.getAllConfig(), { ...expected, crashReportingEnabled: false });
   });
 });
