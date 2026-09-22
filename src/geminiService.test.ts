@@ -13,11 +13,68 @@ import {
   type TranscribeSonioxAudioParams,
 } from './sonioxTranscription';
 import { createCostSession } from './services/usageTracker';
+import { type LostSegment, detectPromptEcho, type SpeakerLabelStats } from './transcriptQuality';
 import { findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
 const ffmpegPath = findFfmpegSync();
 
 let workDir: string;
+
+// Mirrors the service-internal shape that transcribeWithTwoSteps assembles
+// from per-segment speaker-label stats (issue #197).
+type SpeakerLabelAggregate = {
+  normalizedLines: number;
+  cappedSegments: Array<{ segment: number; distinctIds: number; collapsed?: boolean }>;
+};
+
+const NO_SPEAKER_LABELS: SpeakerLabelStats = {
+  distinctIds: 0,
+  normalizedLines: 0,
+  exceededCap: false,
+  capped: false,
+};
+
+// Synthetic transcript fixtures for the foreign-script guard (issue #197).
+// Generic sentences written for the test; nothing is copied from the audited
+// recordings and no real names appear.
+const KOREAN_MEETING_LINES = [
+  '오늘 회의에서는 다음 분기 일정을 함께 검토하겠습니다.',
+  '예산 배분은 지난번 논의대로 유지하는 편이 좋겠습니다.',
+  '담당자는 각 팀에서 한 명씩 지정해 주시기 바랍니다.',
+  '일정이 지연되면 즉시 공유해 주시면 감사하겠습니다.',
+  '다음 주까지 초안을 정리해서 다시 안내드리겠습니다.',
+  '추가로 논의할 안건이 있으면 말씀해 주시기 바랍니다.',
+  '지난 분기 지표는 전반적으로 개선된 흐름을 보였습니다.',
+  '고객 문의가 늘어나서 응대 인력을 보강해야 합니다.',
+  '보안 점검 결과는 별도 문서로 정리해 두었습니다.',
+  '출시 일정은 품질 검증이 끝난 뒤에 확정하겠습니다.',
+  '외부 협력사와의 계약 조건도 다시 확인이 필요합니다.',
+  '회의록은 오늘 중으로 공유 드라이브에 올리겠습니다.',
+];
+
+const PORTUGUESE_LINES = [
+  'Hoje vamos conversar sobre o futuro da tecnologia e o impacto dela no trabalho.',
+  'Antes disso, quero agradecer a todos que acompanham o programa toda semana.',
+  'A convidada vai explicar como comecou a trabalhar com inteligencia artificial.',
+  'Depois vamos responder as perguntas enviadas pelos ouvintes durante a semana.',
+  'O tema de hoje interessa a quem trabalha com dados e automacao de processos.',
+  'Fique conosco ate o final porque teremos uma novidade importante no programa.',
+];
+
+function koreanBody(start: number, count: number): string {
+  return Array.from(
+    { length: count },
+    (_, i) =>
+      `참가자${(i % 2) + 1}: ${KOREAN_MEETING_LINES[(start + i) % KOREAN_MEETING_LINES.length]}`,
+  ).join('\n\n');
+}
+
+function portugueseBody(count: number): string {
+  return Array.from(
+    { length: count },
+    (_, i) => `참가자${(i % 2) + 1}: ${PORTUGUESE_LINES[i % PORTUGUESE_LINES.length]}`,
+  ).join('\n\n');
+}
 
 type GeminiServiceFfmpegHelpers = {
   getAudioDuration(audioFilePath: string, signal?: AbortSignal): Promise<number>;
@@ -189,6 +246,13 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       signal?: AbortSignal,
     ): Promise<{ flagged: boolean; reason?: string }>;
     cleanupTranscriptQuality(text: string, signal?: AbortSignal): Promise<string>;
+    buildGlossaryBlock(): string;
+    createSegmentPrompt(
+      segmentIndex: number,
+      totalSegments: number,
+      customPrompt?: string,
+      includeGlossary?: boolean,
+    ): string;
     transcribeSegmentRaw(
       segmentFile: string,
       promptText: string,
@@ -216,6 +280,12 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       empty: boolean;
       cleaned: boolean;
       uncertain: boolean;
+      speakerLabels: {
+        distinctIds: number;
+        normalizedLines: number;
+        exceededCap: boolean;
+        capped: boolean;
+      };
     }>;
   };
 
@@ -275,6 +345,56 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     assert.deepEqual(temperatures, [undefined, 0.4]);
     assert.ok(result.body.includes(retryText));
     assert.equal(result.uncertain, false);
+  });
+
+  it('rewrites corrupted speaker labels in the segment body', async () => {
+    const raw = ['참가1: 안녕하세요.', '참자2: 반갑습니다.', '[참가자1] 시작하겠습니다.'].join(
+      '\n',
+    );
+    const { service } = makeGatedService([raw]);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(
+      result.body,
+      ['참가자1: 안녕하세요.', '참가자2: 반갑습니다.', '참가자1: 시작하겠습니다.'].join('\n'),
+    );
+    assert.equal(result.speakerLabels.normalizedLines, 3);
+    assert.equal(result.speakerLabels.distinctIds, 2);
+    assert.equal(result.speakerLabels.capped, false);
+    assert.equal(result.uncertain, false, 'normalisation alone is not a quality defect');
+  });
+
+  it('caps a runaway speaker id counter and marks the segment uncertain', async () => {
+    // The audit shape: a diarizer hands nearly every short line its own id.
+    const raw = Array.from({ length: 15 }, (_, i) => `참가자${i + 1}: 어.`).join('\n');
+    const { service } = makeGatedService([raw]);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(result.speakerLabels.capped, true);
+    assert.equal(result.speakerLabels.distinctIds, 15);
+    assert.equal(result.uncertain, true, 'owner attribution cannot be trusted past the cap');
+    assert.ok(!result.body.includes('참가자13'));
+    assert.ok(result.body.endsWith('참가자12: 어.'));
+  });
+
+  it("keeps a large meeting's ids and still marks the segment uncertain", async () => {
+    // Fifteen participants who each take two turns: over the cap, but the
+    // reused ids show the diarizer was still tracking who was speaking.
+    const raw = [
+      ...Array.from({ length: 15 }, (_, i) => `참가자${i + 1}: 먼저 의견을 말씀드리겠습니다.`),
+      ...Array.from({ length: 15 }, (_, i) => `참가자${i + 1}: 이어서 보충하겠습니다.`),
+    ].join('\n');
+    const { service } = makeGatedService([raw]);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(result.speakerLabels.exceededCap, true);
+    assert.equal(result.speakerLabels.capped, false);
+    assert.equal(result.speakerLabels.distinctIds, 15);
+    assert.equal(result.body, raw, 'no participant is merged onto another id');
+    assert.equal(result.uncertain, true, 'the id count is still worth flagging');
   });
 
   it('replaces a flagged segment with the clean context-cleared retry result', async () => {
@@ -483,6 +603,94 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     assert.deepEqual(judgedTexts, [loopText, loopText]);
     assert.deepEqual(qualityRetryCalls, [[1, 1]]);
   });
+
+  // Prompt echo (issue #197). A store audit found the app's own transcription
+  // prompt saved as a segment result -- glossary block (company, product and
+  // colleague names), positional prefix and instruction list -- which then
+  // flowed into the summary, Notion, the Markdown export and Drive sync.
+  // These tests are tripwires: the prompts this pipeline actually assembles
+  // must stay detectable, so editing a prompt without updating the markers in
+  // transcriptQuality.ts fails here instead of shipping silently.
+  function makeEchoingService(replyWithPrompt: (call: number) => boolean): {
+    service: SegmentHelpers;
+    prompts: string[];
+    judgeCalls: () => number;
+    cleanupCalls: () => number;
+  } {
+    const { service, prompts } = makeGatedService([]);
+    let judgeCalls = 0;
+    let cleanupCalls = 0;
+    let call = 0;
+    // The defect shape: the provider hands the prompt back as "transcript".
+    service.transcribeSegmentRaw = async (_file, promptText) => {
+      prompts.push(promptText);
+      call++;
+      return replyWithPrompt(call) ? promptText : cleanText;
+    };
+    service.judgeTranscriptQuality = async () => {
+      judgeCalls++;
+      return { flagged: false };
+    };
+    service.cleanupTranscriptQuality = async (text) => {
+      cleanupCalls++;
+      return text;
+    };
+    return { service, prompts, judgeCalls: () => judgeCalls, cleanupCalls: () => cleanupCalls };
+  }
+
+  it('detects every prompt this pipeline assembles as a prompt echo', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+      knownWords: ['Listener.AI', '김한결'],
+    }) as unknown as SegmentHelpers;
+
+    const glossaryBlock = service.buildGlossaryBlock();
+    assert.ok(glossaryBlock.includes('Listener.AI'), 'glossary must carry the known words');
+    assert.equal(detectPromptEcho(glossaryBlock).echoed, true);
+
+    const segmentPrompt = service.createSegmentPrompt(3, 12);
+    assert.match(segmentPrompt, /\[Audio segment 4 of 12\]/);
+    assert.equal(detectPromptEcho(segmentPrompt).echoed, true);
+
+    // The retry prompt is module-private; take the one a real run sent.
+    const { service: gated, prompts } = makeGatedService([loopText, cleanText]);
+    await gated.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+    assert.equal(prompts.length, 2);
+    assert.doesNotMatch(prompts[1], /Audio segment/, 'retry prompt must drop positional context');
+    assert.equal(detectPromptEcho(prompts[1]).echoed, true);
+  });
+
+  it('drops a segment whose first result and every retry echo the prompt', async () => {
+    const { service, prompts, judgeCalls, cleanupCalls } = makeEchoingService(() => true);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 3, 12, 900, 1200);
+
+    assert.equal(prompts.length, 3, 'an echo still advances through both retry rungs');
+    assert.match(prompts[0], /Audio segment 4 of 12/);
+    assert.equal(result.body, '', 'prompt text must never be returned as transcript');
+    assert.equal(result.empty, true);
+    assert.equal(result.uncertain, true);
+    assert.equal(result.cleaned, false);
+    assert.match(result.header, /^\[Segment 4: /);
+    assert.equal(judgeCalls(), 0, 'an echo is decided before the judge');
+    assert.equal(cleanupCalls(), 0, 'cleaning instruction text cannot recover speech');
+  });
+
+  it('uses the clean retry when only the first result echoes the prompt', async () => {
+    const { service, prompts } = makeEchoingService((call) => call === 1);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(prompts.length, 2);
+    assert.doesNotMatch(prompts[1], /Audio segment/, 'retry prompt must drop positional context');
+    assert.doesNotMatch(prompts[1], /proper nouns, names, and terms/, 'retry drops the glossary');
+    assert.equal(result.body, cleanText);
+    assert.equal(result.empty, false);
+    assert.equal(result.uncertain, false);
+  });
 });
 
 describe('GeminiService segmented quality aggregation', () => {
@@ -498,6 +706,15 @@ describe('GeminiService segmented quality aggregation', () => {
       empty: boolean;
       cleaned: boolean;
       uncertain: boolean;
+      speakerLabels: {
+        distinctIds: number;
+        normalizedLines: number;
+        exceededCap: boolean;
+        capped: boolean;
+      };
+      startTime: number;
+      endTime: number;
+      lossReason?: LostSegment['reason'];
     }>;
     getSegmentedTranscript(
       audioFilePath: string,
@@ -506,6 +723,12 @@ describe('GeminiService segmented quality aggregation', () => {
       text: string;
       cleaned: boolean;
       uncertainSegments: number[];
+      speakerLabels: {
+        normalizedLines: number;
+        cappedSegments: Array<{ segment: number; distinctIds: number; collapsed?: boolean }>;
+      };
+      bodies: string[];
+      lostSegments: LostSegment[];
     }>;
   };
 
@@ -531,6 +754,9 @@ describe('GeminiService segmented quality aggregation', () => {
       empty: false,
       cleaned: false,
       uncertain: segmentIndex === 1,
+      speakerLabels: { distinctIds: 1, normalizedLines: 0, exceededCap: false, capped: false },
+      startTime: segmentIndex * 300,
+      endTime: (segmentIndex + 1) * 300,
     });
 
     const result = await service.getSegmentedTranscript(
@@ -539,6 +765,135 @@ describe('GeminiService segmented quality aggregation', () => {
     );
 
     assert.deepEqual(result.uncertainSegments, [2]);
+  });
+
+  it('aggregates speaker-label stats and records which segments were collapsed', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as SegmentedHelpers;
+    const segmentFiles = [
+      path.join(workDir, 'labels_segment_000.webm'),
+      path.join(workDir, 'labels_segment_001.webm'),
+    ];
+    for (const segmentFile of segmentFiles) {
+      fs.writeFileSync(segmentFile, Buffer.alloc(8, 1));
+    }
+    service.splitAudioIntoSegments = async () => segmentFiles;
+    service.transcribeSingleSegment = async (_segmentFile, segmentIndex) => {
+      // Segment 1 ran past the cap with its ids kept (a large meeting);
+      // segment 2 ran past it with a runaway counter that was collapsed.
+      const collapsed = segmentIndex === 1;
+      return {
+        index: segmentIndex,
+        header: `[Segment ${segmentIndex + 1}]\n`,
+        body: `참가자1: 세그먼트 ${segmentIndex + 1}의 정상 발화입니다.`,
+        empty: false,
+        cleaned: false,
+        uncertain: true,
+        speakerLabels: {
+          distinctIds: collapsed ? 15 : 20,
+          normalizedLines: segmentIndex === 0 ? 3 : 4,
+          exceededCap: true,
+          capped: collapsed,
+        },
+        startTime: segmentIndex * 300,
+        endTime: (segmentIndex + 1) * 300,
+      };
+    };
+
+    const result = await service.getSegmentedTranscript(
+      path.join(workDir, 'labels-source.webm'),
+      600,
+    );
+
+    assert.deepEqual(result.uncertainSegments, [1, 2]);
+    assert.deepEqual(result.speakerLabels, {
+      normalizedLines: 7,
+      cappedSegments: [
+        { segment: 1, distinctIds: 20 },
+        { segment: 2, distinctIds: 15, collapsed: true },
+      ],
+    });
+  });
+
+  it('collects segments that produced no body, with their reason and time range', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as SegmentedHelpers;
+    const segmentFiles = [0, 1, 2].map((i) => path.join(workDir, `lost_segment_00${i}.webm`));
+    for (const segmentFile of segmentFiles) {
+      fs.writeFileSync(segmentFile, Buffer.alloc(8, 1));
+    }
+    service.splitAudioIntoSegments = async () => segmentFiles;
+    service.transcribeSingleSegment = async (_segmentFile, segmentIndex) => {
+      const lossReason =
+        segmentIndex === 1 ? 'empty' : segmentIndex === 2 ? 'prompt-echo' : undefined;
+      return {
+        index: segmentIndex,
+        header: `[Segment ${segmentIndex + 1}]\n`,
+        body: lossReason ? '' : '참가자1: 첫 번째 안건부터 살펴보겠습니다.',
+        empty: Boolean(lossReason),
+        cleaned: false,
+        uncertain: false,
+        speakerLabels: { distinctIds: 1, normalizedLines: 0, exceededCap: false, capped: false },
+        startTime: segmentIndex * 300,
+        endTime: (segmentIndex + 1) * 300,
+        lossReason,
+      };
+    };
+
+    const result = await service.getSegmentedTranscript(
+      path.join(workDir, 'lost-source.webm'),
+      900,
+    );
+
+    assert.deepEqual(result.lostSegments, [
+      { segment: 2, start: 300, end: 600, reason: 'empty' },
+      { segment: 3, start: 600, end: 900, reason: 'prompt-echo' },
+    ]);
+  });
+
+  it('counts a segment emptied by overlap reconciliation as lost', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as SegmentedHelpers;
+    const segmentFiles = [0, 1].map((i) => path.join(workDir, `overlap_segment_00${i}.webm`));
+    for (const segmentFile of segmentFiles) {
+      fs.writeFileSync(segmentFile, Buffer.alloc(8, 1));
+    }
+    // Segment 2 holds nothing but the overlap copy of segment 1's last turn,
+    // so reconciliation removes its only line and leaves a bare header.
+    const overlapTurn = '참가자2: 지난주 배포 결과부터 공유드리겠습니다.';
+    service.splitAudioIntoSegments = async () => segmentFiles;
+    service.transcribeSingleSegment = async (_segmentFile, segmentIndex) => ({
+      index: segmentIndex,
+      header: `[Segment ${segmentIndex + 1}]\n`,
+      body:
+        segmentIndex === 0 ? `참가자1: 오늘 회의를 시작하겠습니다.\n\n${overlapTurn}` : overlapTurn,
+      empty: false,
+      cleaned: false,
+      uncertain: false,
+      speakerLabels: { distinctIds: 1, normalizedLines: 0, exceededCap: false, capped: false },
+      startTime: segmentIndex * 300,
+      endTime: (segmentIndex + 1) * 300,
+    });
+
+    const result = await service.getSegmentedTranscript(
+      path.join(workDir, 'overlap-source.webm'),
+      600,
+    );
+
+    assert.equal(result.bodies[1], '', 'the duplicate head was removed');
+    assert.deepEqual(result.lostSegments, [{ segment: 2, start: 300, end: 600, reason: 'empty' }]);
   });
 });
 
@@ -937,6 +1292,78 @@ describe('GeminiService short-audio quality judge wiring', () => {
     assert.equal(geminiCalls, 1);
     assert.equal(result.text, text);
   });
+
+  // Prompt echo (issue #197) on the whole-file path is a transcription
+  // failure, not silence: "no speech" would tell the user their recording was
+  // empty when the provider simply handed the instructions back.
+  const echoedPrompt =
+    'Please transcribe this audio recording with proper speaker identification.\n\nFormat requirements:';
+
+  it('fails the whole-file run when the result echoes the prompt', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as ShortAudioHelpers;
+    const audioPath = path.join(workDir, 'short-echo.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    let transportCalls = 0;
+    let judgeCalls = 0;
+    service.generateGeminiTranscript = async () => {
+      transportCalls++;
+      return echoedPrompt;
+    };
+    service.judgeTranscriptQuality = async () => {
+      judgeCalls++;
+      return { flagged: false };
+    };
+
+    await assert.rejects(
+      () => service.getShortAudioTranscript(audioPath, 10),
+      (error: unknown) =>
+        error instanceof Error &&
+        !(error instanceof EmptyTranscriptionError) &&
+        /prompt text instead of speech/.test(error.message),
+    );
+    assert.equal(transportCalls, 3, 'an echo still advances through both retry rungs');
+    assert.equal(judgeCalls, 0, 'an echo is decided before the judge');
+  });
+
+  // Live snippets keep the silent path: `transcribeLiveSnippet` maps a typed
+  // no-speech error to '', and an error toast every 12 seconds is worse than
+  // one dropped chunk.
+  it('treats an echoed live snippet as silence, not a failure', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as ShortAudioHelpers;
+    const audioPath = path.join(workDir, 'short-echo-live.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    let transportCalls = 0;
+    service.generateGeminiTranscript = async () => {
+      transportCalls++;
+      return echoedPrompt;
+    };
+
+    await assert.rejects(
+      () =>
+        service.getShortAudioTranscript(
+          audioPath,
+          10,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          false,
+        ),
+      (error: unknown) => error instanceof EmptyTranscriptionError,
+    );
+    assert.equal(transportCalls, 1, 'live snippets never re-send the same blob');
+  });
 });
 
 // Soniox is the third batch backend. Its distinguishing properties are the
@@ -1278,13 +1705,19 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       actionItemGroups?: Array<{ owner: string; items: string[] }>;
       customFields?: Record<string, unknown>;
     }>;
-    getShortAudioTranscript(
-      ...args: unknown[]
-    ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
+    getShortAudioTranscript(...args: unknown[]): Promise<{
+      text: string;
+      cleaned: boolean;
+      uncertain: boolean;
+      speakerLabels: SpeakerLabelStats;
+    }>;
     getSegmentedTranscript(...args: unknown[]): Promise<{
       text: string;
       cleaned: boolean;
       uncertainSegments: number[];
+      speakerLabels: SpeakerLabelAggregate;
+      bodies: string[];
+      lostSegments: LostSegment[];
     }>;
     generateSummary(promptText: string, transcript: string, ...rest: unknown[]): Promise<string>;
   };
@@ -1295,6 +1728,10 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     cleaned?: boolean;
     uncertain?: boolean;
     uncertainSegments?: number[];
+    speakerLabels?: SpeakerLabelStats;
+    segmentedSpeakerLabels?: SpeakerLabelAggregate;
+    bodies?: string[];
+    lostSegments?: LostSegment[];
   }): {
     service: TwoStepHelpers;
     summaryPrompts: string[];
@@ -1310,11 +1747,15 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       text: opts.transcript,
       cleaned: opts.cleaned ?? false,
       uncertain: opts.uncertain ?? false,
+      speakerLabels: opts.speakerLabels ?? NO_SPEAKER_LABELS,
     });
     service.getSegmentedTranscript = async () => ({
       text: opts.transcript,
       cleaned: opts.cleaned ?? false,
       uncertainSegments: opts.uncertainSegments ?? [],
+      speakerLabels: opts.segmentedSpeakerLabels ?? { normalizedLines: 0, cappedSegments: [] },
+      bodies: opts.bodies ?? [opts.transcript],
+      lostSegments: opts.lostSegments ?? [],
     });
     service.generateSummary = async (promptText) => {
       summaryPrompts.push(promptText);
@@ -1581,6 +2022,276 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     });
   });
 
+  it('persists the segmented speaker-label guard on customFields', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
+      uncertainSegments: [2],
+      segmentedSpeakerLabels: {
+        normalizedLines: 7,
+        cappedSegments: [{ segment: 2, distinctIds: 15, collapsed: true }],
+      },
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('labels-long.webm'), 600);
+
+    assert.deepEqual(result.customFields?.transcriptQuality, {
+      uncertainSegments: [2],
+      speakerLabels: {
+        normalizedLines: 7,
+        cappedSegments: [{ segment: 2, distinctIds: 15, collapsed: true }],
+      },
+    });
+  });
+
+  it('persists a capped whole-file transcript as segment 1', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
+      uncertain: true,
+      speakerLabels: { distinctIds: 15, normalizedLines: 7, exceededCap: true, capped: true },
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('labels-short.webm'), 10);
+
+    assert.deepEqual(result.customFields?.transcriptQuality, {
+      uncertainSegments: [1],
+      speakerLabels: {
+        normalizedLines: 7,
+        cappedSegments: [{ segment: 1, distinctIds: 15, collapsed: true }],
+      },
+    });
+  });
+
+  it('persists an over-cap whole-file transcript whose ids were kept', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
+      uncertain: true,
+      speakerLabels: { distinctIds: 15, normalizedLines: 7, exceededCap: true, capped: false },
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('labels-kept.webm'), 10);
+
+    assert.deepEqual(result.customFields?.transcriptQuality, {
+      uncertainSegments: [1],
+      speakerLabels: { normalizedLines: 7, cappedSegments: [{ segment: 1, distinctIds: 15 }] },
+    });
+  });
+
+  it('persists normalized label counts even when nothing else is wrong', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
+      speakerLabels: { distinctIds: 2, normalizedLines: 3, exceededCap: false, capped: false },
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('labels-only.webm'), 10);
+
+    assert.deepEqual(result.customFields?.transcriptQuality, {
+      speakerLabels: { normalizedLines: 3, cappedSegments: [] },
+    });
+  });
+
+  it('marks a foreign-script segment uncertain and warns the summary model', async () => {
+    const bodies = [koreanBody(0, 12), koreanBody(4, 12), portugueseBody(6), koreanBody(8, 12)];
+    const transcript = bodies
+      .map((body, i) => `[Segment ${i + 1}: 00:0${i}:00 ~ 00:0${i + 1}:00]\n\n${body}`)
+      .join('\n\n---\n\n');
+    const { service, summaryPrompts } = makeTwoStepService({
+      transcript,
+      bodies,
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('foreign-long.webm'), 600);
+
+    const quality = result.customFields?.transcriptQuality as {
+      uncertainSegments?: number[];
+      analyzer?: {
+        reasons: string[];
+        scriptMix?: {
+          overall: { hangul: number; latin: number; other: number };
+          outlierSegments?: number[];
+          outlierWindows?: Array<{ index: number; total: number }>;
+        };
+      };
+    };
+    assert.deepEqual(quality.uncertainSegments, [3], 'the Portuguese segment is segment 3');
+    assert.deepEqual(quality.analyzer?.reasons, ['foreign-script-segment']);
+    assert.deepEqual(quality.analyzer?.scriptMix?.outlierSegments, [3]);
+    assert.equal(quality.analyzer?.scriptMix?.outlierWindows, undefined);
+    assert.ok((quality.analyzer?.scriptMix?.overall.hangul ?? 0) >= 0.6);
+    assert.match(summaryPrompts[0], /segment 3 carries a script mix unlike the rest/);
+    assert.match(
+      summaryPrompts[0],
+      /keep it if it reads as genuine discussion/,
+      'the note asks the model to verify the block, not to drop it',
+    );
+    assert.equal(result.transcript, transcript, 'the transcript is never rewritten');
+  });
+
+  it('records a foreign window for a whole-file transcript', async () => {
+    // No segments on the short path, so the guard works on letter-budget
+    // windows. The generated fixture repeats a small sentence pool, which also
+    // trips the compression metric -- the script finding is the subject here.
+    const transcript = [koreanBody(0, 60), portugueseBody(24), koreanBody(6, 60)].join('\n\n');
+    const { service, summaryPrompts } = makeTwoStepService({
+      transcript,
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('foreign-short.webm'), 10);
+
+    const quality = result.customFields?.transcriptQuality as {
+      uncertainSegments?: number[];
+      analyzer?: {
+        reasons: string[];
+        scriptMix?: {
+          outlierSegments?: number[];
+          outlierWindows?: Array<{ index: number; total: number }>;
+        };
+      };
+    };
+    assert.ok(quality.analyzer?.reasons.includes('foreign-script-segment'));
+    assert.deepEqual(quality.analyzer?.scriptMix?.outlierWindows, [{ index: 2, total: 3 }]);
+    assert.equal(quality.analyzer?.scriptMix?.outlierSegments, undefined);
+    assert.equal(quality.uncertainSegments, undefined, 'windows are not segment indices');
+    assert.match(summaryPrompts[0], /one or more stretches of the transcript carry a script mix/);
+  });
+
+  it('writes no script finding for a Korean meeting carrying English jargon', async () => {
+    const transcript = [
+      koreanBody(0, 12),
+      '참가자1: 이번 sprint 에서 feature flag rollout percentage 를 staging 에서 QA 합니다.',
+      koreanBody(6, 12),
+    ].join('\n\n');
+    const { service, summaryPrompts } = makeTwoStepService({
+      transcript,
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('jargon.webm'), 10);
+
+    assert.equal(result.customFields, undefined);
+    assert.doesNotMatch(summaryPrompts[0], /An automated check found/);
+  });
+
+  it('prepends a coverage notice to both summary representations when segments were lost', async () => {
+    const notice =
+      '10 minutes of this recording produced no transcript ' +
+      '(segments: 3 [00:10:00 ~ 00:15:00], 7 [00:30:00 ~ 00:35:00]).';
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 첫 번째 안건부터 살펴보겠습니다.',
+      lostSegments: [
+        { segment: 3, start: 600, end: 900, reason: 'empty' },
+        { segment: 7, start: 1800, end: 2100, reason: 'prompt-echo' },
+      ],
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summarySections: [{ heading: 'Agenda', bullets: ['Discussed the roadmap'] }],
+        keyPoints: ['One'],
+        actionItemGroups: [{ owner: 'Team', items: ['Follow up'] }],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('lost-long.webm'), 600);
+
+    assert.ok(result.summary.startsWith(notice), 'the flat summary leads with the notice');
+    assert.equal(result.summary.split(notice).length, 2, 'the notice appears exactly once');
+    assert.deepEqual(result.summarySections?.[0], {
+      heading: 'Transcript coverage',
+      bullets: [notice],
+    });
+    assert.equal(result.summarySections?.[1]?.heading, 'Agenda');
+    assert.deepEqual(result.customFields?.transcriptQuality, {
+      lostSegments: [
+        { segment: 3, start: 600, end: 900, reason: 'empty' },
+        { segment: 7, start: 1800, end: 2100, reason: 'prompt-echo' },
+      ],
+      lostSeconds: 600,
+    });
+  });
+
+  it('adds no coverage notice when every segment produced a transcript', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 첫 번째 안건부터 살펴보겠습니다.',
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summarySections: [{ heading: 'Agenda', bullets: ['Discussed the roadmap'] }],
+        keyPoints: ['One'],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('kept-long.webm'), 600);
+
+    assert.doesNotMatch(result.summary, /produced no transcript/);
+    assert.equal(result.summarySections?.[0]?.heading, 'Agenda');
+    assert.equal(result.customFields, undefined);
+  });
+
+  it('omits speakerLabels when the guard had nothing to report', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
+      cleaned: true,
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('clean-labels.webm'), 10);
+
+    assert.deepEqual(result.customFields?.transcriptQuality, { cleaned: true });
+  });
+
   it('persists short-audio uncertainty as segment 1', async () => {
     const { service } = makeTwoStepService({
       transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
@@ -1759,9 +2470,12 @@ describe('GeminiService transcription error attribution', () => {
       options?: { transcriptOnly?: boolean },
     ): Promise<{ transcript: string }>;
     getAudioDuration(audioFilePath: string, signal?: AbortSignal): Promise<number>;
-    getShortAudioTranscript(
-      ...args: unknown[]
-    ): Promise<{ text: string; cleaned: boolean; uncertain: boolean }>;
+    getShortAudioTranscript(...args: unknown[]): Promise<{
+      text: string;
+      cleaned: boolean;
+      uncertain: boolean;
+      speakerLabels: SpeakerLabelStats;
+    }>;
     generateSummary(promptText: string, transcript: string, ...rest: unknown[]): Promise<string>;
   };
 
@@ -1794,6 +2508,7 @@ describe('GeminiService transcription error attribution', () => {
       text: '참가자1: 회의를 시작하겠습니다.',
       cleaned: false,
       uncertain: false,
+      speakerLabels: NO_SPEAKER_LABELS,
     });
     service.generateSummary = async () => {
       throw new Error('API key not valid. Please pass a valid API key.');

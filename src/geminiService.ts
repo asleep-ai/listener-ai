@@ -45,11 +45,19 @@ import {
   retryTemperaturesFor,
 } from './batchSttBackend';
 import {
+  type LostSegment,
   NO_SPEECH_SENTINEL,
+  SPEAKER_ID_CAP,
+  type SpeakerLabelStats,
   analyzeAssembledTranscript,
   applyTranscriptQualityGate,
+  findScriptMixOutliers,
+  formatTranscriptLossNotice,
+  normalizeSpeakerLabels,
   normalizeTranscriptQualityNotes,
   reconcileOverlappingSegments,
+  splitIntoScriptWindows,
+  type TranscriptLossReason,
   stripNoSpeechSentinel,
 } from './transcriptQuality';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
@@ -284,13 +292,39 @@ interface QualityGatedTranscript {
   text: string;
   cleaned: boolean;
   uncertain: boolean;
+  speakerLabels: SpeakerLabelStats;
+}
+
+// Whole-recording view of the speaker-label guard (issue #197), assembled
+// from the per-segment stats and persisted on the note when it has anything
+// to report.
+interface SpeakerLabelAggregate {
+  normalizedLines: number;
+  /**
+   * Segments whose distinct id count ran past SPEAKER_ID_CAP. `collapsed`
+   * marks the ones whose ids were actually rewritten; the rest kept every id
+   * they were given and are recorded for diagnosis only.
+   */
+  cappedSegments: Array<{ segment: number; distinctIds: number; collapsed?: boolean }>;
 }
 
 interface SegmentedQualityGatedTranscript {
   text: string;
   cleaned: boolean;
   uncertainSegments: number[];
+  speakerLabels: SpeakerLabelAggregate;
+  /** Reconciled per-segment bodies, headers excluded, for script-mix review. */
+  bodies: string[];
+  /** Segments that ended up with no body at all (issue #197 guard 5). */
+  lostSegments: LostSegment[];
 }
+
+const NO_SPEAKER_LABELS: SpeakerLabelStats = {
+  distinctIds: 0,
+  normalizedLines: 0,
+  exceededCap: false,
+  capped: false,
+};
 
 export interface HighlightEntry {
   offsetMs: number;
@@ -594,6 +628,40 @@ const TRANSCRIPT_QUALITY_PROMPT_BLOCK = `Additionally, before summarizing, revie
 - If there are none, omit the field.
 - Never rewrite or remove transcript content based on this review.
 - Base the summary, key points, and action items only on content you judge to be genuine speech; do not summarize suspected artifacts as if they were discussion content.`;
+
+const FOREIGN_SCRIPT_REASON = 'foreign-script-segment';
+
+// Heading for the coverage notice prepended to structured summaries. The app
+// tab, `listener show` and Notion all render summarySections and ignore the
+// flat summary string when sections exist, so the notice has to live in both.
+const TRANSCRIPT_COVERAGE_HEADING = 'Transcript coverage';
+
+// Script shares are advisory, so keep meta.json readable instead of carrying
+// full floating-point precision.
+function roundShare(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+// Extra instruction appended to the quality prompt block when the script-mix
+// check found outliers (issue #197). Advisory on purpose: the check is a
+// letter-share heuristic that cannot hear the audio, so it asks the model to
+// weigh the block against its surroundings rather than to drop it. Positions
+// and counts only -- never transcript text. TRANSCRIPT_QUALITY_PROMPT_BLOCK
+// itself stays fixed.
+function buildScriptMixPromptLine(outliers: number[], kind: 'segment' | 'window'): string {
+  if (outliers.length === 0) return '';
+  const subject =
+    kind === 'window'
+      ? 'one or more stretches of the transcript carry'
+      : outliers.length === 1
+        ? `segment ${outliers[0]} carries`
+        : `segments ${outliers.join(', ')} carry`;
+  return (
+    `\n- An automated check found that ${subject} a script mix unlike the rest of the ` +
+    'recording, so it may be a transcription artifact rather than speech; verify it against ' +
+    'the surrounding context and keep it if it reads as genuine discussion.'
+  );
+}
 
 // Context-cleared prompt for the bounded quality retry ladder (issue #182):
 // no glossary, no positional prefix, no format examples -- so a retry after a
@@ -1215,6 +1283,27 @@ export class GeminiService {
     return `The following proper nouns, names, and terms may appear in the audio. Transcribe them exactly as spelled:\n${wordList}\n\n`;
   }
 
+  // Every prompt line a transcription call could echo back as "transcript"
+  // (issue #197): the prompt actually sent plus the context-cleared retry
+  // prompt the quality ladder uses. A backend with no prompt surface gets the
+  // built-in instructions and the glossary block instead -- its vocabulary
+  // arrives out of band, so its output can still echo those terms.
+  private echoPromptLines(sentPrompt: string | undefined, includeGlossary: boolean): string[] {
+    const sources =
+      sentPrompt !== undefined
+        ? [sentPrompt]
+        : [includeGlossary ? this.buildGlossaryBlock() : '', DEFAULT_TRANSCRIPT_PROMPT];
+    sources.push(QUALITY_RETRY_TRANSCRIPT_PROMPT);
+    const lines = new Set<string>();
+    for (const source of sources) {
+      for (const line of source.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed) lines.add(trimmed);
+      }
+    }
+    return [...lines];
+  }
+
   async transcribeAudio(
     audioFilePath: string,
     progressCallback?: (percent: number, message: string) => void,
@@ -1594,6 +1683,14 @@ Requirements:
       let fullTranscript = '';
       let qualityCleaned = false;
       let uncertainSegments: number[] = [];
+      let speakerLabels: SpeakerLabelAggregate = { normalizedLines: 0, cappedSegments: [] };
+      // Blocks handed to the foreign-script check: real segments when we have
+      // them, letter-budget windows otherwise.
+      let scriptBlocks: string[] = [];
+      let scriptSegmented = false;
+      // Stretches that produced no transcript at all. The short path never
+      // contributes: an empty whole file throws instead of saving a note.
+      let lostSegments: LostSegment[] = [];
       const stats = await fs.promises.stat(audioFilePath);
       const fileSizeInMB = stats.size / (1024 * 1024);
       // Segment intentionally for parallelism: even when the API would
@@ -1635,6 +1732,10 @@ Requirements:
           fullTranscript = gatedTranscript.text;
           qualityCleaned = gatedTranscript.cleaned;
           uncertainSegments = gatedTranscript.uncertainSegments;
+          speakerLabels = gatedTranscript.speakerLabels;
+          scriptBlocks = gatedTranscript.bodies;
+          scriptSegmented = true;
+          lostSegments = gatedTranscript.lostSegments;
         } else {
           // Get transcript for short audio
           console.error('Transcribing short audio...');
@@ -1651,6 +1752,19 @@ Requirements:
           fullTranscript = gatedTranscript.text;
           qualityCleaned = gatedTranscript.cleaned;
           uncertainSegments = gatedTranscript.uncertain ? [1] : [];
+          // A whole-file transcript is segment 1 of 1.
+          speakerLabels = {
+            normalizedLines: gatedTranscript.speakerLabels.normalizedLines,
+            cappedSegments: gatedTranscript.speakerLabels.exceededCap
+              ? [
+                  {
+                    segment: 1,
+                    distinctIds: gatedTranscript.speakerLabels.distinctIds,
+                    ...(gatedTranscript.speakerLabels.capped ? { collapsed: true } : {}),
+                  },
+                ]
+              : [],
+          };
         }
       } catch (error) {
         throw annotateTranscriptionError(error, this.sttBackend.id);
@@ -1667,6 +1781,30 @@ Requirements:
           `[transcript-quality] assembled transcript flagged (${assembledQuality.reasons.join(', ')}; ` +
             `normalizedLength=${assembledQuality.metrics.normalizedLength})`,
         );
+      }
+
+      // Foreign-script insertion (issue #197). Fabricated but fluent passages
+      // in another language pass every repetition-shaped detector, so compare
+      // each block's script composition against the recording as a whole. A
+      // whole-file transcript has no segments, so it is chopped into windows
+      // that keep a mid-file foreign run from being diluted by the speech
+      // around it. Notes-only: positions are recorded, text is never touched.
+      if (!scriptSegmented) scriptBlocks = splitIntoScriptWindows(fullTranscript);
+      const scriptOutliers = findScriptMixOutliers(scriptBlocks);
+      const scriptOutlierPositions = scriptOutliers.outliers.map((index) => index + 1);
+      if (scriptOutlierPositions.length > 0) {
+        console.error(
+          `[transcript-quality] ${scriptOutlierPositions.length} of ${scriptBlocks.length} ` +
+            `${scriptSegmented ? 'segments' : 'windows'} carry a script mix unlike the rest of ` +
+            `the recording (hangul=${scriptOutliers.overall.hangul.toFixed(2)}, ` +
+            `latin=${scriptOutliers.overall.latin.toFixed(2)}, ` +
+            `other=${scriptOutliers.overall.other.toFixed(2)})`,
+        );
+        if (scriptSegmented) {
+          uncertainSegments = [...new Set([...uncertainSegments, ...scriptOutlierPositions])].sort(
+            (a, b) => a - b,
+          );
+        }
       }
 
       if (options.transcriptOnly) {
@@ -1687,7 +1825,12 @@ Requirements:
       const highlightsBlock = buildHighlightsPromptBlock(enrichableNotes);
       // Same additive pattern as the highlights block: appended to custom
       // summary prompts too, since the shared parser tolerates the extra key.
-      const summaryPrompt = [basePrompt, highlightsBlock, TRANSCRIPT_QUALITY_PROMPT_BLOCK]
+      const summaryPrompt = [
+        basePrompt,
+        highlightsBlock,
+        TRANSCRIPT_QUALITY_PROMPT_BLOCK +
+          buildScriptMixPromptLine(scriptOutlierPositions, scriptSegmented ? 'segment' : 'window'),
+      ]
         .filter(Boolean)
         .join('\n\n');
 
@@ -1776,26 +1919,88 @@ Requirements:
         throw new Error('The summary model returned invalid JSON.', { cause: e });
       }
 
+      // Silent transcript loss (issue #197). The gate already knew which
+      // stretches produced nothing, and the stored summary still read as if
+      // the whole meeting had been captured. Put one plain sentence at the top
+      // of both summary representations: consumers that render structured
+      // sections ignore the flat string entirely, and vice versa. Runs once,
+      // on the linear path after the summary JSON is parsed, so the notice
+      // cannot be added twice. `transcriptOnly` returned long before this.
+      const lossNotice = formatTranscriptLossNotice(lostSegments, (seconds) =>
+        this.formatTime(seconds),
+      );
+      if (lossNotice) {
+        console.error(
+          `[transcript-quality] ${lostSegments.length} segment(s) produced no transcript; ` +
+            'prepending a coverage notice to the summary',
+        );
+        summaryData.summary = summaryData.summary
+          ? `${lossNotice}\n\n${summaryData.summary}`
+          : lossNotice;
+        if (summaryData.summarySections?.length) {
+          summaryData.summarySections = [
+            { heading: TRANSCRIPT_COVERAGE_HEADING, bullets: [lossNotice] },
+            ...summaryData.summarySections,
+          ];
+        }
+      }
+
       const highlights = mergeHighlights(liveNotes, rawHighlights);
 
       // Persist the final-stage quality picture on the note (meta.json
       // customFields) when cleanup, kept uncertainty, the analyzer, or the
       // summary review reports an artifact.
       const modelQualityNotes = normalizeTranscriptQualityNotes(rawQualityNotes);
+      const speakerLabelsRecorded =
+        speakerLabels.normalizedLines > 0 || speakerLabels.cappedSegments.length > 0;
+      const scriptOutliersFound = scriptOutlierPositions.length > 0;
+      const lostSeconds = lostSegments.reduce(
+        (total, segment) => total + Math.max(0, segment.end - segment.start),
+        0,
+      );
+      // The analyzer block now carries two independent findings, so it is
+      // written when either of them has something to say.
+      const analyzerRecorded = assembledQuality.flagged || scriptOutliersFound;
       if (
         qualityCleaned ||
         uncertainSegments.length > 0 ||
-        assembledQuality.flagged ||
+        speakerLabelsRecorded ||
+        lostSegments.length > 0 ||
+        analyzerRecorded ||
         modelQualityNotes.length > 0
       ) {
         customFields.transcriptQuality = {
           ...(qualityCleaned ? { cleaned: true } : {}),
           ...(uncertainSegments.length > 0 ? { uncertainSegments } : {}),
-          ...(assembledQuality.flagged
+          ...(speakerLabelsRecorded ? { speakerLabels } : {}),
+          ...(lostSegments.length > 0 ? { lostSegments, lostSeconds } : {}),
+          ...(analyzerRecorded
             ? {
                 analyzer: {
-                  reasons: assembledQuality.reasons,
+                  reasons: [
+                    ...assembledQuality.reasons,
+                    ...(scriptOutliersFound ? [FOREIGN_SCRIPT_REASON] : []),
+                  ],
                   metrics: assembledQuality.metrics,
+                  ...(scriptOutliersFound
+                    ? {
+                        scriptMix: {
+                          overall: {
+                            hangul: roundShare(scriptOutliers.overall.hangul),
+                            latin: roundShare(scriptOutliers.overall.latin),
+                            other: roundShare(scriptOutliers.overall.other),
+                          },
+                          ...(scriptSegmented
+                            ? { outlierSegments: scriptOutlierPositions }
+                            : {
+                                outlierWindows: scriptOutlierPositions.map((index) => ({
+                                  index,
+                                  total: scriptBlocks.length,
+                                })),
+                              }),
+                        },
+                      }
+                    : {}),
                 },
               }
             : {}),
@@ -1922,6 +2127,7 @@ Requirements:
           label: `short audio (${backend.id})`,
           judge: qualityJudge,
           cleanup: qualityCleanup,
+          promptLines: this.echoPromptLines(transcriptPrompt, includeGlossary),
           retries: qualityRetry
             ? retryTemperatures.map((temperature, index) => () => {
                 reportQualityRetry(index + 1, retryTemperatures.length);
@@ -1932,13 +2138,27 @@ Requirements:
             : undefined,
           log: (message) => console.error(message),
         });
+        // A dropped echo is a transcription failure, not silence: reporting
+        // it as "no speech" would tell the user their recording was empty
+        // when the provider simply handed the prompt back. Live snippets keep
+        // the silent path -- `qualityRetry: false` is the every-12s chunk
+        // mode, where an error toast per chunk is worse than a dropped one.
+        if (gated.dropped && qualityRetry) {
+          console.error(
+            `[transcript-quality] short audio (${backend.id}): dropped transcript that echoed the prompt`,
+          );
+          throw new Error('Transcription returned the prompt text instead of speech');
+        }
         if (!gated.text.trim()) {
           throw new EmptyTranscriptionError('Transcription produced no speech content');
         }
+        const speakerLabels = normalizeSpeakerLabels(gated.text);
+        this.reportSpeakerLabelOverflow(speakerLabels, `Short audio (${backend.id})`);
         return {
-          text: gated.text,
+          text: speakerLabels.text,
           cleaned: gated.cleaned === true,
-          uncertain: gated.flagged,
+          uncertain: gated.flagged || speakerLabels.exceededCap,
+          speakerLabels,
         };
       } finally {
         // Release the shared upload once per run, on every exit path: a
@@ -2103,6 +2323,18 @@ Requirements:
     });
   }
 
+  // Metrics only, never transcript text (the analyzer's logging rule).
+  private reportSpeakerLabelOverflow(labels: SpeakerLabelStats, label: string): void {
+    if (!labels.exceededCap) return;
+    console.error(
+      `[transcript-quality] ${label}: ${labels.distinctIds} speaker ids exceed the cap of ` +
+        `${SPEAKER_ID_CAP}; ` +
+        (labels.capped
+          ? 'runaway id counter, collapsing the rest onto the last valid id'
+          : 'ids are reused across lines, keeping them as emitted'),
+    );
+  }
+
   // Transcribe a single segment with retry logic
   private async transcribeSingleSegment(
     segmentFile: string,
@@ -2123,6 +2355,11 @@ Requirements:
     empty: boolean;
     cleaned: boolean;
     uncertain: boolean;
+    speakerLabels: SpeakerLabelStats;
+    startTime: number;
+    endTime: number;
+    /** Set only when the segment ended up with no body at all. */
+    lossReason?: TranscriptLossReason;
   }> {
     const maxRetries = 3;
     let lastError: any = null;
@@ -2135,6 +2372,7 @@ Requirements:
     const retryPrompt = this.sttBackend.supportsPrompt
       ? QUALITY_RETRY_TRANSCRIPT_PROMPT
       : undefined;
+    const echoPromptLines = this.echoPromptLines(segmentPrompt, includeGlossary);
     const segmentSeconds = Math.max(0, segmentEndTime - segmentStartTime);
     const segmentHeader = this.createSegmentHeader(segmentIndex, segmentStartTime, segmentEndTime);
     const qualityJudge = qualityRetry
@@ -2178,6 +2416,7 @@ Requirements:
           label: `segment ${segmentIndex + 1}/${totalSegments}`,
           judge: qualityJudge,
           cleanup: qualityCleanup,
+          promptLines: echoPromptLines,
           retries: qualityRetry
             ? retryTemperatures.map((temperature, index) => () => {
                 onQualityRetry?.(index + 1, retryTemperatures.length);
@@ -2196,13 +2435,42 @@ Requirements:
           log: (message) => console.error(message),
         });
 
+        // An echoed prompt leaves the segment empty rather than failing the
+        // run: a long recording keeps its other segments, and the time-range
+        // header still marks where the lost audio was.
+        if (gated.dropped) {
+          console.error(
+            `Segment ${segmentIndex + 1}/${totalSegments} returned prompt text instead of speech; dropping its body.`,
+          );
+        }
+
+        const speakerLabels = normalizeSpeakerLabels(gated.text);
+        this.reportSpeakerLabelOverflow(
+          speakerLabels,
+          `Segment ${segmentIndex + 1}/${totalSegments}`,
+        );
+        const empty = speakerLabels.text.trim().length === 0;
         return {
           index: segmentIndex,
           header: segmentHeader,
-          body: gated.text,
-          empty: gated.text.trim().length === 0,
+          body: speakerLabels.text,
+          empty,
           cleaned: gated.cleaned === true,
-          uncertain: gated.flagged,
+          // More speaker ids than the cap allows means the diarizer may have
+          // stopped tracking who is speaking, so the text stays but must not
+          // be trusted for owner attribution -- whether or not the ids
+          // themselves were collapsed.
+          uncertain: gated.flagged || speakerLabels.exceededCap,
+          speakerLabels,
+          startTime: segmentStartTime,
+          endTime: segmentEndTime,
+          lossReason: !empty
+            ? undefined
+            : gated.dropped
+              ? 'prompt-echo'
+              : gated.cleaned === true
+                ? 'cleaned'
+                : 'empty',
         };
       } catch (segmentError) {
         // Abort surfaces here too; don't burn through retries when the caller
@@ -2224,6 +2492,10 @@ Requirements:
             empty: true,
             cleaned: false,
             uncertain: false,
+            speakerLabels: NO_SPEAKER_LABELS,
+            startTime: segmentStartTime,
+            endTime: segmentEndTime,
+            lossReason: 'empty',
           };
         }
         lastError = segmentError;
@@ -2371,6 +2643,10 @@ Requirements:
         empty: boolean;
         cleaned: boolean;
         uncertain: boolean;
+        speakerLabels: SpeakerLabelStats;
+        startTime: number;
+        endTime: number;
+        lossReason?: TranscriptLossReason;
       }[];
       try {
         segmentResults = await Promise.all(progressTrackedPromises);
@@ -2393,6 +2669,19 @@ Requirements:
       const uncertainSegments = segmentResults
         .filter((result) => result.uncertain)
         .map((result) => result.index + 1);
+      const speakerLabels: SpeakerLabelAggregate = {
+        normalizedLines: segmentResults.reduce(
+          (total, result) => total + result.speakerLabels.normalizedLines,
+          0,
+        ),
+        cappedSegments: segmentResults
+          .filter((result) => result.speakerLabels.exceededCap)
+          .map((result) => ({
+            segment: result.index + 1,
+            distinctIds: result.speakerLabels.distinctIds,
+            ...(result.speakerLabels.capped ? { collapsed: true } : {}),
+          })),
+      };
 
       // Update progress
       if (progressCallback) {
@@ -2423,6 +2712,24 @@ Requirements:
         });
       }
 
+      // Loss is judged on the bodies that actually reach the transcript:
+      // reconciliation can empty a segment whose only text was its
+      // predecessor's overlap, leaving a time-range header with nothing under
+      // it. A reason recorded before reconciliation is the more specific one
+      // and wins over the plain `empty`.
+      const lostSegments: LostSegment[] = segmentResults.flatMap((result, i) =>
+        reconciledBodies[i].trim().length === 0
+          ? [
+              {
+                segment: result.index + 1,
+                start: result.startTime,
+                end: result.endTime,
+                reason: result.lossReason ?? 'empty',
+              },
+            ]
+          : [],
+      );
+
       // Merge all transcripts with clear segment breaks
       return {
         text: segmentResults
@@ -2430,6 +2737,9 @@ Requirements:
           .join('\n\n---\n\n'),
         cleaned: segmentResults.some((result) => result.cleaned),
         uncertainSegments,
+        speakerLabels,
+        bodies: reconciledBodies,
+        lostSegments,
       };
     } catch (error) {
       console.error('Error in segmented transcription:', error);

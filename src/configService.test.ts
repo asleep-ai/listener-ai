@@ -366,6 +366,21 @@ Return as JSON:
     assert.match(DEFAULT_SUMMARY_PROMPT, /"actionItemGroups"/);
   });
 
+  it('guards against laundering transcript defects into confident claims', () => {
+    // Store audit (#197): hedged values were resolved to one value, garbled
+    // terms acquired invented English spellings, and finished work showed up
+    // as pending action items.
+    assert.match(DEFAULT_SUMMARY_PROMPT, /Keep the transcript's hedge/);
+    assert.match(
+      DEFAULT_SUMMARY_PROMPT,
+      /Never invent an English, romanized, or corrected spelling/,
+    );
+    assert.match(
+      DEFAULT_SUMMARY_PROMPT,
+      /Exclude work the transcript describes as already completed/,
+    );
+  });
+
   it('replaces an exactly matching legacy default with the current default once', () => {
     const dataPath = freshDataPath('summary-legacy-default');
     const configPath = path.join(dataPath, 'config.json');

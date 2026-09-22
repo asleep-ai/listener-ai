@@ -52,6 +52,40 @@ const baseResult: TranscriptionResult = {
   suggestedTitle: 'Greeting Sync',
 };
 
+describe('transcript coverage notice', () => {
+  // What GeminiService produces when segments came back empty (issue #197):
+  // the notice leads the flat summary and is the first structured section,
+  // because consumers render one or the other, never both.
+  const notice =
+    '10 minutes of this recording produced no transcript (segments: 3 [00:10:00 ~ 00:15:00]).';
+  const partialResult: TranscriptionResult = {
+    ...baseResult,
+    summary: `${notice}\n\nAgenda\n- Discussed the roadmap`,
+    summarySections: [
+      { heading: 'Transcript coverage', bullets: [notice] },
+      { heading: 'Agenda', bullets: ['Discussed the roadmap'] },
+    ],
+  };
+
+  it('renders the notice ahead of the first agenda section and writes it first to summary.md', () => {
+    const body = formatSummary(partialResult, 'Partly Captured Meeting');
+    assert.ok(body.includes('### Transcript coverage'), 'coverage section is rendered');
+    assert.ok(
+      body.indexOf(notice) < body.indexOf('### Agenda'),
+      'the notice comes before the first agenda section',
+    );
+
+    const dataPath = makeTmpDataPath();
+    const folderPath = saveTranscription({
+      title: 'Partly Captured Meeting',
+      result: partialResult,
+      dataPath,
+    });
+    const summaryRaw = fs.readFileSync(path.join(folderPath, SUMMARY_FILE), 'utf-8');
+    assert.ok(summaryRaw.startsWith(notice), 'summary.md leads with the notice');
+  });
+});
+
 describe('saveTranscription with mergedFrom', () => {
   it('round-trips mergedFrom through frontmatter', async () => {
     const dataPath = makeTmpDataPath();
