@@ -1,120 +1,162 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AiProvider, LiveSttProvider, TranscriptionProvider } from './aiProvider';
+import type { AiProvider, BatchSttProvider } from './aiProvider';
+import type {
+  AgentChatMessage,
+  AgentConfirmRequest,
+  AgentScope,
+  ConfigPayload,
+  GoogleSyncProgress,
+  GoogleSyncResult,
+  GoogleSyncStatus,
+  LiveSessionEvent,
+  LiveSessionSnapshot,
+  LiveSessionStartResult,
+  LiveTranscriptSegment,
+  RendererLogPayload,
+  SlackSendApiResult,
+  SystemAudioStartResult,
+  TranscriptionErrorPayload,
+} from './electronApiTypes';
 import type { LiveNote } from './outputService';
+import type { FileInfoResult } from './services/fileInfoTypes';
 import type { SyncProgressEvent } from './services/syncEngine';
 
-contextBridge.exposeInMainWorld('electronAPI', {
+// `ipcRenderer.invoke` resolves to `any`, which would collapse every member
+// below to `Promise<any>` in the derived `ElectronAPI`. Routing through this
+// wrapper forces each member to state what its main-process handler resolves
+// to, so the renderer keeps real return types.
+const invoke = <T>(channel: string, ...args: unknown[]): Promise<T> =>
+  ipcRenderer.invoke(channel, ...args);
+
+const api = {
   platform: process.platform,
-  logRenderer: (payload: {
-    level: 'debug' | 'log' | 'info' | 'warn' | 'error';
-    timestamp: string;
-    url: string;
-    args: unknown[];
-  }) => ipcRenderer.send('renderer-log', payload),
-  startRecording: (payload: { title: string; mimeType: string }) =>
-    ipcRenderer.invoke('start-recording', payload),
+  logRenderer: (payload: RendererLogPayload) => ipcRenderer.send('renderer-log', payload),
+  startRecording: (payload: {
+    title: string;
+    mimeType: string;
+  }): Promise<{ success: boolean; error?: string; filePath?: string }> =>
+    invoke('start-recording', payload),
   sendRecordingChunk: (data: ArrayBuffer) => ipcRenderer.send('recording-chunk', data),
-  stopRecording: (opts?: { liveNotes?: LiveNote[] }) => ipcRenderer.invoke('stop-recording', opts),
-  abortRecording: () => ipcRenderer.invoke('abort-recording'),
+  stopRecording: (opts?: {
+    liveNotes?: LiveNote[];
+  }): Promise<{
+    success: boolean;
+    filePath?: string;
+    durationMs?: number;
+    reason?: string;
+    error?: string;
+  }> => invoke('stop-recording', opts),
+  abortRecording: (): Promise<{ success: boolean; error?: string }> => invoke('abort-recording'),
   onRecordingStatus: (callback: (status: string) => void) => {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
   },
-  checkConfig: () => ipcRenderer.invoke('check-config'),
-  saveConfig: (config: {
-    aiProvider?: AiProvider;
-    transcriptionProvider?: TranscriptionProvider;
-    geminiApiKey?: string;
-    codexModel?: string;
-    codexTranscriptionModel?: string;
-    liveSttProvider?: LiveSttProvider;
-    openaiApiKey?: string;
-    sonioxApiKey?: string;
-    openaiLiveTranscriptionModel?: string;
-    openaiLiveTranslationModel?: string;
-    liveSttLanguage?: string;
-    liveTranslationLanguage?: string;
-    notionApiKey?: string;
-    notionDatabaseId?: string;
-    autoMode?: boolean;
-    meetingDetection?: boolean;
-    displayDetection?: boolean;
-    globalShortcut?: string;
-    knownWords?: string[];
-    summaryPrompt?: string;
-    recordSystemAudio?: boolean;
-    crashReportingEnabled?: boolean;
-    audioDeviceId?: string;
-    slackWebhookUrl?: string;
-    slackAutoShare?: boolean;
-    googleDriveEnabled?: boolean;
-  }) => ipcRenderer.invoke('save-config', config),
-  getConfig: () => ipcRenderer.invoke('get-config'),
-  loginCodexOAuth: () => ipcRenderer.invoke('codex-oauth-login'),
-  cancelCodexOAuth: () => ipcRenderer.invoke('codex-oauth-cancel'),
+  checkConfig: (): Promise<{
+    hasConfig: boolean;
+    hasAiAuth: boolean;
+    hasTranscriptionAuth: boolean;
+    aiProvider: AiProvider;
+    transcriptionProvider: BatchSttProvider;
+    codexOAuthConfigured: boolean;
+    missing: string[];
+  }> => invoke('check-config'),
+  saveConfig: (config: ConfigPayload): Promise<{ success: boolean; error?: string }> =>
+    invoke('save-config', config),
+  getConfig: (): Promise<Record<string, unknown>> => invoke('get-config'),
+  loginCodexOAuth: (): Promise<
+    | { success: true; config: Record<string, unknown> }
+    | { success: false; error: string; cancelled?: boolean }
+  > => invoke('codex-oauth-login'),
+  cancelCodexOAuth: (): Promise<{ success: boolean }> => invoke('codex-oauth-cancel'),
   onCodexOAuthProgress: (
     callback: (status: { phase: 'browser-opened' | 'progress'; message?: string }) => void,
   ) => {
     ipcRenderer.on('codex-oauth-progress', (_, status) => callback(status));
   },
-  clearCodexOAuth: () => ipcRenderer.invoke('codex-oauth-clear'),
-  loginGoogleOAuth: () => ipcRenderer.invoke('google-oauth-login'),
-  cancelGoogleOAuth: () => ipcRenderer.invoke('google-oauth-cancel'),
-  clearGoogleOAuth: () => ipcRenderer.invoke('google-oauth-clear'),
+  clearCodexOAuth: (): Promise<
+    { success: true; config: Record<string, unknown> } | { success: false; error: string }
+  > => invoke('codex-oauth-clear'),
+  loginGoogleOAuth: (): Promise<
+    | { success: true; config: Record<string, unknown> }
+    | { success: false; error: string; cancelled?: boolean }
+  > => invoke('google-oauth-login'),
+  cancelGoogleOAuth: (): Promise<{ success: boolean }> => invoke('google-oauth-cancel'),
+  clearGoogleOAuth: (): Promise<
+    { success: true; config: Record<string, unknown> } | { success: false; error: string }
+  > => invoke('google-oauth-clear'),
   onGoogleOAuthProgress: (
     callback: (status: { phase: 'browser-opened' | 'progress'; message?: string }) => void,
   ) => {
     ipcRenderer.on('google-oauth-progress', (_, status) => callback(status));
   },
-  syncGoogleDriveNow: () => ipcRenderer.invoke('google-drive-sync-now'),
-  getGoogleSyncStatus: () => ipcRenderer.invoke('google-drive-sync-status'),
-  onGoogleSyncStatus: (
-    callback: (status: {
-      phase: 'idle' | 'syncing' | 'success' | 'error';
-      lastSyncedAt: string | null;
-      result?: {
-        uploaded: string[];
-        downloaded: string[];
-        skipped: string[];
-        conflicts: string[];
-        deleted: string[];
-        tombstoned: string[];
-        errors: Array<{ meeting: string; file?: string; error: string }>;
-      };
-      error?: string;
-    }) => void,
-  ) => {
+  syncGoogleDriveNow: (): Promise<
+    | { success: true; result: GoogleSyncResult; lastSyncedAt: string | null }
+    | { success: false; error: string }
+  > => invoke('google-drive-sync-now'),
+  getGoogleSyncStatus: (): Promise<{
+    inFlight: boolean;
+    lastSyncedAt: string | null;
+    lastResult: GoogleSyncResult | null;
+    progress: GoogleSyncProgress | null;
+    enabled: boolean;
+    authenticated: boolean;
+  }> => invoke('google-drive-sync-status'),
+  onGoogleSyncStatus: (callback: (status: GoogleSyncStatus) => void) => {
     ipcRenderer.on('google-sync-status', (_, status) => callback(status));
   },
   onGoogleSyncProgress: (callback: (event: SyncProgressEvent) => void) => {
     ipcRenderer.on('google-sync-progress', (_, event) => callback(event));
   },
-  transcribeAudio: (filePath: string, liveNotes?: LiveNote[]) =>
-    ipcRenderer.invoke('transcribe-audio', filePath, liveNotes),
-  cancelTranscription: (filePath: string) => ipcRenderer.invoke('cancel-transcription', filePath),
+  transcribeAudio: (
+    filePath: string,
+    liveNotes?: LiveNote[],
+  ): Promise<{
+    success: boolean;
+    data?: any;
+    newFilePath?: string;
+    transcriptionPath?: string;
+    error?: string;
+    errorDetails?: TranscriptionErrorPayload;
+    cancelled?: boolean;
+  }> => invoke('transcribe-audio', filePath, liveNotes),
+  cancelTranscription: (filePath: string): Promise<{ success: boolean; reason?: 'not-running' }> =>
+    invoke('cancel-transcription', filePath),
   uploadToNotion: (data: {
     title: string;
     transcriptionData: any;
     audioFilePath?: string;
     transcriptionPath?: string;
-  }) => ipcRenderer.invoke('upload-to-notion', data),
+  }): Promise<{ success: boolean; url?: string; error?: string }> =>
+    invoke('upload-to-notion', data),
   sendToSlack: (data: {
     title: string;
     transcriptionData: any;
     transcriptionPath?: string;
     notionUrl?: string;
     notionError?: string;
-  }) => ipcRenderer.invoke('send-to-slack', data),
-  testSlackWebhook: (webhookUrl?: string) => ipcRenderer.invoke('test-slack-webhook', webhookUrl),
-  openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
-  openRecordingsFolder: () => ipcRenderer.invoke('open-recordings-folder'),
-  showInFinder: (filePath: string) => ipcRenderer.invoke('show-in-finder', filePath),
-  getRecordings: () => ipcRenderer.invoke('get-recordings'),
-  searchTranscriptions: (opts: { query: string; fields?: string[]; limit?: number }) =>
-    ipcRenderer.invoke('search-transcriptions', opts),
-  startLiveSession: (opts: { title?: string; translate?: boolean }) =>
-    ipcRenderer.invoke('live-session-start', opts),
-  handleLiveRealtimeFailure: (opts: { sessionId: string; error?: string }) =>
-    ipcRenderer.invoke('live-session-realtime-failed', opts),
+  }): Promise<SlackSendApiResult> => invoke('send-to-slack', data),
+  testSlackWebhook: (webhookUrl?: string): Promise<SlackSendApiResult> =>
+    invoke('test-slack-webhook', webhookUrl),
+  openExternal: (url: string): Promise<void> => invoke('open-external', url),
+  openRecordingsFolder: (): Promise<void> => invoke('open-recordings-folder'),
+  showInFinder: (filePath: string): Promise<void> => invoke('show-in-finder', filePath),
+  getRecordings: (): Promise<Array<Record<string, any>>> => invoke('get-recordings'),
+  searchTranscriptions: (opts: {
+    query: string;
+    fields?: string[];
+    limit?: number;
+  }): Promise<Array<Record<string, any>>> => invoke('search-transcriptions', opts),
+  startLiveSession: (opts: {
+    title?: string;
+    translate?: boolean;
+  }): Promise<
+    { success: true; session: LiveSessionStartResult } | { success: false; error: string }
+  > => invoke('live-session-start', opts),
+  handleLiveRealtimeFailure: (opts: {
+    sessionId: string;
+    error?: string;
+  }): Promise<
+    { success: true; session: LiveSessionStartResult } | { success: false; error: string }
+  > => invoke('live-session-realtime-failed', opts),
   processLiveAudioChunk: (opts: {
     sessionId: string;
     audioData: ArrayBuffer;
@@ -122,7 +164,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     offsetMs: number;
     durationMs: number;
     translate?: boolean;
-  }) => ipcRenderer.invoke('live-session-process-chunk', opts),
+  }): Promise<
+    | { success: true; segment: LiveTranscriptSegment | null; snapshot: LiveSessionSnapshot | null }
+    | { success: false; error: string }
+  > => invoke('live-session-process-chunk', opts),
   sendLivePcmChunk: (opts: {
     sessionId: string;
     audioData: ArrayBuffer;
@@ -144,49 +189,43 @@ contextBridge.exposeInMainWorld('electronAPI', {
     offsetMs?: number;
     durationMs?: number;
     translation?: string;
-  }) => ipcRenderer.invoke('live-session-final', opts),
-  stopLiveSession: (sessionId: string) => ipcRenderer.invoke('live-session-stop', sessionId),
-  getLiveSessionSnapshot: () => ipcRenderer.invoke('live-session-snapshot'),
-  setLiveSessionTranslate: (opts: { sessionId: string; translate: boolean }) =>
-    ipcRenderer.invoke('live-session-set-translate', opts),
+  }): Promise<{ success: boolean; error?: string }> => invoke('live-session-final', opts),
+  stopLiveSession: (
+    sessionId: string,
+  ): Promise<
+    { success: true; snapshot: LiveSessionSnapshot | null } | { success: false; error: string }
+  > => invoke('live-session-stop', sessionId),
+  getLiveSessionSnapshot: (): Promise<{
+    success: true;
+    snapshot: LiveSessionSnapshot | null;
+  }> => invoke('live-session-snapshot'),
+  setLiveSessionTranslate: (opts: {
+    sessionId: string;
+    translate: boolean;
+  }): Promise<
+    { success: true; snapshot: LiveSessionSnapshot | null } | { success: false; error: string }
+  > => invoke('live-session-set-translate', opts),
   askLiveSession: (opts: {
     sessionId: string;
     question: string;
-    history?: Array<{
-      role: 'user' | 'model';
-      text: string;
-      piaiMessages?: unknown[];
-    }>;
-  }) => ipcRenderer.invoke('live-session-ask', opts),
-  onLiveSessionEvent: (callback: (event: unknown) => void) => {
+    history?: AgentChatMessage[];
+  }): Promise<{ success: true; result: any } | { success: false; error: string }> =>
+    invoke('live-session-ask', opts),
+  onLiveSessionEvent: (callback: (event: LiveSessionEvent) => void) => {
     ipcRenderer.on('live-session-event', (_event, payload) => callback(payload));
   },
   agentChat: (opts: {
     question: string;
-    history?: Array<{
-      role: 'user' | 'model';
-      text: string;
-      piaiMessages?: unknown[];
-    }>;
-    scope: { kind: 'all' } | { kind: 'single'; folderName: string };
-  }) => ipcRenderer.invoke('agent-chat', opts),
-  onAgentConfirmRequest: (
-    callback: (req: {
-      id: string;
-      proposal: {
-        kind: 'setConfig';
-        key: string;
-        value: unknown;
-        currentValue?: unknown;
-        description: string;
-      };
-    }) => void,
-  ) => {
+    history?: AgentChatMessage[];
+    scope: AgentScope;
+  }): Promise<{ success: true; result: any } | { success: false; error: string }> =>
+    invoke('agent-chat', opts),
+  onAgentConfirmRequest: (callback: (req: AgentConfirmRequest) => void) => {
     ipcRenderer.on('agent-confirm-request', (_, req) => callback(req));
   },
-  sendAgentConfirmResponse: (payload: { id: string; approved: boolean }) =>
-    ipcRenderer.invoke('agent-confirm-response', payload),
-  cancelAgentPending: () => ipcRenderer.invoke('agent-cancel-pending'),
+  sendAgentConfirmResponse: (payload: { id: string; approved: boolean }): Promise<void> =>
+    invoke('agent-confirm-response', payload),
+  cancelAgentPending: (): Promise<void> => invoke('agent-cancel-pending'),
   onConfigChanged: (callback: (config: unknown) => void) => {
     ipcRenderer.on('config-changed', (_, config) => callback(config));
   },
@@ -196,23 +235,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('transcription-progress', (_, progress) => callback(progress));
   },
   // FFmpeg management
-  checkFFmpeg: () => ipcRenderer.invoke('check-ffmpeg'),
-  downloadFFmpeg: () => ipcRenderer.invoke('download-ffmpeg'),
-  cancelFFmpegDownload: () => ipcRenderer.invoke('cancel-ffmpeg-download'),
+  checkFFmpeg: (): Promise<{ available: boolean; path?: string }> => invoke('check-ffmpeg'),
+  downloadFFmpeg: (): Promise<{ success: boolean; error?: string }> => invoke('download-ffmpeg'),
+  cancelFFmpegDownload: (): Promise<void> => invoke('cancel-ffmpeg-download'),
   onFFmpegDownloadProgress: (callback: (progress: any) => void) => {
     ipcRenderer.on('ffmpeg-download-progress', (_, progress) => callback(progress));
   },
 
   // Recording export
-  exportRecordingM4A: (srcPath: string) => ipcRenderer.invoke('export-recording-m4a', srcPath),
+  exportRecordingM4A: (
+    srcPath: string,
+  ): Promise<{ success: boolean; outPath?: string; error?: string }> =>
+    invoke('export-recording-m4a', srcPath),
 
   // Permanent removal: audio file + metadata + transcription folder.
   // Triggers a Drive sync if enabled so deletion propagates to other devices.
-  deleteMeeting: (audioFilePath: string) => ipcRenderer.invoke('delete-meeting', audioFilePath),
+  deleteMeeting: (
+    audioFilePath: string,
+  ): Promise<{ success: true } | { success: false; error: string }> =>
+    invoke('delete-meeting', audioFilePath),
 
   // Merge multiple recordings into a single re-transcribed note
-  mergeRecordings: (opts: { paths: string[]; title?: string }) =>
-    ipcRenderer.invoke('merge-recordings', opts),
+  mergeRecordings: (opts: {
+    paths: string[];
+    title?: string;
+  }): Promise<{ success: boolean; folderName?: string; error?: string }> =>
+    invoke('merge-recordings', opts),
 
   // Pushed by main when the recordings directory changes externally
   // (CLI run, manual file ops). Renderer should re-fetch the list.
@@ -221,22 +269,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // System settings
-  openMicrophoneSettings: () => ipcRenderer.invoke('open-microphone-settings'),
-  openScreenRecordingSettings: () => ipcRenderer.invoke('open-screen-recording-settings'),
+  openMicrophoneSettings: (): Promise<void> => invoke('open-microphone-settings'),
+  openScreenRecordingSettings: (): Promise<void> => invoke('open-screen-recording-settings'),
 
   // Native macOS system-audio capture (audiotee / Core Audio Tap).
-  startSystemAudio: () => ipcRenderer.invoke('system-audio-start'),
-  stopSystemAudio: () => ipcRenderer.invoke('system-audio-stop'),
+  startSystemAudio: (): Promise<SystemAudioStartResult> => invoke('system-audio-start'),
+  stopSystemAudio: (): Promise<{ success: boolean }> => invoke('system-audio-stop'),
   onSystemAudioChunk: (callback: (chunk: Uint8Array) => void) => {
     ipcRenderer.on('system-audio-chunk', (_event, chunk: Uint8Array) => callback(chunk));
   },
-  offSystemAudioChunk: () => ipcRenderer.removeAllListeners('system-audio-chunk'),
+  offSystemAudioChunk: () => {
+    ipcRenderer.removeAllListeners('system-audio-chunk');
+  },
   onSystemAudioError: (callback: (err: { message: string }) => void) => {
     ipcRenderer.on('system-audio-error', (_event, err: { message: string }) => callback(err));
   },
 
   // Global shortcut
-  validateShortcut: (shortcut: string) => ipcRenderer.invoke('validate-shortcut', shortcut),
+  validateShortcut: (shortcut: string): Promise<{ valid: boolean; error?: string }> =>
+    invoke('validate-shortcut', shortcut),
 
   // Tray icon events
   onTrayStartRecording: (callback: () => void) => {
@@ -253,32 +304,70 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // File handling
-  saveAudioFile: (fileData: { name: string; data: number[] }) =>
-    ipcRenderer.invoke('save-audio-file', fileData),
-  saveAudioFileBase64: (fileData: { name: string; dataBase64: string }) =>
-    ipcRenderer.invoke('save-audio-file-base64', fileData),
-  copyAudioFile: (fileData: { sourcePath: string; name: string }) =>
-    ipcRenderer.invoke('copy-audio-file', fileData),
-  selectAudioFile: () => ipcRenderer.invoke('select-audio-file'),
-  getFileInfo: (filePath: string) => ipcRenderer.invoke('get-file-info', filePath),
+  saveAudioFile: (fileData: {
+    name: string;
+    data: number[];
+  }): Promise<{ success: boolean; filePath?: string; error?: string }> =>
+    invoke('save-audio-file', fileData),
+  saveAudioFileBase64: (fileData: {
+    name: string;
+    dataBase64: string;
+  }): Promise<{ success: boolean; filePath?: string; error?: string }> =>
+    invoke('save-audio-file-base64', fileData),
+  copyAudioFile: (fileData: {
+    sourcePath: string;
+    name: string;
+  }): Promise<{ success: boolean; filePath?: string; error?: string }> =>
+    invoke('copy-audio-file', fileData),
+  selectAudioFile: (): Promise<{ success: boolean; filePath?: string; canceled?: boolean }> =>
+    invoke('select-audio-file'),
+  getFileInfo: (filePath: string): Promise<FileInfoResult> => invoke('get-file-info', filePath),
 
   // Metadata handling
-  getMetadata: (filePath: string) => ipcRenderer.invoke('get-metadata', filePath),
-  saveMetadata: (filePath: string, metadata: any) =>
-    ipcRenderer.invoke('save-metadata', filePath, metadata),
+  getMetadata: (filePath: string): Promise<Record<string, any> | null> =>
+    invoke('get-metadata', filePath),
+  saveMetadata: (filePath: string, metadata: any): Promise<{ success: boolean }> =>
+    invoke('save-metadata', filePath, metadata),
 
   // Usage / cost tracking
-  getUsageSummary: (opts?: { month?: string }) => ipcRenderer.invoke('get-usage-summary', opts),
+  getUsageSummary: (opts?: {
+    month?: string;
+  }): Promise<
+    | {
+        success: true;
+        month: string;
+        summary: {
+          totalUsd: number;
+          count: number;
+          modelUnknownCount: number;
+          byModel: Array<{
+            modelId: string;
+            kind: 'summary' | 'transcription' | 'agent';
+            usd: number;
+            count: number;
+            tokens: {
+              input?: number;
+              output?: number;
+              cacheRead?: number;
+              cacheWrite?: number;
+              audioSeconds?: number;
+            };
+          }>;
+        };
+      }
+    | { success: false; error: string }
+  > => invoke('get-usage-summary', opts),
 
   // Auto-update events
   onUpdateStatus: (callback: (updateInfo: { event: string; data?: any }) => void) => {
     ipcRenderer.on('update-status', (_, updateInfo) => callback(updateInfo));
   },
-  getUpdateState: () => ipcRenderer.invoke('update:get-state'),
-  downloadUpdate: () => ipcRenderer.invoke('update:download'),
-  installUpdate: () => ipcRenderer.invoke('update:install'),
-  simulateUpdateEvent: (event: string, data?: any) =>
-    ipcRenderer.invoke('update:simulate', event, data),
+  getUpdateState: (): Promise<{ type: string; version?: string; percent?: number }> =>
+    invoke('update:get-state'),
+  downloadUpdate: (): Promise<{ success: boolean; error?: string }> => invoke('update:download'),
+  installUpdate: (): Promise<void> => invoke('update:install'),
+  simulateUpdateEvent: (event: string, data?: any): Promise<void> =>
+    invoke('update:simulate', event, data),
 
   // Release notes (shown after a version update)
   onShowReleaseNotes: (
@@ -289,11 +378,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onOpenReleaseHistory: (callback: () => void) => {
     ipcRenderer.on('open-release-history', () => callback());
   },
-  getAllReleases: () => ipcRenderer.invoke('get-all-releases'),
+  getAllReleases: (): Promise<
+    Array<{
+      name?: string;
+      tag?: string;
+      body?: string;
+      publishedAt?: string;
+      prerelease?: boolean;
+      url?: string;
+    }>
+  > => invoke('get-all-releases'),
 
   // Meeting detection
-  getMeetingStatus: () => ipcRenderer.invoke('get-meeting-status'),
+  getMeetingStatus: (): Promise<{ active: boolean; app?: string }> => invoke('get-meeting-status'),
   onMeetingStatusChanged: (callback: (status: { active: boolean; app?: string }) => void) => {
     ipcRenderer.on('meeting-status-changed', (_, status) => callback(status));
   },
-});
+};
+
+contextBridge.exposeInMainWorld('electronAPI', api);
+
+// The renderer's `window.electronAPI` type is derived from this object
+// (`renderer/electronAPI.d.ts`), so the bridge shape has one definition.
+export type ElectronAPI = typeof api;
