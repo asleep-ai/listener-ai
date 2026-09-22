@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
-import type { ActionItemGroup, SummarySection } from '../geminiService';
+import type { ActionItemGroup, SummarySection } from '../meetingRecord';
 import type { LiveNote } from '../outputService';
 
 interface RecordingMetadata {
