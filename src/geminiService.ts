@@ -300,7 +300,12 @@ interface QualityGatedTranscript {
 // to report.
 interface SpeakerLabelAggregate {
   normalizedLines: number;
-  cappedSegments: Array<{ segment: number; distinctIds: number }>;
+  /**
+   * Segments whose distinct id count ran past SPEAKER_ID_CAP. `collapsed`
+   * marks the ones whose ids were actually rewritten; the rest kept every id
+   * they were given and are recorded for diagnosis only.
+   */
+  cappedSegments: Array<{ segment: number; distinctIds: number; collapsed?: boolean }>;
 }
 
 interface SegmentedQualityGatedTranscript {
@@ -317,6 +322,7 @@ interface SegmentedQualityGatedTranscript {
 const NO_SPEAKER_LABELS: SpeakerLabelStats = {
   distinctIds: 0,
   normalizedLines: 0,
+  exceededCap: false,
   capped: false,
 };
 
@@ -637,9 +643,11 @@ function roundShare(value: number): number {
 }
 
 // Extra instruction appended to the quality prompt block when the script-mix
-// check found outliers (issue #197), so the summary model treats them as
-// suspected artifacts rather than discussion. Positions and counts only --
-// never transcript text. TRANSCRIPT_QUALITY_PROMPT_BLOCK itself stays fixed.
+// check found outliers (issue #197). Advisory on purpose: the check is a
+// letter-share heuristic that cannot hear the audio, so it asks the model to
+// weigh the block against its surroundings rather than to drop it. Positions
+// and counts only -- never transcript text. TRANSCRIPT_QUALITY_PROMPT_BLOCK
+// itself stays fixed.
 function buildScriptMixPromptLine(outliers: number[], kind: 'segment' | 'window'): string {
   if (outliers.length === 0) return '';
   const subject =
@@ -650,8 +658,8 @@ function buildScriptMixPromptLine(outliers: number[], kind: 'segment' | 'window'
         : `segments ${outliers.join(', ')} carry`;
   return (
     `\n- An automated check found that ${subject} a script mix unlike the rest of the ` +
-    'recording (possible fabricated foreign-language content); review that content as a ' +
-    'suspected artifact and do not summarize it as discussion.'
+    'recording, so it may be a transcription artifact rather than speech; verify it against ' +
+    'the surrounding context and keep it if it reads as genuine discussion.'
   );
 }
 
@@ -1747,8 +1755,14 @@ Requirements:
           // A whole-file transcript is segment 1 of 1.
           speakerLabels = {
             normalizedLines: gatedTranscript.speakerLabels.normalizedLines,
-            cappedSegments: gatedTranscript.speakerLabels.capped
-              ? [{ segment: 1, distinctIds: gatedTranscript.speakerLabels.distinctIds }]
+            cappedSegments: gatedTranscript.speakerLabels.exceededCap
+              ? [
+                  {
+                    segment: 1,
+                    distinctIds: gatedTranscript.speakerLabels.distinctIds,
+                    ...(gatedTranscript.speakerLabels.capped ? { collapsed: true } : {}),
+                  },
+                ]
               : [],
           };
         }
@@ -2139,11 +2153,11 @@ Requirements:
           throw new EmptyTranscriptionError('Transcription produced no speech content');
         }
         const speakerLabels = normalizeSpeakerLabels(gated.text);
-        this.reportSpeakerLabelCap(speakerLabels, `Short audio (${backend.id})`);
+        this.reportSpeakerLabelOverflow(speakerLabels, `Short audio (${backend.id})`);
         return {
           text: speakerLabels.text,
           cleaned: gated.cleaned === true,
-          uncertain: gated.flagged || speakerLabels.capped,
+          uncertain: gated.flagged || speakerLabels.exceededCap,
           speakerLabels,
         };
       } finally {
@@ -2310,11 +2324,14 @@ Requirements:
   }
 
   // Metrics only, never transcript text (the analyzer's logging rule).
-  private reportSpeakerLabelCap(labels: SpeakerLabelStats, label: string): void {
-    if (!labels.capped) return;
+  private reportSpeakerLabelOverflow(labels: SpeakerLabelStats, label: string): void {
+    if (!labels.exceededCap) return;
     console.error(
       `[transcript-quality] ${label}: ${labels.distinctIds} speaker ids exceed the cap of ` +
-        `${SPEAKER_ID_CAP}; collapsing the rest onto the last valid id`,
+        `${SPEAKER_ID_CAP}; ` +
+        (labels.capped
+          ? 'runaway id counter, collapsing the rest onto the last valid id'
+          : 'ids are reused across lines, keeping them as emitted'),
     );
   }
 
@@ -2428,7 +2445,10 @@ Requirements:
         }
 
         const speakerLabels = normalizeSpeakerLabels(gated.text);
-        this.reportSpeakerLabelCap(speakerLabels, `Segment ${segmentIndex + 1}/${totalSegments}`);
+        this.reportSpeakerLabelOverflow(
+          speakerLabels,
+          `Segment ${segmentIndex + 1}/${totalSegments}`,
+        );
         const empty = speakerLabels.text.trim().length === 0;
         return {
           index: segmentIndex,
@@ -2436,10 +2456,11 @@ Requirements:
           body: speakerLabels.text,
           empty,
           cleaned: gated.cleaned === true,
-          // A runaway id counter means the diarizer stopped tracking who is
-          // speaking, so the text stays but must not be trusted for owner
-          // attribution.
-          uncertain: gated.flagged || speakerLabels.capped,
+          // More speaker ids than the cap allows means the diarizer may have
+          // stopped tracking who is speaking, so the text stays but must not
+          // be trusted for owner attribution -- whether or not the ids
+          // themselves were collapsed.
+          uncertain: gated.flagged || speakerLabels.exceededCap,
           speakerLabels,
           startTime: segmentStartTime,
           endTime: segmentEndTime,
@@ -2648,28 +2669,17 @@ Requirements:
       const uncertainSegments = segmentResults
         .filter((result) => result.uncertain)
         .map((result) => result.index + 1);
-      const lostSegments: LostSegment[] = segmentResults.flatMap((result) =>
-        result.lossReason
-          ? [
-              {
-                segment: result.index + 1,
-                start: result.startTime,
-                end: result.endTime,
-                reason: result.lossReason,
-              },
-            ]
-          : [],
-      );
       const speakerLabels: SpeakerLabelAggregate = {
         normalizedLines: segmentResults.reduce(
           (total, result) => total + result.speakerLabels.normalizedLines,
           0,
         ),
         cappedSegments: segmentResults
-          .filter((result) => result.speakerLabels.capped)
+          .filter((result) => result.speakerLabels.exceededCap)
           .map((result) => ({
             segment: result.index + 1,
             distinctIds: result.speakerLabels.distinctIds,
+            ...(result.speakerLabels.capped ? { collapsed: true } : {}),
           })),
       };
 
@@ -2701,6 +2711,24 @@ Requirements:
           }
         });
       }
+
+      // Loss is judged on the bodies that actually reach the transcript:
+      // reconciliation can empty a segment whose only text was its
+      // predecessor's overlap, leaving a time-range header with nothing under
+      // it. A reason recorded before reconciliation is the more specific one
+      // and wins over the plain `empty`.
+      const lostSegments: LostSegment[] = segmentResults.flatMap((result, i) =>
+        reconciledBodies[i].trim().length === 0
+          ? [
+              {
+                segment: result.index + 1,
+                start: result.startTime,
+                end: result.endTime,
+                reason: result.lossReason ?? 'empty',
+              },
+            ]
+          : [],
+      );
 
       // Merge all transcripts with clear segment breaks
       return {

@@ -219,8 +219,8 @@ whole-file drop fails the run with `Transcription returned the prompt text
 instead of speech`. Live snippets (`qualityRetry: false`) keep their silent
 path, because an error toast every 12 seconds is worse than a dropped chunk.
 
-**Speaker-label normalisation and id cap** (stage 2, as each segment body is
-assembled).
+**Speaker-label normalisation and runaway id cap** (stage 2, as each segment
+body is assembled).
 Corrupted leading labels -- `참가1:`, `참자2:`, `참참가자1:`, `참가자 3:`, `[참가자1]` --
 appear in 63 of 102 transcripts, and runaway id counters reach `참가자147` where
 the diarizer gave almost every bare `어.` line a new speaker. Owner-grouped
@@ -229,11 +229,17 @@ rewrites every Korean variant to the canonical `참가자N: ` shape and requires
 colon or a closing bracket before it will touch a line, so `참가자 3명이 참석했습니다`
 keeps its first word. English labels and unlabeled lines come back
 byte-identical: `Speaker 2:` arrives well formed, and renaming it would
-destroy the only speaker information an English meeting carries. Distinct ids
-beyond `SPEAKER_ID_CAP` (12) per segment collapse onto the last valid id, and
-a capped segment is marked uncertain -- the text stays, but it must not be
-trusted for owner attribution. The guard runs on both the segmented and the
-whole-file path, and its counts persist as `speakerLabels`.
+destroy the only speaker information an English meeting carries. A segment
+with more distinct ids than `SPEAKER_ID_CAP` (12) is marked uncertain -- the
+text stays, but it must not be trusted for owner attribution -- and its ids
+are collapsed onto the last valid id only when the runaway signature is
+there: ids that only climb, each spent on a single line. Any id reused later
+in the segment says the diarizer was still following people, so a fifteen-
+participant meeting keeps every id it was given, however far past the cap it
+runs; collapsing them would merge real participants, which is worse than a
+high id count. The guard runs on both the segmented and the whole-file path,
+and its counts persist as `speakerLabels`, where `collapsed: true` marks the
+segments whose ids were rewritten.
 
 **Foreign-script insertion** (stage 4). Fabricated but fluent passages in
 another language -- a Portuguese podcast interview as the closing segment of a
@@ -251,16 +257,22 @@ whole turns, which keeps a mid-file foreign run from being diluted by the
 speech around it. Outlier segments join `uncertainSegments`, the finding
 persists under `analyzer.scriptMix` with the reason `foreign-script-segment`,
 and one sentence naming the positions is appended to the summary call's
-quality block so the model treats them as suspected artifacts. Notes only:
-transcript text is never rewritten.
+quality block. That sentence is advisory rather than an instruction to drop
+the block: the check is a letter-share heuristic that cannot hear the audio,
+so it asks the model to weigh the block against the surrounding context and
+keep it if it reads as genuine discussion. Notes only: transcript text is
+never rewritten.
 
 **Silent loss notice** (stages 5 and 6). Everything above is diagnostic
 metadata the user never sees, and that is the failure the audit found most
 damaging: the summary reads as a complete record of the meeting even when a
 quarter of the audio produced nothing. Each segment now carries a `lossReason`
 -- `empty`, `cleaned` when a cleanup call was accepted with empty output, or
-`prompt-echo` -- and `formatTranscriptLossNotice` turns the collected segments
-into one plain sentence: `N minutes of this recording produced no transcript
+`prompt-echo` -- and the list is collected from the bodies that survive
+overlap reconciliation, so a segment whose only text was its predecessor's
+overlap is counted as lost rather than left as a bare header nobody mentions.
+`formatTranscriptLossNotice` turns the collected segments into one plain
+sentence: `N minutes of this recording produced no transcript
 (segments: 3 [00:10:00 ~ 00:15:00], ...)`. `transcribeWithTwoSteps` prepends
 that notice to the flat `summary` string and also inserts it as the first
 `summarySections` entry, under the heading `Transcript coverage`, because the

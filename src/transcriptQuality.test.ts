@@ -338,6 +338,7 @@ describe('normalizeSpeakerLabels', () => {
       text: '',
       distinctIds: 0,
       normalizedLines: 0,
+      exceededCap: false,
       capped: false,
     });
   });
@@ -346,9 +347,11 @@ describe('normalizeSpeakerLabels', () => {
     assert.equal(normalizeSpeakerLabels('[ 참가자1 ]').text, '참가자1:');
   });
 
-  it('collapses ids past the cap onto the last valid id', () => {
+  it('collapses a runaway id sequence onto the last valid id', () => {
+    // The audit shape: ids only climb and each is spent on a single line.
     const body = Array.from({ length: 15 }, (_, i) => idLine(i + 1, '어.')).join('\n');
     const result = normalizeSpeakerLabels(body);
+    assert.equal(result.exceededCap, true);
     assert.equal(result.capped, true);
     assert.equal(result.distinctIds, 15, 'distinctIds reports the pre-cap count');
     const ids = result.text.split('\n').map((line) => line.slice(0, line.indexOf(':')));
@@ -369,22 +372,46 @@ describe('normalizeSpeakerLabels', () => {
     assert.deepEqual(ids.slice(SPEAKER_ID_CAP), ['참가자12', '참가자12', '참가자12']);
   });
 
+  it('collapses the audited runaway counter, whose ids are not consecutive', () => {
+    const body = ['참가자100: 어.', '참가자105: 어.', '참가자147: 어.'].join('\n');
+    const result = normalizeSpeakerLabels(body, { maxDistinctIds: 2 });
+    assert.equal(result.capped, true);
+    assert.equal(result.text, '참가자100: 어.\n참가자105: 어.\n참가자105: 어.');
+  });
+
+  it('keeps every id of a large meeting whose speakers take turns', () => {
+    // Fifteen participants, each speaking twice. The reuse is evidence the
+    // diarizer was still following people, so collapsing would merge real
+    // participants -- the segment is only reported.
+    const body = [
+      ...Array.from({ length: 15 }, (_, i) => idLine(i + 1, '먼저 의견을 말씀드리겠습니다.')),
+      ...Array.from({ length: 15 }, (_, i) => idLine(i + 1, '이어서 보충하겠습니다.')),
+    ].join('\n');
+    const result = normalizeSpeakerLabels(body);
+    assert.equal(result.exceededCap, true);
+    assert.equal(result.capped, false);
+    assert.equal(result.distinctIds, 15);
+    assert.equal(result.text, body, 'the ids are left exactly as emitted');
+  });
+
   it('does not cap exactly the cap many ids', () => {
     const body = Array.from({ length: SPEAKER_ID_CAP }, (_, i) => idLine(i + 1, '어.')).join('\n');
     const result = normalizeSpeakerLabels(body);
+    assert.equal(result.exceededCap, false);
     assert.equal(result.capped, false);
     assert.equal(result.distinctIds, SPEAKER_ID_CAP);
     assert.equal(result.text, body);
   });
 
-  it('orders ids by first appearance, not by number', () => {
+  it('leaves ids past the cap alone when one of them is reused', () => {
     const body = ['참가자9: 먼저.', '참가자4: 다음.', '참가자9: 다시.', '참가자7: 마지막.'].join(
       '\n',
     );
     const result = normalizeSpeakerLabels(body, { maxDistinctIds: 2 });
-    assert.equal(result.capped, true);
+    assert.equal(result.exceededCap, true);
+    assert.equal(result.capped, false);
     assert.equal(result.distinctIds, 3);
-    assert.equal(result.text, '참가자9: 먼저.\n참가자4: 다음.\n참가자9: 다시.\n참가자4: 마지막.');
+    assert.equal(result.text, body);
   });
 
   it('applies the cap after normalisation, so a variant id counts as itself', () => {

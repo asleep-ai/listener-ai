@@ -24,12 +24,13 @@ let workDir: string;
 // from per-segment speaker-label stats (issue #197).
 type SpeakerLabelAggregate = {
   normalizedLines: number;
-  cappedSegments: Array<{ segment: number; distinctIds: number }>;
+  cappedSegments: Array<{ segment: number; distinctIds: number; collapsed?: boolean }>;
 };
 
 const NO_SPEAKER_LABELS: SpeakerLabelStats = {
   distinctIds: 0,
   normalizedLines: 0,
+  exceededCap: false,
   capped: false,
 };
 
@@ -279,7 +280,12 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
       empty: boolean;
       cleaned: boolean;
       uncertain: boolean;
-      speakerLabels: { distinctIds: number; normalizedLines: number; capped: boolean };
+      speakerLabels: {
+        distinctIds: number;
+        normalizedLines: number;
+        exceededCap: boolean;
+        capped: boolean;
+      };
     }>;
   };
 
@@ -371,6 +377,24 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     assert.equal(result.uncertain, true, 'owner attribution cannot be trusted past the cap');
     assert.ok(!result.body.includes('참가자13'));
     assert.ok(result.body.endsWith('참가자12: 어.'));
+  });
+
+  it("keeps a large meeting's ids and still marks the segment uncertain", async () => {
+    // Fifteen participants who each take two turns: over the cap, but the
+    // reused ids show the diarizer was still tracking who was speaking.
+    const raw = [
+      ...Array.from({ length: 15 }, (_, i) => `참가자${i + 1}: 먼저 의견을 말씀드리겠습니다.`),
+      ...Array.from({ length: 15 }, (_, i) => `참가자${i + 1}: 이어서 보충하겠습니다.`),
+    ].join('\n');
+    const { service } = makeGatedService([raw]);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(result.speakerLabels.exceededCap, true);
+    assert.equal(result.speakerLabels.capped, false);
+    assert.equal(result.speakerLabels.distinctIds, 15);
+    assert.equal(result.body, raw, 'no participant is merged onto another id');
+    assert.equal(result.uncertain, true, 'the id count is still worth flagging');
   });
 
   it('replaces a flagged segment with the clean context-cleared retry result', async () => {
@@ -682,7 +706,12 @@ describe('GeminiService segmented quality aggregation', () => {
       empty: boolean;
       cleaned: boolean;
       uncertain: boolean;
-      speakerLabels: { distinctIds: number; normalizedLines: number; capped: boolean };
+      speakerLabels: {
+        distinctIds: number;
+        normalizedLines: number;
+        exceededCap: boolean;
+        capped: boolean;
+      };
       startTime: number;
       endTime: number;
       lossReason?: LostSegment['reason'];
@@ -696,8 +725,9 @@ describe('GeminiService segmented quality aggregation', () => {
       uncertainSegments: number[];
       speakerLabels: {
         normalizedLines: number;
-        cappedSegments: Array<{ segment: number; distinctIds: number }>;
+        cappedSegments: Array<{ segment: number; distinctIds: number; collapsed?: boolean }>;
       };
+      bodies: string[];
       lostSegments: LostSegment[];
     }>;
   };
@@ -724,7 +754,7 @@ describe('GeminiService segmented quality aggregation', () => {
       empty: false,
       cleaned: false,
       uncertain: segmentIndex === 1,
-      speakerLabels: { distinctIds: 1, normalizedLines: 0, capped: false },
+      speakerLabels: { distinctIds: 1, normalizedLines: 0, exceededCap: false, capped: false },
       startTime: segmentIndex * 300,
       endTime: (segmentIndex + 1) * 300,
     });
@@ -737,7 +767,7 @@ describe('GeminiService segmented quality aggregation', () => {
     assert.deepEqual(result.uncertainSegments, [2]);
   });
 
-  it('aggregates speaker-label stats and reports capped segments as uncertain', async () => {
+  it('aggregates speaker-label stats and records which segments were collapsed', async () => {
     const service = new GeminiService({
       apiKey: 'test-key',
       dataPath: workDir,
@@ -753,18 +783,21 @@ describe('GeminiService segmented quality aggregation', () => {
     }
     service.splitAudioIntoSegments = async () => segmentFiles;
     service.transcribeSingleSegment = async (_segmentFile, segmentIndex) => {
-      const capped = segmentIndex === 1;
+      // Segment 1 ran past the cap with its ids kept (a large meeting);
+      // segment 2 ran past it with a runaway counter that was collapsed.
+      const collapsed = segmentIndex === 1;
       return {
         index: segmentIndex,
         header: `[Segment ${segmentIndex + 1}]\n`,
         body: `참가자1: 세그먼트 ${segmentIndex + 1}의 정상 발화입니다.`,
         empty: false,
         cleaned: false,
-        uncertain: capped,
+        uncertain: true,
         speakerLabels: {
-          distinctIds: capped ? 15 : 2,
+          distinctIds: collapsed ? 15 : 20,
           normalizedLines: segmentIndex === 0 ? 3 : 4,
-          capped,
+          exceededCap: true,
+          capped: collapsed,
         },
         startTime: segmentIndex * 300,
         endTime: (segmentIndex + 1) * 300,
@@ -776,10 +809,13 @@ describe('GeminiService segmented quality aggregation', () => {
       600,
     );
 
-    assert.deepEqual(result.uncertainSegments, [2]);
+    assert.deepEqual(result.uncertainSegments, [1, 2]);
     assert.deepEqual(result.speakerLabels, {
       normalizedLines: 7,
-      cappedSegments: [{ segment: 2, distinctIds: 15 }],
+      cappedSegments: [
+        { segment: 1, distinctIds: 20 },
+        { segment: 2, distinctIds: 15, collapsed: true },
+      ],
     });
   });
 
@@ -805,7 +841,7 @@ describe('GeminiService segmented quality aggregation', () => {
         empty: Boolean(lossReason),
         cleaned: false,
         uncertain: false,
-        speakerLabels: { distinctIds: 1, normalizedLines: 0, capped: false },
+        speakerLabels: { distinctIds: 1, normalizedLines: 0, exceededCap: false, capped: false },
         startTime: segmentIndex * 300,
         endTime: (segmentIndex + 1) * 300,
         lossReason,
@@ -821,6 +857,43 @@ describe('GeminiService segmented quality aggregation', () => {
       { segment: 2, start: 300, end: 600, reason: 'empty' },
       { segment: 3, start: 600, end: 900, reason: 'prompt-echo' },
     ]);
+  });
+
+  it('counts a segment emptied by overlap reconciliation as lost', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as SegmentedHelpers;
+    const segmentFiles = [0, 1].map((i) => path.join(workDir, `overlap_segment_00${i}.webm`));
+    for (const segmentFile of segmentFiles) {
+      fs.writeFileSync(segmentFile, Buffer.alloc(8, 1));
+    }
+    // Segment 2 holds nothing but the overlap copy of segment 1's last turn,
+    // so reconciliation removes its only line and leaves a bare header.
+    const overlapTurn = '참가자2: 지난주 배포 결과부터 공유드리겠습니다.';
+    service.splitAudioIntoSegments = async () => segmentFiles;
+    service.transcribeSingleSegment = async (_segmentFile, segmentIndex) => ({
+      index: segmentIndex,
+      header: `[Segment ${segmentIndex + 1}]\n`,
+      body:
+        segmentIndex === 0 ? `참가자1: 오늘 회의를 시작하겠습니다.\n\n${overlapTurn}` : overlapTurn,
+      empty: false,
+      cleaned: false,
+      uncertain: false,
+      speakerLabels: { distinctIds: 1, normalizedLines: 0, exceededCap: false, capped: false },
+      startTime: segmentIndex * 300,
+      endTime: (segmentIndex + 1) * 300,
+    });
+
+    const result = await service.getSegmentedTranscript(
+      path.join(workDir, 'overlap-source.webm'),
+      600,
+    );
+
+    assert.equal(result.bodies[1], '', 'the duplicate head was removed');
+    assert.deepEqual(result.lostSegments, [{ segment: 2, start: 300, end: 600, reason: 'empty' }]);
   });
 });
 
@@ -1955,7 +2028,7 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       uncertainSegments: [2],
       segmentedSpeakerLabels: {
         normalizedLines: 7,
-        cappedSegments: [{ segment: 2, distinctIds: 15 }],
+        cappedSegments: [{ segment: 2, distinctIds: 15, collapsed: true }],
       },
       summaryJson: JSON.stringify({
         suggestedTitle: '제목',
@@ -1970,7 +2043,10 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
 
     assert.deepEqual(result.customFields?.transcriptQuality, {
       uncertainSegments: [2],
-      speakerLabels: { normalizedLines: 7, cappedSegments: [{ segment: 2, distinctIds: 15 }] },
+      speakerLabels: {
+        normalizedLines: 7,
+        cappedSegments: [{ segment: 2, distinctIds: 15, collapsed: true }],
+      },
     });
   });
 
@@ -1978,7 +2054,7 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     const { service } = makeTwoStepService({
       transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
       uncertain: true,
-      speakerLabels: { distinctIds: 15, normalizedLines: 7, capped: true },
+      speakerLabels: { distinctIds: 15, normalizedLines: 7, exceededCap: true, capped: true },
       summaryJson: JSON.stringify({
         suggestedTitle: '제목',
         summary: '요약',
@@ -1992,6 +2068,31 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
 
     assert.deepEqual(result.customFields?.transcriptQuality, {
       uncertainSegments: [1],
+      speakerLabels: {
+        normalizedLines: 7,
+        cappedSegments: [{ segment: 1, distinctIds: 15, collapsed: true }],
+      },
+    });
+  });
+
+  it('persists an over-cap whole-file transcript whose ids were kept', async () => {
+    const { service } = makeTwoStepService({
+      transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
+      uncertain: true,
+      speakerLabels: { distinctIds: 15, normalizedLines: 7, exceededCap: true, capped: false },
+      summaryJson: JSON.stringify({
+        suggestedTitle: '제목',
+        summary: '요약',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '📝',
+      }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('labels-kept.webm'), 10);
+
+    assert.deepEqual(result.customFields?.transcriptQuality, {
+      uncertainSegments: [1],
       speakerLabels: { normalizedLines: 7, cappedSegments: [{ segment: 1, distinctIds: 15 }] },
     });
   });
@@ -1999,7 +2100,7 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
   it('persists normalized label counts even when nothing else is wrong', async () => {
     const { service } = makeTwoStepService({
       transcript: '참가자1: 분석기는 정상으로 보는 자연스러운 문장입니다.',
-      speakerLabels: { distinctIds: 2, normalizedLines: 3, capped: false },
+      speakerLabels: { distinctIds: 2, normalizedLines: 3, exceededCap: false, capped: false },
       summaryJson: JSON.stringify({
         suggestedTitle: '제목',
         summary: '요약',
@@ -2052,6 +2153,11 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     assert.equal(quality.analyzer?.scriptMix?.outlierWindows, undefined);
     assert.ok((quality.analyzer?.scriptMix?.overall.hangul ?? 0) >= 0.6);
     assert.match(summaryPrompts[0], /segment 3 carries a script mix unlike the rest/);
+    assert.match(
+      summaryPrompts[0],
+      /keep it if it reads as genuine discussion/,
+      'the note asks the model to verify the block, not to drop it',
+    );
     assert.equal(result.transcript, transcript, 'the transcript is never rewritten');
   });
 

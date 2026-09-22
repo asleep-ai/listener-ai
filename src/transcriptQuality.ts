@@ -723,8 +723,11 @@ export function stripNoSpeechSentinel(text: string): string {
 // `참가자147`, where a diarizer gave almost every bare `어.` line a new
 // speaker (150 distinct ids in one segment). Owner-grouped action items
 // cannot be attributed on that output, so labels are rewritten to one
-// canonical shape and the id space is bounded before the transcript reaches
-// the summary stage. Pure and total: odd input is left alone, never thrown on.
+// canonical shape before the transcript reaches the summary stage. The id
+// space is bounded only for the runaway shape itself: a genuinely large
+// meeting keeps every id it was given and is merely reported, because
+// collapsing its ids would merge real participants. Pure and total: odd input
+// is left alone, never thrown on.
 export const SPEAKER_ID_CAP = 12;
 
 // A leading Korean speaker label in any of the observed corrupted shapes.
@@ -740,6 +743,8 @@ export interface SpeakerLabelStats {
   distinctIds: number;
   /** Lines whose label text was rewritten by normalisation. */
   normalizedLines: number;
+  /** True when more distinct ids appeared than the cap allows. */
+  exceededCap: boolean;
   /** True when ids past the cap were collapsed onto the last valid id. */
   capped: boolean;
 }
@@ -755,6 +760,20 @@ function canonicalSpeakerLabel(id: string, rest: string): string {
   return rest.length > 0 ? `참가자${id}: ` : `참가자${id}:`;
 }
 
+// The runaway-counter signature: ids that only ever climb, each spent on a
+// single line (`참가자100` ... `참가자147`, one bare `어.` apiece). That is a
+// diarizer which stopped tracking speakers and started numbering lines. An id
+// reused later in the segment is evidence it was still following people, so a
+// large meeting -- fifteen participants taking turns -- fails this test and
+// keeps its ids however far past the cap it runs.
+function isRunawayIdSequence(order: string[], uses: Map<string, number>): boolean {
+  for (let i = 0; i < order.length; i++) {
+    if ((uses.get(order[i]) ?? 0) > 1) return false;
+    if (i > 0 && Number(order[i]) <= Number(order[i - 1])) return false;
+  }
+  return true;
+}
+
 export function normalizeSpeakerLabels(
   body: string,
   options?: { maxDistinctIds?: number },
@@ -765,6 +784,7 @@ export function normalizeSpeakerLabels(
   const parts = body.split(/(\r\n|[\n\r])/u);
   const labels = new Map<number, { id: string; rest: string; original: string }>();
   const order: string[] = [];
+  const uses = new Map<string, number>();
 
   for (let i = 0; i < parts.length; i += 2) {
     const match = SPEAKER_LABEL_VARIANT.exec(parts[i]);
@@ -775,10 +795,12 @@ export function normalizeSpeakerLabels(
     if (!bracketed && !match[6]) continue;
     const id = match[4];
     if (!order.includes(id)) order.push(id);
+    uses.set(id, (uses.get(id) ?? 0) + 1);
     labels.set(i, { id, rest: parts[i].slice(match[0].length), original: match[0] });
   }
 
-  const capped = order.length > maxDistinctIds;
+  const exceededCap = order.length > maxDistinctIds;
+  const capped = exceededCap && isRunawayIdSequence(order, uses);
   const lastValidId = capped ? order[maxDistinctIds - 1] : undefined;
   let normalizedLines = 0;
 
@@ -791,7 +813,13 @@ export function normalizeSpeakerLabels(
     parts[i] = canonicalSpeakerLabel(id, label.rest) + label.rest;
   }
 
-  return { text: parts.join(''), distinctIds: order.length, normalizedLines, capped };
+  return {
+    text: parts.join(''),
+    distinctIds: order.length,
+    normalizedLines,
+    exceededCap,
+    capped,
+  };
 }
 
 // Prompt echo (issue #197). A provider sometimes returns the instructions it
