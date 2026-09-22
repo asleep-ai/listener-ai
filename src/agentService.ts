@@ -1,15 +1,14 @@
 import * as path from 'path';
-import {
-  DEFAULT_CODEX_MODEL,
-  LIVE_STT_PROVIDERS,
-  TRANSCRIPTION_PROVIDERS,
-  type AiProvider,
-  isTranscriptionProvider,
-  normalizeLiveSttProvider,
-  normalizeTranscriptionProvider,
-} from './aiProvider';
+import { DEFAULT_CODEX_MODEL, type AiProvider } from './aiProvider';
 import { type CodexOAuthCredentials } from './codexOAuth';
 import { CodexOAuthHolder } from './codexOAuthHolder';
+import {
+  AGENT_READABLE_CONFIG_KEYS,
+  AGENT_WRITABLE_CONFIG_KEYS,
+  CONFIG_KEY_BY_NAME,
+  type AgentReadableConfigKey,
+  type AgentWritableConfigKey,
+} from './configKeys';
 import type { ConfigService } from './configService';
 import {
   type AssistantMessage,
@@ -86,37 +85,16 @@ export interface AgentRunResult {
   history: AgentChatMessage[];
 }
 
-export const WRITABLE_CONFIG_KEYS = [
-  'autoMode',
-  'meetingDetection',
-  'displayDetection',
-  'globalShortcut',
-  'maxRecordingMinutes',
-  'recordingReminderMinutes',
-  'minRecordingSeconds',
-  'recordSystemAudio',
-  'liveSttProvider',
-  'liveSttLanguage',
-  'liveTranslationLanguage',
-  // Non-secret backend selector. The Soniox API key it may point at is
-  // deliberately neither readable nor writable here.
-  'transcriptionProvider',
-] as const;
+// Derived from the `agent` flag in the config key registry. Secrets are never
+// flagged agent-accessible there, so a new credential key is unreadable and
+// unwritable by construction; `configKeys.test.ts` asserts it.
+export const WRITABLE_CONFIG_KEYS = AGENT_WRITABLE_CONFIG_KEYS;
 
-export type WritableConfigKey = (typeof WRITABLE_CONFIG_KEYS)[number];
+export type WritableConfigKey = AgentWritableConfigKey;
 
-export const READABLE_CONFIG_KEYS = [
-  ...WRITABLE_CONFIG_KEYS,
-  'aiProvider',
-  'geminiModel',
-  'geminiFlashModel',
-  'codexModel',
-  'codexTranscriptionModel',
-  'openaiLiveTranscriptionModel',
-  'openaiLiveTranslationModel',
-] as const;
+export const READABLE_CONFIG_KEYS = AGENT_READABLE_CONFIG_KEYS;
 
-export type ReadableConfigKey = (typeof READABLE_CONFIG_KEYS)[number];
+export type ReadableConfigKey = AgentReadableConfigKey;
 
 function isWritableKey(key: string): key is WritableConfigKey {
   return (WRITABLE_CONFIG_KEYS as readonly string[]).includes(key);
@@ -126,61 +104,62 @@ function isReadableKey(key: string): key is ReadableConfigKey {
   return (READABLE_CONFIG_KEYS as readonly string[]).includes(key);
 }
 
-/** Coerce agent-supplied value to the right type per key. */
+/**
+ * Coerce agent-supplied value to the right type per key.
+ *
+ * The rules deliberately differ from the CLI's (`applyConfigSet`): booleans
+ * accept a real boolean here, integers accept a float and floor it, and the
+ * string and enum keys trim / lowercase. Both grammars are preserved as-is.
+ */
 export function coerceConfigValue(
   key: WritableConfigKey,
   raw: unknown,
 ): { ok: true; value: unknown } | { ok: false; error: string } {
-  switch (key) {
-    case 'autoMode':
-    case 'meetingDetection':
-    case 'displayDetection':
-    case 'recordSystemAudio': {
+  const row = CONFIG_KEY_BY_NAME[key];
+  switch (row.kind) {
+    case 'bool': {
       if (typeof raw === 'boolean') return { ok: true, value: raw };
       if (raw === 'true') return { ok: true, value: true };
       if (raw === 'false') return { ok: true, value: false };
       return { ok: false, error: `${key} expects a boolean` };
     }
-    case 'globalShortcut': {
-      if (typeof raw !== 'string' || raw.trim() === '') {
-        return { ok: false, error: `${key} expects a non-empty string` };
-      }
-      return { ok: true, value: raw.trim() };
-    }
-    case 'liveSttProvider': {
-      const provider = normalizeLiveSttProvider(raw);
-      if (!provider) {
-        return { ok: false, error: `${key} expects one of: ${LIVE_STT_PROVIDERS.join(', ')}` };
-      }
-      return { ok: true, value: provider };
-    }
-    case 'transcriptionProvider': {
-      // `normalize*` falls back to `auto` for junk, so validate before coercing
-      // or a typo would silently reset the backend instead of erroring.
-      const candidate = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
-      if (!isTranscriptionProvider(candidate)) {
-        return { ok: false, error: `${key} expects one of: ${TRANSCRIPTION_PROVIDERS.join(', ')}` };
-      }
-      return { ok: true, value: normalizeTranscriptionProvider(candidate) };
-    }
-    case 'liveSttLanguage': {
-      if (typeof raw !== 'string') return { ok: false, error: `${key} expects a string` };
-      return { ok: true, value: raw.trim() };
-    }
-    case 'liveTranslationLanguage': {
-      if (typeof raw !== 'string') return { ok: false, error: `${key} expects a string` };
-      return { ok: true, value: raw.trim() || 'ko' };
-    }
-    case 'maxRecordingMinutes':
-    case 'recordingReminderMinutes':
-    case 'minRecordingSeconds': {
+    case 'int': {
       const n = typeof raw === 'number' ? raw : Number.parseInt(String(raw), 10);
       if (!Number.isFinite(n) || n < 0) {
         return { ok: false, error: `${key} expects a non-negative integer` };
       }
       return { ok: true, value: Math.floor(n) };
     }
+    case 'enum': {
+      // Validate the normalized candidate rather than calling `normalize*`:
+      // those fall back to a default for junk, so a typo would silently reset
+      // the setting instead of erroring.
+      const values = row.values ?? [];
+      const candidate = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+      if (!values.includes(candidate)) {
+        return { ok: false, error: `${key} expects one of: ${values.join(', ')}` };
+      }
+      return { ok: true, value: candidate };
+    }
+    case 'string': {
+      const rule = row.agentStringRule;
+      if (rule === undefined) break;
+      const error =
+        rule === 'nonEmpty' ? `${key} expects a non-empty string` : `${key} expects a string`;
+      if (typeof raw !== 'string') return { ok: false, error };
+      const trimmed = raw.trim();
+      if (rule === 'nonEmpty') {
+        return trimmed === '' ? { ok: false, error } : { ok: true, value: trimmed };
+      }
+      if (rule === 'trimOrDefault') return { ok: true, value: trimmed || row.default };
+      return { ok: true, value: trimmed };
+    }
+    default:
+      break;
   }
+  // Unreachable today: every agent-writable row declares a coercion rule, and
+  // `configKeys.test.ts` fails if one stops doing so.
+  return { ok: false, error: `key is not settable via agent: ${key}` };
 }
 
 // Pi-ai validates tool arguments against TypeBox schemas. We build them lazily
