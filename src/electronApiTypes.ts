@@ -4,12 +4,7 @@
 // instead of two hand-synced copies. Types only -- nothing here emits runtime
 // code, so importing it never pulls Electron into the renderer bundle.
 
-import type {
-  AiProvider,
-  GeminiThinkingLevel,
-  LiveSttProvider,
-  TranscriptionProvider,
-} from './aiProvider';
+import type { ConfigValues, PayloadConfigKey } from './configKeys';
 import type { StreamingLiveSttProvider } from './liveSttProvider';
 
 export interface TranscriptionErrorPayload {
@@ -106,40 +101,10 @@ export type AgentConfirmRequest = {
   };
 };
 
-export type ConfigPayload = {
-  aiProvider?: AiProvider;
-  transcriptionProvider?: TranscriptionProvider;
-  geminiApiKey?: string;
-  geminiModel?: string;
-  geminiFlashModel?: string;
-  geminiThinkingLevel?: GeminiThinkingLevel;
-  codexModel?: string;
-  codexTranscriptionModel?: string;
-  liveSttProvider?: LiveSttProvider;
-  openaiApiKey?: string;
-  sonioxApiKey?: string;
-  openaiLiveTranscriptionModel?: string;
-  openaiLiveTranslationModel?: string;
-  liveSttLanguage?: string;
-  liveTranslationLanguage?: string;
-  notionApiKey?: string;
-  notionDatabaseId?: string;
-  autoMode?: boolean;
-  meetingDetection?: boolean;
-  displayDetection?: boolean;
-  globalShortcut?: string;
-  knownWords?: string[];
-  summaryPrompt?: string;
+// Every config key flagged `payload` in the registry, plus the one read-only
+// field that has no registry row because `updateConfig` never persists it.
+export type ConfigPayload = ConfigValues<PayloadConfigKey> & {
   defaultSummaryPrompt?: string;
-  maxRecordingMinutes?: number;
-  recordingReminderMinutes?: number;
-  minRecordingSeconds?: number;
-  recordSystemAudio?: boolean;
-  crashReportingEnabled?: boolean;
-  audioDeviceId?: string;
-  slackWebhookUrl?: string;
-  slackAutoShare?: boolean;
-  googleDriveEnabled?: boolean;
 };
 
 export type RendererLogPayload = {

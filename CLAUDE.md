@@ -56,7 +56,7 @@ Listener.AI is an Electron desktop application for recording meetings and produc
 ### 6. AI Agent Chat
 - Conversational access to saved meetings and settings (`src/agentService.ts`), backed by the selected AI provider with a fixed tool set
 - Tools: `search_transcriptions`, `list_recent_transcriptions`, `get_transcription`, `get_config`, `set_config`
-- `set_config` write whitelist (non-secret keys only) lives in `agentService.ts:WRITABLE_CONFIG_KEYS`: `autoMode`, `meetingDetection`, `displayDetection`, `globalShortcut`, `maxRecordingMinutes`, `recordingReminderMinutes`, `minRecordingSeconds`, `recordSystemAudio`, `liveSttProvider`, `liveSttLanguage`, `liveTranslationLanguage`, `transcriptionProvider`. Model strings (`geminiModel`, `geminiFlashModel`, `geminiThinkingLevel`, `codexModel`, `codexTranscriptionModel`) are intentionally NOT agent-writable -- they change the model selection and reasoning depth, which we want to keep to the settings UI / CLI `config set`. API keys (including `sonioxApiKey`) and the Notion database ID can neither be read nor written by the agent.
+- `set_config` write whitelist (non-secret keys only) is derived from the `agent: 'write'` rows in `configKeys.ts` and re-exported as `agentService.ts:WRITABLE_CONFIG_KEYS`: `autoMode`, `meetingDetection`, `displayDetection`, `globalShortcut`, `maxRecordingMinutes`, `recordingReminderMinutes`, `minRecordingSeconds`, `recordSystemAudio`, `liveSttProvider`, `liveSttLanguage`, `liveTranslationLanguage`, `transcriptionProvider`. Model strings (`geminiModel`, `geminiFlashModel`, `geminiThinkingLevel`, `codexModel`, `codexTranscriptionModel`) are intentionally NOT agent-writable -- they change the model selection and reasoning depth, which we want to keep to the settings UI / CLI `config set`. API keys (including `sonioxApiKey`) and the Notion database ID can neither be read nor written by the agent.
 - Every `set_config` call requires explicit user confirmation through an IPC approval flow
 - Folder-name arguments are validated (NUL / path-separator rejection) to block traversal
 - Chat history lives only in renderer memory — lost on reload, not synced across devices or restarts
@@ -224,6 +224,7 @@ Pre-v2 folders use `<sanitized-title>_<timestamp>/` with `summary.md` (YAML fron
 - `codexOAuth.ts` — Codex OAuth sign-in and token refresh wrapper
 - `openaiCodexClient.ts` — OpenAI transcription and Codex Responses client helpers
 - `notionService.ts` — Notion client, block splitting, page assembly
+- `configKeys.ts` — one table row per scalar config key; `AppConfig`, `getAllConfig`, `KNOWN_CONFIG_KEYS`, the agent whitelists and `ConfigPayload` are all derived from it
 - `configService.ts` — `config.json` read/write, env-var fallback, masking
 - `outputService.ts` — transcription folder layout and frontmatter serialization
 - `searchService.ts` — in-memory field-weighted search
