@@ -29,6 +29,7 @@
     "dist/sonioxLiveProvider.js",
     "dist/sonioxTranscription.js",
     "dist/liveSttUtils.js",
+    "dist/meetingRecord.js",
     "dist/batchSttBackend.js",
     "dist/transcriptionErrors.js",
     "dist/openAiRealtimeClient.js",

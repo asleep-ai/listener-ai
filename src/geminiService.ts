@@ -60,6 +60,12 @@ import {
   type TranscriptLossReason,
   stripNoSpeechSentinel,
 } from './transcriptQuality';
+import {
+  type ActionItemGroup,
+  parseActionItemGroups,
+  parseSummarySections,
+  type SummarySection,
+} from './meetingRecord';
 import { formatOffsetTimestamp, type LiveNote } from './outputService';
 import { type Context, completeSimple, extractFinalText, getModel } from './piAiClient';
 import { reportError } from './sentry';
@@ -226,16 +232,6 @@ export interface TranscriptionResult {
   cost?: CostSnapshot;
 }
 
-export interface SummarySection {
-  heading: string;
-  bullets: string[];
-}
-
-export interface ActionItemGroup {
-  owner: string;
-  items: string[];
-}
-
 function normalizeString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -243,49 +239,6 @@ function normalizeString(value: unknown): string {
 function normalizeStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map(normalizeString).filter((item) => item.length > 0);
-}
-
-const TRANSCRIPT_PLACEHOLDER_OWNER = /^(?:speaker|participant|참가자)\s*#?\s*\d+$/iu;
-
-function normalizeSummarySections(value: unknown): SummarySection[] | undefined {
-  if (!Array.isArray(value) || value.length === 0) return undefined;
-  const sections: SummarySection[] = [];
-  for (const entry of value) {
-    if (!entry || typeof entry !== 'object') return undefined;
-    const heading = normalizeString((entry as { heading?: unknown }).heading);
-    const rawBullets = (entry as { bullets?: unknown }).bullets;
-    if (
-      !heading ||
-      !Array.isArray(rawBullets) ||
-      rawBullets.length === 0 ||
-      !rawBullets.every((bullet) => typeof bullet === 'string' && bullet.trim())
-    ) {
-      return undefined;
-    }
-    sections.push({ heading, bullets: rawBullets.map((bullet) => bullet.trim()) });
-  }
-  return sections;
-}
-
-function normalizeActionItemGroups(value: unknown): ActionItemGroup[] | undefined {
-  if (!Array.isArray(value) || value.length === 0) return undefined;
-  const groups: ActionItemGroup[] = [];
-  for (const entry of value) {
-    if (!entry || typeof entry !== 'object') return undefined;
-    const owner = normalizeString((entry as { owner?: unknown }).owner);
-    const rawItems = (entry as { items?: unknown }).items;
-    if (
-      !owner ||
-      !Array.isArray(rawItems) ||
-      rawItems.length === 0 ||
-      !rawItems.every((item) => typeof item === 'string' && item.trim())
-    ) {
-      return undefined;
-    }
-    if (TRANSCRIPT_PLACEHOLDER_OWNER.test(owner)) continue;
-    groups.push({ owner, items: rawItems.map((item) => item.trim()) });
-  }
-  return groups.length > 0 ? groups : undefined;
 }
 
 interface QualityGatedTranscript {
@@ -1874,8 +1827,12 @@ Requirements:
 
       try {
         const parsed = JSON.parse(stripJsonFences(summaryText)) as Record<string, unknown>;
-        const summarySections = normalizeSummarySections(parsed.summarySections);
-        const actionItemGroups = normalizeActionItemGroups(parsed.actionItemGroups);
+        const parsedSections = parseSummarySections(parsed.summarySections);
+        const summarySections = parsedSections.length > 0 ? parsedSections : undefined;
+        const parsedGroups = parseActionItemGroups(parsed.actionItemGroups, {
+          dropPlaceholderOwners: true,
+        });
+        const actionItemGroups = parsedGroups.length > 0 ? parsedGroups : undefined;
         const legacySummary = normalizeString(parsed.summary);
         const keyPoints = normalizeStringArray(parsed.keyPoints);
         const legacyActionItems = normalizeStringArray(parsed.actionItems);

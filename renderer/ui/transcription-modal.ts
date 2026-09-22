@@ -6,9 +6,9 @@
 import { getDom } from '../state';
 import { resetModalChatFor } from './chat-panel';
 import { showConfigModal } from './config-modal';
+import { camelToLabel } from '../../src/meetingRecord';
 import {
   type TranscriptionData,
-  camelToLabel,
   escapeHtml,
   renderDynamicFields,
   renderMarkdown,

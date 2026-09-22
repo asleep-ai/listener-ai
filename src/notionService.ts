@@ -1,7 +1,8 @@
 import { Client } from '@notionhq/client';
 import type { BlockObjectRequest } from '@notionhq/client/build/src/api-endpoints';
 import type { TranscriptionResult } from './geminiService';
-import { camelToLabel, formatOffsetTimestamp } from './outputService';
+import { camelToLabel } from './meetingRecord';
+import { formatOffsetTimestamp } from './outputService';
 
 export interface NotionConfig {
   apiKey: string;

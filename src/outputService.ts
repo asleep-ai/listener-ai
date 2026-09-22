@@ -1,11 +1,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type {
-  ActionItemGroup,
-  HighlightEntry,
-  SummarySection,
-  TranscriptionResult,
-} from './geminiService';
+import type { HighlightEntry, TranscriptionResult } from './geminiService';
+import {
+  type ActionItemGroup,
+  camelToLabel,
+  parseActionItemGroups,
+  parseSummarySections,
+  renderMeetingSections,
+  type SummarySection,
+} from './meetingRecord';
 import type { CostSnapshot } from './services/usageTracker';
 
 /** One timestamped note captured while recording. Empty `text` = bare flag. */
@@ -194,14 +197,6 @@ function formatBullets(items: string[]): string {
   return items.map((item) => `- ${normalizeBulletItem(item)}`).join('\n') + '\n';
 }
 
-/** Convert camelCase key to a display label: "keyDecisions" -> "Key Decisions" */
-export function camelToLabel(key: string): string {
-  return key
-    .replace(/([A-Z])/g, ' $1')
-    .replace(/^./, (s: string) => s.toUpperCase())
-    .trim();
-}
-
 /** Subset of TranscriptionResult / ReadTranscriptionResult that formatSummary
  * actually consumes -- intentionally loose so both shapes (writer-side
  * TranscriptionResult and reader-side ReadTranscriptionResult) satisfy it. */
@@ -235,40 +230,7 @@ export function formatSummary(
     lines.push('');
   }
 
-  if (result.summarySections?.length) {
-    lines.push('## Summary\n');
-    for (const section of result.summarySections) {
-      lines.push(`### ${section.heading}`);
-      for (const bullet of section.bullets) lines.push(`- ${bullet}`);
-      lines.push('');
-    }
-  } else if (result.summary) {
-    lines.push('## Summary\n');
-    lines.push(`${result.summary}\n`);
-  }
-
-  if (result.keyPoints?.length) {
-    lines.push('## Key Points\n');
-    for (const point of result.keyPoints) {
-      lines.push(`- ${point}`);
-    }
-    lines.push('');
-  }
-
-  if (result.actionItemGroups?.length) {
-    lines.push('## Action Items\n');
-    for (const group of result.actionItemGroups) {
-      lines.push(`### ${group.owner}`);
-      for (const item of group.items) lines.push(`- ${item}`);
-      lines.push('');
-    }
-  } else if (result.actionItems?.length) {
-    lines.push('## Action Items\n');
-    for (const item of result.actionItems) {
-      lines.push(`- ${item}`);
-    }
-    lines.push('');
-  }
+  lines.push(...renderMeetingSections(result));
 
   // Prefer the AI-enriched "highlights" view when present -- it carries the
   // same user notes plus per-moment subtitle/bullets. Fall back to the bare
@@ -511,41 +473,16 @@ export function parseHighlightsField(raw: unknown): HighlightEntry[] | undefined
   }
 }
 
+/** meta.json omits these fields rather than storing an empty array, so an
+ * unusable value reads back as `undefined`. */
 function parseSummarySectionsField(raw: unknown): SummarySection[] | undefined {
-  if (!Array.isArray(raw) || raw.length === 0) return undefined;
-  const sections: SummarySection[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') return undefined;
-    const heading = (item as { heading?: unknown }).heading;
-    const bullets = (item as { bullets?: unknown }).bullets;
-    if (
-      typeof heading !== 'string' ||
-      !heading.trim() ||
-      !Array.isArray(bullets) ||
-      bullets.length === 0
-    ) {
-      return undefined;
-    }
-    if (!bullets.every((bullet) => typeof bullet === 'string' && bullet.trim())) return undefined;
-    sections.push({ heading: heading.trim(), bullets: bullets.map((bullet) => bullet.trim()) });
-  }
-  return sections;
+  const sections = parseSummarySections(raw);
+  return sections.length > 0 ? sections : undefined;
 }
 
 function parseActionItemGroupsField(raw: unknown): ActionItemGroup[] | undefined {
-  if (!Array.isArray(raw) || raw.length === 0) return undefined;
-  const groups: ActionItemGroup[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') return undefined;
-    const owner = (item as { owner?: unknown }).owner;
-    const items = (item as { items?: unknown }).items;
-    if (typeof owner !== 'string' || !owner.trim() || !Array.isArray(items) || items.length === 0) {
-      return undefined;
-    }
-    if (!items.every((entry) => typeof entry === 'string' && entry.trim())) return undefined;
-    groups.push({ owner: owner.trim(), items: items.map((entry) => entry.trim()) });
-  }
-  return groups;
+  const groups = parseActionItemGroups(raw);
+  return groups.length > 0 ? groups : undefined;
 }
 
 function yamlUnquote(value: string): string {
