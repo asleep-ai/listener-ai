@@ -5,16 +5,13 @@ import * as fs from 'fs';
 import * as readline from 'readline';
 import * as path from 'path';
 import { type AgentScope, AgentService, type ConfigProposal } from './agentService';
-import {
-  GEMINI_THINKING_LEVELS,
-  LIVE_STT_PROVIDERS,
-  TRANSCRIPTION_PROVIDERS,
-  isAiProvider,
-  isTranscriptionProvider,
-  normalizeGeminiThinkingLevel,
-  normalizeLiveSttProvider,
-} from './aiProvider';
 import { extensionForMimeType, mimeTypeForFile } from './audioFormats';
+import {
+  CONFIG_KEY_BY_NAME,
+  type CliConfigKey,
+  type ConfigKeyDefinition,
+  KNOWN_CONFIG_KEYS,
+} from './configKeys';
 import { type AppConfig, ConfigService } from './configService';
 import { loginCodexOAuth } from './codexOAuth';
 import { getDataPath } from './dataPath';
@@ -127,42 +124,11 @@ function showHelp(): never {
   process.exit(0);
 }
 
-const KNOWN_CONFIG_KEYS = [
-  'aiProvider',
-  'transcriptionProvider',
-  'geminiApiKey',
-  'geminiModel',
-  'geminiFlashModel',
-  'geminiThinkingLevel',
-  'codexModel',
-  'codexTranscriptionModel',
-  'liveSttProvider',
-  'openaiApiKey',
-  'sonioxApiKey',
-  'openaiLiveTranscriptionModel',
-  'openaiLiveTranslationModel',
-  'liveSttLanguage',
-  'liveTranslationLanguage',
-  'notionApiKey',
-  'notionDatabaseId',
-  'autoMode',
-  'meetingDetection',
-  'displayDetection',
-  'globalShortcut',
-  'knownWords',
-  'summaryPrompt',
-  'maxRecordingMinutes',
-  'recordingReminderMinutes',
-  'minRecordingSeconds',
-  'recordSystemAudio',
-  'slackWebhookUrl',
-  'slackAutoShare',
-] as const;
-type ConfigKey = (typeof KNOWN_CONFIG_KEYS)[number];
+export { KNOWN_CONFIG_KEYS };
+type ConfigKey = CliConfigKey;
 
 function isSensitiveKey(key: string): boolean {
-  const lk = key.toLowerCase();
-  return lk.includes('key') || lk.includes('webhook') || lk.includes('oauth');
+  return CONFIG_KEY_BY_NAME[key]?.secret === true;
 }
 
 function maskValue(key: string, value: unknown): string {
@@ -204,124 +170,46 @@ function parseKnownWords(v: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-function applyConfigSet(config: ConfigService, key: ConfigKey, value: string): void {
-  switch (key) {
-    case 'aiProvider': {
-      if (!isAiProvider(value)) {
-        process.stderr.write('Error: aiProvider must be "gemini" or "codex"\n');
-        process.exit(1);
-      }
-      config.setAiProvider(value);
-      return;
-    }
-    case 'transcriptionProvider': {
-      if (!isTranscriptionProvider(value)) {
-        process.stderr.write(
-          `Error: transcriptionProvider must be one of: ${TRANSCRIPTION_PROVIDERS.join(', ')}\n`,
-        );
-        process.exit(1);
-      }
-      config.setTranscriptionProvider(value);
-      return;
-    }
-    case 'geminiApiKey':
-      config.setGeminiApiKey(value);
-      return;
-    case 'geminiModel':
-      config.setGeminiModel(value);
-      return;
-    case 'geminiFlashModel':
-      config.setGeminiFlashModel(value);
-      return;
-    case 'geminiThinkingLevel': {
-      const level = normalizeGeminiThinkingLevel(value);
-      if (!level) {
-        process.stderr.write(
-          `Error: geminiThinkingLevel must be one of: ${GEMINI_THINKING_LEVELS.join(', ')}\n`,
-        );
-        process.exit(1);
-      }
-      config.setGeminiThinkingLevel(level);
-      return;
-    }
-    case 'codexModel':
-      config.setCodexModel(value);
-      return;
-    case 'codexTranscriptionModel':
-      config.setCodexTranscriptionModel(value);
-      return;
-    case 'liveSttProvider': {
-      const provider = normalizeLiveSttProvider(value);
-      if (!provider) {
-        process.stderr.write(
-          `Error: liveSttProvider must be one of: ${LIVE_STT_PROVIDERS.join(', ')}\n`,
-        );
-        process.exit(1);
-      }
-      config.setLiveSttProvider(provider);
-      return;
-    }
-    case 'openaiApiKey':
-      config.setOpenAiApiKey(value);
-      return;
-    case 'sonioxApiKey':
-      config.setSonioxApiKey(value);
-      return;
-    case 'openaiLiveTranscriptionModel':
-      config.updateConfig({ openaiLiveTranscriptionModel: value });
-      return;
-    case 'openaiLiveTranslationModel':
-      config.updateConfig({ openaiLiveTranslationModel: value });
-      return;
-    case 'liveSttLanguage':
-      config.updateConfig({ liveSttLanguage: value });
-      return;
-    case 'liveTranslationLanguage':
-      config.updateConfig({ liveTranslationLanguage: value });
-      return;
-    case 'notionApiKey':
-      config.setNotionApiKey(value);
-      return;
-    case 'notionDatabaseId':
-      config.setNotionDatabaseId(value);
-      return;
-    case 'autoMode':
-      config.setAutoMode(parseBool('autoMode', value));
-      return;
-    case 'meetingDetection':
-      config.updateConfig({ meetingDetection: parseBool('meetingDetection', value) });
-      return;
-    case 'displayDetection':
-      config.setDisplayDetection(parseBool('displayDetection', value));
-      return;
-    case 'globalShortcut':
-      config.setGlobalShortcut(value);
-      return;
-    case 'knownWords':
-      config.setKnownWords(parseKnownWords(value));
-      return;
-    case 'summaryPrompt':
-      config.setSummaryPrompt(value);
-      return;
-    case 'maxRecordingMinutes':
-      config.setMaxRecordingMinutes(parseNonNegInt('maxRecordingMinutes', value));
-      return;
-    case 'recordingReminderMinutes':
-      config.setRecordingReminderMinutes(parseNonNegInt('recordingReminderMinutes', value));
-      return;
-    case 'minRecordingSeconds':
-      config.setMinRecordingSeconds(parseNonNegInt('minRecordingSeconds', value));
-      return;
-    case 'recordSystemAudio':
-      config.setRecordSystemAudio(parseBool('recordSystemAudio', value));
-      return;
-    case 'slackWebhookUrl':
-      config.setSlackWebhookUrl(value);
-      return;
-    case 'slackAutoShare':
-      config.setSlackAutoShare(parseBool('slackAutoShare', value));
-      return;
+function parseEnum(key: ConfigKey, row: ConfigKeyDefinition, v: string): string {
+  const values = row.values ?? [];
+  // Only the keys whose CLI branch went through a `normalize*` helper accept a
+  // differently-cased spelling; aiProvider and transcriptionProvider are exact.
+  const candidate = row.cliNormalizesCase ? v.trim().toLowerCase() : v;
+  if (!values.includes(candidate)) {
+    process.stderr.write(
+      `Error: ${row.cliEnumMessage ?? `${key} must be one of: ${values.join(', ')}`}\n`,
+    );
+    process.exit(1);
   }
+  return candidate;
+}
+
+// Parses the raw argument per the key's declared kind, then writes through the
+// single `updateConfig` path. That is equivalent to the typed setters it
+// replaced: enum values are validated here before updateConfig re-validates
+// them, the duration clamp is redundant after parseNonNegInt, and updateConfig
+// applies the same summaryPrompt trim + default-elision as setSummaryPrompt.
+function applyConfigSet(config: ConfigService, key: ConfigKey, value: string): void {
+  const row = CONFIG_KEY_BY_NAME[key];
+  let parsed: string | number | boolean | string[];
+  switch (row.kind) {
+    case 'bool':
+      parsed = parseBool(key, value);
+      break;
+    case 'int':
+      parsed = parseNonNegInt(key, value);
+      break;
+    case 'string[]':
+      parsed = parseKnownWords(value);
+      break;
+    case 'enum':
+      parsed = parseEnum(key, row, value);
+      break;
+    case 'string':
+      parsed = value;
+      break;
+  }
+  config.updateConfig({ [key]: parsed } as Partial<AppConfig>);
 }
 
 function formatAiCredentialsError(config: ConfigService): string {
