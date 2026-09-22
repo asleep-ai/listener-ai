@@ -10,7 +10,7 @@ import {
   type ModelField,
   chooseInitial,
 } from '../services/model-options';
-import type { GoogleSyncProgress } from '../electronAPI';
+import type { ConfigPayload, GoogleSyncProgress } from '../electronAPI';
 import {
   type AiProvider,
   type GeminiThinkingLevel,
@@ -1029,11 +1029,7 @@ export function setupConfigModal(): void {
         return;
       }
 
-      // ConfigPayload in electronAPI.d.ts is a subset; the main process
-      // accepts these extra keys (*Recording*Minutes, etc). Cast through
-      // `unknown` to satisfy strict mode without widening the public type
-      // surface used elsewhere.
-      const payload = {
+      const payload: ConfigPayload = {
         aiProvider,
         geminiApiKey: geminiKey,
         geminiModel: geminiModel,
@@ -1060,9 +1056,7 @@ export function setupConfigModal(): void {
         recordingReminderMinutes: recordingReminderMinutes,
         minRecordingSeconds: minRecordingSeconds,
       };
-      await window.electronAPI.saveConfig(
-        payload as unknown as Parameters<typeof window.electronAPI.saveConfig>[0],
-      );
+      await window.electronAPI.saveConfig(payload);
       hideConfig();
     });
   }
