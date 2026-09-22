@@ -1,14 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
-  DEFAULT_CODEX_MODEL,
-  DEFAULT_CODEX_TRANSCRIPTION_MODEL,
-  DEFAULT_GEMINI_FLASH_MODEL,
-  DEFAULT_GEMINI_MODEL,
   DEFAULT_GEMINI_THINKING_LEVEL,
   DEFAULT_LIVE_STT_PROVIDER,
-  DEFAULT_OPENAI_LIVE_TRANSCRIPTION_MODEL,
-  DEFAULT_OPENAI_LIVE_TRANSLATION_MODEL,
   type AiProvider,
   type BatchSttProvider,
   type GeminiThinkingLevel,
@@ -28,65 +22,43 @@ import {
   getCodexOAuthEnvCredentials,
 } from './codexOAuth';
 import {
+  CONFIG_KEY_BY_NAME,
+  CONFIG_KEY_DEFINITIONS,
+  DEFAULT_LIVE_TRANSLATION_LANGUAGE,
+  type ConfigKeyName,
+  type ConfigReadResult,
+  type ConfigValues,
+  type GenericReadConfigKey,
+} from './configKeys';
+import {
   type GoogleOAuthCredentials,
   getGoogleOAuthEnvCredentials,
   hasGoogleOAuthEnvCredentials,
 } from './googleOAuth';
 
-export interface AppConfig {
-  aiProvider?: AiProvider;
-  // Batch (file) speech-to-text backend. `auto` follows `aiProvider`; summary,
-  // judge and agent calls stay on `aiProvider` whatever this says.
-  transcriptionProvider?: TranscriptionProvider;
-  geminiApiKey?: string;
-  geminiModel?: string;
-  geminiFlashModel?: string;
-  geminiThinkingLevel?: GeminiThinkingLevel;
-  codexModel?: string;
-  codexTranscriptionModel?: string;
-  liveSttProvider?: LiveSttProvider;
-  openaiApiKey?: string;
-  sonioxApiKey?: string;
-  openaiLiveTranscriptionModel?: string;
-  openaiLiveTranslationModel?: string;
-  liveSttLanguage?: string;
-  liveTranslationLanguage?: string;
+// Keys that are not scalar registry rows: the two OAuth credential blobs, the
+// read-only fields `getAllConfig()` derives, and the migration markers.
+interface AppConfigExtras {
   codexOAuth?: CodexOAuthCredentials;
   codexOAuthConfigured?: boolean;
   codexOAuthSource?: CodexOAuthCredentialSource['source'];
   googleOAuth?: GoogleOAuthCredentials;
   googleOAuthConfigured?: boolean;
-  // When true, the app periodically syncs transcription folders to Drive
-  // (and auto-syncs after each new transcription completes). When false,
-  // sync only runs on explicit user trigger (CLI or "Sync now" button).
-  googleDriveEnabled?: boolean;
-  notionApiKey?: string;
-  notionDatabaseId?: string;
-  autoMode?: boolean;
-  meetingDetection?: boolean;
-  displayDetection?: boolean;
-  globalShortcut?: string;
-  knownWords?: string[];
-  summaryPrompt?: string;
   // Read-only renderer payload field. It is never persisted by updateConfig.
   defaultSummaryPrompt?: string;
-  maxRecordingMinutes?: number;
-  recordingReminderMinutes?: number;
-  minRecordingSeconds?: number;
-  recordSystemAudio?: boolean;
-  // Crash/error reporting to Sentry. Opt-out: defaults to ON. Only togglable via
-  // settings UI / CLI, never by the agent (not in agentService WRITABLE keys).
-  crashReportingEnabled?: boolean;
-  audioDeviceId?: string;
-  lastSeenVersion?: string;
-  slackWebhookUrl?: string;
-  slackAutoShare?: boolean;
   // Idempotency marker for `migrateLegacyDefaults` -- once set we never
   // re-run the migration, so a user who deliberately re-selects the old
   // model after upgrade keeps their choice.
   codexTranscriptionMigratedToDiarize?: boolean;
   summaryPromptMigratedToStructured?: boolean;
 }
+
+type AppConfigShape = ConfigValues & AppConfigExtras;
+
+// Flattened so `keyof AppConfig` stays a plain union of string literals and
+// every property stays optional -- consumers only use `Partial<AppConfig>` and
+// `keyof AppConfig`, both of which depend on that.
+export type AppConfig = { [K in keyof AppConfigShape]?: AppConfigShape[K] };
 
 // What the user has to go configure, named per provider. Keyed by
 // `BatchSttProvider` (a superset of `AiProvider`) so both credential gates
@@ -285,13 +257,46 @@ export class ConfigService {
     }
   }
 
+  // Generic resolved read for the registry keys whose getter is pure
+  // stored/env/default coalescing. Keys with real logic (env precedence,
+  // normalize-or-default, trimming) are excluded by `GenericReadConfigKey` and
+  // keep their hand-written getters below.
+  private read<K extends GenericReadConfigKey>(key: K): ConfigReadResult<K> {
+    const row = CONFIG_KEY_BY_NAME[key];
+    const stored = (this.config as Record<string, unknown>)[key];
+    if (row.kind === 'string[]') {
+      // Fresh array per call, so a caller mutating the result cannot reach the
+      // stored config or a shared default.
+      return ((stored as string[] | undefined) ?? []) as ConfigReadResult<K>;
+    }
+    if (row.kind !== 'string' && row.kind !== 'enum') {
+      // Booleans and integers use `??`: only `crashReportingEnabled` (default
+      // true) depends on it, but `?? false` / `?? 0` match the old `|| false` /
+      // `|| 0` for anything JSON can store.
+      return (stored ?? row.default) as ConfigReadResult<K>;
+    }
+    // Strings use `||`, so an empty stored value falls through to the env
+    // fallback and then to the default -- as the original getters did.
+    if (row.envVar === undefined && row.default === undefined) {
+      // No `||` chain existed at all for these, so a stored '' stays ''.
+      return stored as ConfigReadResult<K>;
+    }
+    const env = row.envVar !== undefined ? process.env[row.envVar] : undefined;
+    if (row.default === undefined) return (stored || env) as ConfigReadResult<K>;
+    return (stored || env || row.default) as ConfigReadResult<K>;
+  }
+
+  private write<K extends ConfigKeyName>(key: K, value: AppConfig[K]): void {
+    this.setKey(key, value);
+    this.saveConfig();
+  }
+
   getGeminiApiKey(): string | undefined {
-    return this.config.geminiApiKey || process.env.GEMINI_API_KEY;
+    return this.read('geminiApiKey');
   }
 
   setGeminiApiKey(apiKey: string): void {
-    this.setKey('geminiApiKey', apiKey);
-    this.saveConfig();
+    this.write('geminiApiKey', apiKey);
   }
 
   getAiProvider(): AiProvider {
@@ -315,8 +320,7 @@ export class ConfigService {
   }
 
   setAiProvider(provider: AiProvider): void {
-    this.setKey('aiProvider', provider);
-    this.saveConfig();
+    this.write('aiProvider', provider);
   }
 
   getTranscriptionProvider(): TranscriptionProvider {
@@ -324,8 +328,7 @@ export class ConfigService {
   }
 
   setTranscriptionProvider(provider: TranscriptionProvider): void {
-    this.setKey('transcriptionProvider', provider);
-    this.saveConfig();
+    this.write('transcriptionProvider', provider);
   }
 
   // The backend a transcription actually runs on. `auto` follows the chat
@@ -419,12 +422,11 @@ export class ConfigService {
   }
 
   getGoogleDriveEnabled(): boolean {
-    return this.config.googleDriveEnabled ?? false;
+    return this.read('googleDriveEnabled');
   }
 
   setGoogleDriveEnabled(enabled: boolean): void {
-    this.setKey('googleDriveEnabled', enabled);
-    this.saveConfig();
+    this.write('googleDriveEnabled', enabled);
   }
 
   // Summary, judge and agent auth. A Soniox key alone never satisfies this:
@@ -445,21 +447,19 @@ export class ConfigService {
   }
 
   getNotionApiKey(): string | undefined {
-    return this.config.notionApiKey || process.env.NOTION_API_KEY;
+    return this.read('notionApiKey');
   }
 
   setNotionApiKey(apiKey: string): void {
-    this.setKey('notionApiKey', apiKey);
-    this.saveConfig();
+    this.write('notionApiKey', apiKey);
   }
 
   getNotionDatabaseId(): string | undefined {
-    return this.config.notionDatabaseId || process.env.NOTION_DATABASE_ID;
+    return this.read('notionDatabaseId');
   }
 
   setNotionDatabaseId(databaseId: string): void {
-    this.setKey('notionDatabaseId', databaseId);
-    this.saveConfig();
+    this.write('notionDatabaseId', databaseId);
   }
 
   // Everything an unattended end-to-end run (auto mode) needs. The
@@ -493,61 +493,55 @@ export class ConfigService {
   }
 
   getAutoMode(): boolean {
-    return this.config.autoMode || false;
+    return this.read('autoMode');
   }
 
   setAutoMode(enabled: boolean): void {
-    this.setKey('autoMode', enabled);
-    this.saveConfig();
+    this.write('autoMode', enabled);
   }
 
   getMeetingDetection(): boolean {
-    return this.config.meetingDetection || false;
+    return this.read('meetingDetection');
   }
 
   getDisplayDetection(): boolean {
-    return this.config.displayDetection || false;
+    return this.read('displayDetection');
   }
 
   setDisplayDetection(enabled: boolean): void {
-    this.setKey('displayDetection', enabled);
-    this.saveConfig();
+    this.write('displayDetection', enabled);
   }
 
   getGlobalShortcut(): string {
-    return this.config.globalShortcut || 'CommandOrControl+Shift+L';
+    return this.read('globalShortcut');
   }
 
   setGlobalShortcut(shortcut: string): void {
-    this.setKey('globalShortcut', shortcut);
-    this.saveConfig();
+    this.write('globalShortcut', shortcut);
   }
 
   getKnownWords(): string[] {
-    return this.config.knownWords || [];
+    return this.read('knownWords');
   }
 
   setKnownWords(words: string[]): void {
-    this.setKey('knownWords', words);
-    this.saveConfig();
+    this.write('knownWords', words);
   }
 
   getGeminiModel(): string {
-    return this.config.geminiModel || DEFAULT_GEMINI_MODEL;
+    return this.read('geminiModel');
   }
 
   setGeminiModel(model: string): void {
-    this.setKey('geminiModel', model);
-    this.saveConfig();
+    this.write('geminiModel', model);
   }
 
   getGeminiFlashModel(): string {
-    return this.config.geminiFlashModel || DEFAULT_GEMINI_FLASH_MODEL;
+    return this.read('geminiFlashModel');
   }
 
   setGeminiFlashModel(model: string): void {
-    this.setKey('geminiFlashModel', model);
-    this.saveConfig();
+    this.write('geminiFlashModel', model);
   }
 
   // Stored values from older clients that no longer match the allowed set
@@ -560,26 +554,23 @@ export class ConfigService {
   }
 
   setGeminiThinkingLevel(level: GeminiThinkingLevel): void {
-    this.setKey('geminiThinkingLevel', level);
-    this.saveConfig();
+    this.write('geminiThinkingLevel', level);
   }
 
   getCodexModel(): string {
-    return this.config.codexModel || DEFAULT_CODEX_MODEL;
+    return this.read('codexModel');
   }
 
   setCodexModel(model: string): void {
-    this.setKey('codexModel', model);
-    this.saveConfig();
+    this.write('codexModel', model);
   }
 
   getCodexTranscriptionModel(): string {
-    return this.config.codexTranscriptionModel || DEFAULT_CODEX_TRANSCRIPTION_MODEL;
+    return this.read('codexTranscriptionModel');
   }
 
   setCodexTranscriptionModel(model: string): void {
-    this.setKey('codexTranscriptionModel', model);
-    this.saveConfig();
+    this.write('codexTranscriptionModel', model);
   }
 
   getLiveSttProvider(): LiveSttProvider {
@@ -587,34 +578,31 @@ export class ConfigService {
   }
 
   setLiveSttProvider(provider: LiveSttProvider): void {
-    this.setKey('liveSttProvider', provider);
-    this.saveConfig();
+    this.write('liveSttProvider', provider);
   }
 
   getOpenAiApiKey(): string | undefined {
-    return this.config.openaiApiKey || process.env.OPENAI_API_KEY;
+    return this.read('openaiApiKey');
   }
 
   setOpenAiApiKey(apiKey: string): void {
-    this.setKey('openaiApiKey', apiKey);
-    this.saveConfig();
+    this.write('openaiApiKey', apiKey);
   }
 
   getSonioxApiKey(): string | undefined {
-    return this.config.sonioxApiKey || process.env.SONIOX_API_KEY;
+    return this.read('sonioxApiKey');
   }
 
   setSonioxApiKey(apiKey: string): void {
-    this.setKey('sonioxApiKey', apiKey);
-    this.saveConfig();
+    this.write('sonioxApiKey', apiKey);
   }
 
   getOpenAiLiveTranscriptionModel(): string {
-    return this.config.openaiLiveTranscriptionModel || DEFAULT_OPENAI_LIVE_TRANSCRIPTION_MODEL;
+    return this.read('openaiLiveTranscriptionModel');
   }
 
   getOpenAiLiveTranslationModel(): string {
-    return this.config.openaiLiveTranslationModel || DEFAULT_OPENAI_LIVE_TRANSLATION_MODEL;
+    return this.read('openaiLiveTranslationModel');
   }
 
   getLiveSttLanguage(): string | undefined {
@@ -622,7 +610,7 @@ export class ConfigService {
   }
 
   getLiveTranslationLanguage(): string {
-    return this.config.liveTranslationLanguage?.trim() || 'ko';
+    return this.config.liveTranslationLanguage?.trim() || DEFAULT_LIVE_TRANSLATION_LANGUAGE;
   }
 
   hasStreamingLiveSttAuth(): boolean {
@@ -638,63 +626,57 @@ export class ConfigService {
   }
 
   getMaxRecordingMinutes(): number {
-    return this.config.maxRecordingMinutes || 0;
+    return this.read('maxRecordingMinutes');
   }
 
   setMaxRecordingMinutes(minutes: number): void {
-    this.setKey('maxRecordingMinutes', Math.max(0, Math.floor(minutes)));
-    this.saveConfig();
+    this.write('maxRecordingMinutes', Math.max(0, Math.floor(minutes)));
   }
 
   getRecordingReminderMinutes(): number {
-    return this.config.recordingReminderMinutes || 0;
+    return this.read('recordingReminderMinutes');
   }
 
   setRecordingReminderMinutes(minutes: number): void {
-    this.setKey('recordingReminderMinutes', Math.max(0, Math.floor(minutes)));
-    this.saveConfig();
+    this.write('recordingReminderMinutes', Math.max(0, Math.floor(minutes)));
   }
 
   getMinRecordingSeconds(): number {
-    return this.config.minRecordingSeconds || 0;
+    return this.read('minRecordingSeconds');
   }
 
   setMinRecordingSeconds(seconds: number): void {
-    this.setKey('minRecordingSeconds', Math.max(0, Math.floor(seconds)));
-    this.saveConfig();
+    this.write('minRecordingSeconds', Math.max(0, Math.floor(seconds)));
   }
 
   getRecordSystemAudio(): boolean {
-    return this.config.recordSystemAudio || false;
+    return this.read('recordSystemAudio');
   }
 
   setRecordSystemAudio(enabled: boolean): void {
-    this.setKey('recordSystemAudio', enabled);
-    this.saveConfig();
+    this.write('recordSystemAudio', enabled);
   }
 
-  // Opt-out: absence means ON. `?? true` (not `|| false`) so the default is
-  // enabled and only an explicit `false` disables reporting.
+  // Opt-out: absence means ON. The registry default is `true` and the generic
+  // read uses `??`, so only an explicit `false` disables reporting.
   getCrashReportingEnabled(): boolean {
-    return this.config.crashReportingEnabled ?? true;
+    return this.read('crashReportingEnabled');
   }
 
   setCrashReportingEnabled(enabled: boolean): void {
-    this.setKey('crashReportingEnabled', enabled);
-    this.saveConfig();
+    this.write('crashReportingEnabled', enabled);
   }
 
   getAudioDeviceId(): string | undefined {
-    return this.config.audioDeviceId;
+    return this.read('audioDeviceId');
   }
 
   getLastSeenVersion(): string | undefined {
-    return this.config.lastSeenVersion;
+    return this.read('lastSeenVersion');
   }
 
   setLastSeenVersion(version: string): void {
-    this.setKey('lastSeenVersion', version);
-    this.saveConfig();
+    this.write('lastSeenVersion', version);
   }
 
   getSummaryPrompt(): string {
@@ -711,21 +693,19 @@ export class ConfigService {
   }
 
   getSlackWebhookUrl(): string | undefined {
-    return this.config.slackWebhookUrl || process.env.SLACK_WEBHOOK_URL;
+    return this.read('slackWebhookUrl');
   }
 
   setSlackWebhookUrl(url: string): void {
-    this.setKey('slackWebhookUrl', url);
-    this.saveConfig();
+    this.write('slackWebhookUrl', url);
   }
 
   getSlackAutoShare(): boolean {
-    return this.config.slackAutoShare || false;
+    return this.read('slackAutoShare');
   }
 
   setSlackAutoShare(enabled: boolean): void {
-    this.setKey('slackAutoShare', enabled);
-    this.saveConfig();
+    this.write('slackAutoShare', enabled);
   }
 
   updateConfig(partial: Partial<AppConfig>): void {
@@ -782,48 +762,34 @@ export class ConfigService {
     this.saveConfig();
   }
 
+  // Every registry key plus the four derived read-only fields. Stays typed as
+  // `AppConfig` (all-optional): `cli.ts` relies on `val ?? ''` still being
+  // reachable for keys a narrower "resolved" type would mark non-optional.
   getAllConfig(): AppConfig {
-    return {
-      aiProvider: this.getAiProvider(),
-      transcriptionProvider: this.getTranscriptionProvider(),
-      geminiApiKey: this.getGeminiApiKey(),
-      geminiModel: this.getGeminiModel(),
-      geminiFlashModel: this.getGeminiFlashModel(),
-      geminiThinkingLevel: this.getGeminiThinkingLevel(),
-      codexModel: this.getCodexModel(),
-      codexTranscriptionModel: this.getCodexTranscriptionModel(),
-      liveSttProvider: this.getLiveSttProvider(),
-      // Stored value only -- never surface the OPENAI_API_KEY env fallback to the
-      // settings form, or saving any change would persist an env-only key to config.json.
-      openaiApiKey: this.config.openaiApiKey,
-      // Stored value only, for the same reason as openaiApiKey above.
-      sonioxApiKey: this.config.sonioxApiKey,
-      openaiLiveTranscriptionModel: this.getOpenAiLiveTranscriptionModel(),
-      openaiLiveTranslationModel: this.getOpenAiLiveTranslationModel(),
-      liveSttLanguage: this.getLiveSttLanguage(),
-      liveTranslationLanguage: this.getLiveTranslationLanguage(),
-      codexOAuthConfigured: this.hasCodexOAuth(),
-      codexOAuthSource: this.getCodexOAuthSource()?.source,
-      googleOAuthConfigured: this.hasGoogleOAuth(),
-      googleDriveEnabled: this.getGoogleDriveEnabled(),
-      notionApiKey: this.getNotionApiKey(),
-      notionDatabaseId: this.getNotionDatabaseId(),
-      autoMode: this.getAutoMode(),
-      meetingDetection: this.getMeetingDetection(),
-      displayDetection: this.getDisplayDetection(),
-      globalShortcut: this.getGlobalShortcut(),
-      knownWords: this.getKnownWords(),
-      summaryPrompt: this.getSummaryPrompt(),
-      defaultSummaryPrompt: DEFAULT_SUMMARY_PROMPT,
-      maxRecordingMinutes: this.getMaxRecordingMinutes(),
-      recordingReminderMinutes: this.getRecordingReminderMinutes(),
-      minRecordingSeconds: this.getMinRecordingSeconds(),
-      recordSystemAudio: this.getRecordSystemAudio(),
-      crashReportingEnabled: this.getCrashReportingEnabled(),
-      audioDeviceId: this.getAudioDeviceId(),
-      lastSeenVersion: this.getLastSeenVersion(),
-      slackWebhookUrl: this.getSlackWebhookUrl(),
-      slackAutoShare: this.getSlackAutoShare(),
-    };
+    const all: Record<string, unknown> = {};
+    for (const row of CONFIG_KEY_DEFINITIONS) {
+      if (row.customRead) continue;
+      all[row.key] =
+        row.envSurfaced === false
+          ? // Stored value only -- never surface the env fallback to the
+            // settings form, or saving any change would persist an env-only
+            // key to config.json.
+            (this.config as Record<string, unknown>)[row.key]
+          : this.read(row.key as GenericReadConfigKey);
+    }
+    // Keys whose resolved read has logic the registry cannot express.
+    all.aiProvider = this.getAiProvider();
+    all.transcriptionProvider = this.getTranscriptionProvider();
+    all.geminiThinkingLevel = this.getGeminiThinkingLevel();
+    all.liveSttProvider = this.getLiveSttProvider();
+    all.liveSttLanguage = this.getLiveSttLanguage();
+    all.liveTranslationLanguage = this.getLiveTranslationLanguage();
+    all.summaryPrompt = this.getSummaryPrompt();
+    // Derived read-only fields: never persisted, so they have no registry row.
+    all.codexOAuthConfigured = this.hasCodexOAuth();
+    all.codexOAuthSource = this.getCodexOAuthSource()?.source;
+    all.googleOAuthConfigured = this.hasGoogleOAuth();
+    all.defaultSummaryPrompt = DEFAULT_SUMMARY_PROMPT;
+    return all as AppConfig;
   }
 }

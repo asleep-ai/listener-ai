@@ -22,9 +22,8 @@ import type { AppConfig } from './configService';
 import type { ConfigPayload } from './electronApiTypes';
 import type { ElectronAPI } from './preload';
 
-type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
-  ? true
-  : false;
+type Equal<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 type Expect<T extends true> = T;
 
 // Documented exclusion set 1: `AppConfig` keys that deliberately never reach

@@ -18,6 +18,7 @@
     "dist/codexOAuth.js",
     "dist/codexOAuthHolder.js",
     "dist/codexTranscription.js",
+    "dist/configKeys.js",
     "dist/configService.js",
     "dist/dataPath.js",
     "dist/esmImport.js",
