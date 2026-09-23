@@ -220,6 +220,17 @@ covers a user's custom `--prompt` text and the glossary entries. Short prompt
 lines are excluded on purpose: a one-term glossary bullet is exactly what a
 legitimate mention of that term looks like in speech.
 
+Because the gate deletes an echoed segment, the built-in markers come in two
+strengths. The distinctive ones -- the `[Audio segment N of M]` tag and the
+long instruction sentences (the glossary preamble, "Please transcribe this
+audio recording with proper speaker identification", "Transcribe the speech
+in this audio exactly as spoken") -- are enough on their own. The generic ones
+(`Format requirements:`, `Return only the transcription text`, `Return only
+the transcript text`) are phrases a speaker can plausibly say, so one of them
+alone never flags: an echo needs two distinct generic markers, or a verbatim
+prompt line, which is sufficient by itself. A speaker saying "Format
+requirements: ..." keeps their segment.
+
 The check runs inside the gate before the judge, so an echo drives the same
 retry ladder as a loop. If every rung is exhausted and the result still
 echoes, the gate returns empty text with `dropped: 'prompt-echo'` and skips

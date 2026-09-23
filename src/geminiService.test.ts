@@ -698,6 +698,21 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     assert.equal(result.empty, false);
     assert.equal(result.uncertain, false);
   });
+
+  // The gate deletes an echoed segment, so a speaker who happens to say one
+  // of the generic instruction phrases must keep their words -- checked with
+  // the prompt lines a real run passes, not just the bare detector.
+  it('keeps a real speech segment that says one generic prompt phrase', async () => {
+    const speech = '참가자1: Format requirements: 다음 주까지 정리';
+    const { service, prompts } = makeGatedService([speech]);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(prompts.length, 1, 'no echo means no retry');
+    assert.equal(result.body, speech);
+    assert.equal(result.empty, false);
+    assert.equal(result.uncertain, false);
+  });
 });
 
 describe('GeminiService segmented quality aggregation', () => {
