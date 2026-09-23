@@ -248,7 +248,7 @@ Pre-v2 folders use `<sanitized-title>_<timestamp>/` with `summary.md` (YAML fron
 - Existing: `agentService`, `searchService`, `meetingDetectorService`, `simpleAudioRecorder`, `outputService`, `services/audioConcatService`, `cli` (adb-style integration)
 - Shared helpers in `src/test-helpers.ts` (temp dirs, ffmpeg detection, synthetic audio fixtures)
 - Test escape hatches (read-only at process start, never set in production):
-  - `LISTENER_DATA_PATH` — overrides `getDataPath()` so tests run against a temp directory
+  - `LISTENER_DATA_PATH` — overrides `getDataPath()` so tests run against a temp directory; honoured only when `NODE_ENV=test` (a stray value in a packaged user's shell is ignored)
   - `LISTENER_TEST_MODE` — `GeminiService.transcribeAudio` returns a canned fixture instead of calling the API
   - `LISTENER_SKIP_AUTO_MIGRATE` — CLI bypasses the v1→v2 startup migration, so `listener migrate` tests can drive the explicit command against an un-migrated fixture
 
