@@ -1,7 +1,7 @@
 import { Client } from '@notionhq/client';
 import type { BlockObjectRequest } from '@notionhq/client/build/src/api-endpoints';
 import type { TranscriptionResult } from './geminiService';
-import { camelToLabel } from './meetingRecord';
+import { camelToLabel, formatCustomFieldItem } from './meetingRecord';
 import { formatOffsetTimestamp } from './outputService';
 
 export interface NotionConfig {
@@ -255,7 +255,7 @@ export class NotionService {
               },
             } as BlockObjectRequest);
             for (const item of value) {
-              const text = String(item).slice(0, 1900);
+              const text = formatCustomFieldItem(item).slice(0, 1900);
               children.push({
                 type: 'bulleted_list_item',
                 bulleted_list_item: {

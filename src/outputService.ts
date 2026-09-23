@@ -4,6 +4,7 @@ import type { HighlightEntry, TranscriptionResult } from './geminiService';
 import {
   type ActionItemGroup,
   camelToLabel,
+  formatCustomFieldItem,
   parseActionItemGroups,
   parseSummarySections,
   renderMeetingSections,
@@ -269,11 +270,7 @@ export function formatSummary(
       lines.push(`## ${label}\n`);
       if (Array.isArray(value)) {
         for (const item of value) {
-          // Object items (e.g. `[{ what, who }]`) would stringify to
-          // `[object Object]`; render them as compact JSON instead.
-          const text =
-            item !== null && typeof item === 'object' ? JSON.stringify(item) : String(item);
-          lines.push(`- ${text}`);
+          lines.push(`- ${formatCustomFieldItem(item)}`);
         }
       } else if (typeof value === 'string') {
         lines.push(value);
