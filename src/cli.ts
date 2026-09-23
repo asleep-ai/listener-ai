@@ -1465,9 +1465,13 @@ async function main(): Promise<void> {
 
   process.stderr.write(`Processing: ${filePath}\n`);
 
-  const result = await gemini.transcribeAudio(filePath, (_percent, message) => {
-    process.stderr.write(`  ${message}\n`);
-  });
+  const result = await gemini.transcribeAudio(
+    filePath,
+    (_percent, message) => {
+      process.stderr.write(`  ${message}\n`);
+    },
+    config.getSummaryPrompt(),
+  );
 
   const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));
 

@@ -693,6 +693,75 @@ describe('listener transcript (CLI integration)', () => {
   });
 });
 
+describe('listener <file> (CLI integration)', () => {
+  let fileDataPath: string;
+
+  before(() => {
+    fileDataPath = makeTempDir('cli-file');
+  });
+
+  after(() => rmDir(fileDataPath));
+
+  function runCli(
+    args: string[],
+  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    return new Promise((resolve) => {
+      const { spawn } = require('child_process') as typeof import('child_process');
+      const child = spawn('node', [cliPath, ...args], {
+        env: {
+          ...process.env,
+          NODE_ENV: 'test',
+          LISTENER_AI_PROVIDER: 'gemini',
+          LISTENER_DATA_PATH: fileDataPath,
+          LISTENER_TEST_MODE: '1',
+          GEMINI_API_KEY: 'test-mode-key',
+          SONIOX_API_KEY: '',
+        },
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d: Buffer) => {
+        stdout += d.toString();
+      });
+      child.stderr.on('data', (d: Buffer) => {
+        stderr += d.toString();
+      });
+      child.on('close', (code: number | null) => {
+        resolve({ stdout, stderr, code });
+      });
+    });
+  }
+
+  it('forwards the configured summaryPrompt to the summary stage, like the GUI', async () => {
+    const audio = path.join(fileDataPath, 'meeting.mp3');
+    fs.writeFileSync(audio, '');
+
+    const set = await runCli(['config', 'set', 'summaryPrompt', 'CUSTOM_SUMMARY_PROMPT_SENTINEL']);
+    assert.equal(set.code, 0, set.stderr);
+
+    const { stdout, stderr, code } = await runCli([audio]);
+    assert.equal(code, 0, stderr);
+    assert.match(stderr, /Stubbed summary prompt: CUSTOM_SUMMARY_PROMPT_SENTINEL/);
+
+    const folderPath = stdout.trim();
+    assert.ok(folderPath.startsWith(fileDataPath), `unexpected output folder ${folderPath}`);
+    assert.ok(fs.existsSync(path.join(folderPath, 'meta.json')));
+  });
+
+  it('forwards the default summary prompt when none is configured', async () => {
+    const audio = path.join(fileDataPath, 'default.mp3');
+    fs.writeFileSync(audio, '');
+
+    const unset = await runCli(['config', 'unset', 'summaryPrompt']);
+    assert.equal(unset.code, 0, unset.stderr);
+
+    const { stderr, code } = await runCli([audio]);
+    assert.equal(code, 0, stderr);
+    assert.match(stderr, /Stubbed summary prompt: \S/);
+    assert.doesNotMatch(stderr, /CUSTOM_SUMMARY_PROMPT_SENTINEL/);
+  });
+});
+
 describe(
   'listener merge (CLI integration)',
   { skip: !ffmpegPath ? 'ffmpeg not installed' : undefined },
