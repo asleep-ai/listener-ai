@@ -28,12 +28,22 @@ function hasUserData(dataPath: string): boolean {
   );
 }
 
+// Captured once at module load: a process started as a test stays a test for
+// its whole life. A test that deletes or rewrites NODE_ENV mid-run (to exercise
+// some other NODE_ENV gate) must not flip getDataPath() back to the user's real
+// data directory for every later test in that process.
+const TEST_ENV_AT_LOAD = process.env.NODE_ENV === 'test';
+
+export function isTestEnvironment(): boolean {
+  return TEST_ENV_AT_LOAD || process.env.NODE_ENV === 'test';
+}
+
 export function getDataPath(): string {
   // Test escape hatch: integration tests set this to a temp dir to avoid
   // touching the user's real data. Gated on NODE_ENV=test so a stray
   // LISTENER_DATA_PATH in a packaged user's shell rc can't redirect their
   // config + transcriptions to an attacker-controlled path.
-  if (process.env.LISTENER_DATA_PATH && process.env.NODE_ENV === 'test') {
+  if (process.env.LISTENER_DATA_PATH && isTestEnvironment()) {
     return process.env.LISTENER_DATA_PATH;
   }
 
