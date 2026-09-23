@@ -145,6 +145,18 @@ for a garbled or uncertain name, product, or term; and to exclude completed work
 action items, which cover pending future work only. These rules constrain the summary
 text only -- the transcript itself is never rewritten here.
 
+The summary response is parsed leniently, because a parse failure must never
+cost the user a transcript that is already paid for. The parser tries the
+fence-stripped text, then the outermost `{...}` span, so a fenced object with
+surrounding prose or an object followed by commentary still parses. When
+neither parses (usually truncated output), the run keeps the `summary` string
+if it closed before the cut, otherwise the raw model text as the summary, logs
+the error and reports it to Sentry as `summary.parse` (warning), and saves the
+note. A parsed object needs no particular key: a custom summary prompt may ask
+only for action items, key points or custom fields, and the note is saved with
+an empty summary. This matches v2.14.0; later builds briefly failed the whole
+run on either shape.
+
 > **Decision history:**
 > - *LLM text cleanup.* A broad cleanup pass was removed by user decision on
 >   2026-07-22 after a production incident: the cleanup model entered its own

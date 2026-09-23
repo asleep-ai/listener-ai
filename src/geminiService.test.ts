@@ -5,7 +5,14 @@ import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
 import { EmptyTranscriptionError, TranscriptionApiError } from './transcriptionErrors';
 import { type BatchSttBackend, planSegmentation, retryTemperaturesFor } from './batchSttBackend';
-import { GeminiService, computeSegmentPlan, segmentOverlapSeconds } from './geminiService';
+import {
+  GeminiService,
+  type TranscriptionResult,
+  computeSegmentPlan,
+  segmentOverlapSeconds,
+} from './geminiService';
+import { renderMeetingSections } from './meetingRecord';
+import { readTranscription, saveTranscription } from './outputService';
 import {
   SONIOX_MAX_FILE_BYTES,
   SONIOX_MAX_FILE_SECONDS,
@@ -1701,6 +1708,7 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       summary: string;
       keyPoints: string[];
       actionItems: string[];
+      suggestedTitle?: string;
       summarySections?: Array<{ heading: string; bullets: string[] }>;
       actionItemGroups?: Array<{ owner: string; items: string[] }>;
       customFields?: Record<string, unknown>;
@@ -1914,19 +1922,141 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     assert.deepEqual(result.actionItemGroups, [{ owner: 'Owner', items: ['Structured action'] }]);
   });
 
-  it('fails instead of silently saving an empty note when summary JSON is malformed', async () => {
+  // Malformed summary JSON must never cost the user their note: the
+  // transcript is already paid for, so the run degrades instead of failing
+  // (v2.14.0 behaviour).
+  it('recovers a summary object wrapped in a fence with surrounding prose', async () => {
     const { service } = makeTwoStepService({
       transcript: 'Participant 1: Valid transcript.',
-      summaryJson: '{"summarySections":[{"heading":"Agenda","bullets":[',
+      summaryJson:
+        'Here is the summary you asked for:\n```json\n' +
+        JSON.stringify({
+          suggestedTitle: 'Fenced',
+          summary: 'Fenced summary',
+          keyPoints: ['Point'],
+          actionItems: ['Act'],
+          emoji: '🧾',
+        }) +
+        '\n```\nLet me know if you need anything else.',
     });
 
-    await assert.rejects(
-      service.transcribeWithTwoSteps(makeAudioStub('malformed-summary.webm'), 10),
-      /summary model returned invalid JSON/,
-    );
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('fenced-summary.webm'), 10);
+
+    assert.equal(result.summary, 'Fenced summary');
+    assert.deepEqual(result.keyPoints, ['Point']);
+    assert.deepEqual(result.actionItems, ['Act']);
   });
 
-  it('fails instead of saving an empty note when structured summary content is invalid', async () => {
+  it('recovers a summary object followed by trailing prose without a fence', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson:
+        JSON.stringify({
+          suggestedTitle: 'Trailing',
+          summarySections: [{ heading: 'Agenda', bullets: ['Detail'] }],
+          actionItemGroups: [{ owner: 'Acme', items: ['Ship it'] }],
+          emoji: '📝',
+        }) + '\n\nNote: the second half of the recording was quiet.',
+    });
+
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('trailing-prose-summary.webm'),
+      10,
+    );
+
+    assert.deepEqual(result.summarySections, [{ heading: 'Agenda', bullets: ['Detail'] }]);
+    assert.equal(result.summary, 'Agenda\n- Detail');
+    assert.deepEqual(result.actionItems, ['Acme: Ship it']);
+  });
+
+  it('salvages the summary string from truncated summary JSON', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson:
+        '{"suggestedTitle":"Cut","summary":"Line one\\nLine \\"two\\"","keyPoints":["a",',
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('truncated.webm'), 10);
+
+    assert.equal(result.summary, 'Line one\nLine "two"');
+    assert.equal(result.transcript, 'Participant 1: Valid transcript.');
+  });
+
+  it('keeps the raw model text when truncated summary JSON has no salvageable summary', async () => {
+    const truncated = '{"summarySections":[{"heading":"Agenda","bullets":[';
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: truncated,
+    });
+
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('malformed-summary.webm'),
+      10,
+    );
+
+    assert.equal(result.summary, truncated);
+    assert.deepEqual(result.keyPoints, []);
+    assert.deepEqual(result.actionItems, []);
+    assert.equal(result.transcript, 'Participant 1: Valid transcript.');
+  });
+
+  it('saves a malformed-summary result as a readable note', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: 'Sorry, here is a plain summary instead of JSON.',
+    });
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('prose-summary.webm'), 10);
+    const folderPath = saveTranscription({
+      title: 'Prose',
+      result: result as unknown as TranscriptionResult,
+      outputDir: workDir,
+      dataPath: workDir,
+    });
+    const note = await readTranscription(folderPath);
+
+    assert.equal(note?.summary, 'Sorry, here is a plain summary instead of JSON.');
+    assert.equal(note?.transcript, 'Participant 1: Valid transcript.');
+  });
+
+  // Custom summary prompts may ask only for action items, key points or
+  // custom fields; a response without `summary`/`summarySections` is valid.
+  it('accepts action-items-only summary JSON from a custom prompt', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: JSON.stringify({ actionItems: ['Send the deck', 'Book the room'] }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('actions-only.webm'),
+      10,
+      undefined,
+      'List only the action items.',
+    );
+
+    assert.equal(result.summary, '');
+    assert.equal(result.summarySections, undefined);
+    assert.deepEqual(result.actionItems, ['Send the deck', 'Book the room']);
+    assert.deepEqual(result.keyPoints, []);
+  });
+
+  it('accepts custom-field-only summary JSON from a custom prompt', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: JSON.stringify({ risks: ['Budget overrun'] }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('custom-field-only.webm'),
+      10,
+      undefined,
+      'List only the risks.',
+    );
+
+    assert.equal(result.summary, '');
+    assert.deepEqual(result.customFields, { risks: ['Budget overrun'] });
+  });
+
+  it('saves an empty note instead of failing when structured summary content is invalid', async () => {
     const { service } = makeTwoStepService({
       transcript: 'Participant 1: Valid transcript.',
       summaryJson: JSON.stringify({
@@ -1938,9 +2068,31 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       }),
     });
 
-    await assert.rejects(
-      service.transcribeWithTwoSteps(makeAudioStub('invalid-structured-summary.webm'), 10),
-      /summary model returned invalid JSON/,
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('invalid-structured-summary.webm'),
+      10,
+    );
+
+    assert.equal(result.summary, '');
+    assert.equal(result.summarySections, undefined);
+    assert.equal(result.suggestedTitle, 'Meeting');
+    assert.equal(result.transcript, 'Participant 1: Valid transcript.');
+  });
+
+  it('puts the loss notice alone in an otherwise empty summary', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: JSON.stringify({ actionItems: ['Follow up'] }),
+      lostSegments: [{ segment: 2, start: 300, end: 600, reason: 'empty' }],
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('loss-only.webm'), 600);
+
+    assert.match(result.summary, /produced no transcript/);
+    assert.equal(result.summarySections, undefined);
+    assert.deepEqual(
+      renderMeetingSections(result).filter((line) => line.startsWith('##')),
+      ['## Summary\n', '## Action Items\n'],
     );
   });
 
