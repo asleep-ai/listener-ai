@@ -1984,6 +1984,41 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     assert.deepEqual(result.actionItems, ['Acme: Ship it']);
   });
 
+  it('recovers a summary object when surrounding prose contains braces', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson:
+        'Here is the {summary} you asked for:\n' +
+        JSON.stringify({
+          suggestedTitle: 'Braces',
+          summary: 'Uses {name} and "}" inside strings',
+          keyPoints: ['x'],
+          actionItems: ['Ship it'],
+        }) +
+        '\nUse {name} if needed',
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('brace-prose.webm'), 10);
+
+    assert.equal(result.suggestedTitle, 'Braces');
+    assert.equal(result.summary, 'Uses {name} and "}" inside strings');
+    assert.deepEqual(result.keyPoints, ['x']);
+    assert.deepEqual(result.actionItems, ['Ship it']);
+  });
+
+  it('does not mistake a nested object in truncated JSON for the summary', async () => {
+    const truncated =
+      '{"summary":"Kept","summarySections":[{"heading":"Agenda","bullets":["a"]},{"heading":';
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: truncated,
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('nested-cut.webm'), 10);
+
+    assert.equal(result.summary, 'Kept');
+  });
+
   it('salvages the summary string from truncated summary JSON', async () => {
     const { service } = makeTwoStepService({
       transcript: 'Participant 1: Valid transcript.',

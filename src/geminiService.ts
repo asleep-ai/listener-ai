@@ -663,16 +663,47 @@ function stripJsonFences(text: string): string {
   return fenced ? fenced[1].trim() : text.trim();
 }
 
+// Top-level balanced `{...}` spans, in order. Braces inside JSON strings are
+// skipped, so prose like `Use {name}` around the object neither ends a span
+// early nor stretches it past the object. Scanning resumes after each span
+// and stops at the first brace that never closes, so a nested object inside
+// truncated JSON is never mistaken for the whole summary.
+function* balancedBraceSpans(text: string): Generator<string> {
+  let start = text.indexOf('{');
+  while (start !== -1) {
+    let depth = 0;
+    let inString = false;
+    let end = -1;
+    for (let i = start; i < text.length && end === -1; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (ch === '\\') i++;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') {
+        inString = true;
+      } else if (ch === '{') {
+        depth++;
+      } else if (ch === '}' && --depth === 0) {
+        end = i;
+      }
+    }
+    if (end === -1) return;
+    yield text.slice(start, end + 1);
+    start = text.indexOf('{', end + 1);
+  }
+}
+
 // Summary models sometimes wrap the JSON object in prose or add commentary
-// after it. Try the fence-stripped text first, then the outermost `{...}`
-// span. Throws when neither yields a JSON object.
+// after it. Try the fence-stripped text first, then each balanced `{...}`
+// span. Throws when none yields a JSON object.
 function parseSummaryJsonObject(text: string): Record<string, unknown> {
-  const candidates = [stripJsonFences(text)];
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start !== -1 && end > start) candidates.push(text.slice(start, end + 1));
+  // Lazy: well-formed output parses on the first candidate and never scans.
+  function* candidates(): Generator<string> {
+    yield stripJsonFences(text);
+    yield* balancedBraceSpans(text);
+  }
   let lastError: unknown;
-  for (const candidate of candidates) {
+  for (const candidate of candidates()) {
     try {
       const parsed: unknown = JSON.parse(candidate);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
