@@ -352,6 +352,36 @@ describe('listener show / export across v1 + v2 folders', () => {
     });
   });
 
+  it('show renders object-valued custom fields readably, never as [object Object]', async () => {
+    const folderPath = saveTranscription({
+      title: 'Object Custom Fields',
+      result: {
+        transcript: 't',
+        summary: 'Summary text.',
+        keyPoints: [],
+        actionItems: [],
+        emoji: 'X',
+        customFields: {
+          decisions: [{ what: 'ship v2', who: 'Alice' }, 'plain decision'],
+          budget: { amount: 5, currency: 'USD' },
+          transcriptQuality: { cleaned: true, modelNotes: ['QUALITY_SENTINEL'] },
+        },
+      },
+      dataPath: showDataPath,
+    });
+
+    const { stdout, code } = await runCli(['show', path.basename(folderPath)]);
+    assert.equal(code, 0);
+    assert.doesNotMatch(stdout, /\[object Object\]/);
+    assert.match(
+      stdout,
+      /## Decisions\n\n- \{"what":"ship v2","who":"Alice"\}\n- plain decision\n/,
+    );
+    assert.match(stdout, /## Budget\n[\s\S]*"amount": 5[\s\S]*"currency": "USD"/);
+    assert.doesNotMatch(stdout, /Transcript Quality/);
+    assert.doesNotMatch(stdout, /QUALITY_SENTINEL/);
+  });
+
   it('show on a v1 folder still prints its frontmatter body', async () => {
     const folderPath = __saveTranscriptionLegacyV1ForTests({
       title: 'V1 Show',

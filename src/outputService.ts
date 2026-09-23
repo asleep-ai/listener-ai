@@ -269,7 +269,11 @@ export function formatSummary(
       lines.push(`## ${label}\n`);
       if (Array.isArray(value)) {
         for (const item of value) {
-          lines.push(`- ${String(item)}`);
+          // Object items (e.g. `[{ what, who }]`) would stringify to
+          // `[object Object]`; render them as compact JSON instead.
+          const text =
+            item !== null && typeof item === 'object' ? JSON.stringify(item) : String(item);
+          lines.push(`- ${text}`);
         }
       } else if (typeof value === 'string') {
         lines.push(value);
