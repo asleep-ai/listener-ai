@@ -5,7 +5,14 @@ import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
 import { EmptyTranscriptionError, TranscriptionApiError } from './transcriptionErrors';
 import { type BatchSttBackend, planSegmentation, retryTemperaturesFor } from './batchSttBackend';
-import { GeminiService, computeSegmentPlan, segmentOverlapSeconds } from './geminiService';
+import {
+  GeminiService,
+  type TranscriptionResult,
+  computeSegmentPlan,
+  segmentOverlapSeconds,
+} from './geminiService';
+import { renderMeetingSections } from './meetingRecord';
+import { readTranscription, saveTranscription } from './outputService';
 import {
   SONIOX_MAX_FILE_BYTES,
   SONIOX_MAX_FILE_SECONDS,
@@ -688,6 +695,21 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     assert.doesNotMatch(prompts[1], /Audio segment/, 'retry prompt must drop positional context');
     assert.doesNotMatch(prompts[1], /proper nouns, names, and terms/, 'retry drops the glossary');
     assert.equal(result.body, cleanText);
+    assert.equal(result.empty, false);
+    assert.equal(result.uncertain, false);
+  });
+
+  // The gate deletes an echoed segment, so a speaker who happens to say one
+  // of the generic instruction phrases must keep their words -- checked with
+  // the prompt lines a real run passes, not just the bare detector.
+  it('keeps a real speech segment that says one generic prompt phrase', async () => {
+    const speech = '참가자1: Format requirements: 다음 주까지 정리';
+    const { service, prompts } = makeGatedService([speech]);
+
+    const result = await service.transcribeSingleSegment('/tmp/seg.webm', 0, 2, 0, 300);
+
+    assert.equal(prompts.length, 1, 'no echo means no retry');
+    assert.equal(result.body, speech);
     assert.equal(result.empty, false);
     assert.equal(result.uncertain, false);
   });
@@ -1701,6 +1723,7 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       summary: string;
       keyPoints: string[];
       actionItems: string[];
+      suggestedTitle?: string;
       summarySections?: Array<{ heading: string; bullets: string[] }>;
       actionItemGroups?: Array<{ owner: string; items: string[] }>;
       customFields?: Record<string, unknown>;
@@ -1914,19 +1937,206 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     assert.deepEqual(result.actionItemGroups, [{ owner: 'Owner', items: ['Structured action'] }]);
   });
 
-  it('fails instead of silently saving an empty note when summary JSON is malformed', async () => {
+  // Malformed summary JSON must never cost the user their note: the
+  // transcript is already paid for, so the run degrades instead of failing
+  // (v2.14.0 behaviour).
+  it('recovers a summary object wrapped in a fence with surrounding prose', async () => {
     const { service } = makeTwoStepService({
       transcript: 'Participant 1: Valid transcript.',
-      summaryJson: '{"summarySections":[{"heading":"Agenda","bullets":[',
+      summaryJson:
+        'Here is the summary you asked for:\n```json\n' +
+        JSON.stringify({
+          suggestedTitle: 'Fenced',
+          summary: 'Fenced summary',
+          keyPoints: ['Point'],
+          actionItems: ['Act'],
+          emoji: '🧾',
+        }) +
+        '\n```\nLet me know if you need anything else.',
     });
 
-    await assert.rejects(
-      service.transcribeWithTwoSteps(makeAudioStub('malformed-summary.webm'), 10),
-      /summary model returned invalid JSON/,
-    );
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('fenced-summary.webm'), 10);
+
+    assert.equal(result.summary, 'Fenced summary');
+    assert.deepEqual(result.keyPoints, ['Point']);
+    assert.deepEqual(result.actionItems, ['Act']);
   });
 
-  it('fails instead of saving an empty note when structured summary content is invalid', async () => {
+  it('recovers a summary object followed by trailing prose without a fence', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson:
+        JSON.stringify({
+          suggestedTitle: 'Trailing',
+          summarySections: [{ heading: 'Agenda', bullets: ['Detail'] }],
+          actionItemGroups: [{ owner: 'Acme', items: ['Ship it'] }],
+          emoji: '📝',
+        }) + '\n\nNote: the second half of the recording was quiet.',
+    });
+
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('trailing-prose-summary.webm'),
+      10,
+    );
+
+    assert.deepEqual(result.summarySections, [{ heading: 'Agenda', bullets: ['Detail'] }]);
+    assert.equal(result.summary, 'Agenda\n- Detail');
+    assert.deepEqual(result.actionItems, ['Acme: Ship it']);
+  });
+
+  it('recovers a summary object when surrounding prose contains braces', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson:
+        'Here is the {summary} you asked for:\n' +
+        JSON.stringify({
+          suggestedTitle: 'Braces',
+          summary: 'Uses {name} and "}" inside strings',
+          keyPoints: ['x'],
+          actionItems: ['Ship it'],
+        }) +
+        '\nUse {name} if needed',
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('brace-prose.webm'), 10);
+
+    assert.equal(result.suggestedTitle, 'Braces');
+    assert.equal(result.summary, 'Uses {name} and "}" inside strings');
+    assert.deepEqual(result.keyPoints, ['x']);
+    assert.deepEqual(result.actionItems, ['Ship it']);
+  });
+
+  it('prefers the summary object over an earlier JSON snippet in the prose', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson:
+        'Metadata: {"attempt":2}\n' +
+        JSON.stringify({ suggestedTitle: 'Real', summary: 'Real summary', keyPoints: ['k'] }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('snippet-first.webm'), 10);
+
+    assert.equal(result.summary, 'Real summary');
+    assert.deepEqual(result.keyPoints, ['k']);
+    assert.equal(result.customFields?.attempt, undefined);
+  });
+
+  it('keeps a custom-field-only response over a smaller stray JSON snippet', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson:
+        'Metadata: {"attempt":2}\n' +
+        JSON.stringify({ risks: ['Budget overrun', 'Vendor delay'] }) +
+        '\nDone {ok}',
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('custom-only.webm'), 10);
+
+    assert.deepEqual(result.customFields?.risks, ['Budget overrun', 'Vendor delay']);
+    assert.equal(result.customFields?.attempt, undefined);
+  });
+
+  it('does not mistake a nested object in truncated JSON for the summary', async () => {
+    const truncated =
+      '{"summary":"Kept","summarySections":[{"heading":"Agenda","bullets":["a"]},{"heading":';
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: truncated,
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('nested-cut.webm'), 10);
+
+    assert.equal(result.summary, 'Kept');
+  });
+
+  it('salvages the summary string from truncated summary JSON', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson:
+        '{"suggestedTitle":"Cut","summary":"Line one\\nLine \\"two\\"","keyPoints":["a",',
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('truncated.webm'), 10);
+
+    assert.equal(result.summary, 'Line one\nLine "two"');
+    assert.equal(result.transcript, 'Participant 1: Valid transcript.');
+  });
+
+  it('keeps the raw model text when truncated summary JSON has no salvageable summary', async () => {
+    const truncated = '{"summarySections":[{"heading":"Agenda","bullets":[';
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: truncated,
+    });
+
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('malformed-summary.webm'),
+      10,
+    );
+
+    assert.equal(result.summary, truncated);
+    assert.deepEqual(result.keyPoints, []);
+    assert.deepEqual(result.actionItems, []);
+    assert.equal(result.transcript, 'Participant 1: Valid transcript.');
+  });
+
+  it('saves a malformed-summary result as a readable note', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: 'Sorry, here is a plain summary instead of JSON.',
+    });
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('prose-summary.webm'), 10);
+    const folderPath = saveTranscription({
+      title: 'Prose',
+      result: result as unknown as TranscriptionResult,
+      outputDir: workDir,
+      dataPath: workDir,
+    });
+    const note = await readTranscription(folderPath);
+
+    assert.equal(note?.summary, 'Sorry, here is a plain summary instead of JSON.');
+    assert.equal(note?.transcript, 'Participant 1: Valid transcript.');
+  });
+
+  // Custom summary prompts may ask only for action items, key points or
+  // custom fields; a response without `summary`/`summarySections` is valid.
+  it('accepts action-items-only summary JSON from a custom prompt', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: JSON.stringify({ actionItems: ['Send the deck', 'Book the room'] }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('actions-only.webm'),
+      10,
+      undefined,
+      'List only the action items.',
+    );
+
+    assert.equal(result.summary, '');
+    assert.equal(result.summarySections, undefined);
+    assert.deepEqual(result.actionItems, ['Send the deck', 'Book the room']);
+    assert.deepEqual(result.keyPoints, []);
+  });
+
+  it('accepts custom-field-only summary JSON from a custom prompt', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: JSON.stringify({ risks: ['Budget overrun'] }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('custom-field-only.webm'),
+      10,
+      undefined,
+      'List only the risks.',
+    );
+
+    assert.equal(result.summary, '');
+    assert.deepEqual(result.customFields, { risks: ['Budget overrun'] });
+  });
+
+  it('saves an empty note instead of failing when structured summary content is invalid', async () => {
     const { service } = makeTwoStepService({
       transcript: 'Participant 1: Valid transcript.',
       summaryJson: JSON.stringify({
@@ -1938,9 +2148,31 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
       }),
     });
 
-    await assert.rejects(
-      service.transcribeWithTwoSteps(makeAudioStub('invalid-structured-summary.webm'), 10),
-      /summary model returned invalid JSON/,
+    const result = await service.transcribeWithTwoSteps(
+      makeAudioStub('invalid-structured-summary.webm'),
+      10,
+    );
+
+    assert.equal(result.summary, '');
+    assert.equal(result.summarySections, undefined);
+    assert.equal(result.suggestedTitle, 'Meeting');
+    assert.equal(result.transcript, 'Participant 1: Valid transcript.');
+  });
+
+  it('puts the loss notice alone in an otherwise empty summary', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson: JSON.stringify({ actionItems: ['Follow up'] }),
+      lostSegments: [{ segment: 2, start: 300, end: 600, reason: 'empty' }],
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('loss-only.webm'), 600);
+
+    assert.match(result.summary, /produced no transcript/);
+    assert.equal(result.summarySections, undefined);
+    assert.deepEqual(
+      renderMeetingSections(result).filter((line) => line.startsWith('##')),
+      ['## Summary\n', '## Action Items\n'],
     );
   });
 

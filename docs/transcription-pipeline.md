@@ -145,6 +145,18 @@ for a garbled or uncertain name, product, or term; and to exclude completed work
 action items, which cover pending future work only. These rules constrain the summary
 text only -- the transcript itself is never rewritten here.
 
+The summary response is parsed leniently, because a parse failure must never
+cost the user a transcript that is already paid for. The parser tries the
+fence-stripped text, then the outermost `{...}` span, so a fenced object with
+surrounding prose or an object followed by commentary still parses. When
+neither parses (usually truncated output), the run keeps the `summary` string
+if it closed before the cut, otherwise the raw model text as the summary, logs
+the error and reports it to Sentry as `summary.parse` (warning), and saves the
+note. A parsed object needs no particular key: a custom summary prompt may ask
+only for action items, key points or custom fields, and the note is saved with
+an empty summary. This matches v2.14.0; later builds briefly failed the whole
+run on either shape.
+
 > **Decision history:**
 > - *LLM text cleanup.* A broad cleanup pass was removed by user decision on
 >   2026-07-22 after a production incident: the cleanup model entered its own
@@ -207,6 +219,17 @@ verbatim lines of at least 24 characters from the prompt actually sent, which
 covers a user's custom `--prompt` text and the glossary entries. Short prompt
 lines are excluded on purpose: a one-term glossary bullet is exactly what a
 legitimate mention of that term looks like in speech.
+
+Because the gate deletes an echoed segment, the built-in markers come in two
+strengths. The distinctive ones -- the `[Audio segment N of M]` tag and the
+long instruction sentences (the glossary preamble, "Please transcribe this
+audio recording with proper speaker identification", "Transcribe the speech
+in this audio exactly as spoken") -- are enough on their own. The generic ones
+(`Format requirements:`, `Return only the transcription text`, `Return only
+the transcript text`) are phrases a speaker can plausibly say, so one of them
+alone never flags: an echo needs two distinct generic markers, or a verbatim
+prompt line, which is sufficient by itself. A speaker saying "Format
+requirements: ..." keeps their segment.
 
 The check runs inside the gate before the judge, so an echo drives the same
 retry ladder as a loop. If every rung is exhausted and the result still

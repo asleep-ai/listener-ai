@@ -834,13 +834,26 @@ export function normalizeSpeakerLabels(
 //      covers a user's custom `--prompt` text and glossary entries.
 // Short prompt lines are excluded on purpose: a glossary bullet (`- Foo`) is
 // exactly what a legitimate mention of that term looks like in speech.
+//
+// The gate DELETES an echoed segment, so precision beats recall here. The
+// built-in markers come in two strengths:
+//   - Distinctive: the positional `[Audio segment N of M]` tag and the long
+//     instruction sentences. Nobody says these in a meeting, so one hit is
+//     enough on its own.
+//   - Generic: short phrases a speaker can plausibly say ("Format
+//     requirements: ..."). One of them alone never triggers an echo; it takes
+//     two distinct generic markers. A generic marker next to a verbatim
+//     prompt line is already covered, since that line is sufficient alone.
 const PROMPT_ECHO_REASON = 'prompt-echo';
 const MIN_ECHOED_PROMPT_LINE_CHARS = 24;
-const PROMPT_ECHO_MARKERS: Array<string | RegExp> = [
+const MIN_GENERIC_PROMPT_ECHO_MARKERS = 2;
+const DISTINCTIVE_PROMPT_ECHO_MARKERS: Array<string | RegExp> = [
   /\[audio segment \d+ of \d+\]/u,
   'the following proper nouns, names, and terms may appear in the audio',
   'please transcribe this audio recording with proper speaker identification',
   'transcribe the speech in this audio exactly as spoken',
+];
+const GENERIC_PROMPT_ECHO_MARKERS: string[] = [
   'format requirements:',
   'return only the transcription text',
   'return only the transcript text',
@@ -860,10 +873,16 @@ export function detectPromptEcho(
 ): { echoed: boolean; reasons: string[] } {
   const haystack = normalizeForEcho(text);
   if (!haystack) return { echoed: false, reasons: [] };
-  for (const marker of PROMPT_ECHO_MARKERS) {
+  for (const marker of DISTINCTIVE_PROMPT_ECHO_MARKERS) {
     if (typeof marker === 'string' ? haystack.includes(marker) : marker.test(haystack)) {
       return { echoed: true, reasons: [PROMPT_ECHO_REASON] };
     }
+  }
+  const genericHits = GENERIC_PROMPT_ECHO_MARKERS.filter((marker) =>
+    haystack.includes(marker),
+  ).length;
+  if (genericHits >= MIN_GENERIC_PROMPT_ECHO_MARKERS) {
+    return { echoed: true, reasons: [PROMPT_ECHO_REASON] };
   }
   for (const line of promptLines ?? []) {
     const needle = normalizeForEcho(line);

@@ -663,6 +663,95 @@ function stripJsonFences(text: string): string {
   return fenced ? fenced[1].trim() : text.trim();
 }
 
+// Top-level balanced `{...}` spans, in order. Braces inside JSON strings are
+// skipped, so prose like `Use {name}` around the object neither ends a span
+// early nor stretches it past the object. Scanning resumes after each span
+// and stops at the first brace that never closes, so a nested object inside
+// truncated JSON is never mistaken for the whole summary.
+function* balancedBraceSpans(text: string): Generator<string> {
+  let start = text.indexOf('{');
+  while (start !== -1) {
+    let depth = 0;
+    let inString = false;
+    let end = -1;
+    for (let i = start; i < text.length && end === -1; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (ch === '\\') i++;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') {
+        inString = true;
+      } else if (ch === '{') {
+        depth++;
+      } else if (ch === '}' && --depth === 0) {
+        end = i;
+      }
+    }
+    if (end === -1) return;
+    yield text.slice(start, end + 1);
+    start = text.indexOf('{', end + 1);
+  }
+}
+
+// Keys the summary prompt asks for; used to pick the real response when the
+// commentary around it holds other JSON (e.g. `Metadata: {"attempt":2}`).
+const SUMMARY_SHAPE_KEYS = [
+  'summary',
+  'summarySections',
+  'keyPoints',
+  'actionItems',
+  'actionItemGroups',
+  'suggestedTitle',
+];
+
+// Summary models sometimes wrap the JSON object in prose or add commentary
+// after it. Try the fence-stripped text first, then each balanced `{...}`
+// span, preferring the first object that carries a summary key. A custom
+// prompt may use only its own keys, so the fallback is the LARGEST object: the
+// requested response outweighs a stray snippet like `{"attempt":2}` on either
+// side of it. Throws when no candidate yields a JSON object.
+function parseSummaryJsonObject(text: string): Record<string, unknown> {
+  // Lazy: well-formed output parses on the first candidate and never scans.
+  function* candidates(): Generator<string> {
+    yield stripJsonFences(text);
+    yield* balancedBraceSpans(text);
+  }
+  let largest: { object: Record<string, unknown>; size: number } | undefined;
+  let lastError: unknown;
+  for (const candidate of candidates()) {
+    try {
+      const parsed: unknown = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const object = parsed as Record<string, unknown>;
+        if (SUMMARY_SHAPE_KEYS.some((key) => key in object)) return object;
+        if (!largest || candidate.length > largest.size) {
+          largest = { object, size: candidate.length };
+        }
+      } else {
+        lastError = new TypeError('Summary output is not a JSON object.');
+      }
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  if (largest) return largest.object;
+  throw lastError;
+}
+
+// Last resort for summary output no parser can read (usually truncated JSON).
+// Like v2.14.0, keep the `summary` string when it closed before the cut;
+// otherwise keep the raw text so the note still carries what the model said.
+// A failed summary parse must never cost the user a transcript already paid for.
+function salvageSummaryText(text: string): string {
+  const match = text.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
+  if (!match) return stripJsonFences(text);
+  try {
+    return JSON.parse(`"${match[1]}"`) as string;
+  } catch {
+    return match[1].replace(/\\n/g, '\n');
+  }
+}
+
 function parseQualityJudgeResponse(text: string): { flagged: boolean; reason?: string } {
   if (!text.trim()) {
     throw new Error('Quality judge returned an empty response');
@@ -1834,7 +1923,7 @@ Requirements:
       let rawQualityNotes: unknown;
 
       try {
-        const parsed = JSON.parse(stripJsonFences(summaryText)) as Record<string, unknown>;
+        const parsed = parseSummaryJsonObject(summaryText);
         const parsedSections = parseSummarySections(parsed.summarySections);
         const summarySections = parsedSections.length > 0 ? parsedSections : undefined;
         const parsedGroups = parseActionItemGroups(parsed.actionItemGroups, {
@@ -1844,9 +1933,9 @@ Requirements:
         const legacySummary = normalizeString(parsed.summary);
         const keyPoints = normalizeStringArray(parsed.keyPoints);
         const legacyActionItems = normalizeStringArray(parsed.actionItems);
-        if (!legacySummary && !summarySections) {
-          throw new TypeError('Summary output contains no valid summary content.');
-        }
+        // No `summary`/`summarySections` is valid: a custom prompt may ask
+        // only for action items, key points or custom fields (v2.14.0 saved
+        // whatever the object carried).
         summaryData = {
           suggestedTitle: normalizeString(parsed.suggestedTitle),
           summary:
@@ -1881,7 +1970,7 @@ Requirements:
       } catch (e) {
         console.error('Error parsing summary JSON:', e);
         reportError(e, { operation: 'summary.parse', severity: 'warning' });
-        throw new Error('The summary model returned invalid JSON.', { cause: e });
+        summaryData.summary = salvageSummaryText(summaryText);
       }
 
       // Silent transcript loss (issue #197). The gate already knew which

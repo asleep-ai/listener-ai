@@ -484,20 +484,61 @@ describe('stripNoSpeechSentinel', () => {
 // glossary. Legitimate speech that merely mentions a glossary term must stay
 // unflagged, which is why short prompt lines never participate.
 describe('detectPromptEcho', () => {
-  it('flags the built-in prompt markers', () => {
+  it('flags each distinctive built-in prompt marker on its own', () => {
     const echoes = [
       '[Audio segment 4 of 12]',
       'The following proper nouns, names, and terms may appear in the audio. Transcribe them exactly as spelled:',
       'Please transcribe this audio recording with proper speaker identification.',
       'Transcribe the speech in this audio exactly as spoken.',
-      'Format requirements:',
-      '- Return ONLY the transcription text, no JSON formatting',
-      '- Return only the transcript text.',
     ];
     for (const echo of echoes) {
       assert.equal(detectPromptEcho(echo).echoed, true, `should flag: ${echo}`);
       assert.deepEqual(detectPromptEcho(echo).reasons, ['prompt-echo']);
     }
+  });
+
+  // The gate deletes an echoed segment, so a short phrase a speaker can
+  // plausibly say must never be enough evidence on its own.
+  it('does not flag a single generic marker spoken inside real speech', () => {
+    const speech = [
+      '참가자1: Format requirements: 다음 주까지 정리',
+      '참가자2: 그 API는 return only the transcription text 라고 문서에 써 있어요.',
+      '참가자1: 모델한테 return only the transcript text 하라고 했어요.',
+    ];
+    for (const line of speech) {
+      assert.equal(detectPromptEcho(line).echoed, false, `should keep: ${line}`);
+      assert.deepEqual(detectPromptEcho(line).reasons, []);
+    }
+  });
+
+  it('flags two distinct generic markers together', () => {
+    const echo =
+      'Format requirements:\n1. ...\n- Return ONLY the transcription text, no JSON formatting';
+    assert.equal(detectPromptEcho(echo).echoed, true);
+    assert.deepEqual(detectPromptEcho(echo).reasons, ['prompt-echo']);
+  });
+
+  it('flags a generic marker alongside a verbatim prompt line', () => {
+    const promptLines = [
+      'Format requirements:',
+      '1. IDENTIFY different speakers and label them as 참가자1, 참가자2, etc.',
+    ];
+    const echo =
+      'Format requirements:\n1. IDENTIFY different speakers and label them as 참가자1, 참가자2, etc.';
+    assert.equal(detectPromptEcho(echo, promptLines).echoed, true);
+  });
+
+  it('still flags the full echoed transcription prompt', () => {
+    const echo = `Please transcribe this audio recording with proper speaker identification.
+
+Format requirements:
+1. IDENTIFY different speakers and label them as 참가자1, 참가자2, etc.
+2. Each speaker's turn MUST start on a NEW LINE
+
+IMPORTANT:
+- Return ONLY the transcription text, no JSON formatting`;
+    assert.equal(detectPromptEcho(echo).echoed, true);
+    assert.deepEqual(detectPromptEcho(echo).reasons, ['prompt-echo']);
   });
 
   it('matches markers across line breaks and casing', () => {
