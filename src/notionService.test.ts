@@ -102,6 +102,52 @@ describe('NotionService', () => {
     assert.doesNotMatch(serializedInput, /QUALITY_SENTINEL/);
   });
 
+  it('renders object items in array custom fields as JSON bullets, not [object Object]', async () => {
+    const service = new NotionService({
+      apiKey: 'test-api-key',
+      databaseId: 'test-database-id',
+    });
+    let children: Array<{
+      type: string;
+      bulleted_list_item?: { rich_text: Array<{ text: { content: string } }> };
+    }> = [];
+
+    (
+      service as unknown as {
+        notion: {
+          pages: { create: (input: { children: typeof children }) => Promise<{ id: string }> };
+        };
+      }
+    ).notion = {
+      pages: {
+        create: async (input) => {
+          children = input.children;
+          return { id: '12345678-1234-1234-1234-123456789abc' };
+        },
+      },
+    };
+
+    const result: TranscriptionResult = {
+      transcript: 't',
+      summary: 's',
+      keyPoints: [],
+      actionItems: [],
+      emoji: '📝',
+      customFields: {
+        decisions: [{ what: 'ship v2', who: 'Alice' }, 'plain decision'],
+      },
+    };
+
+    await service.createMeetingNote('Test meeting', new Date('2026-08-10T00:00:00Z'), result);
+
+    const bullets = children
+      .filter((block) => block.type === 'bulleted_list_item')
+      .map((block) => block.bulleted_list_item!.rich_text[0].text.content);
+    assert.ok(bullets.includes('{"what":"ship v2","who":"Alice"}'), JSON.stringify(bullets));
+    assert.ok(bullets.includes('plain decision'));
+    assert.doesNotMatch(JSON.stringify(children), /\[object Object\]/);
+  });
+
   it('appends structured content in bounded batches after creating the page', async () => {
     const service = new NotionService({
       apiKey: 'test-api-key',

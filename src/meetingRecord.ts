@@ -93,6 +93,16 @@ export function camelToLabel(key: string): string {
     .trim();
 }
 
+/**
+ * Format one item of an array-valued custom field for a single bullet. Object
+ * items (e.g. `[{ what, who }]`) become one-line JSON instead of
+ * `[object Object]`; everything else goes through `String()`. Shared by the
+ * CLI markdown, the renderer tabs, and the Notion page builder so they agree.
+ */
+export function formatCustomFieldItem(item: unknown): string {
+  return item !== null && typeof item === 'object' ? JSON.stringify(item) : String(item);
+}
+
 /** Subset of a meeting record the shared emitter consumes. Values are assumed
  * already validated -- callers reading untrusted JSON run them through
  * `parseSummarySections` / `parseActionItemGroups` first. Intentionally loose

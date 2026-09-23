@@ -4,6 +4,7 @@ import type { HighlightEntry, TranscriptionResult } from './geminiService';
 import {
   type ActionItemGroup,
   camelToLabel,
+  formatCustomFieldItem,
   parseActionItemGroups,
   parseSummarySections,
   renderMeetingSections,
@@ -269,7 +270,7 @@ export function formatSummary(
       lines.push(`## ${label}\n`);
       if (Array.isArray(value)) {
         for (const item of value) {
-          lines.push(`- ${String(item)}`);
+          lines.push(`- ${formatCustomFieldItem(item)}`);
         }
       } else if (typeof value === 'string') {
         lines.push(value);

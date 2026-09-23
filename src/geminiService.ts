@@ -1273,6 +1273,14 @@ export class GeminiService {
     // in a packaged user's shell rc can't silently stub their transcripts.
     if (process.env.LISTENER_TEST_MODE && process.env.NODE_ENV === 'test') {
       if (progressCallback) progressCallback(100, 'Stubbed transcription');
+      // Echo the summary prompt's head so CLI integration tests can assert
+      // which prompt each entry point forwards.
+      if (progressCallback && summaryPrompt) {
+        progressCallback(
+          100,
+          `Stubbed summary prompt: ${summaryPrompt.replace(/\s+/g, ' ').slice(0, 80)}`,
+        );
+      }
       if (options.transcriptOnly) {
         return transcriptOnlyResult('Stubbed transcript.');
       }

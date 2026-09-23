@@ -4,6 +4,7 @@
 import { type Tokens, marked } from 'marked';
 import {
   camelToLabel,
+  formatCustomFieldItem,
   parseActionItemGroups,
   parseSummarySections,
   renderMeetingSections,
@@ -112,7 +113,7 @@ export function structuredToMarkdown(data: TranscriptionData, section: string): 
       if (key === 'transcriptQuality' || value == null) continue;
       lines.push(`## ${camelToLabel(key)}\n`);
       if (Array.isArray(value)) {
-        for (const v of value) lines.push(`- ${v}`);
+        for (const v of value) lines.push(`- ${formatCustomFieldItem(v)}`);
       } else if (typeof value === 'string') {
         lines.push(value);
       } else {
@@ -127,7 +128,7 @@ export function structuredToMarkdown(data: TranscriptionData, section: string): 
     if (cfKey === 'transcriptQuality') return '';
     const value = data.customFields[cfKey];
     if (Array.isArray(value)) {
-      for (const v of value) lines.push(`- ${v}`);
+      for (const v of value) lines.push(`- ${formatCustomFieldItem(v)}`);
     } else if (typeof value === 'string') {
       lines.push(value);
     } else if (value != null) {

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   camelToLabel,
+  formatCustomFieldItem,
   parseActionItemGroups,
   parseSummarySections,
   renderMeetingSections,
@@ -200,6 +201,25 @@ describe('camelToLabel', () => {
 
   it('returns an empty string for an empty key', () => {
     assert.equal(camelToLabel(''), '');
+  });
+});
+
+describe('formatCustomFieldItem', () => {
+  it('renders object and array items as one-line JSON, never [object Object]', () => {
+    assert.equal(
+      formatCustomFieldItem({ what: 'ship v2', who: 'Alice' }),
+      '{"what":"ship v2","who":"Alice"}',
+    );
+    assert.equal(formatCustomFieldItem({ nested: { a: [1, 2] } }), '{"nested":{"a":[1,2]}}');
+    assert.equal(formatCustomFieldItem(['a', 'b']), '["a","b"]');
+  });
+
+  it('passes primitives through String()', () => {
+    assert.equal(formatCustomFieldItem('plain decision'), 'plain decision');
+    assert.equal(formatCustomFieldItem(42), '42');
+    assert.equal(formatCustomFieldItem(true), 'true');
+    assert.equal(formatCustomFieldItem(null), 'null');
+    assert.equal(formatCustomFieldItem(undefined), 'undefined');
   });
 });
 
