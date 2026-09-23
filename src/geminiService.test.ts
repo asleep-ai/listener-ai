@@ -2006,6 +2006,21 @@ describe('GeminiService transcribeWithTwoSteps final-stage quality pass', () => 
     assert.deepEqual(result.actionItems, ['Ship it']);
   });
 
+  it('prefers the summary object over an earlier JSON snippet in the prose', async () => {
+    const { service } = makeTwoStepService({
+      transcript: 'Participant 1: Valid transcript.',
+      summaryJson:
+        'Metadata: {"attempt":2}\n' +
+        JSON.stringify({ suggestedTitle: 'Real', summary: 'Real summary', keyPoints: ['k'] }),
+    });
+
+    const result = await service.transcribeWithTwoSteps(makeAudioStub('snippet-first.webm'), 10);
+
+    assert.equal(result.summary, 'Real summary');
+    assert.deepEqual(result.keyPoints, ['k']);
+    assert.equal(result.customFields?.attempt, undefined);
+  });
+
   it('does not mistake a nested object in truncated JSON for the summary', async () => {
     const truncated =
       '{"summary":"Kept","summarySections":[{"heading":"Agenda","bullets":["a"]},{"heading":';

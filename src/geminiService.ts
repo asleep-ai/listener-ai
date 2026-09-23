@@ -693,27 +693,45 @@ function* balancedBraceSpans(text: string): Generator<string> {
   }
 }
 
+// Keys the summary prompt asks for; used to pick the real response when the
+// commentary around it holds other JSON (e.g. `Metadata: {"attempt":2}`).
+const SUMMARY_SHAPE_KEYS = [
+  'summary',
+  'summarySections',
+  'keyPoints',
+  'actionItems',
+  'actionItemGroups',
+  'suggestedTitle',
+];
+
 // Summary models sometimes wrap the JSON object in prose or add commentary
 // after it. Try the fence-stripped text first, then each balanced `{...}`
-// span. Throws when none yields a JSON object.
+// span, preferring the first object that carries a summary key and falling
+// back to the first object of any shape (a custom prompt may use only its own
+// keys). Throws when no candidate yields a JSON object.
 function parseSummaryJsonObject(text: string): Record<string, unknown> {
   // Lazy: well-formed output parses on the first candidate and never scans.
   function* candidates(): Generator<string> {
     yield stripJsonFences(text);
     yield* balancedBraceSpans(text);
   }
+  let firstObject: Record<string, unknown> | undefined;
   let lastError: unknown;
   for (const candidate of candidates()) {
     try {
       const parsed: unknown = JSON.parse(candidate);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
+        const object = parsed as Record<string, unknown>;
+        if (SUMMARY_SHAPE_KEYS.some((key) => key in object)) return object;
+        firstObject ??= object;
+      } else {
+        lastError = new TypeError('Summary output is not a JSON object.');
       }
-      lastError = new TypeError('Summary output is not a JSON object.');
     } catch (e) {
       lastError = e;
     }
   }
+  if (firstObject) return firstObject;
   throw lastError;
 }
 
