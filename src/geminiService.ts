@@ -706,16 +706,17 @@ const SUMMARY_SHAPE_KEYS = [
 
 // Summary models sometimes wrap the JSON object in prose or add commentary
 // after it. Try the fence-stripped text first, then each balanced `{...}`
-// span, preferring the first object that carries a summary key and falling
-// back to the first object of any shape (a custom prompt may use only its own
-// keys). Throws when no candidate yields a JSON object.
+// span, preferring the first object that carries a summary key. A custom
+// prompt may use only its own keys, so the fallback is the LARGEST object: the
+// requested response outweighs a stray snippet like `{"attempt":2}` on either
+// side of it. Throws when no candidate yields a JSON object.
 function parseSummaryJsonObject(text: string): Record<string, unknown> {
   // Lazy: well-formed output parses on the first candidate and never scans.
   function* candidates(): Generator<string> {
     yield stripJsonFences(text);
     yield* balancedBraceSpans(text);
   }
-  let firstObject: Record<string, unknown> | undefined;
+  let largest: { object: Record<string, unknown>; size: number } | undefined;
   let lastError: unknown;
   for (const candidate of candidates()) {
     try {
@@ -723,7 +724,9 @@ function parseSummaryJsonObject(text: string): Record<string, unknown> {
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         const object = parsed as Record<string, unknown>;
         if (SUMMARY_SHAPE_KEYS.some((key) => key in object)) return object;
-        firstObject ??= object;
+        if (!largest || candidate.length > largest.size) {
+          largest = { object, size: candidate.length };
+        }
       } else {
         lastError = new TypeError('Summary output is not a JSON object.');
       }
@@ -731,7 +734,7 @@ function parseSummaryJsonObject(text: string): Record<string, unknown> {
       lastError = e;
     }
   }
-  if (firstObject) return firstObject;
+  if (largest) return largest.object;
   throw lastError;
 }
 
