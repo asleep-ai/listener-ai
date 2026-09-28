@@ -36,10 +36,12 @@ import {
   migrateV1ToV2,
   readTranscription,
   repairMissingAudioFiles,
+  repairRenamedRecordingSidecars,
   sanitizeForPath,
   saveTranscription,
 } from './outputService';
 import { ALL_FIELDS, type SearchField, resolveFields, searchTranscriptions } from './searchService';
+import { recoverInterruptedRegenerations } from './regenerateTranscription';
 import { concatAudioFiles } from './services/audioConcatService';
 import { FFmpegManager } from './services/ffmpegManager';
 import { currentMonthString, formatUsd, monthRange, summarizeUsage } from './services/usageTracker';
@@ -1361,7 +1363,13 @@ async function main(): Promise<void> {
   // Backfill notes whose meta.audioFile still names a pre-rename recording
   // (#209) so `merge` reads the real recording. Best-effort.
   if (!COMMANDS_WITHOUT_DATA_ACCESS.has(args[0])) {
+    // The CLI may be the first reader after a GUI crash during Regenerate.
+    // Restore the previous complete note before list/show/export/merge sees it.
+    for (const folder of recoverInterruptedRegenerations(getDataPath(), { strict: true })) {
+      process.stderr.write(`Recovered interrupted regeneration: ${folder}\n`);
+    }
     try {
+      await repairRenamedRecordingSidecars(getDataPath());
       await repairMissingAudioFiles(getDataPath());
     } catch (err) {
       process.stderr.write(

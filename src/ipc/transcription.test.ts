@@ -3,8 +3,14 @@ import assert from 'node:assert/strict';
 import Module from 'node:module';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import * as path from 'path';
+import { spawnSync } from 'node:child_process';
 import type { TranscriptionResult } from '../geminiService';
-import { META_JSON, readTranscription, repairMissingAudioFiles } from '../outputService';
+import {
+  META_JSON,
+  readTranscription,
+  repairMissingAudioFiles,
+  repairRenamedRecordingSidecars,
+} from '../outputService';
 import { makeTempDir, rmDir } from '../test-helpers';
 import type { IpcContext } from './types';
 
@@ -186,5 +192,51 @@ describe('transcribe-audio save/rename ordering', () => {
       fs.readFileSync(path.join(metadataDir, `Untitled_Meeting_${TS}.json`), 'utf-8'),
     );
     assert.equal(sidecar.transcriptionPath, res.transcriptionPath);
+  });
+
+  it('recovers a sidecar when the process exits between audio rename and metadata move', async () => {
+    const untitled = path.join(recordingsDir, `Untitled_Meeting_${TS}.webm`);
+    const renamed = path.join(recordingsDir, `Weekly_Sync_${TS}.webm`);
+    fs.writeFileSync(untitled, 'audio-bytes');
+    fs.mkdirSync(metadataDir);
+    const oldSidecar = path.join(metadataDir, `Untitled_Meeting_${TS}.json`);
+    fs.writeFileSync(
+      oldSidecar,
+      JSON.stringify({
+        filePath: untitled,
+        title: 'Untitled',
+        liveNotes: [{ offsetMs: 1000, text: 'keep' }],
+      }),
+    );
+
+    const child = spawnSync(process.execPath, [
+      '-e',
+      `require('fs').renameSync(${JSON.stringify(untitled)}, ${JSON.stringify(renamed)}); process.exit(7)`,
+    ]);
+    assert.equal(child.status, 7);
+    assert.ok(!fs.existsSync(untitled));
+    assert.ok(fs.existsSync(oldSidecar));
+
+    const repaired = await repairRenamedRecordingSidecars(dataPath);
+    const newSidecar = path.join(metadataDir, `Weekly_Sync_${TS}.json`);
+    assert.deepEqual(repaired.repaired, [{ from: oldSidecar, to: newSidecar }]);
+    assert.ok(!fs.existsSync(oldSidecar));
+    const metadata = JSON.parse(fs.readFileSync(newSidecar, 'utf-8'));
+    assert.equal(metadata.filePath, renamed);
+    assert.deepEqual(metadata.liveNotes, [{ offsetMs: 1000, text: 'keep' }]);
+  });
+
+  it('leaves a missing sidecar path alone when two renamed recordings match', async () => {
+    const untitled = path.join(recordingsDir, `Untitled_Meeting_${TS}.webm`);
+    fs.writeFileSync(path.join(recordingsDir, `First_${TS}.webm`), 'first');
+    fs.writeFileSync(path.join(recordingsDir, `Second_${TS}.webm`), 'second');
+    fs.mkdirSync(metadataDir);
+    const oldSidecar = path.join(metadataDir, `Untitled_Meeting_${TS}.json`);
+    fs.writeFileSync(oldSidecar, JSON.stringify({ filePath: untitled, liveNotes: ['keep'] }));
+
+    const repair = await repairRenamedRecordingSidecars(dataPath);
+    assert.deepEqual(repair.repaired, []);
+    assert.deepEqual(repair.ambiguous, [oldSidecar]);
+    assert.ok(fs.existsSync(oldSidecar));
   });
 });

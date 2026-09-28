@@ -131,6 +131,34 @@ describe('saveRegeneratedTranscription', () => {
     assert.equal(fs.readFileSync(path.join(previous, HIGHLIGHTS_JSON_FILE), 'utf-8'), '');
   });
 
+  it('preserves unknown metadata while clearing exports tied to the old content', () => {
+    const dataPath = makeDataPath();
+    const previous = saveTranscription({ title: 'Old Title', result: oldResult, dataPath });
+    const metaPath = path.join(previous, META_JSON);
+    const oldMeta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    oldMeta.futureField = { retained: true };
+    oldMeta.exports = { notion: { pageUrl: 'https://example.test/old-note' } };
+    oldMeta.customFields = { oldTranscriptTag: true };
+    fs.writeFileSync(metaPath, `${JSON.stringify(oldMeta, null, 2)}\n`);
+
+    saveRegeneratedTranscription({
+      title: 'New Title',
+      result: newResult,
+      dataPath,
+      previousFolderPath: previous,
+    });
+
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    assert.deepEqual(meta.futureField, { retained: true });
+    assert.equal(meta.exports, undefined, 'old export status does not describe the new content');
+    assert.equal(
+      meta.customFields,
+      undefined,
+      'old transcript fields do not describe the new content',
+    );
+    assert.equal(meta.title, 'New Title');
+  });
+
   it('carries merge provenance forward', async () => {
     const dataPath = makeDataPath();
     const previous = saveTranscription({
@@ -306,6 +334,36 @@ describe('recoverInterruptedRegenerations', () => {
     assert.equal(fs.readFileSync(path.join(unknown, 'keep.txt'), 'utf-8'), 'keep');
   });
 
+  it('fails a CLI read without deleting data when an interrupted swap has no backup', () => {
+    const dataPath = makeDataPath();
+    const previous = saveTranscription({ title: 'Old Title', result: oldResult, dataPath });
+    const scratch = path.join(dataPath, '.regenerate-missing-backup');
+    fs.mkdirSync(path.join(scratch, 'new'), { recursive: true });
+    fs.writeFileSync(path.join(scratch, 'new', META_JSON), '{}');
+    fs.writeFileSync(
+      path.join(scratch, 'swap.json'),
+      JSON.stringify({ pid: 2147483647, target: previous, staged: 'new' }),
+    );
+    fs.writeFileSync(path.join(previous, 'summary.md'), 'Partially swapped summary.');
+
+    const cli = spawnSync(
+      process.execPath,
+      [require.resolve('./cli'), 'show', path.basename(previous)],
+      {
+        encoding: 'utf-8',
+        env: { ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: dataPath },
+      },
+    );
+    assert.equal(cli.status, 1);
+    assert.match(cli.stderr, /Regeneration backup is missing meta.json/);
+    assert.equal(cli.stdout, '');
+    assert.ok(fs.existsSync(scratch), 'keep the scratch files for manual recovery');
+    assert.equal(
+      fs.readFileSync(path.join(previous, 'summary.md'), 'utf-8'),
+      'Partially swapped summary.',
+    );
+  });
+
   it('restores the previous note when the process died mid-swap', async () => {
     const dataPath = makeDataPath();
     const previous = saveTranscription({ title: 'Old Title', result: oldResult, dataPath });
@@ -334,7 +392,21 @@ describe('recoverInterruptedRegenerations', () => {
     );
     assert.equal(scratchDirs(dataPath).length, 1);
 
-    assert.deepEqual(recoverInterruptedRegenerations(dataPath), [previous]);
+    // The CLI can be the first process to read this note after the GUI crash.
+    const cli = spawnSync(
+      process.execPath,
+      [require.resolve('./cli'), 'show', path.basename(previous)],
+      {
+        encoding: 'utf-8',
+        env: { ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: dataPath },
+      },
+    );
+    assert.equal(cli.status, 0, cli.stderr);
+    assert.match(cli.stdout, /Old summary\./);
+    assert.doesNotMatch(cli.stdout, /New summary\./);
+    assert.match(cli.stderr, /Recovered interrupted regeneration/);
+
+    assert.deepEqual(recoverInterruptedRegenerations(dataPath), []);
     assert.deepEqual(snapshot(previous), before);
     assert.equal((await readTranscription(previous))?.summary, 'Old summary.');
     assert.deepEqual(scratchDirs(dataPath), []);

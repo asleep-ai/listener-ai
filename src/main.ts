@@ -39,6 +39,7 @@ import {
   type LiveNote,
   readTranscription,
   repairMissingAudioFiles,
+  repairRenamedRecordingSidecars,
   updateTranscriptionStatus,
 } from './outputService';
 import { recoverInterruptedRegenerations } from './regenerateTranscription';
@@ -681,6 +682,17 @@ app.whenReady().then(async () => {
   // Backfill notes whose meta.audioFile still names a pre-rename recording
   // (#209). Best-effort: a failure only leaves those notes as they were.
   try {
+    const sidecars = await repairRenamedRecordingSidecars(getDataPath());
+    if (
+      sidecars.repaired.length > 0 ||
+      sidecars.ambiguous.length > 0 ||
+      sidecars.failed.length > 0
+    ) {
+      console.log(
+        `[audio-repair] Repaired ${sidecars.repaired.length} recording sidecar(s);` +
+          ` skipped ${sidecars.ambiguous.length} ambiguous; ${sidecars.failed.length} failed.`,
+      );
+    }
     const repair = await repairMissingAudioFiles(getDataPath());
     if (repair.repaired.length > 0 || repair.ambiguous.length > 0 || repair.failed.length > 0) {
       console.log(

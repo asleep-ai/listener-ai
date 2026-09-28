@@ -1342,6 +1342,104 @@ function untitledRecordingTimestamp(audioPath: string): string | null {
   return base.match(RECORDING_TIMESTAMP_SUFFIX)?.[1] ?? null;
 }
 
+export interface RecordingSidecarRepairResult {
+  repaired: Array<{ from: string; to: string }>;
+  ambiguous: string[];
+  failed: Array<{ from: string; error: string }>;
+}
+
+/** Recover a recording renamed just before the app stopped, while its
+ * metadata sidecar was still keyed to the missing Untitled_Meeting path.
+ * Require the old sidecar plus exactly one recording with the same timestamp
+ * and extension in this data root's recordings directory. Unknown or
+ * conflicting metadata is left untouched. Run before note audio-path repair. */
+export async function repairRenamedRecordingSidecars(
+  dataPath: string,
+): Promise<RecordingSidecarRepairResult> {
+  const result: RecordingSidecarRepairResult = { repaired: [], ambiguous: [], failed: [] };
+  const recordingsDir = path.join(dataPath, 'recordings');
+  const metadataDir = path.join(dataPath, RECORDING_METADATA_DIR);
+  let audioNames: string[];
+  let sidecarNames: string[];
+  try {
+    [audioNames, sidecarNames] = await Promise.all([
+      fs.promises.readdir(recordingsDir),
+      fs.promises.readdir(metadataDir),
+    ]);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return result;
+    throw err;
+  }
+
+  for (const name of sidecarNames) {
+    if (!name.endsWith('.json')) continue;
+    const oldSidecar = path.join(metadataDir, name);
+    let metadata: Record<string, unknown>;
+    try {
+      metadata = JSON.parse(await fs.promises.readFile(oldSidecar, 'utf-8'));
+    } catch {
+      continue;
+    }
+    if (!metadata || typeof metadata !== 'object') continue;
+    const oldAudio = metadata.filePath;
+    if (typeof oldAudio !== 'string') continue;
+    const timestamp = untitledRecordingTimestamp(oldAudio);
+    if (!timestamp || fs.existsSync(oldAudio)) continue;
+    if (path.resolve(path.dirname(oldAudio)) !== path.resolve(recordingsDir)) continue;
+    if (name !== `${path.basename(oldAudio, path.extname(oldAudio))}.json`) continue;
+
+    const extension = path.extname(oldAudio);
+    const candidates: string[] = [];
+    for (const audioName of audioNames) {
+      if (path.extname(audioName) !== extension) continue;
+      if (!path.basename(audioName, extension).endsWith(`_${timestamp}`)) continue;
+      const candidate = path.join(recordingsDir, audioName);
+      try {
+        if ((await fs.promises.lstat(candidate)).isFile()) candidates.push(candidate);
+      } catch {
+        // A recording removed since the directory scan is not a candidate.
+      }
+    }
+    if (candidates.length === 0) continue;
+    if (candidates.length !== 1) {
+      result.ambiguous.push(oldSidecar);
+      continue;
+    }
+
+    const newAudio = candidates[0];
+    const newSidecar = path.join(
+      metadataDir,
+      `${path.basename(newAudio, path.extname(newAudio))}.json`,
+    );
+    try {
+      if (fs.existsSync(newSidecar)) {
+        const current = JSON.parse(await fs.promises.readFile(newSidecar, 'utf-8'));
+        if (
+          current?.filePath !== newAudio ||
+          (metadata.liveNotes !== undefined &&
+            JSON.stringify(current.liveNotes) !== JSON.stringify(metadata.liveNotes))
+        ) {
+          result.ambiguous.push(oldSidecar);
+          continue;
+        }
+      } else {
+        writeAtomic(
+          newSidecar,
+          `${JSON.stringify({ ...metadata, filePath: newAudio }, null, 2)}\n`,
+        );
+      }
+      await fs.promises.unlink(oldSidecar);
+      result.repaired.push({ from: oldSidecar, to: newSidecar });
+    } catch (err) {
+      result.failed.push({
+        from: oldSidecar,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return result;
+}
+
 /**
  * Backfill for #209: GUI transcriptions used to save the note before renaming
  * the `Untitled_Meeting_*` recording, so meta.audioFile kept the pre-rename

@@ -27,6 +27,23 @@ const NOTE_CONTENT_FILES = [
   HIGHLIGHTS_JSON_FILE,
 ];
 const NOTE_FILES = [...NOTE_CONTENT_FILES, META_JSON];
+// A fresh transcription owns these fields. Other keys may come from a newer
+// schema or integration and must survive a regenerate of an older client.
+// `exports` is intentionally reset: it describes delivery of the old content.
+const TRANSCRIPTION_META_KEYS = new Set([
+  'schemaVersion',
+  'title',
+  'suggestedTitle',
+  'emoji',
+  'transcribedAt',
+  'audioFile',
+  'cost',
+  'customFields',
+  'summarySections',
+  'actionItemGroups',
+  'merge',
+  'exports',
+]);
 
 // Scratch folders live directly under dataPath (same filesystem as
 // transcriptions/, so renames are atomic) and outside anything that lists or
@@ -92,6 +109,17 @@ export function saveRegeneratedTranscription(opts: RegenerateTranscriptionOption
       mergedFrom: target.meta.merge?.sourceIds,
     });
 
+    const stagedMetaPath = path.join(staged, META_JSON);
+    const stagedMeta = JSON.parse(fs.readFileSync(stagedMetaPath, 'utf-8')) as MeetingMetaV2;
+    const unknownMeta = Object.fromEntries(
+      Object.entries(target.meta).filter(([key]) => !TRANSCRIPTION_META_KEYS.has(key)),
+    );
+    fs.writeFileSync(
+      stagedMetaPath,
+      `${JSON.stringify({ ...unknownMeta, ...stagedMeta }, null, 2)}\n`,
+      'utf-8',
+    );
+
     const backup = path.join(scratch, 'backup');
     fs.mkdirSync(backup);
     for (const name of NOTE_FILES) {
@@ -150,7 +178,10 @@ export function saveRegeneratedTranscription(opts: RegenerateTranscriptionOption
  * or never-started swaps are just removed. Folders owned by another live
  * process are skipped. Returns the note folders that were restored.
  */
-export function recoverInterruptedRegenerations(dataPath: string): string[] {
+export function recoverInterruptedRegenerations(
+  dataPath: string,
+  options: { strict?: boolean } = {},
+): string[] {
   let entries: string[];
   try {
     entries = fs.readdirSync(dataPath).filter((name) => name.startsWith(SCRATCH_PREFIX));
@@ -169,7 +200,6 @@ export function recoverInterruptedRegenerations(dataPath: string): string[] {
       // completed before a crash.
       if (!marker) continue;
       if (
-        marker &&
         marker.pid !== process.pid &&
         isProcessAlive(marker.pid) &&
         Date.now() - fs.statSync(markerPath).mtimeMs < LIVE_SCRATCH_MAX_AGE_MS
@@ -177,19 +207,23 @@ export function recoverInterruptedRegenerations(dataPath: string): string[] {
         continue;
       }
 
-      const staged = marker?.staged ? path.join(scratch, marker.staged) : undefined;
-      if (
-        marker?.target &&
-        staged?.startsWith(scratch + path.sep) &&
-        fs.existsSync(path.join(staged, META_JSON)) &&
-        resolveReplaceableFolder(dataPath, marker.target)
-      ) {
-        restoreFromBackup(marker.target, path.join(scratch, 'backup'), NOTE_FILES);
-        restored.push(marker.target);
+      if (marker.target) {
+        const staged = marker.staged ? path.join(scratch, marker.staged) : undefined;
+        if (!staged?.startsWith(scratch + path.sep)) {
+          throw new Error('Invalid regeneration staging path');
+        }
+        if (!resolveReplaceableFolder(dataPath, marker.target)) {
+          throw new Error(`Cannot verify regeneration target ${marker.target}`);
+        }
+        if (fs.existsSync(path.join(staged, META_JSON))) {
+          restoreFromBackup(marker.target, path.join(scratch, 'backup'), NOTE_FILES);
+          restored.push(marker.target);
+        }
       }
       fs.rmSync(scratch, { recursive: true, force: true });
     } catch (err) {
       console.warn(`Failed to recover interrupted regenerate at ${scratch}:`, err);
+      if (options.strict) throw err;
     }
   }
   return restored;
@@ -198,6 +232,9 @@ export function recoverInterruptedRegenerations(dataPath: string): string[] {
 /** Put `names` in `folderPath` back to their backed-up state: restore files
  * that existed before the swap and remove ones that did not. */
 function restoreFromBackup(folderPath: string, backup: string, names: string[]): void {
+  if (!fs.existsSync(path.join(backup, META_JSON))) {
+    throw new Error(`Regeneration backup is missing meta.json: ${backup}`);
+  }
   for (const name of names) {
     const saved = path.join(backup, name);
     const dest = path.join(folderPath, name);

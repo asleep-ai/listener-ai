@@ -37,6 +37,7 @@
     "dist/openAiRealtimeClient.js",
     "dist/piAiClient.js",
     "dist/outputService.js",
+    "dist/regenerateTranscription.js",
     "dist/searchService.js",
     "dist/agentService.js",
     "dist/audioFormats.js",
