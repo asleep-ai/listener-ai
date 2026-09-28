@@ -1095,6 +1095,21 @@ describe('migrate crash-safety and corruption recovery', () => {
     assert.equal(await readTranscription(folderPath), null);
     assert.ok(!fs.existsSync(path.join(oldRoot, '.listener-meeting-locks')));
   });
+
+  it('reads a note from a read-only legacy data root', async () => {
+    const oldRoot = makeTmpDataPath();
+    const folderPath = saveTranscription({
+      title: 'Archived',
+      result: baseResult,
+      dataPath: oldRoot,
+    });
+    fs.chmodSync(oldRoot, 0o555);
+    try {
+      assert.equal((await readTranscription(folderPath))?.title, 'Archived');
+    } finally {
+      fs.chmodSync(oldRoot, 0o755);
+    }
+  });
 });
 
 describe('repairMissingAudioFiles (#209 backfill)', () => {

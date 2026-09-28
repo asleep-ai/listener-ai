@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'node:crypto';
 import { withMeetingLock } from './meetingLock';
+import { getDataPath } from './dataPath';
 import type { HighlightEntry, TranscriptionResult } from './geminiService';
 import {
   type ActionItemGroup,
@@ -860,8 +861,12 @@ export async function withTranscriptionSnapshot<T>(
   if (!fs.existsSync(path.join(folderPath, META_JSON))) {
     return action(await readTranscriptionUnlocked(folderPath, opts));
   }
-  return withMeetingLock(folderPath, async () =>
-    action(await readTranscriptionUnlocked(folderPath, opts)),
+  const activeRoot = path.resolve(getTranscriptionsDir(getDataPath()));
+  const isActiveNote = path.dirname(path.resolve(folderPath)) === activeRoot;
+  return withMeetingLock(
+    folderPath,
+    async () => action(await readTranscriptionUnlocked(folderPath, opts)),
+    { allowUnlockedReadOnly: !isActiveNote },
   );
 }
 
@@ -1462,21 +1467,32 @@ export async function repairRenamedRecordingSidecars(
       `${path.basename(newAudio, path.extname(newAudio))}.json`,
     );
     try {
-      if (fs.existsSync(newSidecar)) {
-        const current = JSON.parse(await fs.promises.readFile(newSidecar, 'utf-8'));
-        const expected = { ...metadata, filePath: newAudio };
-        if (!current || JSON.stringify(current) !== JSON.stringify(expected)) {
-          result.ambiguous.push(oldSidecar);
-          continue;
-        }
-      } else {
-        writeAtomic(
-          newSidecar,
-          `${JSON.stringify({ ...metadata, filePath: newAudio }, null, 2)}\n`,
-        );
-      }
-      await fs.promises.unlink(oldSidecar);
-      result.repaired.push({ from: oldSidecar, to: newSidecar });
+      const outcome = await withMeetingLock(oldSidecar, () =>
+        withMeetingLock(newSidecar, async () => {
+          // A live writer may have changed either sidecar since the scan.
+          let latest: Record<string, unknown>;
+          try {
+            latest = JSON.parse(await fs.promises.readFile(oldSidecar, 'utf-8'));
+          } catch {
+            return 'changed';
+          }
+          if (JSON.stringify(latest) !== JSON.stringify(metadata)) return 'changed';
+          if (fs.existsSync(newSidecar)) {
+            const current = JSON.parse(await fs.promises.readFile(newSidecar, 'utf-8'));
+            const expected = { ...latest, filePath: newAudio };
+            if (!current || JSON.stringify(current) !== JSON.stringify(expected)) return 'changed';
+          } else {
+            writeAtomic(
+              newSidecar,
+              `${JSON.stringify({ ...latest, filePath: newAudio }, null, 2)}\n`,
+            );
+          }
+          await fs.promises.unlink(oldSidecar);
+          return 'repaired';
+        }),
+      );
+      if (outcome === 'repaired') result.repaired.push({ from: oldSidecar, to: newSidecar });
+      else result.ambiguous.push(oldSidecar);
     } catch (err) {
       result.failed.push({
         from: oldSidecar,

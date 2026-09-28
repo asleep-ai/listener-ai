@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import * as path from 'path';
 import { spawnSync } from 'node:child_process';
 import type { TranscriptionResult } from '../geminiService';
+import { withMeetingLock } from '../meetingLock';
 import {
   META_JSON,
   readTranscription,
@@ -306,5 +307,47 @@ describe('transcribe-audio save/rename ordering', () => {
     assert.deepEqual(repair.ambiguous, [oldSidecar]);
     assert.ok(fs.existsSync(oldSidecar));
     assert.ok(fs.existsSync(newSidecar));
+  });
+
+  it('does not overwrite a sidecar saved while rename repair waits', async () => {
+    const untitled = path.join(recordingsDir, `Untitled_Meeting_${TS}.webm`);
+    const renamed = path.join(recordingsDir, `Weekly_Sync_${TS}.webm`);
+    fs.writeFileSync(renamed, 'audio');
+    fs.mkdirSync(metadataDir);
+    const oldSidecar = path.join(metadataDir, `Untitled_Meeting_${TS}.json`);
+    const newSidecar = path.join(metadataDir, `Weekly_Sync_${TS}.json`);
+    fs.writeFileSync(oldSidecar, JSON.stringify({ filePath: untitled, liveNotes: ['old'] }));
+
+    let releaseWriter!: () => void;
+    let signalWriter!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      signalWriter = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseWriter = resolve;
+    });
+    const writer = withMeetingLock(newSidecar, async () => {
+      signalWriter();
+      await gate;
+      fs.writeFileSync(
+        newSidecar,
+        JSON.stringify({ filePath: renamed, transcriptionPath: 'fresh' }),
+      );
+    });
+    await ready;
+    try {
+      const pending = repairRenamedRecordingSidecars(dataPath);
+      await new Promise<void>((resolve) => setTimeout(resolve, 30));
+      releaseWriter();
+      await writer;
+      const repair = await pending;
+      assert.deepEqual(repair.repaired, []);
+      assert.deepEqual(repair.ambiguous, [oldSidecar]);
+      assert.equal(JSON.parse(fs.readFileSync(newSidecar, 'utf-8')).transcriptionPath, 'fresh');
+      assert.ok(fs.existsSync(oldSidecar));
+    } finally {
+      releaseWriter();
+      await writer;
+    }
   });
 });

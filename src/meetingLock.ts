@@ -19,11 +19,16 @@ const lockfile = require('proper-lockfile') as {
 export async function withMeetingLock<T>(
   folderPath: string,
   action: () => Promise<T> | T,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; allowUnlockedReadOnly?: boolean } = {},
 ): Promise<T> {
   const key = path.resolve(folderPath);
   const lockDir = path.join(path.dirname(path.dirname(key)), '.listener-meeting-locks');
-  fs.mkdirSync(lockDir, { recursive: true });
+  try {
+    fs.mkdirSync(lockDir, { recursive: true });
+  } catch (error) {
+    if (options.allowUnlockedReadOnly && isReadOnlyError(error)) return action();
+    throw error;
+  }
   const lockfilePath = path.join(lockDir, `${createHash('sha256').update(key).digest('hex')}.lock`);
   const deadline = Date.now() + 15 * 60_000;
   let release: () => Promise<void>;
@@ -38,6 +43,7 @@ export async function withMeetingLock<T>(
       });
       break;
     } catch (error) {
+      if (options.allowUnlockedReadOnly && isReadOnlyError(error)) return action();
       if ((error as NodeJS.ErrnoException).code !== 'ELOCKED' || Date.now() >= deadline) {
         throw error;
       }
@@ -50,6 +56,11 @@ export async function withMeetingLock<T>(
   } finally {
     await release();
   }
+}
+
+function isReadOnlyError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'EACCES' || code === 'EPERM' || code === 'EROFS';
 }
 
 function waitForRetry(signal?: AbortSignal): Promise<void> {

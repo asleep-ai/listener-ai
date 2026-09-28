@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
+import { withMeetingLock } from '../meetingLock';
 import type { ActionItemGroup, SummarySection } from '../meetingRecord';
 import type { LiveNote } from '../outputService';
 
@@ -49,23 +50,25 @@ export class MetadataService {
   async saveMetadata(audioFilePath: string, metadata: Partial<RecordingMetadata>): Promise<void> {
     try {
       const metadataPath = this.getMetadataPath(audioFilePath);
-      console.log('Saving metadata to:', metadataPath);
+      await withMeetingLock(metadataPath, async () => {
+        console.log('Saving metadata to:', metadataPath);
 
-      const existingMetadata = await this.getMetadata(audioFilePath);
+        const existingMetadata = await this.getMetadata(audioFilePath);
 
-      const updatedMetadata: RecordingMetadata = {
-        ...existingMetadata,
-        ...metadata,
-        filePath: audioFilePath,
-        title:
-          metadata.title ||
-          existingMetadata?.title ||
-          path.basename(audioFilePath, path.extname(audioFilePath)),
-        timestamp: existingMetadata?.timestamp || new Date().toISOString(),
-      };
+        const updatedMetadata: RecordingMetadata = {
+          ...existingMetadata,
+          ...metadata,
+          filePath: audioFilePath,
+          title:
+            metadata.title ||
+            existingMetadata?.title ||
+            path.basename(audioFilePath, path.extname(audioFilePath)),
+          timestamp: existingMetadata?.timestamp || new Date().toISOString(),
+        };
 
-      await fs.writeFile(metadataPath, JSON.stringify(updatedMetadata, null, 2), 'utf8');
-      console.log('Metadata written successfully to:', metadataPath);
+        await fs.writeFile(metadataPath, JSON.stringify(updatedMetadata, null, 2), 'utf8');
+        console.log('Metadata written successfully to:', metadataPath);
+      });
     } catch (error) {
       console.error('Failed to save metadata:', error);
       throw error;
@@ -86,7 +89,7 @@ export class MetadataService {
   async deleteMetadata(audioFilePath: string): Promise<void> {
     try {
       const metadataPath = this.getMetadataPath(audioFilePath);
-      await fs.unlink(metadataPath);
+      await withMeetingLock(metadataPath, () => fs.unlink(metadataPath));
     } catch (_error) {
       // Ignore if file doesn't exist
       console.log('Metadata file not found:', audioFilePath);
