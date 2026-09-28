@@ -1062,6 +1062,14 @@ describe('migrate crash-safety and corruption recovery', () => {
     const data = await readTranscription(folderPath);
     assert.equal(data, null, 'corrupt meta.json must yield null, not throw');
   });
+
+  it('does not create a lock beside a missing legacy note path', async () => {
+    const dataPath = makeTmpDataPath();
+    const oldRoot = path.join(dataPath, 'unavailable-old-root');
+    const folderPath = path.join(oldRoot, 'transcriptions', 'missing-note');
+    assert.equal(await readTranscription(folderPath), null);
+    assert.ok(!fs.existsSync(path.join(oldRoot, '.listener-meeting-locks')));
+  });
 });
 
 describe('repairMissingAudioFiles (#209 backfill)', () => {

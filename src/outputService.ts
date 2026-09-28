@@ -849,6 +849,11 @@ export async function withTranscriptionSnapshot<T>(
   opts: ReadTranscriptionOptions,
   action: (data: ReadTranscriptionResult | null) => Promise<T> | T,
 ): Promise<T> {
+  // A legacy sidecar can name a note in an old or unavailable data root.
+  // Preserve the reader's null fallback without creating a lock there.
+  if (!fs.existsSync(path.join(folderPath, META_JSON))) {
+    return action(await readTranscriptionUnlocked(folderPath, opts));
+  }
   return withMeetingLock(folderPath, async () =>
     action(await readTranscriptionUnlocked(folderPath, opts)),
   );
