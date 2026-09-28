@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { app, ipcMain } from 'electron';
 import { withMeetingLock } from '../meetingLock';
+import { META_JSON } from '../outputService';
 import { saveRegeneratedTranscription } from '../regenerateTranscription';
 import { reportError } from '../sentry';
 import { metadataService } from '../services/metadataService';
@@ -73,6 +74,9 @@ export function register(ctx: IpcContext): void {
       } catch (err) {
         console.warn('Failed to read recording metadata:', err);
       }
+      const previousNoteWasPresent =
+        !!existing?.transcriptionPath &&
+        fs.existsSync(path.join(existing.transcriptionPath, META_JSON));
       let liveNotes = ctx.sanitizeLiveNotes(liveNotesRaw);
       if (!liveNotes || liveNotes.length === 0) {
         // Fall back to whatever stop-recording persisted -- covers the
@@ -154,6 +158,13 @@ export function register(ctx: IpcContext): void {
           // A cancel can arrive during the awaited rename, sidecar move, or
           // wait for an in-flight Drive sync of this note.
           signal.throwIfAborted();
+          if (
+            previousNoteWasPresent &&
+            existing?.transcriptionPath &&
+            !fs.existsSync(path.join(existing.transcriptionPath, META_JSON))
+          ) {
+            throw new Error('The linked note was deleted while regeneration was running.');
+          }
           return saveRegeneratedTranscription({
             title,
             result,
@@ -176,12 +187,16 @@ export function register(ctx: IpcContext): void {
       }
 
       if (!transcriptionPath && existing?.transcriptionPath) {
-        // Regenerate whose save failed: the previous note is still linked and
-        // intact. Leave the sidecar alone rather than pairing that note with
-        // inline fields from a result that was never saved.
+        // Leave the sidecar alone when regeneration did not save a new note;
+        // never pair it with inline fields from an uncommitted result.
+        const deletedDuringRun =
+          previousNoteWasPresent &&
+          !fs.existsSync(path.join(existing.transcriptionPath, META_JSON));
         return {
           success: false,
-          error: 'Could not save the regenerated note. The previous note was kept.',
+          error: deletedDuringRun
+            ? 'The linked note was deleted during regeneration. No new note was saved.'
+            : 'Could not save the regenerated note. The previous note was kept.',
         };
       }
 

@@ -358,7 +358,9 @@ export class SyncEngine {
         if (localMeetingNames.includes(name)) {
           const localPath = path.join(this.transcriptionsDir, name);
           try {
-            fs.rmSync(localPath, { recursive: true, force: true });
+            await withMeetingLock(localPath, () =>
+              fs.rmSync(localPath, { recursive: true, force: true }),
+            );
             result.deleted.push(name);
             this.logger(`Deleted resurrected local meeting "${name}" (tombstoned).`);
           } catch (err) {
@@ -452,11 +454,12 @@ export class SyncEngine {
         // Remove from meetings map and from disk if present.
         delete state.meetings[meetingName];
         const localPath = path.join(this.transcriptionsDir, meetingName);
-        if (fs.existsSync(localPath)) {
+        await withMeetingLock(localPath, () => {
+          if (!fs.existsSync(localPath)) return;
           fs.rmSync(localPath, { recursive: true, force: true });
           result.deleted.push(meetingName);
           this.logger(`Applied remote tombstone for "${meetingName}".`);
-        }
+        });
       } catch (err) {
         result.errors.push({
           meeting: meetingName,

@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { withMeetingLock } from '../meetingLock';
 import { makeTempDir, rmDir } from '../test-helpers';
 import type { DriveFile, GoogleDriveClient } from './googleDriveService';
 import { SyncEngine, type SyncProgressEvent, type SyncState } from './syncEngine';
@@ -608,6 +609,45 @@ describe('SyncEngine: deletions and tombstones (Phase 3C)', () => {
     const state2 = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
     assert.ok(!state2.meetings['m1']);
     assert.ok(state2.tombstones!['m1']);
+  });
+
+  it('waits for a note writer before applying a remote tombstone', async () => {
+    const folderPath = makeMeeting('m1', { 'summary.md': 's' });
+    await makeEngine().syncOnce();
+    const state = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    await mockClient.uploadFile({
+      name: 'm1.json',
+      parentId: state.tombstonesFolderId!,
+      content: JSON.stringify({ meetingName: 'm1', deletedAt: new Date().toISOString() }),
+      mimeType: 'application/json',
+    });
+
+    let release!: () => void;
+    let ready!: () => void;
+    const acquired = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const held = withMeetingLock(
+      folderPath,
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+          ready();
+        }),
+    );
+    await acquired;
+    try {
+      const pending = makeEngine().syncOnce();
+      await new Promise<void>((resolve) => setTimeout(resolve, 80));
+      assert.ok(fs.existsSync(folderPath));
+      release();
+      const result = await pending;
+      assert.deepEqual(result.deleted, ['m1']);
+      assert.ok(!fs.existsSync(folderPath));
+    } finally {
+      release();
+      await held;
+    }
   });
 
   it('re-deletes a meeting whose folder was resurrected locally after tombstoning', async () => {

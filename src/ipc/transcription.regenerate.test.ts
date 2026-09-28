@@ -210,6 +210,32 @@ describe('transcribe-audio regenerate (#213)', () => {
     assert.equal(read?.summary, 'First summary.');
   });
 
+  it('does not recreate a linked note deleted while the provider was running', async () => {
+    transcribe = async () => resultFor('First');
+    const first = await run();
+    const previous = first.transcriptionPath!;
+    let releaseProvider!: () => void;
+    let signalReady!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      signalReady = resolve;
+    });
+    transcribe = () =>
+      new Promise<TranscriptionResult>((resolve) => {
+        releaseProvider = () => resolve(resultFor('Second'));
+        signalReady();
+      });
+
+    const pending = run();
+    await ready;
+    fs.rmSync(previous, { recursive: true });
+    releaseProvider();
+    const second = (await pending) as { success: boolean; error?: string };
+    assert.equal(second.success, false);
+    assert.match(second.error ?? '', /linked note was deleted/);
+    assert.deepEqual(noteFolders(), []);
+    assert.equal(linkedPath(), previous);
+  });
+
   it('a regenerate whose save fails keeps the previous note and leaves the sidecar untouched', async () => {
     transcribe = async () => resultFor('First');
     const first = await run();
