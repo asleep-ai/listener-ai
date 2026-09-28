@@ -25,6 +25,7 @@ let currentTranscriptionData: TranscriptionData | null = null;
 let currentMeetingTitle = '';
 let currentFilePath: string | null | undefined = '';
 let currentTranscriptionPath: string | null = null;
+let currentGenerationId: string | null | undefined;
 let currentNotionUrl: string | null = null;
 let currentSlackSentAt: string | null = null;
 
@@ -138,6 +139,9 @@ export function showSavedTranscript(
     currentFilePath = filePath;
     currentTranscriptionPath =
       (metadata as { transcriptionPath?: string }).transcriptionPath ?? null;
+    currentGenerationId = currentTranscriptionPath
+      ? (metadata as { generationId?: string | null }).generationId
+      : undefined;
     currentNotionUrl = (metadata as { notionPageUrl?: string }).notionPageUrl ?? null;
     currentSlackSentAt = (metadata as { slackSentAt?: string }).slackSentAt ?? null;
     refreshSlackButtonLabel();
@@ -251,6 +255,9 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       currentFilePath = filePath;
       currentTranscriptionPath =
         (result as { transcriptionPath?: string }).transcriptionPath ?? null;
+      currentGenerationId = currentTranscriptionPath
+        ? (result as { generationId?: string | null }).generationId
+        : undefined;
       currentNotionUrl = null;
       currentSlackSentAt = null;
       refreshSlackButtonLabel();
@@ -407,6 +414,9 @@ export function setupTranscriptionModal(): void {
           transcriptionData: currentTranscriptionData,
           audioFilePath: currentFilePath || undefined,
           transcriptionPath: currentTranscriptionPath || undefined,
+          ...(currentGenerationId !== undefined
+            ? { expectedGenerationId: currentGenerationId }
+            : {}),
         });
 
         if (result.success) {
@@ -454,6 +464,9 @@ export function setupTranscriptionModal(): void {
           title: currentMeetingTitle,
           transcriptionData: currentTranscriptionData,
           transcriptionPath: currentTranscriptionPath || undefined,
+          ...(currentGenerationId !== undefined
+            ? { expectedGenerationId: currentGenerationId }
+            : {}),
           notionUrl: currentNotionUrl || undefined,
         });
 
@@ -480,11 +493,13 @@ export function _setCurrentTranscription(data: {
   title: string;
   filePath: string | null | undefined;
   transcriptionPath?: string | null;
+  generationId?: string | null;
 }): void {
   currentTranscriptionData = data.transcriptionData;
   currentMeetingTitle = data.title;
   currentFilePath = data.filePath;
   currentTranscriptionPath = data.transcriptionPath ?? null;
+  currentGenerationId = currentTranscriptionPath ? data.generationId : undefined;
   currentNotionUrl = null;
   currentSlackSentAt = null;
   refreshSlackButtonLabel();

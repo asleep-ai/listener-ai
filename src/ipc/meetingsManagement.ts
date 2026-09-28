@@ -6,7 +6,7 @@ import { promisify } from 'util';
 import { app, dialog, ipcMain } from 'electron';
 import { extensionForMimeType } from '../audioFormats';
 import { withMeetingLock } from '../meetingLock';
-import { formatTimestamp, sanitizeForPath, saveTranscription } from '../outputService';
+import { META_JSON, formatTimestamp, sanitizeForPath, saveTranscription } from '../outputService';
 import { reportError } from '../sentry';
 import { concatAudioFiles } from '../services/audioConcatService';
 import { metadataService } from '../services/metadataService';
@@ -282,6 +282,7 @@ export function register(ctx: IpcContext): void {
       // user's --title flag / dialog input.
       const finalTitle = opts.title?.trim() || result.suggestedTitle || rawTitle;
       let transcriptionPath: string;
+      let generationId: string | null;
       try {
         transcriptionPath = saveTranscription({
           title: finalTitle,
@@ -290,6 +291,9 @@ export function register(ctx: IpcContext): void {
           dataPath: app.getPath('userData'),
           mergedFrom: sourceFolders,
         });
+        generationId =
+          JSON.parse(fs.readFileSync(path.join(transcriptionPath, META_JSON), 'utf-8'))
+            .generationId ?? null;
         ctx.maybeAutoSync();
       } catch (error) {
         console.error('Failed to save merged transcription files:', error);
@@ -323,6 +327,7 @@ export function register(ctx: IpcContext): void {
         data: result,
         mergedAudioPath,
         transcriptionPath,
+        generationId,
         mergedFrom: sourceFolders,
       };
     } catch (error) {

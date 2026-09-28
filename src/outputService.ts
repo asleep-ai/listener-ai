@@ -798,6 +798,7 @@ function folderNameToTimestamp(name: string): string {
 
 export interface ReadTranscriptionResult {
   title: string;
+  generationId?: string | null;
   suggestedTitle?: string;
   transcript: string;
   summary: string;
@@ -929,6 +930,7 @@ async function readTranscriptionUnlocked(
 
     return {
       title: meta.title || path.basename(folderPath),
+      generationId: meta.generationId ?? null,
       suggestedTitle: meta.suggestedTitle,
       transcript: (transcript ?? '').trim(),
       summary: (summary ?? '').trim(),

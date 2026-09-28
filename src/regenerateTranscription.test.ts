@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
 import * as path from 'path';
 import type { TranscriptionResult } from './geminiService';
+import { withMeetingLock } from './meetingLock';
 import {
   HIGHLIGHTS_JSON_FILE,
   KEY_POINTS_FILE,
@@ -352,26 +353,73 @@ describe('saveRegeneratedTranscription', () => {
 });
 
 describe('recoverInterruptedRegenerations', () => {
-  it('blocks a strict reader while another process owns a live regeneration', () => {
+  it('waits for readers and lets only one process restore an interrupted swap', async () => {
+    const dataPath = makeDataPath();
+    const previous = saveTranscription({ title: 'Old Title', result: oldResult, dataPath });
+    const before = snapshot(previous);
+    const scratch = path.join(dataPath, '.regenerate-overlapping-recovery');
+    fs.mkdirSync(path.join(scratch, 'new'), { recursive: true });
+    fs.cpSync(previous, path.join(scratch, 'backup'), { recursive: true });
+    fs.writeFileSync(path.join(scratch, 'new', META_JSON), '{}');
+    fs.writeFileSync(
+      path.join(scratch, 'swap.json'),
+      JSON.stringify({ pid: 2147483647, target: previous, staged: 'new' }),
+    );
+    fs.writeFileSync(path.join(previous, 'summary.md'), 'Partially swapped summary.');
+
+    let releaseReader!: () => void;
+    let signalReader!: () => void;
+    const readerReady = new Promise<void>((resolve) => {
+      signalReader = resolve;
+    });
+    const reader = withMeetingLock(
+      previous,
+      () =>
+        new Promise<void>((resolve) => {
+          releaseReader = resolve;
+          signalReader();
+        }),
+    );
+    await readerReady;
+    try {
+      const first = recoverInterruptedRegenerations(dataPath, { strict: true });
+      const second = recoverInterruptedRegenerations(dataPath, { strict: true });
+      await new Promise<void>((resolve) => setTimeout(resolve, 30));
+      assert.equal(
+        fs.readFileSync(path.join(previous, 'summary.md'), 'utf-8'),
+        'Partially swapped summary.',
+      );
+      releaseReader();
+      const results = await Promise.all([first, second]);
+      assert.deepEqual(results.flat(), [previous]);
+      assert.deepEqual(snapshot(previous), before);
+      assert.equal(fs.existsSync(scratch), false);
+    } finally {
+      releaseReader();
+      await reader;
+    }
+  });
+
+  it('blocks a strict reader while another process owns a live regeneration', async () => {
     const dataPath = makeDataPath();
     const scratch = path.join(dataPath, '.regenerate-live-writer');
     fs.mkdirSync(scratch);
     fs.writeFileSync(path.join(scratch, 'swap.json'), JSON.stringify({ pid: process.ppid }));
 
-    assert.throws(
-      () => recoverInterruptedRegenerations(dataPath, { strict: true }),
+    await assert.rejects(
+      recoverInterruptedRegenerations(dataPath, { strict: true }),
       /Meeting regeneration is in progress/,
     );
     assert.ok(fs.existsSync(scratch));
   });
 
-  it('preserves an unrecognized directory with the scratch prefix', () => {
+  it('preserves an unrecognized directory with the scratch prefix', async () => {
     const dataPath = makeDataPath();
     const unknown = path.join(dataPath, '.regenerate-user-data');
     fs.mkdirSync(unknown);
     fs.writeFileSync(path.join(unknown, 'keep.txt'), 'keep');
 
-    assert.deepEqual(recoverInterruptedRegenerations(dataPath), []);
+    assert.deepEqual(await recoverInterruptedRegenerations(dataPath), []);
     assert.equal(fs.readFileSync(path.join(unknown, 'keep.txt'), 'utf-8'), 'keep');
   });
 
@@ -447,13 +495,13 @@ describe('recoverInterruptedRegenerations', () => {
     assert.doesNotMatch(cli.stdout, /New summary\./);
     assert.match(cli.stderr, /Recovered interrupted regeneration/);
 
-    assert.deepEqual(recoverInterruptedRegenerations(dataPath), []);
+    assert.deepEqual(await recoverInterruptedRegenerations(dataPath), []);
     assert.deepEqual(snapshot(previous), before);
     assert.equal((await readTranscription(previous))?.summary, 'Old summary.');
     assert.deepEqual(scratchDirs(dataPath), []);
   });
 
-  it('removes leftovers from a swap that already finished without touching the note', () => {
+  it('removes leftovers from a swap that already finished without touching the note', async () => {
     const dataPath = makeDataPath();
     const previous = saveTranscription({ title: 'Old Title', result: oldResult, dataPath });
     const script = `
@@ -470,25 +518,25 @@ describe('recoverInterruptedRegenerations', () => {
     assert.equal(child.status, 7, child.stderr);
     const after = snapshot(previous);
 
-    assert.deepEqual(recoverInterruptedRegenerations(dataPath), []);
+    assert.deepEqual(await recoverInterruptedRegenerations(dataPath), []);
     assert.deepEqual(snapshot(previous), after);
     assert.equal(after.get('summary.md')?.trim(), 'New summary.');
     assert.deepEqual(scratchDirs(dataPath), []);
   });
 
-  it('leaves scratch folders owned by another live process alone', () => {
+  it('leaves scratch folders owned by another live process alone', async () => {
     const dataPath = makeDataPath();
     const scratch = path.join(dataPath, '.regenerate-live');
     fs.mkdirSync(scratch);
     fs.writeFileSync(path.join(scratch, 'swap.json'), JSON.stringify({ pid: process.ppid }));
 
-    assert.deepEqual(recoverInterruptedRegenerations(dataPath), []);
+    assert.deepEqual(await recoverInterruptedRegenerations(dataPath), []);
     assert.ok(fs.existsSync(scratch));
 
     // Same live pid, but far too old to be an in-flight swap: pid was reused.
     const stale = new Date(Date.now() - 60 * 60 * 1000);
     fs.utimesSync(path.join(scratch, 'swap.json'), stale, stale);
-    assert.deepEqual(recoverInterruptedRegenerations(dataPath), []);
+    assert.deepEqual(await recoverInterruptedRegenerations(dataPath), []);
     assert.ok(!fs.existsSync(scratch));
   });
 });

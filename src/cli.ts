@@ -1392,7 +1392,7 @@ async function main(): Promise<void> {
   if (commandUsesMeetingData(args)) {
     // The CLI may be the first reader after a GUI crash during Regenerate.
     // Restore the previous complete note before list/show/export/merge sees it.
-    for (const folder of recoverInterruptedRegenerations(getDataPath(), { strict: true })) {
+    for (const folder of await recoverInterruptedRegenerations(getDataPath(), { strict: true })) {
       process.stderr.write(`Recovered interrupted regeneration: ${folder}\n`);
     }
     try {

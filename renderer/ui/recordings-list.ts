@@ -45,6 +45,7 @@ type MergeRecordingsResult = {
   data?: Record<string, unknown>;
   mergedAudioPath?: string;
   transcriptionPath?: string;
+  generationId?: string | null;
 };
 
 // Monotonic token so a slow loadRecordings (per-item async metadata reads)
@@ -670,6 +671,7 @@ async function performMerge(paths: string[], title: string): Promise<void> {
       title,
       filePath: result.mergedAudioPath || null,
       transcriptionPath: result.transcriptionPath ?? null,
+      generationId: result.generationId,
     });
     populateTranscriptionUI((result.data || {}) as never);
 

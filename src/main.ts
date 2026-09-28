@@ -660,7 +660,7 @@ app.whenReady().then(async () => {
     // Clean up backup directories older than 30 days. Best-effort; never fatal.
     gcLegacyBackups(getDataPath()).catch((err) => console.warn('[migrate] backup GC failed:', err));
     // A failed restore must stop startup before readers see a partial swap.
-    for (const folder of recoverInterruptedRegenerations(getDataPath(), { strict: true })) {
+    for (const folder of await recoverInterruptedRegenerations(getDataPath(), { strict: true })) {
       console.log(`[regenerate] Restored ${folder} after an interrupted regenerate.`);
     }
   } catch (err) {
@@ -1518,6 +1518,7 @@ ipcMain.handle(
       transcriptionData: any;
       audioFilePath?: string;
       transcriptionPath?: string;
+      expectedGenerationId?: string | null;
     },
   ) => {
     try {
@@ -1543,6 +1544,9 @@ ipcMain.handle(
       const generation = isContainedTranscriptionPath(data.transcriptionPath)
         ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
         : undefined;
+      if (data.expectedGenerationId !== undefined && generation !== data.expectedGenerationId) {
+        return { success: false, error: 'This note changed. Reopen it before uploading.' };
+      }
 
       const result = await notionService.createMeetingNote(
         titleWithSuffix,
@@ -1595,6 +1599,7 @@ ipcMain.handle(
       title: string;
       transcriptionData: any;
       transcriptionPath?: string;
+      expectedGenerationId?: string | null;
       notionUrl?: string;
       notionError?: string;
     },
@@ -1609,6 +1614,9 @@ ipcMain.handle(
       const generation = isContainedTranscriptionPath(data.transcriptionPath)
         ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
         : undefined;
+      if (data.expectedGenerationId !== undefined && generation !== data.expectedGenerationId) {
+        return { success: false, error: 'This note changed. Reopen it before sending.' };
+      }
 
       // For a historical resend, use the original meeting time from frontmatter
       // so the Slack message shows when the meeting actually happened, not now.
@@ -1701,6 +1709,7 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
           data: {
             ...metadata,
             folderName: path.basename(metadata.transcriptionPath),
+            generationId: transcription.generationId,
             transcript: transcription.transcript,
             summary: transcription.summary,
             keyPoints: transcription.keyPoints,

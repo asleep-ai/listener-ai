@@ -208,6 +208,7 @@ describe('updateTranscriptionStatus', () => {
     assert.equal(bodyAfter, bodyBefore, 'body should be preserved verbatim');
 
     const data = await readTranscription(folderPath);
+    assert.equal(data?.generationId, await readTranscriptionGeneration(folderPath));
     assert.equal(data!.notionPageUrl, 'https://www.notion.so/abc123');
     assert.equal(data!.slackSentAt, '2026-04-30T09:30:00Z');
     assert.equal(data!.slackError, undefined);

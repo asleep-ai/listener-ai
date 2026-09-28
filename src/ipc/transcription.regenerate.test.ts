@@ -102,11 +102,17 @@ describe('transcribe-audio regenerate (#213)', () => {
     rmDir(dataPath);
   });
 
-  const run = (): Promise<{ success: boolean; cancelled?: boolean; transcriptionPath?: string }> =>
+  const run = (): Promise<{
+    success: boolean;
+    cancelled?: boolean;
+    transcriptionPath?: string;
+    generationId?: string | null;
+  }> =>
     handlers.get('transcribe-audio')!(undefined, audioPath) as Promise<{
       success: boolean;
       cancelled?: boolean;
       transcriptionPath?: string;
+      generationId?: string | null;
     }>;
   const noteFolders = () => fs.readdirSync(getTranscriptionsDir(dataPath));
   const linkedPath = (): string | undefined => {
@@ -118,10 +124,12 @@ describe('transcribe-audio regenerate (#213)', () => {
     transcribe = async () => resultFor('First');
     const first = await run();
     assert.equal(first.success, true);
+    assert.equal(first.generationId, await readTranscriptionGeneration(first.transcriptionPath!));
 
     transcribe = async () => resultFor('Second');
     const second = await run();
     assert.equal(second.success, true);
+    assert.notEqual(second.generationId, first.generationId);
 
     assert.equal(noteFolders().length, 1, `expected one note, found ${noteFolders().join(', ')}`);
     assert.equal(second.transcriptionPath, first.transcriptionPath);

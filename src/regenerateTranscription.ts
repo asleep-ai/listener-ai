@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { withMeetingLock } from './meetingLock';
 import {
   ACTION_ITEMS_FILE,
   HIGHLIGHTS_JSON_FILE,
@@ -188,10 +189,10 @@ export function saveRegeneratedTranscription(opts: RegenerateTranscriptionOption
  * or never-started swaps are just removed. Folders owned by another live
  * process are skipped. Returns the note folders that were restored.
  */
-export function recoverInterruptedRegenerations(
+export async function recoverInterruptedRegenerations(
   dataPath: string,
   options: { strict?: boolean } = {},
-): string[] {
+): Promise<string[]> {
   let entries: string[];
   try {
     entries = fs.readdirSync(dataPath).filter((name) => name.startsWith(SCRATCH_PREFIX));
@@ -228,10 +229,20 @@ export function recoverInterruptedRegenerations(
         if (!resolveReplaceableFolder(dataPath, marker.target)) {
           throw new Error(`Cannot verify regeneration target ${marker.target}`);
         }
-        if (fs.existsSync(path.join(staged, META_JSON))) {
-          restoreFromBackup(marker.target, path.join(scratch, 'backup'), NOTE_FILES);
-          restored.push(marker.target);
-        }
+        await withMeetingLock(marker.target, () => {
+          // Another startup may have recovered and removed this scratch folder
+          // while we waited for the same target lock.
+          if (!fs.existsSync(scratch)) return;
+          if (!resolveReplaceableFolder(dataPath, marker.target!)) {
+            throw new Error(`Cannot verify regeneration target ${marker.target}`);
+          }
+          if (fs.existsSync(path.join(staged, META_JSON))) {
+            restoreFromBackup(marker.target!, path.join(scratch, 'backup'), NOTE_FILES);
+            restored.push(marker.target!);
+          }
+          fs.rmSync(scratch, { recursive: true, force: true });
+        });
+        continue;
       }
       fs.rmSync(scratch, { recursive: true, force: true });
     } catch (err) {

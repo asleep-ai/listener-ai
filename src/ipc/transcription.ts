@@ -153,6 +153,7 @@ export function register(ctx: IpcContext): void {
       // written, so a failure here leaves the previous note linked and intact.
       const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));
       let transcriptionPath: string | undefined;
+      let generationId: string | null | undefined;
       let metadataHandledUnderLock = false;
       const lockPath =
         previousNoteWasPresent &&
@@ -180,6 +181,9 @@ export function register(ctx: IpcContext): void {
             liveNotes,
             previousFolderPath: existing?.transcriptionPath,
           });
+          generationId =
+            JSON.parse(fs.readFileSync(path.join(savedPath, META_JSON), 'utf-8')).generationId ??
+            null;
           if (lockPath) {
             metadataHandledUnderLock = true;
             try {
@@ -261,10 +265,16 @@ export function register(ctx: IpcContext): void {
       notificationService.notifyTranscriptionComplete(result.suggestedTitle || 'Meeting');
 
       if (renameTitle) {
-        return { success: true, data: result, newFilePath: audioFilePath, transcriptionPath };
+        return {
+          success: true,
+          data: result,
+          newFilePath: audioFilePath,
+          transcriptionPath,
+          generationId,
+        };
       }
 
-      return { success: true, data: result, transcriptionPath };
+      return { success: true, data: result, transcriptionPath, generationId };
     } catch (error) {
       // Cancellation is a normal outcome -- skip the failure notification and
       // signal it cleanly so the renderer collapses the inline progress without
