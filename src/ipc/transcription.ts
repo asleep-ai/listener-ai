@@ -174,9 +174,12 @@ export function register(ctx: IpcContext): void {
             previousFolderPath: existing?.transcriptionPath,
           });
         };
-        transcriptionPath = existing?.transcriptionPath
-          ? await withMeetingLock(existing.transcriptionPath, save, { signal })
-          : save();
+        transcriptionPath =
+          previousNoteWasPresent &&
+          existing?.transcriptionPath &&
+          ctx.isContainedTranscriptionPath(existing.transcriptionPath)
+            ? await withMeetingLock(existing.transcriptionPath, save, { signal })
+            : save();
         noteCommitted = true;
         console.log('Transcription saved to:', transcriptionPath);
         ctx.maybeAutoSync();

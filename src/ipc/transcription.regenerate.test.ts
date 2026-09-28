@@ -236,6 +236,24 @@ describe('transcribe-audio regenerate (#213)', () => {
     assert.equal(linkedPath(), previous);
   });
 
+  it('saves a new note when a stale sidecar points outside the current data root', async () => {
+    transcribe = async () => resultFor('First');
+    const first = await run();
+    assert.equal(first.success, true);
+    const stalePath = path.join(dataPath, 'old-root', 'missing-note');
+    const sidecar = path.join(dataPath, 'metadata', `${path.basename(audioPath, '.webm')}.json`);
+    const metadata = JSON.parse(fs.readFileSync(sidecar, 'utf-8'));
+    fs.writeFileSync(sidecar, JSON.stringify({ ...metadata, transcriptionPath: stalePath }));
+
+    transcribe = async () => resultFor('Second');
+    const second = await run();
+    assert.equal(second.success, true);
+    assert.notEqual(second.transcriptionPath, stalePath);
+    assert.equal(linkedPath(), second.transcriptionPath);
+    assert.equal(fs.existsSync(path.join(dataPath, 'old-root')), false);
+    assert.equal((await readTranscription(second.transcriptionPath!))?.summary, 'Second summary.');
+  });
+
   it('a regenerate whose save fails keeps the previous note and leaves the sidecar untouched', async () => {
     transcribe = async () => resultFor('First');
     const first = await run();
