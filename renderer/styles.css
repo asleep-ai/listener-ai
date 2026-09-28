@@ -768,7 +768,7 @@ h1 {
   border: 1px solid transparent;
   transition: background-color 0.15s, border-color 0.15s, transform 0.15s;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(120px, 1fr) auto;
   align-items: center;
   gap: 12px;
   position: relative;
@@ -2079,27 +2079,78 @@ h1 {
   flex-shrink: 0;
 }
 
-/* Secondary actions (Merge / Show / M4A / Regenerate) are visible at all
-   times but visually de-emphasized -- lighter text, slightly muted -- so the
-   primary CTA (Transcribe pill, or chevron on transcribed rows) reads as the
-   main anchor without the row needing to "wake up" on hover. Hovering the
-   button itself brightens it; hovering the row alone does NOT change layout
-   so there is no shifting motion. */
-.recording-item .merge-btn,
-.recording-item .reveal-btn,
-.recording-item .export-m4a-btn,
-.recording-item .regenerate-btn {
+/* Secondary actions (Regenerate / Merge / Show / M4A / Delete) live in a
+   per-row "More actions" menu so they neither squeeze the title nor cover the
+   row's centre. The trigger is de-emphasized so the primary CTA (Transcribe
+   pill, or chevron on transcribed rows) stays the main anchor. */
+.recording-item .more-actions-btn {
   color: #94a3b8;
-  font-weight: 400;
-  transition: color 0.12s ease, background-color 0.12s ease;
+  font-size: 16px;
+  padding: 2px 8px;
+  line-height: 1;
 }
 
-.recording-item .merge-btn:hover,
-.recording-item .reveal-btn:hover,
-.recording-item .export-m4a-btn:hover,
-.recording-item .regenerate-btn:hover {
+.recording-item .more-actions-btn:hover,
+.recording-item .more-actions-btn[aria-expanded="true"] {
   color: #0f172a;
   background-color: #eef2f6;
+}
+
+.recording-item .action-button:focus-visible,
+.recording-menu-item:focus-visible {
+  outline: 2px solid #3498db;
+  outline-offset: 1px;
+}
+
+/* Popover (top layer) anchored under its trigger; flips above when there is
+   no room below. Overrides the UA popover centering (inset/margin). */
+.recording-menu {
+  inset: auto;
+  margin: 4px 0;
+  position-area: bottom span-left;
+  position-try-fallbacks: flip-block;
+  min-width: 190px;
+  padding: 4px;
+  background: white;
+  color: #0f172a;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(15, 23, 42, 0.08);
+}
+
+.recording-menu-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #0f172a;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.recording-menu-item:hover,
+.recording-menu-item:focus {
+  background-color: #eef2f6;
+}
+
+.recording-menu-item.delete-recording-btn {
+  color: #b91c1c;
+}
+
+.recording-menu-item.delete-recording-btn:hover,
+.recording-menu-item.delete-recording-btn:focus {
+  background-color: #fee2e2;
+}
+
+.recording-menu-item:disabled {
+  color: #cbd5e1;
+  cursor: not-allowed;
+  background-color: transparent;
 }
 
 /* Default: subtle ghost style. Utility actions (Merge/Show/M4A/regenerate)
@@ -2128,13 +2179,6 @@ h1 {
   color: #cbd5e1;
   cursor: not-allowed;
   background-color: transparent;
-}
-
-.regenerate-btn {
-  padding: 4px 8px;
-  font-size: 14px;
-  line-height: 1;
-  color: #94a3b8;
 }
 
 /* Primary: Transcribe stands out for un-transcribed rows (entry CTA).
