@@ -77,6 +77,24 @@ describe('listener CLI basics', () => {
     assert.match(stdout, /^listener \d/);
   });
 
+  it('google status does not touch interrupted meeting recovery', async () => {
+    const scratch = path.join(basicsDataPath, '.regenerate-google-auth');
+    fs.mkdirSync(path.join(scratch, 'new'), { recursive: true });
+    fs.writeFileSync(
+      path.join(scratch, 'swap.json'),
+      JSON.stringify({ pid: 2147483647, target: '/missing/note', staged: 'new' }),
+    );
+
+    try {
+      const { stdout, code } = await runCli(['google', 'status']);
+      assert.equal(code, 0);
+      assert.match(stdout, /googleOAuthConfigured=/);
+      assert.ok(fs.existsSync(scratch));
+    } finally {
+      rmDir(scratch);
+    }
+  });
+
   it('--help exits 0 and writes to stdout', async () => {
     const { stdout, stderr, code } = await runCli(['--help']);
     assert.equal(code, 0);

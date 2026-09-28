@@ -65,6 +65,14 @@ const SUPPORTED_EXTENSIONS = new Set([
  *   to v2 before `--dry-run` could observe it. The `migrate` handler is
  *   responsible for any conversion it does. */
 const COMMANDS_WITHOUT_DATA_ACCESS = new Set(['config', 'codex', 'migrate']);
+const GOOGLE_AUTH_COMMANDS = new Set(['login', 'logout', 'status']);
+
+function commandUsesMeetingData(args: string[]): boolean {
+  return (
+    !COMMANDS_WITHOUT_DATA_ACCESS.has(args[0]) &&
+    !(args[0] === 'google' && GOOGLE_AUTH_COMMANDS.has(args[1]))
+  );
+}
 
 const VERSION = (() => {
   try {
@@ -1349,7 +1357,7 @@ async function main(): Promise<void> {
   // dir-scan when it's irrelevant. Also skip when `LISTENER_SKIP_AUTO_MIGRATE`
   // is set -- the migrate-command tests use this to drive the explicit
   // `listener migrate` flow on un-migrated fixtures.
-  if (!COMMANDS_WITHOUT_DATA_ACCESS.has(args[0]) && !process.env.LISTENER_SKIP_AUTO_MIGRATE) {
+  if (commandUsesMeetingData(args) && !process.env.LISTENER_SKIP_AUTO_MIGRATE) {
     try {
       await autoMigrateLegacyOnStartup(getDataPath());
     } catch (err) {
@@ -1362,7 +1370,7 @@ async function main(): Promise<void> {
 
   // Backfill notes whose meta.audioFile still names a pre-rename recording
   // (#209) so `merge` reads the real recording. Best-effort.
-  if (!COMMANDS_WITHOUT_DATA_ACCESS.has(args[0])) {
+  if (commandUsesMeetingData(args)) {
     // The CLI may be the first reader after a GUI crash during Regenerate.
     // Restore the previous complete note before list/show/export/merge sees it.
     for (const folder of recoverInterruptedRegenerations(getDataPath(), { strict: true })) {
