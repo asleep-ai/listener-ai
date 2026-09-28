@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { isSupportedAudioExtension, mimeTypeForFile } from '../audioFormats';
+import { withMeetingLock } from '../meetingLock';
 import { reportError } from '../sentry';
 import { telemetryHash } from '../sentryScrub';
 import {
@@ -371,9 +372,13 @@ export class SyncEngine {
       const remoteEntry = remoteByName.get(name);
       try {
         if (localExists && remoteEntry) {
-          await this.syncMeetingBidirectional(name, remoteEntry, state, result);
+          await withMeetingLock(path.join(this.transcriptionsDir, name), () =>
+            this.syncMeetingBidirectional(name, remoteEntry, state, result),
+          );
         } else if (localExists) {
-          await this.syncMeetingUploadOnly(name, state, result);
+          await withMeetingLock(path.join(this.transcriptionsDir, name), () =>
+            this.syncMeetingUploadOnly(name, state, result),
+          );
         } else if (remoteEntry) {
           await this.syncMeetingDownloadOnly(name, remoteEntry, state, result);
         }

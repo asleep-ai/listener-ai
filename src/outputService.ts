@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { withMeetingLock } from './meetingLock';
 import type { HighlightEntry, TranscriptionResult } from './geminiService';
 import {
   type ActionItemGroup,
@@ -838,6 +839,13 @@ export interface ReadTranscriptionOptions {
 export async function readTranscription(
   folderPath: string,
   opts: ReadTranscriptionOptions = {},
+): Promise<ReadTranscriptionResult | null> {
+  return withMeetingLock(folderPath, () => readTranscriptionUnlocked(folderPath, opts));
+}
+
+async function readTranscriptionUnlocked(
+  folderPath: string,
+  opts: ReadTranscriptionOptions,
 ): Promise<ReadTranscriptionResult | null> {
   let metaRaw: string;
   try {

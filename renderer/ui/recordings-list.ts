@@ -872,6 +872,8 @@ async function runInlineTranscription(item: HTMLElement, filePath: string): Prom
     const result = await transcribeWithFfmpegRetry(filePath);
     if (result.cancelled) {
       // Row goes back to its pre-transcribe state; no toast — user chose this.
+      // A failed rename rollback can leave the audio under its new path.
+      if (result.newFilePath) await refreshRecordingsList();
       return;
     }
     if (!result.success) {

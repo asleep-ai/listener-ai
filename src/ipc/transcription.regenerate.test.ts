@@ -4,6 +4,7 @@ import Module from 'node:module';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import * as path from 'path';
 import type { TranscriptionResult } from '../geminiService';
+import { withMeetingLock } from '../meetingLock';
 import { getTranscriptionsDir, readTranscription } from '../outputService';
 import { makeTempDir, rmDir } from '../test-helpers';
 import type { IpcContext } from './types';
@@ -123,6 +124,44 @@ describe('transcribe-audio regenerate (#213)', () => {
     const read = await readTranscription(linkedPath()!);
     assert.equal(read?.summary, 'Second summary.');
     assert.equal(read?.title, 'Second Title');
+  });
+
+  it('does not save a cancelled regeneration after waiting for a note reader', async () => {
+    transcribe = async () => resultFor('First');
+    const first = await run();
+    assert.equal(first.success, true);
+    const previous = linkedPath()!;
+
+    let releaseRead!: () => void;
+    let signalReady!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      signalReady = resolve;
+    });
+    const read = withMeetingLock(
+      previous,
+      () =>
+        new Promise<void>((resolve) => {
+          releaseRead = resolve;
+          signalReady();
+        }),
+    );
+    await ready;
+
+    try {
+      transcribe = async () => resultFor('Second');
+      const pending = run();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await handlers.get('cancel-transcription')!(undefined, audioPath);
+      releaseRead();
+      const cancelled = await pending;
+      assert.equal(cancelled.cancelled, true);
+      assert.equal(linkedPath(), previous);
+      assert.equal((await readTranscription(previous))?.summary, 'First summary.');
+      assert.equal(noteFolders().length, 1);
+    } finally {
+      releaseRead();
+      await read;
+    }
   });
 
   it('regenerates a recording renamed during its first transcription without creating another note', async () => {

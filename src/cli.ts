@@ -41,6 +41,7 @@ import {
   saveTranscription,
 } from './outputService';
 import { ALL_FIELDS, type SearchField, resolveFields, searchTranscriptions } from './searchService';
+import { withMeetingLock } from './meetingLock';
 import { recoverInterruptedRegenerations } from './regenerateTranscription';
 import { concatAudioFiles } from './services/audioConcatService';
 import { FFmpegManager } from './services/ffmpegManager';
@@ -451,18 +452,20 @@ async function handleGoogleUpload(
   // Gather every regular file in the meeting folder. Drive mirrors the local
   // layout, so anything in the folder (summary, transcript, audio, optional
   // attachments) goes up. Hidden files (.DS_Store etc.) are skipped.
-  const entries = fs.readdirSync(folderPath, { withFileTypes: true });
-  const files = entries
-    .filter((e) => e.isFile() && !e.name.startsWith('.'))
-    .map((e) => {
-      const filePath = path.join(folderPath, e.name);
-      const content = fs.readFileSync(filePath);
-      return {
-        name: e.name,
-        content,
-        mimeType: mimeTypeForFile(e.name),
-      };
-    });
+  const files = await withMeetingLock(folderPath, () => {
+    const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+    return entries
+      .filter((e) => e.isFile() && !e.name.startsWith('.'))
+      .map((e) => {
+        const filePath = path.join(folderPath, e.name);
+        const content = fs.readFileSync(filePath);
+        return {
+          name: e.name,
+          content,
+          mimeType: mimeTypeForFile(e.name),
+        };
+      });
+  });
 
   if (files.length === 0) {
     process.stderr.write(`Error: No files to upload in ${folderPath}\n`);

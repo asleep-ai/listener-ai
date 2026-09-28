@@ -213,6 +213,9 @@ export function recoverInterruptedRegenerations(
         isProcessAlive(marker.pid) &&
         Date.now() - fs.statSync(markerPath).mtimeMs < LIVE_SCRATCH_MAX_AGE_MS
       ) {
+        if (options.strict) {
+          throw new Error(`Meeting regeneration is in progress at ${scratch}`);
+        }
         continue;
       }
 

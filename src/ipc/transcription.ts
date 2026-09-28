@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { app, ipcMain } from 'electron';
+import { withMeetingLock } from '../meetingLock';
 import { saveRegeneratedTranscription } from '../regenerateTranscription';
 import { reportError } from '../sentry';
 import { metadataService } from '../services/metadataService';
@@ -54,6 +55,8 @@ export function register(ctx: IpcContext): void {
     const controller = new AbortController();
     activeTranscriptions.set(filePath, controller);
     const signal = controller.signal;
+    let renamedAudioPath: string | undefined;
+    let noteCommitted = false;
 
     const sendProgress = (percent: number, message: string) => {
       const win = ctx.getMainWindow();
@@ -126,6 +129,7 @@ export function register(ctx: IpcContext): void {
       if (renameTitle) {
         audioFilePath = await renameAudioFile(filePath, renameTitle);
         if (audioFilePath !== filePath) {
+          renamedAudioPath = audioFilePath;
           // Carry the stop-recording sidecar (live notes) over to the renamed
           // audio. Delete the old one only after the copy lands.
           try {
@@ -146,17 +150,27 @@ export function register(ctx: IpcContext): void {
       const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));
       let transcriptionPath: string | undefined;
       try {
-        transcriptionPath = saveRegeneratedTranscription({
-          title,
-          result,
-          audioFilePath,
-          dataPath: app.getPath('userData'),
-          liveNotes,
-          previousFolderPath: existing?.transcriptionPath,
-        });
+        const save = () => {
+          // A cancel can arrive during the awaited rename, sidecar move, or
+          // wait for an in-flight Drive sync of this note.
+          signal.throwIfAborted();
+          return saveRegeneratedTranscription({
+            title,
+            result,
+            audioFilePath,
+            dataPath: app.getPath('userData'),
+            liveNotes,
+            previousFolderPath: existing?.transcriptionPath,
+          });
+        };
+        transcriptionPath = existing?.transcriptionPath
+          ? await withMeetingLock(existing.transcriptionPath, save)
+          : save();
+        noteCommitted = true;
         console.log('Transcription saved to:', transcriptionPath);
         ctx.maybeAutoSync();
       } catch (error) {
+        if (signal.aborted) throw error;
         console.error('Failed to save transcription files:', error);
         reportError(error, { operation: 'transcription.save', severity: 'warning' });
       }
@@ -218,8 +232,25 @@ export function register(ctx: IpcContext): void {
       // on error name/message would risk mis-classifying legitimate provider
       // failures whose body happens to contain "aborted".
       if (signal.aborted) {
+        if (renamedAudioPath && !noteCommitted) {
+          try {
+            const movedMetadata = await metadataService.getMetadata(renamedAudioPath);
+            if (movedMetadata) {
+              await metadataService.saveMetadata(filePath, movedMetadata);
+              await metadataService.deleteMetadata(renamedAudioPath);
+            }
+            await fs.promises.rename(renamedAudioPath, filePath);
+            renamedAudioPath = undefined;
+          } catch (rollbackError) {
+            console.error('Failed to restore cancelled recording rename:', rollbackError);
+          }
+        }
         console.log('Transcription cancelled for:', filePath);
-        return { success: false, cancelled: true as const };
+        return {
+          success: false,
+          cancelled: true as const,
+          ...(renamedAudioPath ? { newFilePath: renamedAudioPath } : {}),
+        };
       }
       console.error('Error transcribing audio:', error);
       reportError(error, { operation: 'transcription', severity: 'error' });

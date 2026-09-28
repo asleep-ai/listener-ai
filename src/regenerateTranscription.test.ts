@@ -352,6 +352,19 @@ describe('saveRegeneratedTranscription', () => {
 });
 
 describe('recoverInterruptedRegenerations', () => {
+  it('blocks a strict reader while another process owns a live regeneration', () => {
+    const dataPath = makeDataPath();
+    const scratch = path.join(dataPath, '.regenerate-live-writer');
+    fs.mkdirSync(scratch);
+    fs.writeFileSync(path.join(scratch, 'swap.json'), JSON.stringify({ pid: process.ppid }));
+
+    assert.throws(
+      () => recoverInterruptedRegenerations(dataPath, { strict: true }),
+      /Meeting regeneration is in progress/,
+    );
+    assert.ok(fs.existsSync(scratch));
+  });
+
   it('preserves an unrecognized directory with the scratch prefix', () => {
     const dataPath = makeDataPath();
     const unknown = path.join(dataPath, '.regenerate-user-data');

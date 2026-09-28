@@ -155,6 +155,51 @@ describe('transcribe-audio save/rename ordering', () => {
     });
   });
 
+  it('restores the original recording and sidecar when cancelled during the rename', async () => {
+    const untitled = path.join(recordingsDir, `Untitled_Meeting_${TS}.webm`);
+    const renamed = path.join(recordingsDir, `Weekly_Sync_${TS}.webm`);
+    fs.writeFileSync(untitled, 'audio-bytes');
+    fs.mkdirSync(metadataDir);
+    const oldSidecar = path.join(metadataDir, `Untitled_Meeting_${TS}.json`);
+    fs.writeFileSync(oldSidecar, JSON.stringify({ filePath: untitled, title: 'Untitled' }));
+
+    const service = require('../services/metadataService').metadataService as {
+      saveMetadata: (file: string, metadata: unknown) => Promise<void>;
+    };
+    const originalSave = service.saveMetadata.bind(service);
+    let signalReady!: () => void;
+    let releaseSave!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      signalReady = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    service.saveMetadata = async (file, metadata) => {
+      if (file === renamed) {
+        signalReady();
+        await gate;
+      }
+      await originalSave(file, metadata);
+    };
+
+    try {
+      const pending = transcribe(untitled);
+      await ready;
+      await handlers.get('cancel-transcription')!({}, untitled);
+      releaseSave();
+      const result = (await pending) as TranscribeResponse & { cancelled?: boolean };
+      assert.equal(result.cancelled, true);
+      assert.ok(fs.existsSync(untitled));
+      assert.ok(!fs.existsSync(renamed));
+      assert.ok(fs.existsSync(oldSidecar));
+      const notesDir = path.join(dataPath, 'transcriptions');
+      assert.ok(!fs.existsSync(notesDir) || fs.readdirSync(notesDir).length === 0);
+    } finally {
+      releaseSave();
+    }
+  });
+
   it('keeps the original path for recordings that are not untitled', async () => {
     const named = path.join(recordingsDir, `Standup_${TS}.webm`);
     fs.writeFileSync(named, 'audio-bytes');

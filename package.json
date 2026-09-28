@@ -32,6 +32,7 @@
     "dist/sonioxTranscription.js",
     "dist/liveSttUtils.js",
     "dist/meetingRecord.js",
+    "dist/meetingLock.js",
     "dist/batchSttBackend.js",
     "dist/transcriptionErrors.js",
     "dist/openAiRealtimeClient.js",
@@ -113,6 +114,7 @@
     "google-auth-library": "^11.0.1",
     "jwa": "^2.0.1",
     "marked": "^18.0.9",
+    "proper-lockfile": "4.1.2",
     "ws": "^8.21.3"
   },
   "optionalDependencies": {
