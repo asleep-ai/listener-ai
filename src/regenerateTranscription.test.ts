@@ -159,6 +159,34 @@ describe('saveRegeneratedTranscription', () => {
     assert.equal(meta.title, 'New Title');
   });
 
+  it('keeps an unrelated note when a stale sidecar points to it', async () => {
+    const dataPath = makeDataPath();
+    const oldAudio = path.join(dataPath, 'recordings', 'old.webm');
+    const selectedAudio = path.join(dataPath, 'recordings', 'selected.webm');
+    const previous = saveTranscription({
+      title: 'Old Title',
+      result: oldResult,
+      dataPath,
+      audioFilePath: oldAudio,
+    });
+    const before = snapshot(previous);
+
+    const saved = saveRegeneratedTranscription({
+      title: 'New Title',
+      result: newResult,
+      dataPath,
+      audioFilePath: selectedAudio,
+      previousFolderPath: previous,
+    });
+
+    assert.notEqual(saved, previous);
+    assert.deepEqual(snapshot(previous), before);
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(saved, META_JSON), 'utf-8')).audioFile,
+      selectedAudio,
+    );
+  });
+
   it('carries merge provenance forward', async () => {
     const dataPath = makeDataPath();
     const previous = saveTranscription({

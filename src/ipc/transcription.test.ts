@@ -239,4 +239,27 @@ describe('transcribe-audio save/rename ordering', () => {
     assert.deepEqual(repair.ambiguous, [oldSidecar]);
     assert.ok(fs.existsSync(oldSidecar));
   });
+
+  it('keeps both sidecars when their linked notes conflict', async () => {
+    const untitled = path.join(recordingsDir, `Untitled_Meeting_${TS}.webm`);
+    const renamed = path.join(recordingsDir, `Weekly_Sync_${TS}.webm`);
+    fs.writeFileSync(renamed, 'audio');
+    fs.mkdirSync(metadataDir);
+    const oldSidecar = path.join(metadataDir, `Untitled_Meeting_${TS}.json`);
+    const newSidecar = path.join(metadataDir, `Weekly_Sync_${TS}.json`);
+    fs.writeFileSync(
+      oldSidecar,
+      JSON.stringify({ filePath: untitled, transcriptionPath: 'note-a' }),
+    );
+    fs.writeFileSync(
+      newSidecar,
+      JSON.stringify({ filePath: renamed, transcriptionPath: 'note-b' }),
+    );
+
+    const repair = await repairRenamedRecordingSidecars(dataPath);
+    assert.deepEqual(repair.repaired, []);
+    assert.deepEqual(repair.ambiguous, [oldSidecar]);
+    assert.ok(fs.existsSync(oldSidecar));
+    assert.ok(fs.existsSync(newSidecar));
+  });
 });

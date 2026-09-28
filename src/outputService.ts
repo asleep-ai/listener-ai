@@ -1414,11 +1414,8 @@ export async function repairRenamedRecordingSidecars(
     try {
       if (fs.existsSync(newSidecar)) {
         const current = JSON.parse(await fs.promises.readFile(newSidecar, 'utf-8'));
-        if (
-          current?.filePath !== newAudio ||
-          (metadata.liveNotes !== undefined &&
-            JSON.stringify(current.liveNotes) !== JSON.stringify(metadata.liveNotes))
-        ) {
+        const expected = { ...metadata, filePath: newAudio };
+        if (!current || JSON.stringify(current) !== JSON.stringify(expected)) {
           result.ambiguous.push(oldSidecar);
           continue;
         }

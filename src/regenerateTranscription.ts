@@ -95,7 +95,16 @@ export interface RegenerateTranscriptionOptions extends Omit<
 export function saveRegeneratedTranscription(opts: RegenerateTranscriptionOptions): string {
   const { previousFolderPath, onFileSwapped, ...saveOpts } = opts;
   const target = resolveReplaceableFolder(saveOpts.dataPath, previousFolderPath);
-  if (!target) return saveTranscription(saveOpts);
+  // A stale sidecar must not let this recording overwrite another recording's
+  // note. Older notes without audioFile keep the existing replacement path.
+  if (
+    !target ||
+    (target.meta.audioFile &&
+      saveOpts.audioFilePath &&
+      path.resolve(target.meta.audioFile) !== path.resolve(saveOpts.audioFilePath))
+  ) {
+    return saveTranscription(saveOpts);
+  }
 
   const scratch = fs.mkdtempSync(path.join(saveOpts.dataPath, SCRATCH_PREFIX));
   const markerPath = path.join(scratch, SWAP_MARKER);

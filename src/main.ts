@@ -658,21 +658,17 @@ app.whenReady().then(async () => {
     }
     // Clean up backup directories older than 30 days. Best-effort; never fatal.
     gcLegacyBackups(getDataPath()).catch((err) => console.warn('[migrate] backup GC failed:', err));
-    // Put back notes whose Regenerate swap was cut short by a crash. Best-effort.
-    for (const folder of recoverInterruptedRegenerations(getDataPath())) {
+    // A failed restore must stop startup before readers see a partial swap.
+    for (const folder of recoverInterruptedRegenerations(getDataPath(), { strict: true })) {
       console.log(`[regenerate] Restored ${folder} after an interrupted regenerate.`);
     }
   } catch (err) {
-    console.error('[migrate] startup migration failed:', err);
-    const message =
-      err instanceof Error
-        ? err.message
-        : 'Unknown error converting your transcriptions to the new layout.';
+    console.error('[startup] migration or note recovery failed:', err);
+    const message = err instanceof Error ? err.message : 'Unknown error preparing your meetings.';
     dialog.showErrorBox(
       'Listener.AI could not start',
-      `Migrating your existing meetings to the new storage layout failed:\n\n${message}\n\n` +
-        `Your original files are backed up under ${getDataPath()}/.v1-backup-<timestamp>/ ` +
-        `(if the backup step completed). The app will now quit. ` +
+      `Preparing your existing meetings failed:\n\n${message}\n\n` +
+        `Your files were kept under ${getDataPath()}. The app will now quit. ` +
         `Please report this to the maintainer.`,
     );
     app.quit();
