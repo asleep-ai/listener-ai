@@ -35,6 +35,7 @@ import {
   listTranscriptions,
   migrateV1ToV2,
   readTranscription,
+  withTranscriptionSnapshot,
   repairMissingAudioFiles,
   repairRenamedRecordingSidecars,
   sanitizeForPath,
@@ -767,10 +768,10 @@ async function handleExport(args: string[]): Promise<void> {
     process.exit(1);
   }
   if (targetPath) {
-    targetPath = path.resolve(targetPath);
-    fs.mkdirSync(targetPath, { recursive: true });
-    copyExportedFiles(folderPath, targetPath);
-    process.stderr.write(`Exported to ${targetPath}\n`);
+    const exportDir = path.resolve(targetPath);
+    fs.mkdirSync(exportDir, { recursive: true });
+    await withMeetingLock(folderPath, () => copyExportedFiles(folderPath, exportDir));
+    process.stderr.write(`Exported to ${exportDir}\n`);
     return;
   }
 
@@ -797,19 +798,28 @@ async function handleExport(args: string[]): Promise<void> {
     }
     process.stdout.write(`${JSON.stringify(obj, null, 2)}\n`);
   } else {
-    const md = await renderV2Markdown(folderPath);
-    if (md === null) {
+    const output = await withTranscriptionSnapshot(folderPath, {}, (data) => {
+      if (!data) return null;
+      let markdown = formatSummary(
+        data,
+        data.title,
+        data.mergedFrom,
+        data.liveNotes,
+        data.highlights,
+      );
+      if (includeTranscript) {
+        const transcriptPath = path.join(folderPath, TRANSCRIPT_FILE);
+        if (fs.existsSync(transcriptPath)) {
+          markdown += `\n${fs.readFileSync(transcriptPath, 'utf-8')}`;
+        }
+      }
+      return markdown;
+    });
+    if (output === null) {
       process.stderr.write(`Error: could not read transcription at ${folderPath}\n`);
       process.exit(1);
     }
-    process.stdout.write(md);
-    if (includeTranscript) {
-      const transcriptPath = path.join(folderPath, TRANSCRIPT_FILE);
-      if (fs.existsSync(transcriptPath)) {
-        const transcriptContent = fs.readFileSync(transcriptPath, 'utf-8');
-        process.stdout.write(`\n${transcriptContent}`);
-      }
-    }
+    process.stdout.write(output);
   }
 }
 

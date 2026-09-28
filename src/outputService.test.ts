@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
 import * as path from 'path';
+import { withMeetingLock } from './meetingLock';
 import type { TranscriptionResult } from './geminiService';
 import {
   ACTION_ITEMS_FILE,
@@ -1149,6 +1150,45 @@ describe('repairMissingAudioFiles (#209 backfill)', () => {
     assert.equal(fs.readFileSync(sidecarPath, 'utf-8'), sidecarBefore);
     assert.equal(fs.readFileSync(newAudio, 'utf-8'), 'audio-bytes');
     assert.ok(!fs.existsSync(path.join(folderPath, 'meta.json.tmp')));
+  });
+
+  it('waits for a note writer before repairing legacy audio metadata', async () => {
+    const dataPath = makeTmpDataPath();
+    const { folderPath, newAudio } = makeLegacyNote(dataPath, 'Locked_Repair');
+    let release!: () => void;
+    let ready!: () => void;
+    const acquired = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const held = withMeetingLock(
+      folderPath,
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+          ready();
+        }),
+    );
+    await acquired;
+    try {
+      let settled = false;
+      const pending = repairMissingAudioFiles(dataPath).then((result) => {
+        settled = true;
+        return result;
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 80));
+      assert.equal(settled, false);
+      const meta = readMeta(folderPath);
+      meta.futureField = 'keep';
+      fs.writeFileSync(path.join(folderPath, META_JSON), JSON.stringify(meta));
+      release();
+      const result = await pending;
+      assert.equal(result.repaired.length, 1);
+      assert.equal(readMeta(folderPath).audioFile, newAudio);
+      assert.equal(readMeta(folderPath).futureField, 'keep');
+    } finally {
+      release();
+      await held;
+    }
   });
 
   it('matches the sidecar by note folder name when its recorded data root differs', async () => {

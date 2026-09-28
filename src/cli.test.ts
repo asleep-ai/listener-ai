@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
 import { KNOWN_CONFIG_KEYS } from './configKeys';
+import { withMeetingLock } from './meetingLock';
 import { __saveTranscriptionLegacyV1ForTests, saveTranscription } from './outputService';
 import { execFileAsync, findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
@@ -336,6 +337,55 @@ describe('listener show / export across v1 + v2 folders', () => {
     assert.match(stdout, /## Summary\n[\s\S]*Summary text\./);
     assert.match(stdout, /## Key Points\n[\s\S]*- KP1\n- KP2/);
     assert.match(stdout, /## Action Items\n[\s\S]*- AI1/);
+  });
+
+  it('waits for a note swap before exporting its files', async () => {
+    const folderPath = saveTranscription({
+      title: 'Export Lock',
+      result: {
+        transcript: 'Locked transcript.',
+        summary: 'Locked summary.',
+        keyPoints: [],
+        actionItems: [],
+        emoji: 'X',
+      },
+      dataPath: showDataPath,
+    });
+    const exportDir = path.join(showDataPath, 'export-lock-output');
+    let release!: () => void;
+    let ready!: () => void;
+    const acquired = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const held = withMeetingLock(
+      folderPath,
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+          ready();
+        }),
+    );
+    await acquired;
+    try {
+      let settled = false;
+      const pending = runCli(['export', path.basename(folderPath), exportDir]).then((result) => {
+        settled = true;
+        return result;
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      assert.equal(settled, false);
+      release();
+      const result = await pending;
+      assert.equal(result.code, 0, result.stderr);
+      assert.match(fs.readFileSync(path.join(exportDir, 'summary.md'), 'utf-8'), /Locked summary/);
+      assert.match(
+        fs.readFileSync(path.join(exportDir, 'transcript.md'), 'utf-8'),
+        /Locked transcript/,
+      );
+    } finally {
+      release();
+      await held;
+    }
   });
 
   it('hides transcript quality from show while retaining it in raw JSON export', async () => {

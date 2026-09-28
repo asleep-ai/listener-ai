@@ -840,7 +840,18 @@ export async function readTranscription(
   folderPath: string,
   opts: ReadTranscriptionOptions = {},
 ): Promise<ReadTranscriptionResult | null> {
-  return withMeetingLock(folderPath, () => readTranscriptionUnlocked(folderPath, opts));
+  return withTranscriptionSnapshot(folderPath, opts, (data) => data);
+}
+
+/** Keep a caller's follow-up file reads in the same note snapshot. */
+export async function withTranscriptionSnapshot<T>(
+  folderPath: string,
+  opts: ReadTranscriptionOptions,
+  action: (data: ReadTranscriptionResult | null) => Promise<T> | T,
+): Promise<T> {
+  return withMeetingLock(folderPath, async () =>
+    action(await readTranscriptionUnlocked(folderPath, opts)),
+  );
 }
 
 async function readTranscriptionUnlocked(
@@ -1035,24 +1046,26 @@ export async function updateTranscriptionStatus(
   folderPath: string,
   updates: TranscriptionStatusUpdate,
 ): Promise<void> {
-  const metaPath = path.join(folderPath, META_JSON);
-  const raw = await fs.promises.readFile(metaPath, 'utf-8');
-  const meta = JSON.parse(raw) as MeetingMetaV2;
+  await withMeetingLock(folderPath, async () => {
+    const metaPath = path.join(folderPath, META_JSON);
+    const raw = await fs.promises.readFile(metaPath, 'utf-8');
+    const meta = JSON.parse(raw) as MeetingMetaV2;
 
-  // `exports` is reserved as a CommonJS module local; use a different name.
-  const exportsMeta = { ...meta.exports } as NonNullable<MeetingMetaV2['exports']>;
-  applyV2Notion(exportsMeta, updates.notionPageUrl);
-  applyV2Slack(exportsMeta, 'sentAt', updates.slackSentAt);
-  applyV2Slack(exportsMeta, 'error', updates.slackError);
+    // `exports` is reserved as a CommonJS module local; use a different name.
+    const exportsMeta = { ...meta.exports } as NonNullable<MeetingMetaV2['exports']>;
+    applyV2Notion(exportsMeta, updates.notionPageUrl);
+    applyV2Slack(exportsMeta, 'sentAt', updates.slackSentAt);
+    applyV2Slack(exportsMeta, 'error', updates.slackError);
 
-  if (Object.keys(exportsMeta).length === 0) {
-    delete meta.exports;
-  } else {
-    meta.exports = exportsMeta;
-  }
+    if (Object.keys(exportsMeta).length === 0) {
+      delete meta.exports;
+    } else {
+      meta.exports = exportsMeta;
+    }
 
-  // Atomic write so a crash never leaves a truncated meta.json behind.
-  writeAtomic(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+    // Atomic write so a crash never leaves a truncated meta.json behind.
+    writeAtomic(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+  });
 }
 
 function applyV2Notion(
@@ -1541,13 +1554,15 @@ export async function repairMissingAudioFiles(dataPath: string): Promise<AudioFi
     const [newAudio] = perFolder.values();
     const oldAudio = broken.get(folderName) as string;
     try {
-      // Re-read right before writing so a meta.json change made since the scan
-      // (e.g. a status update from another process) is preserved.
-      const meta = readMetaJsonOrNull(folderPath);
-      if (!meta || meta.audioFile !== oldAudio) continue;
-      meta.audioFile = newAudio;
-      writeAtomic(path.join(folderPath, META_JSON), `${JSON.stringify(meta, null, 2)}\n`);
-      result.repaired.push({ folderName, from: oldAudio, to: newAudio });
+      await withMeetingLock(folderPath, () => {
+        // Re-read under the lock: status updates and regeneration may have
+        // changed this meta.json since the initial scan.
+        const meta = readMetaJsonOrNull(folderPath);
+        if (!meta || meta.audioFile !== oldAudio) return;
+        meta.audioFile = newAudio;
+        writeAtomic(path.join(folderPath, META_JSON), `${JSON.stringify(meta, null, 2)}\n`);
+        result.repaired.push({ folderName, from: oldAudio, to: newAudio });
+      });
     } catch (err) {
       result.failed.push({ folderName, error: err instanceof Error ? err.message : String(err) });
     }
