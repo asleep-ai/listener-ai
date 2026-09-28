@@ -136,6 +136,8 @@ describe(
 // stubbed transcript and the inline UI would treat cancel as success.
 describe('GeminiService transcribeAudio abort plumbing', () => {
   it('throws synchronously when the signal is already aborted', async () => {
+    const priorTestMode = process.env.LISTENER_TEST_MODE;
+    const priorNodeEnv = process.env.NODE_ENV;
     process.env.LISTENER_TEST_MODE = '1';
     process.env.NODE_ENV = 'test';
     try {
@@ -158,8 +160,13 @@ describe('GeminiService transcribeAudio abort plumbing', () => {
         },
       );
     } finally {
-      delete process.env.LISTENER_TEST_MODE;
-      delete process.env.NODE_ENV;
+      // Restore rather than delete: `pnpm test` runs every file with
+      // NODE_ENV=test, and deleting it here used to un-isolate the rest of
+      // this file's tests from the user's real data directory.
+      if (priorTestMode === undefined) delete process.env.LISTENER_TEST_MODE;
+      else process.env.LISTENER_TEST_MODE = priorTestMode;
+      if (priorNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = priorNodeEnv;
     }
   });
 });

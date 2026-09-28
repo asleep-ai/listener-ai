@@ -263,6 +263,7 @@ Pre-v2 folders use `<sanitized-title>_<timestamp>/` with `summary.md` (YAML fron
 #### Conventions
 
 - Per-test temp dirs via `makeTempDir(suffix)` from `test-helpers.ts` (wraps `fs.mkdtempSync` under `os.tmpdir()`). Pair with `rmDir(...)` in `after()`. Never write to the real `getDataPath()`.
+- Every test process is data-isolated: `pnpm test` preloads `src/test-setup.ts` (`--require ./dist/test-setup.js`), which sets `NODE_ENV=test` and a fresh per-process temp `LISTENER_DATA_PATH`, so `usage.jsonl`, `config.json` and transcriptions never resolve to the developer's real data dir (guarded by `test-setup.test.ts`). Running a compiled test file directly needs the same `NODE_ENV=test node --test --require ./dist/test-setup.js` flags. `dataPath.ts` latches test mode at module load, so a test that deletes `NODE_ENV` cannot un-isolate the rest of its file -- still restore env vars you mutate instead of deleting them.
 - For `describe({ skip })` based on external-tool availability, detect synchronously at module load (`findFfmpegSync()`); `before()` runs too late because `describe` evaluates options at file-load time.
 - Skip gracefully when external tools are missing: `describe('...', { skip: !ffmpegPath ? 'ffmpeg not installed' : undefined }, ...)`. Tests should pass on a machine without ffmpeg, run for real where it's installed.
 

@@ -24,7 +24,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { getDataPath } from '../dataPath';
+import { getDataPath, isTestEnvironment } from '../dataPath';
 
 /**
  * Per-model rates. Text/image/audio token rates are $ per 1M tokens.
@@ -178,7 +178,7 @@ export function _setDataPathForTesting(p: string | undefined): void {
  */
 function usageFilePath(): string | null {
   if (overrideDataPath) return path.join(overrideDataPath, 'usage.jsonl');
-  if (process.env.NODE_ENV === 'test' && !process.env.LISTENER_DATA_PATH) return null;
+  if (isTestEnvironment() && !process.env.LISTENER_DATA_PATH) return null;
   return path.join(getDataPath(), 'usage.jsonl');
 }
 
