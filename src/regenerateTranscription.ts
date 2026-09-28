@@ -36,6 +36,7 @@ const TRANSCRIPTION_META_KEYS = new Set([
   'suggestedTitle',
   'emoji',
   'transcribedAt',
+  'generationId',
   'audioFile',
   'cost',
   'customFields',

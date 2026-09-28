@@ -38,6 +38,7 @@ import {
   getTranscriptionsDir,
   type LiveNote,
   readTranscription,
+  readTranscriptionGeneration,
   repairMissingAudioFiles,
   repairRenamedRecordingSidecars,
   updateTranscriptionStatus,
@@ -1539,6 +1540,9 @@ ipcMain.handle(
 
       // Add "by L.AI" to the title for distinction
       const titleWithSuffix = `${data.title} by L.AI`;
+      const generation = isContainedTranscriptionPath(data.transcriptionPath)
+        ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
+        : undefined;
 
       const result = await notionService.createMeetingNote(
         titleWithSuffix,
@@ -1547,11 +1551,20 @@ ipcMain.handle(
         data.audioFilePath,
       );
 
-      if (result.success && result.url && isContainedTranscriptionPath(data.transcriptionPath)) {
+      if (
+        result.success &&
+        result.url &&
+        generation !== undefined &&
+        isContainedTranscriptionPath(data.transcriptionPath)
+      ) {
         try {
-          await updateTranscriptionStatus(data.transcriptionPath, {
-            notionPageUrl: result.url,
-          });
+          await updateTranscriptionStatus(
+            data.transcriptionPath,
+            {
+              notionPageUrl: result.url,
+            },
+            generation,
+          );
         } catch (error) {
           console.error('Failed to persist Notion URL to transcription:', error);
           reportError(error, { operation: 'notion.persistUrl', severity: 'warning' });
@@ -1593,11 +1606,14 @@ ipcMain.handle(
       if (!service) {
         return { success: false, error: 'Slack webhook URL is not configured' };
       }
+      const generation = isContainedTranscriptionPath(data.transcriptionPath)
+        ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
+        : undefined;
 
       // For a historical resend, use the original meeting time from frontmatter
       // so the Slack message shows when the meeting actually happened, not now.
       let meetingDate = new Date();
-      if (isContainedTranscriptionPath(data.transcriptionPath)) {
+      if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
         const stored = await readTranscription(data.transcriptionPath).catch(() => null);
         if (stored?.transcribedAt) {
           const parsed = new Date(stored.transcribedAt);
@@ -1613,14 +1629,18 @@ ipcMain.handle(
         notionError: data.notionError,
       });
 
-      if (isContainedTranscriptionPath(data.transcriptionPath)) {
+      if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
         try {
           // Preserve the previous successful slackSentAt on a failed resend;
           // only the error field reflects the new failure.
-          await updateTranscriptionStatus(data.transcriptionPath, {
-            ...(result.success ? { slackSentAt: result.sentAt } : {}),
-            slackError: result.success ? null : result.error,
-          });
+          await updateTranscriptionStatus(
+            data.transcriptionPath,
+            {
+              ...(result.success ? { slackSentAt: result.sentAt } : {}),
+              slackError: result.success ? null : result.error,
+            },
+            generation,
+          );
         } catch (error) {
           console.error('Failed to persist Slack status to transcription:', error);
           reportError(error, { operation: 'slack.persistStatus', severity: 'warning' });

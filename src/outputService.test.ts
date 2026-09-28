@@ -24,6 +24,7 @@ import {
   parseBullets,
   parseFrontmatter,
   readTranscription,
+  readTranscriptionGeneration,
   repairMissingAudioFiles,
   sanitizeForPath,
   sanitizeV2Title,
@@ -163,6 +164,29 @@ describe('formatSummary custom fields', () => {
 });
 
 describe('updateTranscriptionStatus', () => {
+  it('accepts status updates for older notes without a generation ID', async () => {
+    const folderPath = saveTranscription({
+      title: 'Legacy status',
+      result: baseResult,
+      dataPath: makeTmpDataPath(),
+    });
+    const metaPath = path.join(folderPath, META_JSON);
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    delete meta.generationId;
+    fs.writeFileSync(metaPath, JSON.stringify(meta));
+
+    assert.equal(await readTranscriptionGeneration(folderPath), null);
+    await updateTranscriptionStatus(
+      folderPath,
+      { notionPageUrl: 'https://www.notion.so/legacy' },
+      null,
+    );
+    assert.equal(
+      (await readTranscription(folderPath))?.notionPageUrl,
+      'https://www.notion.so/legacy',
+    );
+  });
+
   it('writes Notion URL and Slack send timestamp without losing the markdown body', async () => {
     const dataPath = makeTmpDataPath();
     const folderPath = saveTranscription({

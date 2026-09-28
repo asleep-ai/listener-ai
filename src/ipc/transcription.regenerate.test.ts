@@ -5,7 +5,12 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import * as path from 'path';
 import type { TranscriptionResult } from '../geminiService';
 import { withMeetingLock } from '../meetingLock';
-import { getTranscriptionsDir, readTranscription } from '../outputService';
+import {
+  getTranscriptionsDir,
+  readTranscription,
+  readTranscriptionGeneration,
+  updateTranscriptionStatus,
+} from '../outputService';
 import { makeTempDir, rmDir } from '../test-helpers';
 import type { IpcContext } from './types';
 
@@ -124,6 +129,29 @@ describe('transcribe-audio regenerate (#213)', () => {
     const read = await readTranscription(linkedPath()!);
     assert.equal(read?.summary, 'Second summary.');
     assert.equal(read?.title, 'Second Title');
+  });
+
+  it('does not mark a new note as sent by an older in-flight export', async () => {
+    transcribe = async () => resultFor('First');
+    const first = await run();
+    const previousGeneration = await readTranscriptionGeneration(first.transcriptionPath!);
+    assert.ok(previousGeneration);
+
+    transcribe = async () => resultFor('Second');
+    const second = await run();
+    assert.equal(second.transcriptionPath, first.transcriptionPath);
+    assert.notEqual(
+      await readTranscriptionGeneration(second.transcriptionPath!),
+      previousGeneration,
+    );
+    await updateTranscriptionStatus(
+      second.transcriptionPath!,
+      { notionPageUrl: 'https://www.notion.so/old', slackSentAt: '2026-01-01T00:00:00Z' },
+      previousGeneration,
+    );
+    const note = await readTranscription(second.transcriptionPath!);
+    assert.equal(note?.notionPageUrl, undefined);
+    assert.equal(note?.slackSentAt, undefined);
   });
 
   it('does not save a cancelled regeneration after waiting for a note reader', async () => {

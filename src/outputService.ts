@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'node:crypto';
 import { withMeetingLock } from './meetingLock';
 import type { HighlightEntry, TranscriptionResult } from './geminiService';
 import {
@@ -103,6 +104,7 @@ export interface MeetingMetaV2 {
   suggestedTitle?: string;
   emoji?: string;
   transcribedAt: string; // canonical ISO 8601 UTC, e.g. 2026-05-20T10:30:15.123Z
+  generationId?: string; // changes when note content is replaced; absent in older notes
   audioFile?: string; // absolute path (kept compatible with v1.audioFilePath)
   cost?: CostSnapshot;
   customFields?: Record<string, unknown>;
@@ -553,6 +555,7 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
 
   writeV2Files(folderPath, {
     transcribedAt: v2TimestampToIso(usedTs),
+    generationId: randomUUID(),
     title: opts.title,
     result: opts.result,
     audioFilePath: opts.audioFilePath,
@@ -567,6 +570,7 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
  * because migration also calls this with values it lifted from a v1 folder. */
 interface V2WriteInputs {
   transcribedAt: string;
+  generationId?: string;
   title: string;
   result: TranscriptionResult;
   audioFilePath?: string;
@@ -585,6 +589,7 @@ function writeV2Files(folderPath: string, inputs: V2WriteInputs): void {
     title: inputs.title,
     transcribedAt: inputs.transcribedAt,
   };
+  if (inputs.generationId) meta.generationId = inputs.generationId;
   if (inputs.result.suggestedTitle) meta.suggestedTitle = inputs.result.suggestedTitle;
   if (inputs.result.emoji) meta.emoji = inputs.result.emoji;
   if (inputs.audioFilePath) meta.audioFile = inputs.audioFilePath;
@@ -1040,6 +1045,19 @@ export interface TranscriptionStatusUpdate {
   slackError?: string | null;
 }
 
+/** Capture the content generation before sending a note to an external service. */
+export async function readTranscriptionGeneration(
+  folderPath: string,
+): Promise<string | null | undefined> {
+  if (!fs.existsSync(path.join(folderPath, META_JSON))) return undefined;
+  return withMeetingLock(folderPath, async () => {
+    const meta = JSON.parse(
+      await fs.promises.readFile(path.join(folderPath, META_JSON), 'utf-8'),
+    ) as MeetingMetaV2;
+    return meta.generationId ?? null;
+  });
+}
+
 /**
  * Update tracking fields (Notion URL, Slack send status) in a v2 folder's
  * meta.json. Pass `null` to clear a field, `undefined` to leave unchanged.
@@ -1050,11 +1068,15 @@ export interface TranscriptionStatusUpdate {
 export async function updateTranscriptionStatus(
   folderPath: string,
   updates: TranscriptionStatusUpdate,
+  expectedGeneration?: string | null,
 ): Promise<void> {
   await withMeetingLock(folderPath, async () => {
     const metaPath = path.join(folderPath, META_JSON);
     const raw = await fs.promises.readFile(metaPath, 'utf-8');
     const meta = JSON.parse(raw) as MeetingMetaV2;
+    if (expectedGeneration !== undefined && (meta.generationId ?? null) !== expectedGeneration) {
+      return;
+    }
 
     // `exports` is reserved as a CommonJS module local; use a different name.
     const exportsMeta = { ...meta.exports } as NonNullable<MeetingMetaV2['exports']>;
