@@ -15,10 +15,14 @@ function sameValue(a: unknown, b: unknown): boolean {
 }
 
 /** The entries of `next` whose value differs from `baseline`. */
-export function diffConfigPayload<T extends object>(baseline: T, next: T): Partial<T> {
+export function diffConfigPayload<T extends object>(
+  baseline: T,
+  next: T,
+  forceKeys: readonly (keyof T)[] = [],
+): Partial<T> {
   const changed: Partial<T> = {};
   for (const key of Object.keys(next) as (keyof T)[]) {
-    if (!sameValue(baseline[key], next[key])) changed[key] = next[key];
+    if (forceKeys.includes(key) || !sameValue(baseline[key], next[key])) changed[key] = next[key];
   }
   return changed;
 }

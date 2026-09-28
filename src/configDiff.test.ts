@@ -3,6 +3,12 @@ import { describe, it } from 'node:test';
 import { diffConfigPayload } from './configDiff';
 
 describe('diffConfigPayload', () => {
+  it('sends an explicit reset even when a resolved default looked unchanged', () => {
+    const baseline = { geminiModel: '', summaryPrompt: '' };
+    const next = { ...baseline };
+    assert.deepEqual(diffConfigPayload(baseline, next), {});
+    assert.deepEqual(diffConfigPayload(baseline, next, ['geminiModel', 'summaryPrompt']), next);
+  });
   it('returns nothing for an untouched form', () => {
     const baseline = { aiProvider: 'gemini', autoMode: false, maxRecordingMinutes: 0 };
     assert.deepEqual(diffConfigPayload(baseline, { ...baseline }), {});

@@ -51,6 +51,9 @@ let knownWordsValues: string[] = [];
 // that differ from it, so resolved defaults and env-sourced secrets the user
 // never touched stay out of config.json.
 let settingsBaseline: ConfigPayload = {};
+// The backend sends resolved defaults, so an explicit stored default is
+// indistinguishable from an unset value. A Reset click must still clear it.
+const resetSettingsKeys = new Set<keyof ConfigPayload>();
 let aiPane: HTMLElement | null = null;
 let codexOAuthConfigured = false;
 let codexOAuthSource: 'config' | 'env' | 'codexCli' | null = null;
@@ -155,7 +158,12 @@ function setupModelControls(): void {
     });
 
     const resetBtn = document.getElementById(RESET_BUTTON_IDS[field]) as HTMLButtonElement | null;
-    if (resetBtn) resetBtn.onclick = () => applyModelValue(field, '');
+    if (resetBtn) {
+      resetBtn.onclick = () => {
+        applyModelValue(field, '');
+        resetSettingsKeys.add(field);
+      };
+    }
   }
 }
 
@@ -366,6 +374,7 @@ export async function showConfigModal(): Promise<void> {
   };
 
   // Pre-fill the form if values exist
+  resetSettingsKeys.clear();
   applySettingsFields(config);
   applyModelValue('geminiModel', config.geminiModel);
   applyModelValue('geminiFlashModel', config.geminiFlashModel);
@@ -416,6 +425,7 @@ export async function showConfigModal(): Promise<void> {
     resetPromptBtn.onclick = () => {
       if (summaryPromptInput) {
         summaryPromptInput.value = defaultSummaryPrompt;
+        resetSettingsKeys.add('summaryPrompt');
       }
     };
   }
@@ -883,7 +893,9 @@ export function setupConfigModal(): void {
         return;
       }
 
-      const payload = diffConfigPayload(settingsBaseline, { ...fields, ...readOtherSettings() });
+      const next = { ...fields, ...readOtherSettings() };
+      const forcedResets = [...resetSettingsKeys].filter((key) => next[key] === '');
+      const payload = diffConfigPayload(settingsBaseline, next, forcedResets);
       await window.electronAPI.saveConfig(payload);
       hideConfig();
     });
