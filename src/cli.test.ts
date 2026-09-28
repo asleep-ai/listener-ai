@@ -78,7 +78,7 @@ describe('listener CLI basics', () => {
     assert.match(stdout, /^listener \d/);
   });
 
-  it('google status does not touch interrupted meeting recovery', async () => {
+  it('unrelated commands do not touch interrupted meeting recovery', async () => {
     const scratch = path.join(basicsDataPath, '.regenerate-google-auth');
     fs.mkdirSync(path.join(scratch, 'new'), { recursive: true });
     fs.writeFileSync(
@@ -90,6 +90,13 @@ describe('listener CLI basics', () => {
       const { stdout, code } = await runCli(['google', 'status']);
       assert.equal(code, 0);
       assert.match(stdout, /googleOAuthConfigured=/);
+      const usage = await runCli(['usage', '--month', '2026-05']);
+      assert.equal(usage.code, 0);
+      assert.match(usage.stdout, /Usage for 2026-05/);
+      const transcript = await runCli(['transcript']);
+      assert.equal(transcript.code, 1);
+      assert.match(transcript.stderr, /No audio file specified/);
+      assert.doesNotMatch(transcript.stderr, /regeneration/i);
       assert.ok(fs.existsSync(scratch));
     } finally {
       rmDir(scratch);

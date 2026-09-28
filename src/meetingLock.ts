@@ -11,7 +11,7 @@ const lockfile = require('proper-lockfile') as {
       realpath: false;
       lockfilePath: string;
       stale: number;
-      retries: { retries: number; factor: number; minTimeout: number; maxTimeout: number };
+      retries: number;
     },
   ) => Promise<() => Promise<void>>;
 };
@@ -19,20 +19,52 @@ const lockfile = require('proper-lockfile') as {
 export async function withMeetingLock<T>(
   folderPath: string,
   action: () => Promise<T> | T,
+  options: { signal?: AbortSignal } = {},
 ): Promise<T> {
   const key = path.resolve(folderPath);
   const lockDir = path.join(path.dirname(path.dirname(key)), '.listener-meeting-locks');
   fs.mkdirSync(lockDir, { recursive: true });
   const lockfilePath = path.join(lockDir, `${createHash('sha256').update(key).digest('hex')}.lock`);
-  const release = await lockfile.lock(key, {
-    realpath: false,
-    lockfilePath,
-    stale: 30_000,
-    retries: { retries: 240, factor: 1, minTimeout: 50, maxTimeout: 500 },
-  });
+  const deadline = Date.now() + 15 * 60_000;
+  let release: () => Promise<void>;
+  for (;;) {
+    options.signal?.throwIfAborted();
+    try {
+      release = await lockfile.lock(key, {
+        realpath: false,
+        lockfilePath,
+        stale: 30_000,
+        retries: 0,
+      });
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ELOCKED' || Date.now() >= deadline) {
+        throw error;
+      }
+      await waitForRetry(options.signal);
+    }
+  }
   try {
+    options.signal?.throwIfAborted();
     return await action();
   } finally {
     await release();
   }
+}
+
+function waitForRetry(signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const done = () => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    };
+    const timer = setTimeout(done, 250);
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      reject(signal?.reason ?? new Error('Meeting lock wait cancelled'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+  });
 }

@@ -70,3 +70,30 @@ it('waits for a note lock held by another process', async () => {
     child.kill();
   }
 });
+
+it('stops waiting when a transcription is cancelled', async () => {
+  const folder = path.join(os.tmpdir(), `meeting-lock-cancel-${process.pid}`, 'note');
+  let release!: () => void;
+  let ready!: () => void;
+  const acquired = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+  const held = withMeetingLock(
+    folder,
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+        ready();
+      }),
+  );
+  await acquired;
+  try {
+    const controller = new AbortController();
+    const waiting = withMeetingLock(folder, () => {}, { signal: controller.signal });
+    controller.abort();
+    await assert.rejects(waiting, /abort/i);
+  } finally {
+    release();
+    await held;
+  }
+});

@@ -5,6 +5,7 @@ import * as path from 'path';
 import { promisify } from 'util';
 import { app, dialog, ipcMain } from 'electron';
 import { extensionForMimeType } from '../audioFormats';
+import { withMeetingLock } from '../meetingLock';
 import { formatTimestamp, sanitizeForPath, saveTranscription } from '../outputService';
 import { reportError } from '../sentry';
 import { concatAudioFiles } from '../services/audioConcatService';
@@ -44,7 +45,9 @@ export function register(ctx: IpcContext): void {
       const meta = await metadataService.getMetadata(resolved);
       if (meta?.transcriptionPath && ctx.isContainedTranscriptionPath(meta.transcriptionPath)) {
         try {
-          fs.rmSync(meta.transcriptionPath, { recursive: true, force: true });
+          await withMeetingLock(meta.transcriptionPath, () =>
+            fs.rmSync(meta.transcriptionPath!, { recursive: true, force: true }),
+          );
         } catch (err) {
           console.error('Failed to remove transcription folder:', err);
           // Continue -- audio cleanup still useful even if folder rm partially failed.

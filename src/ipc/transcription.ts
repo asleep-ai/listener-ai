@@ -175,7 +175,7 @@ export function register(ctx: IpcContext): void {
           });
         };
         transcriptionPath = existing?.transcriptionPath
-          ? await withMeetingLock(existing.transcriptionPath, save)
+          ? await withMeetingLock(existing.transcriptionPath, save, { signal })
           : save();
         noteCommitted = true;
         console.log('Transcription saved to:', transcriptionPath);

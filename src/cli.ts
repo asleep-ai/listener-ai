@@ -60,20 +60,26 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.webm',
 ]);
 
-/** Commands that don't trigger the one-shot v1->v2 startup migration:
- * - `config`/`codex` never touch the transcriptions directory.
- * - `migrate` IS the migration command itself; its own loop scans for v1
- *   folders. Running the startup auto-migrate first would convert everything
- *   to v2 before `--dry-run` could observe it. The `migrate` handler is
- *   responsible for any conversion it does. */
-const COMMANDS_WITHOUT_DATA_ACCESS = new Set(['config', 'codex', 'migrate']);
-const GOOGLE_AUTH_COMMANDS = new Set(['login', 'logout', 'status']);
+const MEETING_READER_COMMANDS = new Set(['list', 'show', 'export', 'search', 'merge', 'ask']);
+const COMMANDS_WITHOUT_MIGRATION = new Set([
+  'config',
+  'codex',
+  'migrate', // Its own handler must see v1 folders, including --dry-run.
+  'transcript',
+  'usage',
+  'google',
+]);
 
 function commandUsesMeetingData(args: string[]): boolean {
   return (
-    !COMMANDS_WITHOUT_DATA_ACCESS.has(args[0]) &&
-    !(args[0] === 'google' && GOOGLE_AUTH_COMMANDS.has(args[1]))
+    MEETING_READER_COMMANDS.has(args[0]) ||
+    (args[0] === 'google' && (args[1] === 'upload' || args[1] === 'sync'))
   );
+}
+
+function commandNeedsMigration(args: string[]): boolean {
+  // The default `listener <audio-file>` command writes a new meeting.
+  return commandUsesMeetingData(args) || !COMMANDS_WITHOUT_MIGRATION.has(args[0]);
 }
 
 const VERSION = (() => {
@@ -1366,11 +1372,11 @@ async function main(): Promise<void> {
 
   // One-shot v1 -> v2 migration is the runtime's responsibility on every
   // entry point. Skip for commands that don't touch the transcriptions dir
-  // (`config`, `codex`, `google login/logout/status`) so we don't pay the
+  // (`config`, `codex`, `usage`, `transcript`, `google login/logout/status`) so we don't pay the
   // dir-scan when it's irrelevant. Also skip when `LISTENER_SKIP_AUTO_MIGRATE`
   // is set -- the migrate-command tests use this to drive the explicit
   // `listener migrate` flow on un-migrated fixtures.
-  if (commandUsesMeetingData(args) && !process.env.LISTENER_SKIP_AUTO_MIGRATE) {
+  if (commandNeedsMigration(args) && !process.env.LISTENER_SKIP_AUTO_MIGRATE) {
     try {
       await autoMigrateLegacyOnStartup(getDataPath());
     } catch (err) {
