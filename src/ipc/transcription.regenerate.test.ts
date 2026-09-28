@@ -125,6 +125,36 @@ describe('transcribe-audio regenerate (#213)', () => {
     assert.equal(read?.title, 'Second Title');
   });
 
+  it('regenerates a recording renamed during its first transcription without creating another note', async () => {
+    const untitled = path.join(
+      dataPath,
+      'recordings',
+      'Untitled_Meeting_2026-01-01T00-00-00-000Z.webm',
+    );
+    fs.renameSync(audioPath, untitled);
+    audioPath = untitled;
+
+    transcribe = async () => resultFor('First');
+    const first = (await run()) as {
+      success: boolean;
+      newFilePath?: string;
+      transcriptionPath?: string;
+    };
+    assert.equal(first.success, true);
+    assert.ok(first.newFilePath);
+    audioPath = first.newFilePath;
+
+    transcribe = async () => resultFor('Second');
+    const second = await run();
+    assert.equal(second.success, true);
+    assert.deepEqual(noteFolders(), [path.basename(first.transcriptionPath!)]);
+    assert.equal(second.transcriptionPath, first.transcriptionPath);
+    assert.equal(linkedPath(), first.transcriptionPath);
+    const read = await readTranscription(linkedPath()!);
+    assert.equal(read?.audioFilePath, audioPath);
+    assert.equal(read?.summary, 'Second summary.');
+  });
+
   it('a failed regenerate keeps the previous note and link', async () => {
     transcribe = async () => resultFor('First');
     const first = await run();
@@ -162,6 +192,34 @@ describe('transcribe-audio regenerate (#213)', () => {
     assert.equal(noteFolders().length, 1);
     const read = await readTranscription(first.transcriptionPath!);
     assert.equal(read?.summary, 'First summary.');
+  });
+
+  it('keeps an untitled recording linked to its old note when regeneration fails', async () => {
+    const untitled = path.join(
+      dataPath,
+      'recordings',
+      'Untitled_Meeting_2026-01-01T00-00-00-000Z.webm',
+    );
+    fs.renameSync(audioPath, untitled);
+    audioPath = untitled;
+    transcribe = async () => ({ ...resultFor('First'), suggestedTitle: '' });
+    const first = await run();
+    assert.equal(first.success, true);
+
+    fs.chmodSync(first.transcriptionPath!, 0o555);
+    try {
+      transcribe = async () => resultFor('Second');
+      const second = await run();
+      assert.equal(second.success, false);
+    } finally {
+      fs.chmodSync(first.transcriptionPath!, 0o755);
+    }
+
+    const read = await readTranscription(first.transcriptionPath!);
+    assert.equal(read?.summary, 'First summary.');
+    assert.equal(read?.audioFilePath, untitled);
+    assert.ok(fs.existsSync(untitled), 'the previous note still points to an existing recording');
+    assert.equal(linkedPath(), first.transcriptionPath);
   });
 
   it('a cancelled regenerate never replaces the previous note, even if the provider still resolves', async () => {

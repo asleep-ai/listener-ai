@@ -164,6 +164,10 @@ export function recoverInterruptedRegenerations(dataPath: string): string[] {
     try {
       const markerPath = path.join(scratch, SWAP_MARKER);
       const marker = readMarker(markerPath);
+      // The prefix alone does not prove this directory belongs to us. Keep
+      // unknown user data, including a scratch folder whose marker was never
+      // completed before a crash.
+      if (!marker) continue;
       if (
         marker &&
         marker.pid !== process.pid &&

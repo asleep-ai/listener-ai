@@ -296,6 +296,16 @@ describe('saveRegeneratedTranscription', () => {
 });
 
 describe('recoverInterruptedRegenerations', () => {
+  it('preserves an unrecognized directory with the scratch prefix', () => {
+    const dataPath = makeDataPath();
+    const unknown = path.join(dataPath, '.regenerate-user-data');
+    fs.mkdirSync(unknown);
+    fs.writeFileSync(path.join(unknown, 'keep.txt'), 'keep');
+
+    assert.deepEqual(recoverInterruptedRegenerations(dataPath), []);
+    assert.equal(fs.readFileSync(path.join(unknown, 'keep.txt'), 'utf-8'), 'keep');
+  });
+
   it('restores the previous note when the process died mid-swap', async () => {
     const dataPath = makeDataPath();
     const previous = saveTranscription({ title: 'Old Title', result: oldResult, dataPath });

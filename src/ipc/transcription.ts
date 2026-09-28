@@ -114,11 +114,14 @@ export function register(ctx: IpcContext): void {
         result.liveNotes = liveNotes;
       }
 
-      // Rename an untitled recording BEFORE saving so the note's meta.audioFile
-      // and the metadata sidecar both reference the final path (#209).
-      const renameTitle = path.basename(filePath).includes('Untitled_Meeting')
-        ? result.suggestedTitle
-        : undefined;
+      // Rename an untitled recording BEFORE its first save so meta.audioFile
+      // and the sidecar both reference the final path (#209). A Regenerate
+      // already has a linked note: keep its audio path stable until the note
+      // replacement succeeds, including when saving fails (#213).
+      const renameTitle =
+        !existing?.transcriptionPath && path.basename(filePath).includes('Untitled_Meeting')
+          ? result.suggestedTitle
+          : undefined;
       let audioFilePath = filePath;
       if (renameTitle) {
         audioFilePath = await renameAudioFile(filePath, renameTitle);
