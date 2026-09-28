@@ -17,6 +17,7 @@ import {
   normalizeTranscriptionProvider,
 } from '../../src/aiProvider';
 import { applySettingsFields, parseLiveSttProvider, readSettingsFields } from './settings-fields';
+import { diffConfigPayload } from '../../src/configDiff';
 import { formatUsd } from '../../src/usageFormat';
 
 let configModal: HTMLDialogElement | null = null;
@@ -46,6 +47,10 @@ let knownWordsContainer: HTMLElement | null = null;
 let defaultSummaryPrompt = '';
 let knownWordsField: HTMLInputElement | null = null;
 let knownWordsValues: string[] = [];
+// What the form read back as right after prefill. Save sends only the fields
+// that differ from it, so resolved defaults and env-sourced secrets the user
+// never touched stay out of config.json.
+let settingsBaseline: ConfigPayload = {};
 let aiPane: HTMLElement | null = null;
 let codexOAuthConfigured = false;
 let codexOAuthSource: 'config' | 'env' | 'codexCli' | null = null;
@@ -122,6 +127,20 @@ function readModelValue(field: ModelField): string {
   if (!els) return '';
   if (els.select.value === CUSTOM_MODEL_SENTINEL) return els.input.value.trim();
   return els.select.value;
+}
+
+// The hand-written controls' share of the save payload.
+function readOtherSettings(): ConfigPayload {
+  const summaryPromptInput = document.getElementById('summaryPrompt') as HTMLTextAreaElement | null;
+  const summaryPrompt = summaryPromptInput ? summaryPromptInput.value.trim() : '';
+  return {
+    geminiModel: readModelValue('geminiModel'),
+    geminiFlashModel: readModelValue('geminiFlashModel'),
+    codexModel: readModelValue('codexModel'),
+    codexTranscriptionModel: readModelValue('codexTranscriptionModel'),
+    knownWords: [...knownWordsValues],
+    summaryPrompt: summaryPrompt === defaultSummaryPrompt ? '' : summaryPrompt,
+  };
 }
 
 function setupModelControls(): void {
@@ -400,6 +419,8 @@ export async function showConfigModal(): Promise<void> {
       }
     };
   }
+
+  settingsBaseline = { ...readSettingsFields(), ...readOtherSettings() };
 
   applyAiProviderVisibility();
   updateLiveProviderNotice();
@@ -703,6 +724,9 @@ export function setupConfigModal(): void {
       if (result.success) {
         applyCodexOAuthState(result.config);
         if (aiProviderSelect) aiProviderSelect.value = 'codex';
+        // Sign-in already persisted this, so switching back to another
+        // provider before Save must still count as an edit.
+        settingsBaseline = { ...settingsBaseline, aiProvider: 'codex' };
         applyAiProviderVisibility();
         updateLiveProviderNotice();
         setCodexOAuthStatus(codexOAuthStatusLabel(codexOAuthSource), 'success');
@@ -853,26 +877,13 @@ export function setupConfigModal(): void {
         addKnownWords(knownWordsField.value);
         knownWordsField.value = '';
       }
-      const knownWords = [...knownWordsValues];
-      const summaryPromptInput = document.getElementById(
-        'summaryPrompt',
-      ) as HTMLTextAreaElement | null;
-      const summaryPrompt = summaryPromptInput ? summaryPromptInput.value.trim() : '';
 
       if (fields.aiProvider === 'gemini' && !fields.geminiApiKey) {
         alert('Please enter at least the Gemini API key');
         return;
       }
 
-      const payload: ConfigPayload = {
-        ...fields,
-        geminiModel: readModelValue('geminiModel'),
-        geminiFlashModel: readModelValue('geminiFlashModel'),
-        codexModel: readModelValue('codexModel'),
-        codexTranscriptionModel: readModelValue('codexTranscriptionModel'),
-        knownWords: knownWords,
-        summaryPrompt: summaryPrompt === defaultSummaryPrompt ? '' : summaryPrompt,
-      };
+      const payload = diffConfigPayload(settingsBaseline, { ...fields, ...readOtherSettings() });
       await window.electronAPI.saveConfig(payload);
       hideConfig();
     });

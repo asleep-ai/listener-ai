@@ -754,7 +754,9 @@ export class ConfigService {
       }
       this.setKey(key as keyof AppConfig, value as AppConfig[keyof AppConfig]);
     }
-    this.saveConfig();
+    // A no-op settings save sends an empty partial; rewriting the file anyway
+    // would reformat a hand-edited config.json for no reason.
+    if (this.dirtyKeys.size > 0) this.saveConfig();
   }
 
   unsetKey(key: keyof AppConfig): void {
