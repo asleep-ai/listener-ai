@@ -110,6 +110,29 @@ export function register(ctx: IpcContext): void {
         result.liveNotes = liveNotes;
       }
 
+      // Rename an untitled recording BEFORE saving so the note's meta.audioFile
+      // and the metadata sidecar both reference the final path (#209).
+      const renameTitle = path.basename(filePath).includes('Untitled_Meeting')
+        ? result.suggestedTitle
+        : undefined;
+      let audioFilePath = filePath;
+      if (renameTitle) {
+        audioFilePath = await renameAudioFile(filePath, renameTitle);
+        if (audioFilePath !== filePath) {
+          // Carry the stop-recording sidecar (live notes) over to the renamed
+          // audio. Delete the old one only after the copy lands.
+          try {
+            const existingMetadata = await metadataService.getMetadata(filePath);
+            if (existingMetadata) {
+              await metadataService.saveMetadata(audioFilePath, existingMetadata);
+              await metadataService.deleteMetadata(filePath);
+            }
+          } catch (error) {
+            console.error('Failed to move metadata to renamed audio:', error);
+          }
+        }
+      }
+
       // Save transcription files (summary.md + transcript.md)
       const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));
       let transcriptionPath: string | undefined;
@@ -117,7 +140,7 @@ export function register(ctx: IpcContext): void {
         transcriptionPath = saveTranscription({
           title,
           result,
-          audioFilePath: filePath,
+          audioFilePath,
           dataPath: app.getPath('userData'),
           liveNotes,
         });
@@ -131,7 +154,7 @@ export function register(ctx: IpcContext): void {
       // Save metadata - slim if transcription files saved, inline fallback otherwise
       try {
         if (transcriptionPath) {
-          await metadataService.saveMetadata(filePath, {
+          await metadataService.saveMetadata(audioFilePath, {
             title,
             suggestedTitle: result.suggestedTitle,
             transcriptionPath,
@@ -141,7 +164,7 @@ export function register(ctx: IpcContext): void {
           });
         } else {
           // Fallback: store inline data when file write failed
-          await metadataService.saveMetadata(filePath, {
+          await metadataService.saveMetadata(audioFilePath, {
             title,
             suggestedTitle: result.suggestedTitle,
             transcript: result.transcript,
@@ -162,19 +185,8 @@ export function register(ctx: IpcContext): void {
 
       notificationService.notifyTranscriptionComplete(result.suggestedTitle || 'Meeting');
 
-      // Check if we need to rename the file (if it was untitled)
-      const fileName = path.basename(filePath);
-      if (fileName.includes('Untitled_Meeting') && result.suggestedTitle) {
-        const newFilePath = await renameAudioFile(filePath, result.suggestedTitle);
-
-        // Move metadata to new file path
-        const existingMetadata = await metadataService.getMetadata(filePath);
-        if (existingMetadata) {
-          await metadataService.deleteMetadata(filePath);
-          await metadataService.saveMetadata(newFilePath, existingMetadata);
-        }
-
-        return { success: true, data: result, newFilePath, transcriptionPath };
+      if (renameTitle) {
+        return { success: true, data: result, newFilePath: audioFilePath, transcriptionPath };
       }
 
       return { success: true, data: result, transcriptionPath };

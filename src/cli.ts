@@ -35,6 +35,7 @@ import {
   listTranscriptions,
   migrateV1ToV2,
   readTranscription,
+  repairMissingAudioFiles,
   sanitizeForPath,
   saveTranscription,
 } from './outputService';
@@ -1354,6 +1355,18 @@ async function main(): Promise<void> {
         `Error: legacy migration failed: ${err instanceof Error ? err.message : String(err)}\n`,
       );
       process.exit(1);
+    }
+  }
+
+  // Backfill notes whose meta.audioFile still names a pre-rename recording
+  // (#209) so `merge` reads the real recording. Best-effort.
+  if (!COMMANDS_WITHOUT_DATA_ACCESS.has(args[0])) {
+    try {
+      await repairMissingAudioFiles(getDataPath());
+    } catch (err) {
+      process.stderr.write(
+        `Warning: audio path repair failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
     }
   }
 

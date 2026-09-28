@@ -172,7 +172,7 @@ Files inside the folder (each holds exactly one semantic field, so there is no i
 - `transcript.md` — plain transcript text, no `# title` heading.
 - `notes.json` (optional) — live notes captured during recording.
 - `highlights.json` (optional) — AI-enriched highlights.
-- Original audio file (optional, path lives in `meta.audioFile`).
+- Original audio file (optional, path lives in `meta.audioFile`). For GUI recordings this is the final path: `transcribe-audio` renames an `Untitled_Meeting_*` recording to its suggested title BEFORE `saveTranscription`, and writes the `metadata/` sidecar once at that path.
 
 ### v1 layout (legacy, auto-migrated on startup)
 
@@ -184,6 +184,7 @@ Pre-v2 folders use `<sanitized-title>_<timestamp>/` with `summary.md` (YAML fron
 - **Startup migration is mandatory and crash-safe.** `main.ts` (Electron) and `cli.ts` (CLI) both `await autoMigrateLegacyOnStartup(getDataPath())` before any other code. Failure aborts startup with a dialog (Electron) or error exit (CLI) — partial migration is worse than no migration. For each v1 folder, the destructively-overwritten files (`summary.md`, `transcript.md`) are snapshotted to `<dataPath>/.v1-backup-<ts>/<folderName>/` before migration. Backups are GC'd after 30 days via `gcLegacyBackups`.
 - **`meta.json` is written LAST in `writeV2Files`** so it doubles as the v2 sentinel — if a save/migration crashes mid-write the folder is still recognised as v1 and a retry restarts cleanly instead of treating a half-written folder as already-migrated.
 - **`updateTranscriptionStatus` touches only `meta.json`** so Drive sync sees a one-file change per status update. Content files (`summary.md`, `transcript.md`, etc.) keep their existing mtime.
+- **Startup audio-path backfill (#209).** After migration, `main.ts` and `cli.ts` run `repairMissingAudioFiles` (best-effort, never fatal). Notes saved before the rename-first fix kept the pre-rename `Untitled_Meeting_*` path. A note is repaired only when its `meta.audioFile` is a missing `Untitled_Meeting_*_<ts>` path and the `metadata/*.json` sidecars naming that note folder (`transcriptionPath` basename) point at exactly one existing recording with the same directory, extension, and `_<ts>` suffix -- i.e. exactly what `renameAudioFile` produced. No sidecar, or sidecars naming different recordings, leave the note untouched; there is no filename-only guessing without sidecar evidence. Only `meta.json` is rewritten (Drive sync re-uploads one file per repaired note), and a per-note write failure is reported without stopping the rest. Known gaps: a note whose recording was later regenerated (sidecar now points at the new note), or whose sidecar the old move code lost, stays unrepaired.
 - **Migration preserves folder names.** Drive sync keys change detection on folder name; renaming would look like delete+recreate and force a full re-upload. v1-named folders keep their v1 names; only the internal file layout flips.
 - **`LISTENER_SKIP_AUTO_MIGRATE`** disables the startup migration. Used only by CLI tests that need to drive `listener migrate` against an un-migrated fixture; do not set this in production.
 
@@ -245,7 +246,7 @@ Pre-v2 folders use `<sanitized-title>_<timestamp>/` with `summary.md` (YAML fron
 ### Tests
 - Run: `pnpm test` (builds with tsc, then executes compiled `.test.js` with `node --test`)
 - Test files live next to source: `src/**/*.test.ts`
-- Existing: `agentService`, `searchService`, `meetingDetectorService`, `simpleAudioRecorder`, `outputService`, `services/audioConcatService`, `cli` (adb-style integration)
+- Existing: `agentService`, `searchService`, `meetingDetectorService`, `simpleAudioRecorder`, `outputService`, `services/audioConcatService`, `ipc/transcription` (electron-stubbed `transcribe-audio` handler), `cli` (adb-style integration)
 - Shared helpers in `src/test-helpers.ts` (temp dirs, ffmpeg detection, synthetic audio fixtures)
 - Test escape hatches (read-only at process start, never set in production):
   - `LISTENER_DATA_PATH` — overrides `getDataPath()` so tests run against a temp directory; honoured only when `NODE_ENV=test` (a stray value in a packaged user's shell is ignored)

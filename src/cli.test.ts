@@ -847,5 +847,124 @@ describe(
       assert.ok(fs.existsSync(folderA), 'source folder A should be preserved');
       assert.ok(fs.existsSync(folderB), 'source folder B should be preserved');
     });
+
+    it('merges notes whose meta.audioFile kept the pre-rename Untitled path (#209)', async () => {
+      const legacyDataPath = makeTempDir('cli-merge-legacy');
+      try {
+        const recordingsDir = path.join(legacyDataPath, 'recordings');
+        const metadataDir = path.join(legacyDataPath, 'metadata');
+        fs.mkdirSync(recordingsDir, { recursive: true });
+        fs.mkdirSync(metadataDir, { recursive: true });
+
+        // Reproduce the pre-fix GUI order: save with the Untitled path, then
+        // rename the audio and move the sidecar to the renamed recording.
+        const folders: string[] = [];
+        const renamedPaths: string[] = [];
+        for (const [i, [title, freq]] of (
+          [
+            ['Alpha', 440],
+            ['Beta', 880],
+          ] as const
+        ).entries()) {
+          const ts = `2025-07-10T0${i}-00-00-000Z`;
+          const untitledName = `Untitled_Meeting_${ts}.webm`;
+          const untitled = await makeOpusWebm(ffmpegPath!, recordingsDir, untitledName, freq);
+          const folder = saveTranscription({
+            title,
+            result: {
+              transcript: `${title} body.`,
+              summary: `${title} summary.`,
+              keyPoints: [],
+              actionItems: [],
+              emoji: '',
+            },
+            audioFilePath: untitled,
+            dataPath: legacyDataPath,
+          });
+          const renamed = path.join(recordingsDir, `${title}_${ts}.webm`);
+          fs.renameSync(untitled, renamed);
+          fs.writeFileSync(
+            path.join(metadataDir, `${title}_${ts}.json`),
+            JSON.stringify({ filePath: renamed, title, transcriptionPath: folder }),
+          );
+          folders.push(folder);
+          renamedPaths.push(renamed);
+        }
+
+        const env = {
+          ...process.env,
+          NODE_ENV: 'test',
+          LISTENER_AI_PROVIDER: 'gemini',
+          LISTENER_DATA_PATH: legacyDataPath,
+          LISTENER_TEST_MODE: '1',
+          GEMINI_API_KEY: 'test-mode-key',
+        };
+        const { stdout } = await execFileAsync(
+          'node',
+          [cliPath, 'merge', path.basename(folders[0]), path.basename(folders[1])],
+          { env },
+        );
+
+        const resultFolder = stdout.trim();
+        const meta = JSON.parse(fs.readFileSync(path.join(resultFolder, 'meta.json'), 'utf-8'));
+        assert.deepEqual(
+          meta.merge?.sourceIds,
+          folders.map((f) => path.basename(f)),
+        );
+        assert.ok(fs.existsSync(meta.audioFile), 'merged audio should exist');
+        folders.forEach((folder, i) => {
+          const sourceMeta = JSON.parse(fs.readFileSync(path.join(folder, 'meta.json'), 'utf-8'));
+          assert.equal(sourceMeta.audioFile, renamedPaths[i], 'source note repaired in place');
+          assert.ok(fs.existsSync(renamedPaths[i]), 'source recording preserved');
+        });
+      } finally {
+        rmDir(legacyDataPath);
+      }
+    });
+
+    it('still refuses to merge a note whose missing audio has no matching sidecar', async () => {
+      const orphanDataPath = makeTempDir('cli-merge-orphan');
+      try {
+        const recordingsDir = path.join(orphanDataPath, 'recordings');
+        fs.mkdirSync(recordingsDir, { recursive: true });
+        const present = await makeOpusWebm(ffmpegPath!, recordingsDir, 'Present.webm', 440);
+        const folderA = saveTranscription({
+          title: 'Present',
+          result: { transcript: 'a', summary: 'a', keyPoints: [], actionItems: [], emoji: '' },
+          audioFilePath: present,
+          dataPath: orphanDataPath,
+        });
+        const missing = path.join(recordingsDir, 'Untitled_Meeting_2025-07-10T00-00-00-000Z.webm');
+        const folderB = saveTranscription({
+          title: 'Orphan',
+          result: { transcript: 'b', summary: 'b', keyPoints: [], actionItems: [], emoji: '' },
+          audioFilePath: missing,
+          dataPath: orphanDataPath,
+        });
+
+        const env = {
+          ...process.env,
+          NODE_ENV: 'test',
+          LISTENER_AI_PROVIDER: 'gemini',
+          LISTENER_DATA_PATH: orphanDataPath,
+          LISTENER_TEST_MODE: '1',
+          GEMINI_API_KEY: 'test-mode-key',
+        };
+        await assert.rejects(
+          execFileAsync(
+            'node',
+            [cliPath, 'merge', path.basename(folderA), path.basename(folderB)],
+            {
+              env,
+            },
+          ),
+          (err: { stderr?: string }) => /source audio missing/.test(err.stderr ?? ''),
+        );
+        const metaB = JSON.parse(fs.readFileSync(path.join(folderB, 'meta.json'), 'utf-8'));
+        assert.equal(metaB.audioFile, missing, 'no guess without sidecar evidence');
+      } finally {
+        rmDir(orphanDataPath);
+      }
+    });
   },
 );

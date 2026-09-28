@@ -1317,3 +1317,151 @@ export async function gcLegacyBackups(dataPath: string, retentionDays = 30): Pro
   }
   return removed;
 }
+
+/** Recording sidecar directory owned by `services/metadataService.ts`
+ * (`<dataPath>/metadata/<audio-basename>.json`). Read directly here because
+ * metadataService depends on Electron's `app`, and the CLI also runs this. */
+const RECORDING_METADATA_DIR = 'metadata';
+
+export interface AudioFileRepairResult {
+  /** Notes whose meta.audioFile was rewritten to the sidecar's audio path. */
+  repaired: Array<{ folderName: string; from: string; to: string }>;
+  /** Notes left untouched because their sidecars named different recordings. */
+  ambiguous: string[];
+  /** Notes whose meta.json could not be rewritten (left as they were). */
+  failed: Array<{ folderName: string; error: string }>;
+}
+
+/** Timestamp suffix that `renameAudioFile` (src/ipc/transcription.ts) keeps
+ * when it renames `Untitled_Meeting_<ts>.<ext>` to `<title>_<ts>.<ext>`. */
+const RECORDING_TIMESTAMP_SUFFIX = /_(\d{4}-\d{2}-\d{2}T[\d-]+Z)$/;
+
+function untitledRecordingTimestamp(audioPath: string): string | null {
+  const base = path.basename(audioPath, path.extname(audioPath));
+  if (!base.includes('Untitled_Meeting')) return null;
+  return base.match(RECORDING_TIMESTAMP_SUFFIX)?.[1] ?? null;
+}
+
+/**
+ * Backfill for #209: GUI transcriptions used to save the note before renaming
+ * the `Untitled_Meeting_*` recording, so meta.audioFile kept the pre-rename
+ * path. The recording sidecar was moved to the renamed audio and still records
+ * which note it produced (`transcriptionPath`), so it is the evidence used to
+ * repair the note.
+ *
+ * A note is repaired only when its meta.audioFile is a missing
+ * `Untitled_Meeting_*_<ts>` recording and its sidecars name exactly one
+ * existing recording that matches what `renameAudioFile` produces: same
+ * directory, same extension, same `_<ts>` suffix. No sidecar, or sidecars
+ * naming different recordings, leaves the note unchanged. Touches only
+ * meta.json and is idempotent; a note that can't be written is reported in
+ * `failed` without stopping the others.
+ */
+export async function repairMissingAudioFiles(dataPath: string): Promise<AudioFileRepairResult> {
+  const result: AudioFileRepairResult = { repaired: [], ambiguous: [], failed: [] };
+  const transcriptionsDir = getTranscriptionsDir(dataPath);
+
+  let folderDirents: fs.Dirent[];
+  try {
+    folderDirents = await fs.promises.readdir(transcriptionsDir, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return result;
+    throw err;
+  }
+
+  // Note folder name -> the missing audio path its meta.json records.
+  const broken = new Map<string, string>();
+  for (const d of folderDirents) {
+    if (!d.isDirectory() || d.name.startsWith('.')) continue;
+    const meta = readMetaJsonOrNull(path.join(transcriptionsDir, d.name));
+    const audioFile = meta?.audioFile;
+    if (typeof audioFile !== 'string' || !audioFile) continue;
+    if (!untitledRecordingTimestamp(audioFile)) continue;
+    if (fs.existsSync(audioFile)) continue;
+    broken.set(d.name, audioFile);
+  }
+  if (broken.size === 0) return result;
+
+  const metadataDir = path.join(dataPath, RECORDING_METADATA_DIR);
+  let sidecarNames: string[];
+  try {
+    sidecarNames = await fs.promises.readdir(metadataDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return result;
+    throw err;
+  }
+
+  // Note folder name -> distinct existing audio paths its sidecars name. Match
+  // on the folder name (unique: ms timestamp + title), like GUI merge does, so
+  // a data root that differs from the one recorded in the sidecar still links.
+  const candidates = new Map<string, Map<string, string>>();
+  for (const name of sidecarNames) {
+    if (!name.endsWith('.json')) continue;
+    let sidecar: { filePath?: unknown; transcriptionPath?: unknown };
+    try {
+      sidecar = JSON.parse(await fs.promises.readFile(path.join(metadataDir, name), 'utf-8'));
+    } catch {
+      continue;
+    }
+    if (!sidecar || typeof sidecar !== 'object') continue;
+    const { filePath, transcriptionPath } = sidecar;
+    if (typeof filePath !== 'string' || !filePath) continue;
+    if (typeof transcriptionPath !== 'string' || !transcriptionPath) continue;
+
+    const folderName = path.basename(transcriptionPath);
+    const oldAudio = broken.get(folderName);
+    if (!oldAudio) continue;
+    if (path.resolve(path.dirname(filePath)) !== path.resolve(path.dirname(oldAudio))) continue;
+    if (path.extname(filePath) !== path.extname(oldAudio)) continue;
+    const newBase = path.basename(filePath, path.extname(filePath));
+    if (!newBase.endsWith(`_${untitledRecordingTimestamp(oldAudio)}`)) continue;
+    try {
+      if (!fs.statSync(filePath).isFile()) continue;
+    } catch {
+      continue;
+    }
+
+    let perFolder = candidates.get(folderName);
+    if (!perFolder) {
+      perFolder = new Map();
+      candidates.set(folderName, perFolder);
+    }
+    perFolder.set(path.resolve(filePath), filePath);
+  }
+
+  for (const [folderName, perFolder] of candidates) {
+    const folderPath = path.join(transcriptionsDir, folderName);
+    if (perFolder.size !== 1) {
+      result.ambiguous.push(folderName);
+      continue;
+    }
+    const [newAudio] = perFolder.values();
+    const oldAudio = broken.get(folderName) as string;
+    try {
+      // Re-read right before writing so a meta.json change made since the scan
+      // (e.g. a status update from another process) is preserved.
+      const meta = readMetaJsonOrNull(folderPath);
+      if (!meta || meta.audioFile !== oldAudio) continue;
+      meta.audioFile = newAudio;
+      writeAtomic(path.join(folderPath, META_JSON), `${JSON.stringify(meta, null, 2)}\n`);
+      result.repaired.push({ folderName, from: oldAudio, to: newAudio });
+    } catch (err) {
+      result.failed.push({ folderName, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  return result;
+}
+
+/** Parse a v2 folder's meta.json, or null when missing, corrupt, or not the
+ * current schema version (never rewrite a file we can't fully understand). */
+function readMetaJsonOrNull(folderPath: string): MeetingMetaV2 | null {
+  try {
+    const meta = JSON.parse(fs.readFileSync(path.join(folderPath, META_JSON), 'utf-8'));
+    if (!meta || typeof meta !== 'object') return null;
+    if (meta.schemaVersion !== META_SCHEMA_VERSION) return null;
+    return meta as MeetingMetaV2;
+  } catch {
+    return null;
+  }
+}

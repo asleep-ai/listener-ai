@@ -23,6 +23,7 @@ import {
   parseBullets,
   parseFrontmatter,
   readTranscription,
+  repairMissingAudioFiles,
   sanitizeForPath,
   sanitizeV2Title,
   saveTranscription,
@@ -1059,5 +1060,315 @@ describe('migrate crash-safety and corruption recovery', () => {
     fs.writeFileSync(path.join(folderPath, 'meta.json'), '{ not valid json', 'utf-8');
     const data = await readTranscription(folderPath);
     assert.equal(data, null, 'corrupt meta.json must yield null, not throw');
+  });
+});
+
+describe('repairMissingAudioFiles (#209 backfill)', () => {
+  const TS = '2025-07-10T01-34-07-679Z';
+
+  /** Reproduce the pre-fix GUI order: save the note with the Untitled path,
+   * then rename the audio and move the sidecar to the renamed file. */
+  function makeLegacyNote(
+    dataPath: string,
+    title: string,
+    opts: { ts?: string; ext?: string; sidecar?: boolean } = {},
+  ) {
+    const recordingsDir = path.join(dataPath, 'recordings');
+    const metadataDir = path.join(dataPath, 'metadata');
+    fs.mkdirSync(recordingsDir, { recursive: true });
+    fs.mkdirSync(metadataDir, { recursive: true });
+    const ts = opts.ts ?? TS;
+    const ext = opts.ext ?? '.webm';
+    const oldAudio = path.join(recordingsDir, `Untitled_Meeting_${ts}${ext}`);
+    const newAudio = path.join(recordingsDir, `${title}_${ts}${ext}`);
+    fs.writeFileSync(oldAudio, 'audio-bytes');
+    const folderPath = saveTranscription({
+      title,
+      result: baseResult,
+      audioFilePath: oldAudio,
+      dataPath,
+    });
+    fs.renameSync(oldAudio, newAudio);
+    const sidecarPath = path.join(metadataDir, `${title}_${ts}.json`);
+    if (opts.sidecar !== false) {
+      fs.writeFileSync(
+        sidecarPath,
+        JSON.stringify({
+          filePath: newAudio,
+          title,
+          timestamp: '2025-07-10T01:34:07.679Z',
+          transcriptionPath: folderPath,
+          liveNotes: [{ offsetMs: 1, text: 'n' }],
+        }),
+      );
+    }
+    return { folderPath, oldAudio, newAudio, sidecarPath };
+  }
+
+  function readMeta(folderPath: string) {
+    return JSON.parse(fs.readFileSync(path.join(folderPath, META_JSON), 'utf-8'));
+  }
+
+  it('returns empty result when there is no transcriptions/ or metadata/ dir', async () => {
+    const dataPath = makeTmpDataPath();
+    assert.deepEqual(await repairMissingAudioFiles(dataPath), {
+      repaired: [],
+      ambiguous: [],
+      failed: [],
+    });
+    const { folderPath, oldAudio } = makeLegacyNote(dataPath, 'No_Sidecar_Dir', { sidecar: false });
+    fs.rmSync(path.join(dataPath, 'metadata'), { recursive: true });
+    assert.deepEqual(await repairMissingAudioFiles(dataPath), {
+      repaired: [],
+      ambiguous: [],
+      failed: [],
+    });
+    assert.equal(readMeta(folderPath).audioFile, oldAudio);
+  });
+
+  it('points meta.audioFile at the renamed recording named by the matching sidecar', async () => {
+    const dataPath = makeTmpDataPath();
+    const { folderPath, oldAudio, newAudio, sidecarPath } = makeLegacyNote(dataPath, 'Weekly_Sync');
+    await updateTranscriptionStatus(folderPath, { notionPageUrl: 'https://www.notion.so/keep' });
+    const sidecarBefore = fs.readFileSync(sidecarPath, 'utf-8');
+    const summaryStat = fs.statSync(path.join(folderPath, SUMMARY_FILE));
+    const metaBefore = readMeta(folderPath);
+
+    const result = await repairMissingAudioFiles(dataPath);
+
+    assert.deepEqual(result, {
+      repaired: [{ folderName: path.basename(folderPath), from: oldAudio, to: newAudio }],
+      ambiguous: [],
+      failed: [],
+    });
+    const metaAfter = readMeta(folderPath);
+    assert.deepEqual(metaAfter, { ...metaBefore, audioFile: newAudio });
+    assert.equal((await readTranscription(folderPath))!.audioFilePath, newAudio);
+    // Only meta.json changes; recordings, sidecars, and content files stay put.
+    assert.equal(fs.statSync(path.join(folderPath, SUMMARY_FILE)).mtimeMs, summaryStat.mtimeMs);
+    assert.equal(fs.readFileSync(sidecarPath, 'utf-8'), sidecarBefore);
+    assert.equal(fs.readFileSync(newAudio, 'utf-8'), 'audio-bytes');
+    assert.ok(!fs.existsSync(path.join(folderPath, 'meta.json.tmp')));
+  });
+
+  it('matches the sidecar by note folder name when its recorded data root differs', async () => {
+    const dataPath = makeTmpDataPath();
+    const { folderPath, newAudio, sidecarPath } = makeLegacyNote(dataPath, 'Other_Root');
+    const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8'));
+    sidecar.transcriptionPath = path.join(
+      '/old-root/listener-ai/transcriptions',
+      path.basename(folderPath),
+    );
+    fs.writeFileSync(sidecarPath, JSON.stringify(sidecar));
+    const result = await repairMissingAudioFiles(dataPath);
+    assert.equal(result.repaired.length, 1);
+    assert.equal(readMeta(folderPath).audioFile, newAudio);
+  });
+
+  it('is idempotent', async () => {
+    const dataPath = makeTmpDataPath();
+    const { folderPath, newAudio } = makeLegacyNote(dataPath, 'Twice');
+    await repairMissingAudioFiles(dataPath);
+    const metaRaw = fs.readFileSync(path.join(folderPath, META_JSON), 'utf-8');
+    assert.deepEqual(await repairMissingAudioFiles(dataPath), {
+      repaired: [],
+      ambiguous: [],
+      failed: [],
+    });
+    assert.equal(fs.readFileSync(path.join(folderPath, META_JSON), 'utf-8'), metaRaw);
+    assert.equal(readMeta(folderPath).audioFile, newAudio);
+  });
+
+  it('never rewrites an audioFile that still exists', async () => {
+    const dataPath = makeTmpDataPath();
+    const recordingsDir = path.join(dataPath, 'recordings');
+    fs.mkdirSync(recordingsDir, { recursive: true });
+    fs.mkdirSync(path.join(dataPath, 'metadata'), { recursive: true });
+    const audio = path.join(recordingsDir, `Present_${TS}.webm`);
+    const other = path.join(recordingsDir, `Other_${TS}.webm`);
+    fs.writeFileSync(audio, 'a');
+    fs.writeFileSync(other, 'b');
+    const folderPath = saveTranscription({
+      title: 'Present',
+      result: baseResult,
+      audioFilePath: audio,
+      dataPath,
+    });
+    fs.writeFileSync(
+      path.join(dataPath, 'metadata', `Other_${TS}.json`),
+      JSON.stringify({ filePath: other, transcriptionPath: folderPath }),
+    );
+    assert.deepEqual(await repairMissingAudioFiles(dataPath), {
+      repaired: [],
+      ambiguous: [],
+      failed: [],
+    });
+    assert.equal(readMeta(folderPath).audioFile, audio);
+  });
+
+  it('leaves the note unchanged when no sidecar references it', async () => {
+    const dataPath = makeTmpDataPath();
+    const { folderPath, oldAudio } = makeLegacyNote(dataPath, 'Orphan', { sidecar: false });
+    // A sidecar for a different note must not be borrowed.
+    const other = makeLegacyNote(dataPath, 'Neighbour', { ts: '2025-07-11T00-00-00-000Z' });
+    const result = await repairMissingAudioFiles(dataPath);
+    assert.deepEqual(result.ambiguous, []);
+    assert.deepEqual(
+      result.repaired.map((r) => r.folderName),
+      [path.basename(other.folderPath)],
+    );
+    assert.equal(readMeta(folderPath).audioFile, oldAudio);
+  });
+
+  it('skips a note when two sidecars name different existing recordings (ambiguous)', async () => {
+    const dataPath = makeTmpDataPath();
+    const { folderPath, oldAudio } = makeLegacyNote(dataPath, 'Dup');
+    const second = path.join(dataPath, 'recordings', `Dup_Copy_${TS}.webm`);
+    fs.writeFileSync(second, 'other-bytes');
+    fs.writeFileSync(
+      path.join(dataPath, 'metadata', `Dup_Copy_${TS}.json`),
+      JSON.stringify({ filePath: second, transcriptionPath: folderPath }),
+    );
+    const result = await repairMissingAudioFiles(dataPath);
+    assert.deepEqual(result, { repaired: [], ambiguous: [path.basename(folderPath)], failed: [] });
+    assert.equal(readMeta(folderPath).audioFile, oldAudio);
+  });
+
+  it('ignores sidecars whose audio is missing, in another directory, or has another extension', async () => {
+    const dataPath = makeTmpDataPath();
+    const { folderPath, oldAudio, newAudio, sidecarPath } = makeLegacyNote(dataPath, 'Guarded');
+
+    // Missing audio.
+    fs.rmSync(newAudio);
+    assert.deepEqual(await repairMissingAudioFiles(dataPath), {
+      repaired: [],
+      ambiguous: [],
+      failed: [],
+    });
+
+    // Different directory.
+    const elsewhere = path.join(dataPath, 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    const movedAudio = path.join(elsewhere, path.basename(newAudio));
+    fs.writeFileSync(movedAudio, 'x');
+    fs.writeFileSync(
+      sidecarPath,
+      JSON.stringify({ filePath: movedAudio, transcriptionPath: folderPath }),
+    );
+    assert.deepEqual(await repairMissingAudioFiles(dataPath), {
+      repaired: [],
+      ambiguous: [],
+      failed: [],
+    });
+
+    // Different extension.
+    const m4a = newAudio.replace(/\.webm$/, '.m4a');
+    fs.writeFileSync(m4a, 'x');
+    fs.writeFileSync(sidecarPath, JSON.stringify({ filePath: m4a, transcriptionPath: folderPath }));
+    assert.deepEqual(await repairMissingAudioFiles(dataPath), {
+      repaired: [],
+      ambiguous: [],
+      failed: [],
+    });
+
+    // Corrupt sidecar JSON is skipped, not fatal.
+    fs.writeFileSync(sidecarPath, '{ not json');
+    assert.deepEqual(await repairMissingAudioFiles(dataPath), {
+      repaired: [],
+      ambiguous: [],
+      failed: [],
+    });
+
+    assert.equal(readMeta(folderPath).audioFile, oldAudio);
+  });
+
+  it('requires the renamed recording to keep the Untitled timestamp suffix', async () => {
+    const dataPath = makeTmpDataPath();
+    const { folderPath, oldAudio, sidecarPath } = makeLegacyNote(dataPath, 'Stamp');
+    // Same dir + ext, but a different recording (other timestamp).
+    const otherRecording = path.join(dataPath, 'recordings', 'Stamp_2025-08-01T00-00-00-000Z.webm');
+    fs.writeFileSync(otherRecording, 'other');
+    fs.writeFileSync(
+      sidecarPath,
+      JSON.stringify({ filePath: otherRecording, transcriptionPath: folderPath }),
+    );
+    assert.deepEqual(await repairMissingAudioFiles(dataPath), {
+      repaired: [],
+      ambiguous: [],
+      failed: [],
+    });
+    assert.equal(readMeta(folderPath).audioFile, oldAudio);
+  });
+
+  it('only repairs notes whose missing audio is an Untitled_Meeting recording', async () => {
+    const dataPath = makeTmpDataPath();
+    const recordingsDir = path.join(dataPath, 'recordings');
+    fs.mkdirSync(recordingsDir, { recursive: true });
+    fs.mkdirSync(path.join(dataPath, 'metadata'), { recursive: true });
+    // An imported file the user later moved away; a same-stamped file exists.
+    const imported = path.join(recordingsDir, `Imported_${TS}.webm`);
+    const lookalike = path.join(recordingsDir, `Renamed_${TS}.webm`);
+    fs.writeFileSync(lookalike, 'x');
+    const folderPath = saveTranscription({
+      title: 'Imported',
+      result: baseResult,
+      audioFilePath: imported,
+      dataPath,
+    });
+    fs.writeFileSync(
+      path.join(dataPath, 'metadata', `Renamed_${TS}.json`),
+      JSON.stringify({ filePath: lookalike, transcriptionPath: folderPath }),
+    );
+    assert.deepEqual(await repairMissingAudioFiles(dataPath), {
+      repaired: [],
+      ambiguous: [],
+      failed: [],
+    });
+    assert.equal(readMeta(folderPath).audioFile, imported);
+  });
+
+  it('keeps repairing other notes past an ambiguous or unwritable one', async () => {
+    const dataPath = makeTmpDataPath();
+    const ambiguous = makeLegacyNote(dataPath, 'Amb', { ts: '2025-07-01T00-00-00-000Z' });
+    const second = path.join(dataPath, 'recordings', 'Amb_Copy_2025-07-01T00-00-00-000Z.webm');
+    fs.writeFileSync(second, 'x');
+    fs.writeFileSync(
+      path.join(dataPath, 'metadata', 'Amb_Copy.json'),
+      JSON.stringify({ filePath: second, transcriptionPath: ambiguous.folderPath }),
+    );
+    const locked = makeLegacyNote(dataPath, 'Locked', { ts: '2025-07-02T00-00-00-000Z' });
+    const ok = makeLegacyNote(dataPath, 'Fine', { ts: '2025-07-03T00-00-00-000Z' });
+    fs.chmodSync(locked.folderPath, 0o555);
+    try {
+      const result = await repairMissingAudioFiles(dataPath);
+      assert.deepEqual(result.ambiguous, [path.basename(ambiguous.folderPath)]);
+      assert.deepEqual(
+        result.failed.map((f) => f.folderName),
+        [path.basename(locked.folderPath)],
+      );
+      assert.deepEqual(
+        result.repaired.map((r) => r.to),
+        [ok.newAudio],
+      );
+    } finally {
+      fs.chmodSync(locked.folderPath, 0o755);
+    }
+    assert.equal(readMeta(locked.folderPath).audioFile, locked.oldAudio);
+    assert.equal(readMeta(ambiguous.folderPath).audioFile, ambiguous.oldAudio);
+    assert.equal(readMeta(ok.folderPath).audioFile, ok.newAudio);
+  });
+
+  it('skips notes whose meta.json is not the current schema version', async () => {
+    const dataPath = makeTmpDataPath();
+    const { folderPath } = makeLegacyNote(dataPath, 'Future');
+    const metaPath = path.join(folderPath, META_JSON);
+    const future = { ...readMeta(folderPath), schemaVersion: 99 };
+    fs.writeFileSync(metaPath, JSON.stringify(future));
+    assert.deepEqual(await repairMissingAudioFiles(dataPath), {
+      repaired: [],
+      ambiguous: [],
+      failed: [],
+    });
+    assert.deepEqual(JSON.parse(fs.readFileSync(metaPath, 'utf-8')), future);
   });
 });

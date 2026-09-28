@@ -38,6 +38,7 @@ import {
   getTranscriptionsDir,
   type LiveNote,
   readTranscription,
+  repairMissingAudioFiles,
   updateTranscriptionStatus,
 } from './outputService';
 import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
@@ -670,6 +671,20 @@ app.whenReady().then(async () => {
     );
     app.quit();
     return;
+  }
+
+  // Backfill notes whose meta.audioFile still names a pre-rename recording
+  // (#209). Best-effort: a failure only leaves those notes as they were.
+  try {
+    const repair = await repairMissingAudioFiles(getDataPath());
+    if (repair.repaired.length > 0 || repair.ambiguous.length > 0 || repair.failed.length > 0) {
+      console.log(
+        `[audio-repair] Repaired ${repair.repaired.length} note audio path(s);` +
+          ` skipped ${repair.ambiguous.length} ambiguous; ${repair.failed.length} failed.`,
+      );
+    }
+  } catch (err) {
+    console.warn('[audio-repair] failed:', err);
   }
 
   // Create menu with DevTools option
