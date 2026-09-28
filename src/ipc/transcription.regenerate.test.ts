@@ -154,6 +154,52 @@ describe('transcribe-audio regenerate (#213)', () => {
     assert.equal(note?.slackSentAt, undefined);
   });
 
+  it('keeps the note locked until the regenerated sidecar is saved', async () => {
+    transcribe = async () => resultFor('First');
+    const first = await run();
+    const previous = first.transcriptionPath!;
+    const { metadataService } = require('../services/metadataService');
+    const originalSave = metadataService.saveMetadata.bind(metadataService);
+    let releaseSave!: () => void;
+    let signalSaving!: () => void;
+    const saving = new Promise<void>((resolve) => {
+      signalSaving = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    metadataService.saveMetadata = async (...args: Parameters<typeof originalSave>) => {
+      signalSaving();
+      await gate;
+      return originalSave(...args);
+    };
+
+    try {
+      transcribe = async () => resultFor('Second');
+      const pending = run();
+      await saving;
+      let entered = false;
+      const reader = withMeetingLock(previous, () => {
+        entered = true;
+        const sidecar = path.join(
+          dataPath,
+          'metadata',
+          `${path.basename(audioPath, '.webm')}.json`,
+        );
+        assert.equal(JSON.parse(fs.readFileSync(sidecar, 'utf-8')).title, 'Second Title');
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 30));
+      assert.equal(entered, false);
+      releaseSave();
+      assert.equal((await pending).success, true);
+      await reader;
+      assert.equal(entered, true);
+    } finally {
+      releaseSave();
+      metadataService.saveMetadata = originalSave;
+    }
+  });
+
   it('does not save a cancelled regeneration after waiting for a note reader', async () => {
     transcribe = async () => resultFor('First');
     const first = await run();

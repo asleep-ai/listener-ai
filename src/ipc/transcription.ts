@@ -153,8 +153,15 @@ export function register(ctx: IpcContext): void {
       // written, so a failure here leaves the previous note linked and intact.
       const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));
       let transcriptionPath: string | undefined;
+      let metadataHandledUnderLock = false;
+      const lockPath =
+        previousNoteWasPresent &&
+        existing?.transcriptionPath &&
+        ctx.isContainedTranscriptionPath(existing.transcriptionPath)
+          ? existing.transcriptionPath
+          : undefined;
       try {
-        const save = () => {
+        const save = async () => {
           // A cancel can arrive during the awaited rename, sidecar move, or
           // wait for an in-flight Drive sync of this note.
           signal.throwIfAborted();
@@ -165,7 +172,7 @@ export function register(ctx: IpcContext): void {
           ) {
             throw new Error('The linked note was deleted while regeneration was running.');
           }
-          return saveRegeneratedTranscription({
+          const savedPath = saveRegeneratedTranscription({
             title,
             result,
             audioFilePath,
@@ -173,13 +180,27 @@ export function register(ctx: IpcContext): void {
             liveNotes,
             previousFolderPath: existing?.transcriptionPath,
           });
+          if (lockPath) {
+            metadataHandledUnderLock = true;
+            try {
+              await metadataService.saveMetadata(audioFilePath, {
+                title,
+                suggestedTitle: result.suggestedTitle,
+                transcriptionPath: savedPath,
+                customFields: result.customFields,
+                liveNotes,
+                transcribedAt: new Date().toISOString(),
+              });
+              console.log('Metadata saved successfully');
+            } catch (error) {
+              console.error('Failed to save metadata:', error);
+            }
+          }
+          return savedPath;
         };
-        transcriptionPath =
-          previousNoteWasPresent &&
-          existing?.transcriptionPath &&
-          ctx.isContainedTranscriptionPath(existing.transcriptionPath)
-            ? await withMeetingLock(existing.transcriptionPath, save, { signal })
-            : save();
+        transcriptionPath = lockPath
+          ? await withMeetingLock(lockPath, save, { signal })
+          : await save();
         noteCommitted = true;
         console.log('Transcription saved to:', transcriptionPath);
         ctx.maybeAutoSync();
@@ -205,32 +226,34 @@ export function register(ctx: IpcContext): void {
 
       // Save metadata - slim if transcription files saved, inline fallback otherwise
       try {
-        if (transcriptionPath) {
-          await metadataService.saveMetadata(audioFilePath, {
-            title,
-            suggestedTitle: result.suggestedTitle,
-            transcriptionPath,
-            customFields: result.customFields,
-            liveNotes,
-            transcribedAt: new Date().toISOString(),
-          });
-        } else {
-          // Fallback: store inline data when file write failed
-          await metadataService.saveMetadata(audioFilePath, {
-            title,
-            suggestedTitle: result.suggestedTitle,
-            transcript: result.transcript,
-            summary: result.summary,
-            keyPoints: result.keyPoints,
-            actionItems: result.actionItems,
-            ...(result.summarySections ? { summarySections: result.summarySections } : {}),
-            ...(result.actionItemGroups ? { actionItemGroups: result.actionItemGroups } : {}),
-            customFields: result.customFields,
-            liveNotes,
-            transcribedAt: new Date().toISOString(),
-          });
+        if (!metadataHandledUnderLock) {
+          if (transcriptionPath) {
+            await metadataService.saveMetadata(audioFilePath, {
+              title,
+              suggestedTitle: result.suggestedTitle,
+              transcriptionPath,
+              customFields: result.customFields,
+              liveNotes,
+              transcribedAt: new Date().toISOString(),
+            });
+          } else {
+            // Fallback: store inline data when file write failed
+            await metadataService.saveMetadata(audioFilePath, {
+              title,
+              suggestedTitle: result.suggestedTitle,
+              transcript: result.transcript,
+              summary: result.summary,
+              keyPoints: result.keyPoints,
+              actionItems: result.actionItems,
+              ...(result.summarySections ? { summarySections: result.summarySections } : {}),
+              ...(result.actionItemGroups ? { actionItemGroups: result.actionItemGroups } : {}),
+              customFields: result.customFields,
+              liveNotes,
+              transcribedAt: new Date().toISOString(),
+            });
+          }
+          console.log('Metadata saved successfully');
         }
-        console.log('Metadata saved successfully');
       } catch (error) {
         console.error('Failed to save metadata:', error);
       }
