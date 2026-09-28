@@ -41,6 +41,7 @@ import {
   repairMissingAudioFiles,
   updateTranscriptionStatus,
 } from './outputService';
+import { recoverInterruptedRegenerations } from './regenerateTranscription';
 import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
 import { initMainSentry, reportError, setSentryEnabled } from './sentry';
 import { autoUpdaterService } from './services/autoUpdaterService';
@@ -656,6 +657,10 @@ app.whenReady().then(async () => {
     }
     // Clean up backup directories older than 30 days. Best-effort; never fatal.
     gcLegacyBackups(getDataPath()).catch((err) => console.warn('[migrate] backup GC failed:', err));
+    // Put back notes whose Regenerate swap was cut short by a crash. Best-effort.
+    for (const folder of recoverInterruptedRegenerations(getDataPath())) {
+      console.log(`[regenerate] Restored ${folder} after an interrupted regenerate.`);
+    }
   } catch (err) {
     console.error('[migrate] startup migration failed:', err);
     const message =

@@ -1,0 +1,247 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import {
+  ACTION_ITEMS_FILE,
+  HIGHLIGHTS_JSON_FILE,
+  KEY_POINTS_FILE,
+  META_JSON,
+  META_SCHEMA_VERSION,
+  type MeetingMetaV2,
+  NOTES_JSON_FILE,
+  SUMMARY_FILE,
+  type SaveTranscriptionOptions,
+  TRANSCRIPT_FILE,
+  getTranscriptionsDir,
+  saveTranscription,
+} from './outputService';
+
+// Content files swapped by a regenerate, in `writeV2Files` order. meta.json is
+// handled separately and always swapped LAST so a folder only reports the new
+// note once every content file has landed.
+const NOTE_CONTENT_FILES = [
+  SUMMARY_FILE,
+  KEY_POINTS_FILE,
+  ACTION_ITEMS_FILE,
+  TRANSCRIPT_FILE,
+  NOTES_JSON_FILE,
+  HIGHLIGHTS_JSON_FILE,
+];
+const NOTE_FILES = [...NOTE_CONTENT_FILES, META_JSON];
+
+// Scratch folders live directly under dataPath (same filesystem as
+// transcriptions/, so renames are atomic) and outside anything that lists or
+// syncs notes.
+const SCRATCH_PREFIX = '.regenerate-';
+const SWAP_MARKER = 'swap.json';
+// Staging + swap take milliseconds (the transcription itself runs before the
+// scratch folder exists), so an older scratch folder is a leftover even if its
+// recorded pid now belongs to an unrelated live process.
+const LIVE_SCRATCH_MAX_AGE_MS = 10 * 60 * 1000;
+
+interface SwapMarker {
+  pid: number;
+  /** Set once the backup is complete, right before the first rename. */
+  target?: string;
+  /** Staged note folder, relative to the scratch folder. */
+  staged?: string;
+}
+
+export interface RegenerateTranscriptionOptions extends Omit<
+  SaveTranscriptionOptions,
+  'outputDir' | 'mergedFrom'
+> {
+  /** Note folder currently linked to the recording (sidecar `transcriptionPath`). */
+  previousFolderPath?: string;
+  /** Test hook: called after each file lands in the target folder. */
+  onFileSwapped?: (filename: string) => void;
+}
+
+/**
+ * Save a re-transcription of a recording, replacing the note it is already
+ * linked to instead of leaving that note behind as a stale copy.
+ *
+ * The new note is fully written to a scratch folder under `dataPath` first,
+ * so a failed transcription or write never touches the previous note. The
+ * files are then renamed into the existing folder one by one (meta.json
+ * last), keeping the folder name stable: Drive sync keys meetings on folder
+ * name, so this syncs as an update rather than delete + re-upload, and merged
+ * notes that reference this folder in `merge.sourceIds` stay valid. If a
+ * rename fails, the previous files are restored from a backup taken before
+ * the swap; if the process dies mid-swap, `recoverInterruptedRegenerations`
+ * restores them on the next app start.
+ *
+ * Falls back to a plain `saveTranscription` (new folder) when there is no
+ * replaceable previous note: missing, not a current-schema v2 folder, or not
+ * a direct child of this data path's transcriptions directory. The fallback
+ * never modifies the previous path.
+ */
+export function saveRegeneratedTranscription(opts: RegenerateTranscriptionOptions): string {
+  const { previousFolderPath, onFileSwapped, ...saveOpts } = opts;
+  const target = resolveReplaceableFolder(saveOpts.dataPath, previousFolderPath);
+  if (!target) return saveTranscription(saveOpts);
+
+  const scratch = fs.mkdtempSync(path.join(saveOpts.dataPath, SCRATCH_PREFIX));
+  const markerPath = path.join(scratch, SWAP_MARKER);
+  writeMarker(markerPath, { pid: process.pid });
+  let keepScratch = false;
+  try {
+    const staged = saveTranscription({
+      ...saveOpts,
+      outputDir: path.join(scratch, 'new'),
+      // Regenerating re-transcribes the same audio, so a merged note stays merged.
+      mergedFrom: target.meta.merge?.sourceIds,
+    });
+
+    const backup = path.join(scratch, 'backup');
+    fs.mkdirSync(backup);
+    for (const name of NOTE_FILES) {
+      const src = path.join(target.folderPath, name);
+      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(backup, name));
+    }
+
+    // Truncate instead of deleting files the new result no longer produces:
+    // the sync engine downloads a file that is missing locally but still on
+    // Drive, which would bring the old content back. Readers treat an empty
+    // file the same as an absent one.
+    for (const name of NOTE_CONTENT_FILES) {
+      if (fs.existsSync(path.join(backup, name)) && !fs.existsSync(path.join(staged, name))) {
+        fs.writeFileSync(path.join(staged, name), '', 'utf-8');
+      }
+    }
+
+    writeMarker(markerPath, {
+      pid: process.pid,
+      target: target.folderPath,
+      staged: path.relative(scratch, staged),
+    });
+    const swapped: string[] = [];
+    try {
+      for (const name of NOTE_FILES) {
+        const src = path.join(staged, name);
+        if (!fs.existsSync(src)) continue;
+        fs.renameSync(src, path.join(target.folderPath, name));
+        swapped.push(name);
+        onFileSwapped?.(name);
+      }
+    } catch (err) {
+      try {
+        restoreFromBackup(target.folderPath, backup, swapped);
+      } catch (restoreErr) {
+        keepScratch = true;
+        console.error(
+          `Failed to restore ${target.folderPath} after a failed regenerate; previous files kept at ${backup}:`,
+          restoreErr,
+        );
+      }
+      throw err;
+    }
+
+    return target.folderPath;
+  } finally {
+    if (!keepScratch) fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Startup recovery for regenerates that died mid-swap (crash, force quit,
+ * power loss). A scratch folder whose swap never reached meta.json has its
+ * target restored from the backup, so the previous note comes back whole
+ * rather than as a mix of old and new files. Scratch folders from finished
+ * or never-started swaps are just removed. Folders owned by another live
+ * process are skipped. Returns the note folders that were restored.
+ */
+export function recoverInterruptedRegenerations(dataPath: string): string[] {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dataPath).filter((name) => name.startsWith(SCRATCH_PREFIX));
+  } catch {
+    return [];
+  }
+
+  const restored: string[] = [];
+  for (const entry of entries) {
+    const scratch = path.join(dataPath, entry);
+    try {
+      const markerPath = path.join(scratch, SWAP_MARKER);
+      const marker = readMarker(markerPath);
+      if (
+        marker &&
+        marker.pid !== process.pid &&
+        isProcessAlive(marker.pid) &&
+        Date.now() - fs.statSync(markerPath).mtimeMs < LIVE_SCRATCH_MAX_AGE_MS
+      ) {
+        continue;
+      }
+
+      const staged = marker?.staged ? path.join(scratch, marker.staged) : undefined;
+      if (
+        marker?.target &&
+        staged?.startsWith(scratch + path.sep) &&
+        fs.existsSync(path.join(staged, META_JSON)) &&
+        resolveReplaceableFolder(dataPath, marker.target)
+      ) {
+        restoreFromBackup(marker.target, path.join(scratch, 'backup'), NOTE_FILES);
+        restored.push(marker.target);
+      }
+      fs.rmSync(scratch, { recursive: true, force: true });
+    } catch (err) {
+      console.warn(`Failed to recover interrupted regenerate at ${scratch}:`, err);
+    }
+  }
+  return restored;
+}
+
+/** Put `names` in `folderPath` back to their backed-up state: restore files
+ * that existed before the swap and remove ones that did not. */
+function restoreFromBackup(folderPath: string, backup: string, names: string[]): void {
+  for (const name of names) {
+    const saved = path.join(backup, name);
+    const dest = path.join(folderPath, name);
+    if (fs.existsSync(saved)) fs.copyFileSync(saved, dest);
+    else fs.rmSync(dest, { force: true });
+  }
+}
+
+function resolveReplaceableFolder(
+  dataPath: string,
+  folderPath: string | undefined,
+): { folderPath: string; meta: MeetingMetaV2 } | null {
+  if (!folderPath) return null;
+  const resolved = path.resolve(folderPath);
+  try {
+    // A symlinked entry could route the renames to another note or outside
+    // transcriptions/; only replace a real directory there.
+    if (fs.lstatSync(resolved).isSymbolicLink()) return null;
+    const real = fs.realpathSync(resolved);
+    if (path.dirname(real) !== fs.realpathSync(getTranscriptionsDir(dataPath))) return null;
+    const meta = JSON.parse(fs.readFileSync(path.join(real, META_JSON), 'utf-8'));
+    if (!meta || meta.schemaVersion !== META_SCHEMA_VERSION) return null;
+    return { folderPath: resolved, meta: meta as MeetingMetaV2 };
+  } catch {
+    return null;
+  }
+}
+
+function writeMarker(markerPath: string, marker: SwapMarker): void {
+  const tmp = `${markerPath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(marker), 'utf-8');
+  fs.renameSync(tmp, markerPath);
+}
+
+function readMarker(markerPath: string): SwapMarker | null {
+  try {
+    const marker = JSON.parse(fs.readFileSync(markerPath, 'utf-8'));
+    return marker && typeof marker.pid === 'number' ? (marker as SwapMarker) : null;
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}

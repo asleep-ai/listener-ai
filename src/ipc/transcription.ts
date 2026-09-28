@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { app, ipcMain } from 'electron';
-import { saveTranscription } from '../outputService';
+import { saveRegeneratedTranscription } from '../regenerateTranscription';
 import { reportError } from '../sentry';
 import { metadataService } from '../services/metadataService';
 import { notificationService } from '../services/notificationService';
@@ -64,18 +64,19 @@ export function register(ctx: IpcContext): void {
 
     try {
       console.log('Transcription requested for:', filePath);
+      let existing: Awaited<ReturnType<typeof metadataService.getMetadata>> = null;
+      try {
+        existing = await metadataService.getMetadata(filePath);
+      } catch (err) {
+        console.warn('Failed to read recording metadata:', err);
+      }
       let liveNotes = ctx.sanitizeLiveNotes(liveNotesRaw);
       if (!liveNotes || liveNotes.length === 0) {
         // Fall back to whatever stop-recording persisted -- covers the
         // record-now-transcribe-later flow when auto-mode is off.
-        try {
-          const existing = await metadataService.getMetadata(filePath);
-          const fromMetadata = ctx.sanitizeLiveNotes(existing?.liveNotes);
-          if (fromMetadata && fromMetadata.length > 0) {
-            liveNotes = fromMetadata;
-          }
-        } catch (err) {
-          console.warn('Failed to read live notes from metadata:', err);
+        const fromMetadata = ctx.sanitizeLiveNotes(existing?.liveNotes);
+        if (fromMetadata && fromMetadata.length > 0) {
+          liveNotes = fromMetadata;
         }
       }
 
@@ -101,6 +102,9 @@ export function register(ctx: IpcContext): void {
         liveNotes,
         { signal },
       );
+      // A cancel (or a superseding Regenerate) that lands after the provider
+      // already returned must not save: this run no longer owns the note.
+      signal.throwIfAborted();
       console.log('Transcription completed successfully');
       console.log('Saving metadata for:', filePath);
 
@@ -133,22 +137,35 @@ export function register(ctx: IpcContext): void {
         }
       }
 
-      // Save transcription files (summary.md + transcript.md)
+      // Save transcription files. When the recording already has a note
+      // (Regenerate), it is replaced in place only once the new one is fully
+      // written, so a failure here leaves the previous note linked and intact.
       const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));
       let transcriptionPath: string | undefined;
       try {
-        transcriptionPath = saveTranscription({
+        transcriptionPath = saveRegeneratedTranscription({
           title,
           result,
           audioFilePath,
           dataPath: app.getPath('userData'),
           liveNotes,
+          previousFolderPath: existing?.transcriptionPath,
         });
         console.log('Transcription saved to:', transcriptionPath);
         ctx.maybeAutoSync();
       } catch (error) {
         console.error('Failed to save transcription files:', error);
         reportError(error, { operation: 'transcription.save', severity: 'warning' });
+      }
+
+      if (!transcriptionPath && existing?.transcriptionPath) {
+        // Regenerate whose save failed: the previous note is still linked and
+        // intact. Leave the sidecar alone rather than pairing that note with
+        // inline fields from a result that was never saved.
+        return {
+          success: false,
+          error: 'Could not save the regenerated note. The previous note was kept.',
+        };
       }
 
       // Save metadata - slim if transcription files saved, inline fallback otherwise
