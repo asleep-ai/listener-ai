@@ -7,6 +7,8 @@ import * as fs from 'fs';
 import assert from 'node:assert/strict';
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import * as path from 'path';
+import { diffConfigPayload } from './configDiff';
+import { CONFIG_KEY_DEFINITIONS } from './configKeys';
 import { ConfigService, DEFAULT_SUMMARY_PROMPT } from './configService';
 import { makeTempDir, rmDir } from './test-helpers';
 
@@ -850,5 +852,133 @@ describe('ConfigService: getAllConfig projection', () => {
     const config = new ConfigService(dataPath);
 
     assert.deepStrictEqual(config.getAllConfig(), { ...expected, crashReportingEnabled: false });
+  });
+});
+
+// #210: the settings form is prefilled from resolved values, so saving it back
+// wholesale leaked env secrets and froze defaults into config.json. The
+// renderer now diffs the save-time read against the prefill read; these tests
+// drive that diff against the real ConfigService.
+describe('ConfigService: settings save only persists edited fields', () => {
+  // Stands in for the renderer's prefill-then-read. The diff only needs the
+  // baseline and the save-time read to go through the same transform.
+  function readSettingsForm(config: ConfigService): Record<string, unknown> {
+    const all = config.getAllConfig() as Record<string, unknown>;
+    return Object.fromEntries(
+      CONFIG_KEY_DEFINITIONS.filter((row) => row.payload).map((row) => [row.key, all[row.key]]),
+    );
+  }
+
+  function setSecretEnv(dataPath: string): void {
+    process.env.GEMINI_API_KEY = 'env-gemini-key';
+    process.env.OPENAI_API_KEY = 'env-openai-key';
+    process.env.SONIOX_API_KEY = 'env-soniox-key';
+    process.env.NOTION_API_KEY = 'env-notion-key';
+    process.env.NOTION_DATABASE_ID = 'env-db';
+    process.env.SLACK_WEBHOOK_URL = 'https://hooks.example/env';
+    process.env.LISTENER_AI_PROVIDER = 'codex';
+    process.env.LISTENER_CODEX_AUTH_PATH = path.join(dataPath, 'no-such-codex-auth.json');
+  }
+
+  it('leaves config.json byte-identical on a no-op save', () => {
+    const dataPath = freshDataPath('settings-save-noop');
+    setSecretEnv(dataPath);
+    const configPath = path.join(dataPath, 'config.json');
+    // Hand-formatted legacy-style file: any rewrite would change its bytes.
+    fs.writeFileSync(
+      configPath,
+      '{"globalShortcut":"Alt+R","knownWords":["alpha"],"autoMode":true,' +
+        '"codexTranscriptionMigratedToDiarize":true,"summaryPromptMigratedToStructured":true}\n',
+    );
+    const before = fs.readFileSync(configPath);
+
+    const config = new ConfigService(dataPath);
+    const baseline = readSettingsForm(config);
+    config.updateConfig(diffConfigPayload(baseline, readSettingsForm(config)));
+
+    assert.deepEqual(fs.readFileSync(configPath), before);
+  });
+
+  it('does not rewrite config.json for an empty update', () => {
+    const dataPath = freshDataPath('settings-save-empty-update');
+    const config = new ConfigService(dataPath);
+    const configPath = config.getConfigPath();
+    fs.writeFileSync(configPath, '{ "autoMode": true }');
+
+    config.updateConfig({});
+
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), '{ "autoMode": true }');
+  });
+
+  it('keeps env secrets and resolved defaults off disk when another field changes', () => {
+    const dataPath = freshDataPath('settings-save-env-secrets');
+    setSecretEnv(dataPath);
+    const config = new ConfigService(dataPath);
+    const markers = JSON.parse(fs.readFileSync(config.getConfigPath(), 'utf-8'));
+
+    const baseline = readSettingsForm(config);
+    // The form shows the env values, so a leak would be visible here.
+    assert.equal(baseline.geminiApiKey, 'env-gemini-key');
+    assert.equal(baseline.aiProvider, 'codex');
+    config.updateConfig(diffConfigPayload(baseline, { ...baseline, autoMode: true }));
+
+    const disk = JSON.parse(fs.readFileSync(config.getConfigPath(), 'utf-8'));
+    assert.deepEqual(disk, { ...markers, autoMode: true });
+    // Env fallbacks still resolve at runtime.
+    assert.equal(config.getGeminiApiKey(), 'env-gemini-key');
+    assert.equal(config.getNotionApiKey(), 'env-notion-key');
+    assert.equal(config.getSlackWebhookUrl(), 'https://hooks.example/env');
+    assert.equal(config.getAiProvider(), 'codex');
+  });
+
+  it('persists explicit edits and leaves untouched stored values alone', () => {
+    const dataPath = freshDataPath('settings-save-explicit');
+    setSecretEnv(dataPath);
+    delete process.env.LISTENER_AI_PROVIDER;
+    fs.writeFileSync(
+      path.join(dataPath, 'config.json'),
+      JSON.stringify({
+        aiProvider: 'gemini',
+        notionDatabaseId: 'stored-db',
+        globalShortcut: 'Alt+R',
+        geminiThinkingLevel: 'high',
+        knownWords: ['alpha'],
+      }),
+    );
+    const config = new ConfigService(dataPath);
+
+    const baseline = readSettingsForm(config);
+    config.updateConfig(
+      diffConfigPayload(baseline, {
+        ...baseline,
+        geminiApiKey: 'typed-key',
+        // Explicitly picking the default value still counts as an edit.
+        geminiThinkingLevel: 'medium',
+        knownWords: ['alpha', 'beta'],
+      }),
+    );
+
+    const disk = JSON.parse(fs.readFileSync(config.getConfigPath(), 'utf-8'));
+    assert.equal(disk.geminiApiKey, 'typed-key');
+    assert.equal(disk.geminiThinkingLevel, 'medium');
+    assert.deepEqual(disk.knownWords, ['alpha', 'beta']);
+    assert.equal(disk.aiProvider, 'gemini');
+    assert.equal(disk.notionDatabaseId, 'stored-db');
+    assert.equal(disk.globalShortcut, 'Alt+R');
+    for (const key of [
+      'notionApiKey',
+      'slackWebhookUrl',
+      'openaiApiKey',
+      'sonioxApiKey',
+      'liveSttProvider',
+      'transcriptionProvider',
+      'liveTranslationLanguage',
+      'crashReportingEnabled',
+      'maxRecordingMinutes',
+      'geminiModel',
+      'summaryPrompt',
+    ]) {
+      assert.equal(key in disk, false, `${key} should not be persisted`);
+    }
   });
 });

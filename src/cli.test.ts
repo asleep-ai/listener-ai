@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
 import { KNOWN_CONFIG_KEYS } from './configKeys';
+import { withMeetingLock } from './meetingLock';
 import { __saveTranscriptionLegacyV1ForTests, saveTranscription } from './outputService';
 import { execFileAsync, findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
 
@@ -75,6 +76,31 @@ describe('listener CLI basics', () => {
     const { stdout, code } = await runCli(['-V']);
     assert.equal(code, 0);
     assert.match(stdout, /^listener \d/);
+  });
+
+  it('unrelated commands do not touch interrupted meeting recovery', async () => {
+    const scratch = path.join(basicsDataPath, '.regenerate-google-auth');
+    fs.mkdirSync(path.join(scratch, 'new'), { recursive: true });
+    fs.writeFileSync(
+      path.join(scratch, 'swap.json'),
+      JSON.stringify({ pid: 2147483647, target: '/missing/note', staged: 'new' }),
+    );
+
+    try {
+      const { stdout, code } = await runCli(['google', 'status']);
+      assert.equal(code, 0);
+      assert.match(stdout, /googleOAuthConfigured=/);
+      const usage = await runCli(['usage', '--month', '2026-05']);
+      assert.equal(usage.code, 0);
+      assert.match(usage.stdout, /Usage for 2026-05/);
+      const transcript = await runCli(['transcript']);
+      assert.equal(transcript.code, 1);
+      assert.match(transcript.stderr, /No audio file specified/);
+      assert.doesNotMatch(transcript.stderr, /regeneration/i);
+      assert.ok(fs.existsSync(scratch));
+    } finally {
+      rmDir(scratch);
+    }
   });
 
   it('--help exits 0 and writes to stdout', async () => {
@@ -318,6 +344,55 @@ describe('listener show / export across v1 + v2 folders', () => {
     assert.match(stdout, /## Summary\n[\s\S]*Summary text\./);
     assert.match(stdout, /## Key Points\n[\s\S]*- KP1\n- KP2/);
     assert.match(stdout, /## Action Items\n[\s\S]*- AI1/);
+  });
+
+  it('waits for a note swap before exporting its files', async () => {
+    const folderPath = saveTranscription({
+      title: 'Export Lock',
+      result: {
+        transcript: 'Locked transcript.',
+        summary: 'Locked summary.',
+        keyPoints: [],
+        actionItems: [],
+        emoji: 'X',
+      },
+      dataPath: showDataPath,
+    });
+    const exportDir = path.join(showDataPath, 'export-lock-output');
+    let release!: () => void;
+    let ready!: () => void;
+    const acquired = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const held = withMeetingLock(
+      folderPath,
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+          ready();
+        }),
+    );
+    await acquired;
+    try {
+      let settled = false;
+      const pending = runCli(['export', path.basename(folderPath), exportDir]).then((result) => {
+        settled = true;
+        return result;
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      assert.equal(settled, false);
+      release();
+      const result = await pending;
+      assert.equal(result.code, 0, result.stderr);
+      assert.match(fs.readFileSync(path.join(exportDir, 'summary.md'), 'utf-8'), /Locked summary/);
+      assert.match(
+        fs.readFileSync(path.join(exportDir, 'transcript.md'), 'utf-8'),
+        /Locked transcript/,
+      );
+    } finally {
+      release();
+      await held;
+    }
   });
 
   it('hides transcript quality from show while retaining it in raw JSON export', async () => {
@@ -846,6 +921,125 @@ describe(
 
       assert.ok(fs.existsSync(folderA), 'source folder A should be preserved');
       assert.ok(fs.existsSync(folderB), 'source folder B should be preserved');
+    });
+
+    it('merges notes whose meta.audioFile kept the pre-rename Untitled path (#209)', async () => {
+      const legacyDataPath = makeTempDir('cli-merge-legacy');
+      try {
+        const recordingsDir = path.join(legacyDataPath, 'recordings');
+        const metadataDir = path.join(legacyDataPath, 'metadata');
+        fs.mkdirSync(recordingsDir, { recursive: true });
+        fs.mkdirSync(metadataDir, { recursive: true });
+
+        // Reproduce the pre-fix GUI order: save with the Untitled path, then
+        // rename the audio and move the sidecar to the renamed recording.
+        const folders: string[] = [];
+        const renamedPaths: string[] = [];
+        for (const [i, [title, freq]] of (
+          [
+            ['Alpha', 440],
+            ['Beta', 880],
+          ] as const
+        ).entries()) {
+          const ts = `2025-07-10T0${i}-00-00-000Z`;
+          const untitledName = `Untitled_Meeting_${ts}.webm`;
+          const untitled = await makeOpusWebm(ffmpegPath!, recordingsDir, untitledName, freq);
+          const folder = saveTranscription({
+            title,
+            result: {
+              transcript: `${title} body.`,
+              summary: `${title} summary.`,
+              keyPoints: [],
+              actionItems: [],
+              emoji: '',
+            },
+            audioFilePath: untitled,
+            dataPath: legacyDataPath,
+          });
+          const renamed = path.join(recordingsDir, `${title}_${ts}.webm`);
+          fs.renameSync(untitled, renamed);
+          fs.writeFileSync(
+            path.join(metadataDir, `${title}_${ts}.json`),
+            JSON.stringify({ filePath: renamed, title, transcriptionPath: folder }),
+          );
+          folders.push(folder);
+          renamedPaths.push(renamed);
+        }
+
+        const env = {
+          ...process.env,
+          NODE_ENV: 'test',
+          LISTENER_AI_PROVIDER: 'gemini',
+          LISTENER_DATA_PATH: legacyDataPath,
+          LISTENER_TEST_MODE: '1',
+          GEMINI_API_KEY: 'test-mode-key',
+        };
+        const { stdout } = await execFileAsync(
+          'node',
+          [cliPath, 'merge', path.basename(folders[0]), path.basename(folders[1])],
+          { env },
+        );
+
+        const resultFolder = stdout.trim();
+        const meta = JSON.parse(fs.readFileSync(path.join(resultFolder, 'meta.json'), 'utf-8'));
+        assert.deepEqual(
+          meta.merge?.sourceIds,
+          folders.map((f) => path.basename(f)),
+        );
+        assert.ok(fs.existsSync(meta.audioFile), 'merged audio should exist');
+        folders.forEach((folder, i) => {
+          const sourceMeta = JSON.parse(fs.readFileSync(path.join(folder, 'meta.json'), 'utf-8'));
+          assert.equal(sourceMeta.audioFile, renamedPaths[i], 'source note repaired in place');
+          assert.ok(fs.existsSync(renamedPaths[i]), 'source recording preserved');
+        });
+      } finally {
+        rmDir(legacyDataPath);
+      }
+    });
+
+    it('still refuses to merge a note whose missing audio has no matching sidecar', async () => {
+      const orphanDataPath = makeTempDir('cli-merge-orphan');
+      try {
+        const recordingsDir = path.join(orphanDataPath, 'recordings');
+        fs.mkdirSync(recordingsDir, { recursive: true });
+        const present = await makeOpusWebm(ffmpegPath!, recordingsDir, 'Present.webm', 440);
+        const folderA = saveTranscription({
+          title: 'Present',
+          result: { transcript: 'a', summary: 'a', keyPoints: [], actionItems: [], emoji: '' },
+          audioFilePath: present,
+          dataPath: orphanDataPath,
+        });
+        const missing = path.join(recordingsDir, 'Untitled_Meeting_2025-07-10T00-00-00-000Z.webm');
+        const folderB = saveTranscription({
+          title: 'Orphan',
+          result: { transcript: 'b', summary: 'b', keyPoints: [], actionItems: [], emoji: '' },
+          audioFilePath: missing,
+          dataPath: orphanDataPath,
+        });
+
+        const env = {
+          ...process.env,
+          NODE_ENV: 'test',
+          LISTENER_AI_PROVIDER: 'gemini',
+          LISTENER_DATA_PATH: orphanDataPath,
+          LISTENER_TEST_MODE: '1',
+          GEMINI_API_KEY: 'test-mode-key',
+        };
+        await assert.rejects(
+          execFileAsync(
+            'node',
+            [cliPath, 'merge', path.basename(folderA), path.basename(folderB)],
+            {
+              env,
+            },
+          ),
+          (err: { stderr?: string }) => /source audio missing/.test(err.stderr ?? ''),
+        );
+        const metaB = JSON.parse(fs.readFileSync(path.join(folderB, 'meta.json'), 'utf-8'));
+        assert.equal(metaB.audioFile, missing, 'no guess without sidecar evidence');
+      } finally {
+        rmDir(orphanDataPath);
+      }
     });
   },
 );

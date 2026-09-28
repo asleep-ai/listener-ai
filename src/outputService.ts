@@ -1,5 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'node:crypto';
+import { withMeetingLock } from './meetingLock';
+import { getDataPath } from './dataPath';
 import type { HighlightEntry, TranscriptionResult } from './geminiService';
 import {
   type ActionItemGroup,
@@ -102,6 +105,7 @@ export interface MeetingMetaV2 {
   suggestedTitle?: string;
   emoji?: string;
   transcribedAt: string; // canonical ISO 8601 UTC, e.g. 2026-05-20T10:30:15.123Z
+  generationId?: string; // changes when note content is replaced; absent in older notes
   audioFile?: string; // absolute path (kept compatible with v1.audioFilePath)
   cost?: CostSnapshot;
   customFields?: Record<string, unknown>;
@@ -552,6 +556,7 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
 
   writeV2Files(folderPath, {
     transcribedAt: v2TimestampToIso(usedTs),
+    generationId: randomUUID(),
     title: opts.title,
     result: opts.result,
     audioFilePath: opts.audioFilePath,
@@ -566,6 +571,7 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
  * because migration also calls this with values it lifted from a v1 folder. */
 interface V2WriteInputs {
   transcribedAt: string;
+  generationId?: string;
   title: string;
   result: TranscriptionResult;
   audioFilePath?: string;
@@ -584,6 +590,7 @@ function writeV2Files(folderPath: string, inputs: V2WriteInputs): void {
     title: inputs.title,
     transcribedAt: inputs.transcribedAt,
   };
+  if (inputs.generationId) meta.generationId = inputs.generationId;
   if (inputs.result.suggestedTitle) meta.suggestedTitle = inputs.result.suggestedTitle;
   if (inputs.result.emoji) meta.emoji = inputs.result.emoji;
   if (inputs.audioFilePath) meta.audioFile = inputs.audioFilePath;
@@ -792,6 +799,7 @@ function folderNameToTimestamp(name: string): string {
 
 export interface ReadTranscriptionResult {
   title: string;
+  generationId?: string | null;
   suggestedTitle?: string;
   transcript: string;
   summary: string;
@@ -838,6 +846,33 @@ export interface ReadTranscriptionOptions {
 export async function readTranscription(
   folderPath: string,
   opts: ReadTranscriptionOptions = {},
+): Promise<ReadTranscriptionResult | null> {
+  return withTranscriptionSnapshot(folderPath, opts, (data) => data);
+}
+
+/** Keep a caller's follow-up file reads in the same note snapshot. */
+export async function withTranscriptionSnapshot<T>(
+  folderPath: string,
+  opts: ReadTranscriptionOptions,
+  action: (data: ReadTranscriptionResult | null) => Promise<T> | T,
+): Promise<T> {
+  // A legacy sidecar can name a note in an old or unavailable data root.
+  // Preserve the reader's null fallback without creating a lock there.
+  if (!fs.existsSync(path.join(folderPath, META_JSON))) {
+    return action(await readTranscriptionUnlocked(folderPath, opts));
+  }
+  const activeRoot = path.resolve(getTranscriptionsDir(getDataPath()));
+  const isActiveNote = path.dirname(path.resolve(folderPath)) === activeRoot;
+  return withMeetingLock(
+    folderPath,
+    async () => action(await readTranscriptionUnlocked(folderPath, opts)),
+    { allowUnlockedReadOnly: !isActiveNote },
+  );
+}
+
+async function readTranscriptionUnlocked(
+  folderPath: string,
+  opts: ReadTranscriptionOptions,
 ): Promise<ReadTranscriptionResult | null> {
   let metaRaw: string;
   try {
@@ -900,6 +935,7 @@ export async function readTranscription(
 
     return {
       title: meta.title || path.basename(folderPath),
+      generationId: meta.generationId ?? null,
       suggestedTitle: meta.suggestedTitle,
       transcript: (transcript ?? '').trim(),
       summary: (summary ?? '').trim(),
@@ -1016,6 +1052,19 @@ export interface TranscriptionStatusUpdate {
   slackError?: string | null;
 }
 
+/** Capture the content generation before sending a note to an external service. */
+export async function readTranscriptionGeneration(
+  folderPath: string,
+): Promise<string | null | undefined> {
+  if (!fs.existsSync(path.join(folderPath, META_JSON))) return undefined;
+  return withMeetingLock(folderPath, async () => {
+    const meta = JSON.parse(
+      await fs.promises.readFile(path.join(folderPath, META_JSON), 'utf-8'),
+    ) as MeetingMetaV2;
+    return meta.generationId ?? null;
+  });
+}
+
 /**
  * Update tracking fields (Notion URL, Slack send status) in a v2 folder's
  * meta.json. Pass `null` to clear a field, `undefined` to leave unchanged.
@@ -1026,25 +1075,31 @@ export interface TranscriptionStatusUpdate {
 export async function updateTranscriptionStatus(
   folderPath: string,
   updates: TranscriptionStatusUpdate,
+  expectedGeneration?: string | null,
 ): Promise<void> {
-  const metaPath = path.join(folderPath, META_JSON);
-  const raw = await fs.promises.readFile(metaPath, 'utf-8');
-  const meta = JSON.parse(raw) as MeetingMetaV2;
+  await withMeetingLock(folderPath, async () => {
+    const metaPath = path.join(folderPath, META_JSON);
+    const raw = await fs.promises.readFile(metaPath, 'utf-8');
+    const meta = JSON.parse(raw) as MeetingMetaV2;
+    if (expectedGeneration !== undefined && (meta.generationId ?? null) !== expectedGeneration) {
+      return;
+    }
 
-  // `exports` is reserved as a CommonJS module local; use a different name.
-  const exportsMeta = { ...meta.exports } as NonNullable<MeetingMetaV2['exports']>;
-  applyV2Notion(exportsMeta, updates.notionPageUrl);
-  applyV2Slack(exportsMeta, 'sentAt', updates.slackSentAt);
-  applyV2Slack(exportsMeta, 'error', updates.slackError);
+    // `exports` is reserved as a CommonJS module local; use a different name.
+    const exportsMeta = { ...meta.exports } as NonNullable<MeetingMetaV2['exports']>;
+    applyV2Notion(exportsMeta, updates.notionPageUrl);
+    applyV2Slack(exportsMeta, 'sentAt', updates.slackSentAt);
+    applyV2Slack(exportsMeta, 'error', updates.slackError);
 
-  if (Object.keys(exportsMeta).length === 0) {
-    delete meta.exports;
-  } else {
-    meta.exports = exportsMeta;
-  }
+    if (Object.keys(exportsMeta).length === 0) {
+      delete meta.exports;
+    } else {
+      meta.exports = exportsMeta;
+    }
 
-  // Atomic write so a crash never leaves a truncated meta.json behind.
-  writeAtomic(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+    // Atomic write so a crash never leaves a truncated meta.json behind.
+    writeAtomic(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+  });
 }
 
 function applyV2Notion(
@@ -1316,4 +1371,260 @@ export async function gcLegacyBackups(dataPath: string, retentionDays = 30): Pro
     }
   }
   return removed;
+}
+
+/** Recording sidecar directory owned by `services/metadataService.ts`
+ * (`<dataPath>/metadata/<audio-basename>.json`). Read directly here because
+ * metadataService depends on Electron's `app`, and the CLI also runs this. */
+const RECORDING_METADATA_DIR = 'metadata';
+
+export interface AudioFileRepairResult {
+  /** Notes whose meta.audioFile was rewritten to the sidecar's audio path. */
+  repaired: Array<{ folderName: string; from: string; to: string }>;
+  /** Notes left untouched because their sidecars named different recordings. */
+  ambiguous: string[];
+  /** Notes whose meta.json could not be rewritten (left as they were). */
+  failed: Array<{ folderName: string; error: string }>;
+}
+
+/** Timestamp suffix that `renameAudioFile` (src/ipc/transcription.ts) keeps
+ * when it renames `Untitled_Meeting_<ts>.<ext>` to `<title>_<ts>.<ext>`. */
+const RECORDING_TIMESTAMP_SUFFIX = /_(\d{4}-\d{2}-\d{2}T[\d-]+Z)$/;
+
+function untitledRecordingTimestamp(audioPath: string): string | null {
+  const base = path.basename(audioPath, path.extname(audioPath));
+  if (!base.includes('Untitled_Meeting')) return null;
+  return base.match(RECORDING_TIMESTAMP_SUFFIX)?.[1] ?? null;
+}
+
+export interface RecordingSidecarRepairResult {
+  repaired: Array<{ from: string; to: string }>;
+  ambiguous: string[];
+  failed: Array<{ from: string; error: string }>;
+}
+
+/** Recover a recording renamed just before the app stopped, while its
+ * metadata sidecar was still keyed to the missing Untitled_Meeting path.
+ * Require the old sidecar plus exactly one recording with the same timestamp
+ * and extension in this data root's recordings directory. Unknown or
+ * conflicting metadata is left untouched. Run before note audio-path repair. */
+export async function repairRenamedRecordingSidecars(
+  dataPath: string,
+): Promise<RecordingSidecarRepairResult> {
+  const result: RecordingSidecarRepairResult = { repaired: [], ambiguous: [], failed: [] };
+  const recordingsDir = path.join(dataPath, 'recordings');
+  const metadataDir = path.join(dataPath, RECORDING_METADATA_DIR);
+  let audioNames: string[];
+  let sidecarNames: string[];
+  try {
+    [audioNames, sidecarNames] = await Promise.all([
+      fs.promises.readdir(recordingsDir),
+      fs.promises.readdir(metadataDir),
+    ]);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return result;
+    throw err;
+  }
+
+  for (const name of sidecarNames) {
+    if (!name.endsWith('.json')) continue;
+    const oldSidecar = path.join(metadataDir, name);
+    let metadata: Record<string, unknown>;
+    try {
+      metadata = JSON.parse(await fs.promises.readFile(oldSidecar, 'utf-8'));
+    } catch {
+      continue;
+    }
+    if (!metadata || typeof metadata !== 'object') continue;
+    const oldAudio = metadata.filePath;
+    if (typeof oldAudio !== 'string') continue;
+    const timestamp = untitledRecordingTimestamp(oldAudio);
+    if (!timestamp || fs.existsSync(oldAudio)) continue;
+    if (path.resolve(path.dirname(oldAudio)) !== path.resolve(recordingsDir)) continue;
+    if (name !== `${path.basename(oldAudio, path.extname(oldAudio))}.json`) continue;
+
+    const extension = path.extname(oldAudio);
+    const candidates: string[] = [];
+    for (const audioName of audioNames) {
+      if (path.extname(audioName) !== extension) continue;
+      if (!path.basename(audioName, extension).endsWith(`_${timestamp}`)) continue;
+      const candidate = path.join(recordingsDir, audioName);
+      try {
+        if ((await fs.promises.lstat(candidate)).isFile()) candidates.push(candidate);
+      } catch {
+        // A recording removed since the directory scan is not a candidate.
+      }
+    }
+    if (candidates.length === 0) continue;
+    if (candidates.length !== 1) {
+      result.ambiguous.push(oldSidecar);
+      continue;
+    }
+
+    const newAudio = candidates[0];
+    const newSidecar = path.join(
+      metadataDir,
+      `${path.basename(newAudio, path.extname(newAudio))}.json`,
+    );
+    try {
+      const outcome = await withMeetingLock(oldSidecar, () =>
+        withMeetingLock(newSidecar, async () => {
+          // A live writer may have changed either sidecar since the scan.
+          let latest: Record<string, unknown>;
+          try {
+            latest = JSON.parse(await fs.promises.readFile(oldSidecar, 'utf-8'));
+          } catch {
+            return 'changed';
+          }
+          if (JSON.stringify(latest) !== JSON.stringify(metadata)) return 'changed';
+          if (fs.existsSync(newSidecar)) {
+            const current = JSON.parse(await fs.promises.readFile(newSidecar, 'utf-8'));
+            const expected = { ...latest, filePath: newAudio };
+            if (!current || JSON.stringify(current) !== JSON.stringify(expected)) return 'changed';
+          } else {
+            writeAtomic(
+              newSidecar,
+              `${JSON.stringify({ ...latest, filePath: newAudio }, null, 2)}\n`,
+            );
+          }
+          await fs.promises.unlink(oldSidecar);
+          return 'repaired';
+        }),
+      );
+      if (outcome === 'repaired') result.repaired.push({ from: oldSidecar, to: newSidecar });
+      else result.ambiguous.push(oldSidecar);
+    } catch (err) {
+      result.failed.push({
+        from: oldSidecar,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return result;
+}
+
+/**
+ * Backfill for #209: GUI transcriptions used to save the note before renaming
+ * the `Untitled_Meeting_*` recording, so meta.audioFile kept the pre-rename
+ * path. The recording sidecar was moved to the renamed audio and still records
+ * which note it produced (`transcriptionPath`), so it is the evidence used to
+ * repair the note.
+ *
+ * A note is repaired only when its meta.audioFile is a missing
+ * `Untitled_Meeting_*_<ts>` recording and its sidecars name exactly one
+ * existing recording that matches what `renameAudioFile` produces: same
+ * directory, same extension, same `_<ts>` suffix. No sidecar, or sidecars
+ * naming different recordings, leaves the note unchanged. Touches only
+ * meta.json and is idempotent; a note that can't be written is reported in
+ * `failed` without stopping the others.
+ */
+export async function repairMissingAudioFiles(dataPath: string): Promise<AudioFileRepairResult> {
+  const result: AudioFileRepairResult = { repaired: [], ambiguous: [], failed: [] };
+  const transcriptionsDir = getTranscriptionsDir(dataPath);
+
+  let folderDirents: fs.Dirent[];
+  try {
+    folderDirents = await fs.promises.readdir(transcriptionsDir, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return result;
+    throw err;
+  }
+
+  // Note folder name -> the missing audio path its meta.json records.
+  const broken = new Map<string, string>();
+  for (const d of folderDirents) {
+    if (!d.isDirectory() || d.name.startsWith('.')) continue;
+    const meta = readMetaJsonOrNull(path.join(transcriptionsDir, d.name));
+    const audioFile = meta?.audioFile;
+    if (typeof audioFile !== 'string' || !audioFile) continue;
+    if (!untitledRecordingTimestamp(audioFile)) continue;
+    if (fs.existsSync(audioFile)) continue;
+    broken.set(d.name, audioFile);
+  }
+  if (broken.size === 0) return result;
+
+  const metadataDir = path.join(dataPath, RECORDING_METADATA_DIR);
+  let sidecarNames: string[];
+  try {
+    sidecarNames = await fs.promises.readdir(metadataDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return result;
+    throw err;
+  }
+
+  // Note folder name -> distinct existing audio paths its sidecars name. Match
+  // on the folder name (unique: ms timestamp + title), like GUI merge does, so
+  // a data root that differs from the one recorded in the sidecar still links.
+  const candidates = new Map<string, Map<string, string>>();
+  for (const name of sidecarNames) {
+    if (!name.endsWith('.json')) continue;
+    let sidecar: { filePath?: unknown; transcriptionPath?: unknown };
+    try {
+      sidecar = JSON.parse(await fs.promises.readFile(path.join(metadataDir, name), 'utf-8'));
+    } catch {
+      continue;
+    }
+    if (!sidecar || typeof sidecar !== 'object') continue;
+    const { filePath, transcriptionPath } = sidecar;
+    if (typeof filePath !== 'string' || !filePath) continue;
+    if (typeof transcriptionPath !== 'string' || !transcriptionPath) continue;
+
+    const folderName = path.basename(transcriptionPath);
+    const oldAudio = broken.get(folderName);
+    if (!oldAudio) continue;
+    if (path.resolve(path.dirname(filePath)) !== path.resolve(path.dirname(oldAudio))) continue;
+    if (path.extname(filePath) !== path.extname(oldAudio)) continue;
+    const newBase = path.basename(filePath, path.extname(filePath));
+    if (!newBase.endsWith(`_${untitledRecordingTimestamp(oldAudio)}`)) continue;
+    try {
+      if (!fs.statSync(filePath).isFile()) continue;
+    } catch {
+      continue;
+    }
+
+    let perFolder = candidates.get(folderName);
+    if (!perFolder) {
+      perFolder = new Map();
+      candidates.set(folderName, perFolder);
+    }
+    perFolder.set(path.resolve(filePath), filePath);
+  }
+
+  for (const [folderName, perFolder] of candidates) {
+    const folderPath = path.join(transcriptionsDir, folderName);
+    if (perFolder.size !== 1) {
+      result.ambiguous.push(folderName);
+      continue;
+    }
+    const [newAudio] = perFolder.values();
+    const oldAudio = broken.get(folderName) as string;
+    try {
+      await withMeetingLock(folderPath, () => {
+        // Re-read under the lock: status updates and regeneration may have
+        // changed this meta.json since the initial scan.
+        const meta = readMetaJsonOrNull(folderPath);
+        if (!meta || meta.audioFile !== oldAudio) return;
+        meta.audioFile = newAudio;
+        writeAtomic(path.join(folderPath, META_JSON), `${JSON.stringify(meta, null, 2)}\n`);
+        result.repaired.push({ folderName, from: oldAudio, to: newAudio });
+      });
+    } catch (err) {
+      result.failed.push({ folderName, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  return result;
+}
+
+/** Parse a v2 folder's meta.json, or null when missing, corrupt, or not the
+ * current schema version (never rewrite a file we can't fully understand). */
+function readMetaJsonOrNull(folderPath: string): MeetingMetaV2 | null {
+  try {
+    const meta = JSON.parse(fs.readFileSync(path.join(folderPath, META_JSON), 'utf-8'));
+    if (!meta || typeof meta !== 'object') return null;
+    if (meta.schemaVersion !== META_SCHEMA_VERSION) return null;
+    return meta as MeetingMetaV2;
+  } catch {
+    return null;
+  }
 }

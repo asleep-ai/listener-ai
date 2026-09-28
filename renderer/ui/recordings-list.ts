@@ -45,6 +45,7 @@ type MergeRecordingsResult = {
   data?: Record<string, unknown>;
   mergedAudioPath?: string;
   transcriptionPath?: string;
+  generationId?: string | null;
 };
 
 // Monotonic token so a slow loadRecordings (per-item async metadata reads)
@@ -136,35 +137,22 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   const actions = document.createElement('div');
   actions.className = 'recording-actions';
 
-  // Hide-on-hover utility buttons go FIRST so hover-reveal grows the actions
-  // block to the left. The primary CTA (Transcribe / chevron entry) sits last
-  // at the right edge and doesn't shift when the row is hovered.
-  actions.appendChild(
-    createActionButton('merge-btn', 'Merge', {
-      title: 'Merge this with other recordings into a single note',
-    }),
-  );
-  actions.appendChild(createActionButton('reveal-btn', 'Show', { title: 'Reveal in Finder' }));
-  actions.appendChild(
-    createActionButton('export-m4a-btn', 'M4A', {
-      title: 'Export as M4A for sharing',
-      ariaLabel: 'Export as M4A',
-    }),
-  );
-  actions.appendChild(
-    createActionButton('delete-recording-btn', 'Delete', {
-      title: 'Delete this meeting (audio + transcript)',
-      ariaLabel: 'Delete this meeting',
-    }),
-  );
+  // Secondary actions live in a "More actions" menu so they don't claim most
+  // of the row width (squeezing the title) or the row's centre (swallowing
+  // the whole-row click). The primary CTA (Transcribe / chevron entry) sits
+  // last at the right edge.
+  const menuItems = [
+    createMenuItem('merge-btn', 'Merge with other recordings…'),
+    createMenuItem('reveal-btn', 'Show in Finder'),
+    createMenuItem('export-m4a-btn', 'Export as M4A'),
+    createMenuItem('delete-recording-btn', 'Delete…'),
+  ];
+  if (hasTranscript) {
+    menuItems.unshift(createMenuItem('regenerate-btn', 'Regenerate transcript'));
+  }
+  actions.append(...createMoreActionsMenu(recording.title, menuItems));
 
   if (hasTranscript) {
-    actions.appendChild(
-      createActionButton('regenerate-btn', '↻', {
-        title: 'Regenerate transcript',
-        ariaLabel: 'Regenerate transcript',
-      }),
-    );
     const chevron = document.createElement('span');
     chevron.className = 'recording-chevron';
     chevron.setAttribute('aria-hidden', 'true');
@@ -329,6 +317,99 @@ function createActionButton(
   if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
   button.textContent = label;
   return button;
+}
+
+let moreActionsMenuSeq = 0;
+
+function createMenuItem(className: string, label: string): HTMLButtonElement {
+  const item = document.createElement('button');
+  item.className = `recording-menu-item ${className}`;
+  item.type = 'button';
+  item.setAttribute('role', 'menuitem');
+  item.tabIndex = -1;
+  item.textContent = label;
+  return item;
+}
+
+// Menu button (WAI-ARIA APG pattern) for a row's secondary actions. The menu
+// is a `popover="auto"` so it renders in the top layer (not clipped by the
+// scrolling list) and gets native light-dismiss + ESC. The trigger is its
+// declarative invoker, so a second click on it toggles closed instead of
+// light-dismissing and reopening. Click listeners registered here run before
+// the per-action handlers wired in createRecordingItem, so the menu is closed
+// (and focus back on the trigger) before an action opens a confirm or modal.
+function createMoreActionsMenu(
+  recordingTitle: string,
+  items: HTMLButtonElement[],
+): [HTMLButtonElement, HTMLElement] {
+  const seq = ++moreActionsMenuSeq;
+  const menu = document.createElement('div');
+  menu.className = 'recording-menu';
+  menu.id = `recording-menu-${seq}`;
+  menu.popover = 'auto';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', `Actions for ${recordingTitle}`);
+  menu.append(...items);
+
+  const trigger = createActionButton('more-actions-btn', '⋯', {
+    title: 'More actions',
+    ariaLabel: `More actions for ${recordingTitle}`,
+  });
+  trigger.setAttribute('aria-haspopup', 'menu');
+  trigger.setAttribute('aria-expanded', 'false');
+  trigger.setAttribute('aria-controls', menu.id);
+  trigger.popoverTargetElement = menu;
+  // Per-row anchor name so each menu positions against its own trigger.
+  trigger.style.setProperty('anchor-name', `--recording-menu-${seq}`);
+  menu.style.setProperty('position-anchor', `--recording-menu-${seq}`);
+
+  const enabledItems = () => items.filter((item) => !item.disabled);
+  let focusOnOpen: 'first' | 'last' = 'first';
+
+  // Menu clicks must not reach the row, whose click handler opens the
+  // transcript. The popover lives in the top layer but is still a DOM child.
+  menu.addEventListener('click', (e) => e.stopPropagation());
+  for (const item of items) {
+    item.addEventListener('click', () => menu.hidePopover());
+  }
+
+  menu.addEventListener('toggle', (e) => {
+    const open = (e as ToggleEvent).newState === 'open';
+    trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) {
+      const targets = enabledItems();
+      (focusOnOpen === 'last' ? targets[targets.length - 1] : targets[0])?.focus();
+      focusOnOpen = 'first';
+    }
+  });
+
+  trigger.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    focusOnOpen = e.key === 'ArrowUp' ? 'last' : 'first';
+    if (!menu.matches(':popover-open')) menu.showPopover();
+  });
+
+  menu.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') {
+      // Menus aren't tab stops: close and let Tab continue from the trigger.
+      menu.hidePopover();
+      return;
+    }
+    const targets = enabledItems();
+    if (targets.length === 0) return;
+    const index = targets.indexOf(document.activeElement as HTMLButtonElement);
+    let next: number;
+    if (e.key === 'ArrowDown') next = (index + 1) % targets.length;
+    else if (e.key === 'ArrowUp') next = (index - 1 + targets.length) % targets.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = targets.length - 1;
+    else return;
+    e.preventDefault();
+    targets[next].focus();
+  });
+
+  return [trigger, menu];
 }
 
 // On ffmpeg-missing, point the user at transcription (which downloads ffmpeg)
@@ -590,6 +671,7 @@ async function performMerge(paths: string[], title: string): Promise<void> {
       title,
       filePath: result.mergedAudioPath || null,
       transcriptionPath: result.transcriptionPath ?? null,
+      generationId: result.generationId,
     });
     populateTranscriptionUI((result.data || {}) as never);
 
@@ -792,6 +874,8 @@ async function runInlineTranscription(item: HTMLElement, filePath: string): Prom
     const result = await transcribeWithFfmpegRetry(filePath);
     if (result.cancelled) {
       // Row goes back to its pre-transcribe state; no toast — user chose this.
+      // A failed rename rollback can leave the audio under its new path.
+      if (result.newFilePath) await refreshRecordingsList();
       return;
     }
     if (!result.success) {

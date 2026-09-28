@@ -32,11 +32,6 @@ type TextFieldRow = {
   key: ConfigKeysOfType<string>;
   /** Substituted for an empty value on both prefill and read. Defaults to ''. */
   fallback?: string;
-  /**
-   * Prefill leaves the input alone when nothing is saved, matching the
-   * `if (el && config.X)` guard these fields originally carried.
-   */
-  keepOnEmpty?: true;
 };
 
 type CheckboxFieldRow = {
@@ -88,7 +83,7 @@ export const SETTINGS_FIELDS: readonly SettingsFieldRow[] = [
     fallback: 'gemini',
     parse: (raw) => normalizeAiProvider(raw) ?? 'gemini',
   }),
-  { kind: 'text', id: 'geminiApiKey', key: 'geminiApiKey', keepOnEmpty: true },
+  { kind: 'text', id: 'geminiApiKey', key: 'geminiApiKey' },
   selectRow({
     kind: 'select',
     id: 'geminiThinkingLevel',
@@ -120,13 +115,13 @@ export const SETTINGS_FIELDS: readonly SettingsFieldRow[] = [
   { kind: 'text', id: 'sonioxApiKey', key: 'sonioxApiKey' },
   { kind: 'text', id: 'liveSttLanguage', key: 'liveSttLanguage' },
   { kind: 'text', id: 'liveTranslationLanguage', key: 'liveTranslationLanguage', fallback: 'ko' },
-  { kind: 'text', id: 'notionApiKey', key: 'notionApiKey', keepOnEmpty: true },
-  { kind: 'text', id: 'notionDatabaseId', key: 'notionDatabaseId', keepOnEmpty: true },
+  { kind: 'text', id: 'notionApiKey', key: 'notionApiKey' },
+  { kind: 'text', id: 'notionDatabaseId', key: 'notionDatabaseId' },
   { kind: 'text', id: 'slackWebhookUrl', key: 'slackWebhookUrl' },
   { kind: 'checkbox', id: 'slackAutoShare', key: 'slackAutoShare' },
   { kind: 'checkbox', id: 'googleDriveEnabled', key: 'googleDriveEnabled' },
   { kind: 'checkbox', id: 'crashReportingEnabled', key: 'crashReportingEnabled', defaultOn: true },
-  { kind: 'text', id: 'globalShortcut', key: 'globalShortcut', keepOnEmpty: true },
+  { kind: 'text', id: 'globalShortcut', key: 'globalShortcut' },
   { kind: 'number', id: 'maxRecordingMinutes', key: 'maxRecordingMinutes' },
   { kind: 'number', id: 'recordingReminderMinutes', key: 'recordingReminderMinutes' },
   { kind: 'number', id: 'minRecordingSeconds', key: 'minRecordingSeconds' },
@@ -143,7 +138,6 @@ function selectEl(id: string): HTMLSelectElement | null {
 function applyTextField(row: TextFieldRow, saved: string | undefined): void {
   const el = inputEl(row.id);
   if (!el) return;
-  if (!saved && row.keepOnEmpty) return;
   el.value = saved || (row.fallback ?? '');
 }
 

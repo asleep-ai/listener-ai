@@ -1,7 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { app, ipcMain } from 'electron';
-import { saveTranscription } from '../outputService';
+import { withMeetingLock } from '../meetingLock';
+import { META_JSON } from '../outputService';
+import { saveRegeneratedTranscription } from '../regenerateTranscription';
 import { reportError } from '../sentry';
 import { metadataService } from '../services/metadataService';
 import { notificationService } from '../services/notificationService';
@@ -54,6 +56,8 @@ export function register(ctx: IpcContext): void {
     const controller = new AbortController();
     activeTranscriptions.set(filePath, controller);
     const signal = controller.signal;
+    let renamedAudioPath: string | undefined;
+    let noteCommitted = false;
 
     const sendProgress = (percent: number, message: string) => {
       const win = ctx.getMainWindow();
@@ -64,18 +68,22 @@ export function register(ctx: IpcContext): void {
 
     try {
       console.log('Transcription requested for:', filePath);
+      let existing: Awaited<ReturnType<typeof metadataService.getMetadata>> = null;
+      try {
+        existing = await metadataService.getMetadata(filePath);
+      } catch (err) {
+        console.warn('Failed to read recording metadata:', err);
+      }
+      const previousNoteWasPresent =
+        !!existing?.transcriptionPath &&
+        fs.existsSync(path.join(existing.transcriptionPath, META_JSON));
       let liveNotes = ctx.sanitizeLiveNotes(liveNotesRaw);
       if (!liveNotes || liveNotes.length === 0) {
         // Fall back to whatever stop-recording persisted -- covers the
         // record-now-transcribe-later flow when auto-mode is off.
-        try {
-          const existing = await metadataService.getMetadata(filePath);
-          const fromMetadata = ctx.sanitizeLiveNotes(existing?.liveNotes);
-          if (fromMetadata && fromMetadata.length > 0) {
-            liveNotes = fromMetadata;
-          }
-        } catch (err) {
-          console.warn('Failed to read live notes from metadata:', err);
+        const fromMetadata = ctx.sanitizeLiveNotes(existing?.liveNotes);
+        if (fromMetadata && fromMetadata.length > 0) {
+          liveNotes = fromMetadata;
         }
       }
 
@@ -101,6 +109,9 @@ export function register(ctx: IpcContext): void {
         liveNotes,
         { signal },
       );
+      // A cancel (or a superseding Regenerate) that lands after the provider
+      // already returned must not save: this run no longer owns the note.
+      signal.throwIfAborted();
       console.log('Transcription completed successfully');
       console.log('Saving metadata for:', filePath);
 
@@ -110,74 +121,160 @@ export function register(ctx: IpcContext): void {
         result.liveNotes = liveNotes;
       }
 
-      // Save transcription files (summary.md + transcript.md)
+      // Rename an untitled recording BEFORE its first save so meta.audioFile
+      // and the sidecar both reference the final path (#209). A Regenerate
+      // already has a linked note: keep its audio path stable until the note
+      // replacement succeeds, including when saving fails (#213).
+      const renameTitle =
+        !existing?.transcriptionPath && path.basename(filePath).includes('Untitled_Meeting')
+          ? result.suggestedTitle
+          : undefined;
+      let audioFilePath = filePath;
+      if (renameTitle) {
+        audioFilePath = await renameAudioFile(filePath, renameTitle);
+        if (audioFilePath !== filePath) {
+          renamedAudioPath = audioFilePath;
+          // Carry the stop-recording sidecar (live notes) over to the renamed
+          // audio. Delete the old one only after the copy lands.
+          try {
+            const existingMetadata = await metadataService.getMetadata(filePath);
+            if (existingMetadata) {
+              await metadataService.saveMetadata(audioFilePath, existingMetadata);
+              await metadataService.deleteMetadata(filePath);
+            }
+          } catch (error) {
+            console.error('Failed to move metadata to renamed audio:', error);
+          }
+        }
+      }
+
+      // Save transcription files. When the recording already has a note
+      // (Regenerate), it is replaced in place only once the new one is fully
+      // written, so a failure here leaves the previous note linked and intact.
       const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));
       let transcriptionPath: string | undefined;
+      let generationId: string | null | undefined;
+      let metadataHandledUnderLock = false;
+      const lockPath =
+        previousNoteWasPresent &&
+        existing?.transcriptionPath &&
+        ctx.isContainedTranscriptionPath(existing.transcriptionPath)
+          ? existing.transcriptionPath
+          : undefined;
       try {
-        transcriptionPath = saveTranscription({
-          title,
-          result,
-          audioFilePath: filePath,
-          dataPath: app.getPath('userData'),
-          liveNotes,
-        });
+        const save = async () => {
+          // A cancel can arrive during the awaited rename, sidecar move, or
+          // wait for an in-flight Drive sync of this note.
+          signal.throwIfAborted();
+          if (
+            previousNoteWasPresent &&
+            existing?.transcriptionPath &&
+            !fs.existsSync(path.join(existing.transcriptionPath, META_JSON))
+          ) {
+            throw new Error('The linked note was deleted while regeneration was running.');
+          }
+          const savedPath = saveRegeneratedTranscription({
+            title,
+            result,
+            audioFilePath,
+            dataPath: app.getPath('userData'),
+            liveNotes,
+            previousFolderPath: existing?.transcriptionPath,
+          });
+          generationId =
+            JSON.parse(fs.readFileSync(path.join(savedPath, META_JSON), 'utf-8')).generationId ??
+            null;
+          if (lockPath) {
+            metadataHandledUnderLock = true;
+            try {
+              await metadataService.saveMetadata(audioFilePath, {
+                title,
+                suggestedTitle: result.suggestedTitle,
+                transcriptionPath: savedPath,
+                customFields: result.customFields,
+                liveNotes,
+                transcribedAt: new Date().toISOString(),
+              });
+              console.log('Metadata saved successfully');
+            } catch (error) {
+              console.error('Failed to save metadata:', error);
+            }
+          }
+          return savedPath;
+        };
+        transcriptionPath = lockPath
+          ? await withMeetingLock(lockPath, save, { signal })
+          : await save();
+        noteCommitted = true;
         console.log('Transcription saved to:', transcriptionPath);
         ctx.maybeAutoSync();
       } catch (error) {
+        if (signal.aborted) throw error;
         console.error('Failed to save transcription files:', error);
         reportError(error, { operation: 'transcription.save', severity: 'warning' });
       }
 
+      if (!transcriptionPath && existing?.transcriptionPath) {
+        // Leave the sidecar alone when regeneration did not save a new note;
+        // never pair it with inline fields from an uncommitted result.
+        const deletedDuringRun =
+          previousNoteWasPresent &&
+          !fs.existsSync(path.join(existing.transcriptionPath, META_JSON));
+        return {
+          success: false,
+          error: deletedDuringRun
+            ? 'The linked note was deleted during regeneration. No new note was saved.'
+            : 'Could not save the regenerated note. The previous note was kept.',
+        };
+      }
+
       // Save metadata - slim if transcription files saved, inline fallback otherwise
       try {
-        if (transcriptionPath) {
-          await metadataService.saveMetadata(filePath, {
-            title,
-            suggestedTitle: result.suggestedTitle,
-            transcriptionPath,
-            customFields: result.customFields,
-            liveNotes,
-            transcribedAt: new Date().toISOString(),
-          });
-        } else {
-          // Fallback: store inline data when file write failed
-          await metadataService.saveMetadata(filePath, {
-            title,
-            suggestedTitle: result.suggestedTitle,
-            transcript: result.transcript,
-            summary: result.summary,
-            keyPoints: result.keyPoints,
-            actionItems: result.actionItems,
-            ...(result.summarySections ? { summarySections: result.summarySections } : {}),
-            ...(result.actionItemGroups ? { actionItemGroups: result.actionItemGroups } : {}),
-            customFields: result.customFields,
-            liveNotes,
-            transcribedAt: new Date().toISOString(),
-          });
+        if (!metadataHandledUnderLock) {
+          if (transcriptionPath) {
+            await metadataService.saveMetadata(audioFilePath, {
+              title,
+              suggestedTitle: result.suggestedTitle,
+              transcriptionPath,
+              customFields: result.customFields,
+              liveNotes,
+              transcribedAt: new Date().toISOString(),
+            });
+          } else {
+            // Fallback: store inline data when file write failed
+            await metadataService.saveMetadata(audioFilePath, {
+              title,
+              suggestedTitle: result.suggestedTitle,
+              transcript: result.transcript,
+              summary: result.summary,
+              keyPoints: result.keyPoints,
+              actionItems: result.actionItems,
+              ...(result.summarySections ? { summarySections: result.summarySections } : {}),
+              ...(result.actionItemGroups ? { actionItemGroups: result.actionItemGroups } : {}),
+              customFields: result.customFields,
+              liveNotes,
+              transcribedAt: new Date().toISOString(),
+            });
+          }
+          console.log('Metadata saved successfully');
         }
-        console.log('Metadata saved successfully');
       } catch (error) {
         console.error('Failed to save metadata:', error);
       }
 
       notificationService.notifyTranscriptionComplete(result.suggestedTitle || 'Meeting');
 
-      // Check if we need to rename the file (if it was untitled)
-      const fileName = path.basename(filePath);
-      if (fileName.includes('Untitled_Meeting') && result.suggestedTitle) {
-        const newFilePath = await renameAudioFile(filePath, result.suggestedTitle);
-
-        // Move metadata to new file path
-        const existingMetadata = await metadataService.getMetadata(filePath);
-        if (existingMetadata) {
-          await metadataService.deleteMetadata(filePath);
-          await metadataService.saveMetadata(newFilePath, existingMetadata);
-        }
-
-        return { success: true, data: result, newFilePath, transcriptionPath };
+      if (renameTitle) {
+        return {
+          success: true,
+          data: result,
+          newFilePath: audioFilePath,
+          transcriptionPath,
+          generationId,
+        };
       }
 
-      return { success: true, data: result, transcriptionPath };
+      return { success: true, data: result, transcriptionPath, generationId };
     } catch (error) {
       // Cancellation is a normal outcome -- skip the failure notification and
       // signal it cleanly so the renderer collapses the inline progress without
@@ -186,8 +283,25 @@ export function register(ctx: IpcContext): void {
       // on error name/message would risk mis-classifying legitimate provider
       // failures whose body happens to contain "aborted".
       if (signal.aborted) {
+        if (renamedAudioPath && !noteCommitted) {
+          try {
+            const movedMetadata = await metadataService.getMetadata(renamedAudioPath);
+            if (movedMetadata) {
+              await metadataService.saveMetadata(filePath, movedMetadata);
+              await metadataService.deleteMetadata(renamedAudioPath);
+            }
+            await fs.promises.rename(renamedAudioPath, filePath);
+            renamedAudioPath = undefined;
+          } catch (rollbackError) {
+            console.error('Failed to restore cancelled recording rename:', rollbackError);
+          }
+        }
         console.log('Transcription cancelled for:', filePath);
-        return { success: false, cancelled: true as const };
+        return {
+          success: false,
+          cancelled: true as const,
+          ...(renamedAudioPath ? { newFilePath: renamedAudioPath } : {}),
+        };
       }
       console.error('Error transcribing audio:', error);
       reportError(error, { operation: 'transcription', severity: 'error' });

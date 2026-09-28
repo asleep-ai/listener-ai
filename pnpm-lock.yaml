@@ -35,6 +35,9 @@ importers:
       marked:
         specifier: ^18.0.9
         version: 18.0.9
+      proper-lockfile:
+        specifier: 4.1.2
+        version: 4.1.2
       ws:
         specifier: ^8.21.3
         version: 8.21.3

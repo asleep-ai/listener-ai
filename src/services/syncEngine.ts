@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { isSupportedAudioExtension, mimeTypeForFile } from '../audioFormats';
+import { withMeetingLock } from '../meetingLock';
 import { reportError } from '../sentry';
 import { telemetryHash } from '../sentryScrub';
 import {
@@ -357,7 +358,9 @@ export class SyncEngine {
         if (localMeetingNames.includes(name)) {
           const localPath = path.join(this.transcriptionsDir, name);
           try {
-            fs.rmSync(localPath, { recursive: true, force: true });
+            await withMeetingLock(localPath, () =>
+              fs.rmSync(localPath, { recursive: true, force: true }),
+            );
             result.deleted.push(name);
             this.logger(`Deleted resurrected local meeting "${name}" (tombstoned).`);
           } catch (err) {
@@ -371,9 +374,13 @@ export class SyncEngine {
       const remoteEntry = remoteByName.get(name);
       try {
         if (localExists && remoteEntry) {
-          await this.syncMeetingBidirectional(name, remoteEntry, state, result);
+          await withMeetingLock(path.join(this.transcriptionsDir, name), () =>
+            this.syncMeetingBidirectional(name, remoteEntry, state, result),
+          );
         } else if (localExists) {
-          await this.syncMeetingUploadOnly(name, state, result);
+          await withMeetingLock(path.join(this.transcriptionsDir, name), () =>
+            this.syncMeetingUploadOnly(name, state, result),
+          );
         } else if (remoteEntry) {
           await this.syncMeetingDownloadOnly(name, remoteEntry, state, result);
         }
@@ -447,11 +454,12 @@ export class SyncEngine {
         // Remove from meetings map and from disk if present.
         delete state.meetings[meetingName];
         const localPath = path.join(this.transcriptionsDir, meetingName);
-        if (fs.existsSync(localPath)) {
+        await withMeetingLock(localPath, () => {
+          if (!fs.existsSync(localPath)) return;
           fs.rmSync(localPath, { recursive: true, force: true });
           result.deleted.push(meetingName);
           this.logger(`Applied remote tombstone for "${meetingName}".`);
-        }
+        });
       } catch (err) {
         result.errors.push({
           meeting: meetingName,

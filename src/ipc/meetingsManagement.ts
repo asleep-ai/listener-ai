@@ -5,7 +5,8 @@ import * as path from 'path';
 import { promisify } from 'util';
 import { app, dialog, ipcMain } from 'electron';
 import { extensionForMimeType } from '../audioFormats';
-import { formatTimestamp, sanitizeForPath, saveTranscription } from '../outputService';
+import { withMeetingLock } from '../meetingLock';
+import { META_JSON, formatTimestamp, sanitizeForPath, saveTranscription } from '../outputService';
 import { reportError } from '../sentry';
 import { concatAudioFiles } from '../services/audioConcatService';
 import { metadataService } from '../services/metadataService';
@@ -44,7 +45,9 @@ export function register(ctx: IpcContext): void {
       const meta = await metadataService.getMetadata(resolved);
       if (meta?.transcriptionPath && ctx.isContainedTranscriptionPath(meta.transcriptionPath)) {
         try {
-          fs.rmSync(meta.transcriptionPath, { recursive: true, force: true });
+          await withMeetingLock(meta.transcriptionPath, () =>
+            fs.rmSync(meta.transcriptionPath!, { recursive: true, force: true }),
+          );
         } catch (err) {
           console.error('Failed to remove transcription folder:', err);
           // Continue -- audio cleanup still useful even if folder rm partially failed.
@@ -279,6 +282,7 @@ export function register(ctx: IpcContext): void {
       // user's --title flag / dialog input.
       const finalTitle = opts.title?.trim() || result.suggestedTitle || rawTitle;
       let transcriptionPath: string;
+      let generationId: string | null;
       try {
         transcriptionPath = saveTranscription({
           title: finalTitle,
@@ -287,6 +291,9 @@ export function register(ctx: IpcContext): void {
           dataPath: app.getPath('userData'),
           mergedFrom: sourceFolders,
         });
+        generationId =
+          JSON.parse(fs.readFileSync(path.join(transcriptionPath, META_JSON), 'utf-8'))
+            .generationId ?? null;
         ctx.maybeAutoSync();
       } catch (error) {
         console.error('Failed to save merged transcription files:', error);
@@ -320,6 +327,7 @@ export function register(ctx: IpcContext): void {
         data: result,
         mergedAudioPath,
         transcriptionPath,
+        generationId,
         mergedFrom: sourceFolders,
       };
     } catch (error) {

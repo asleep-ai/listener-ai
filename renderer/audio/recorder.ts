@@ -287,6 +287,9 @@ export async function processAutoMode(
           transcriptionData: transcriptionResult.data,
           audioFilePath: finalAudioPath,
           transcriptionPath: transcriptionResult.transcriptionPath,
+          ...(transcriptionResult.generationId !== undefined
+            ? { expectedGenerationId: transcriptionResult.generationId }
+            : {}),
         });
 
         if (uploadResult.success) {
@@ -309,6 +312,9 @@ export async function processAutoMode(
           title: finalTitle,
           transcriptionData: transcriptionResult.data,
           transcriptionPath: transcriptionResult.transcriptionPath,
+          ...(transcriptionResult.generationId !== undefined
+            ? { expectedGenerationId: transcriptionResult.generationId }
+            : {}),
           notionUrl,
           notionError,
         });

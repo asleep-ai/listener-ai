@@ -114,6 +114,7 @@ const api = {
     data?: any;
     newFilePath?: string;
     transcriptionPath?: string;
+    generationId?: string | null;
     error?: string;
     errorDetails?: TranscriptionErrorPayload;
     cancelled?: boolean;
@@ -125,12 +126,14 @@ const api = {
     transcriptionData: any;
     audioFilePath?: string;
     transcriptionPath?: string;
+    expectedGenerationId?: string | null;
   }): Promise<{ success: boolean; url?: string; error?: string }> =>
     invoke('upload-to-notion', data),
   sendToSlack: (data: {
     title: string;
     transcriptionData: any;
     transcriptionPath?: string;
+    expectedGenerationId?: string | null;
     notionUrl?: string;
     notionError?: string;
   }): Promise<SlackSendApiResult> => invoke('send-to-slack', data),
@@ -259,8 +262,12 @@ const api = {
   mergeRecordings: (opts: {
     paths: string[];
     title?: string;
-  }): Promise<{ success: boolean; folderName?: string; error?: string }> =>
-    invoke('merge-recordings', opts),
+  }): Promise<{
+    success: boolean;
+    folderName?: string;
+    generationId?: string | null;
+    error?: string;
+  }> => invoke('merge-recordings', opts),
 
   // Pushed by main when the recordings directory changes externally
   // (CLI run, manual file ops). Renderer should re-fetch the list.

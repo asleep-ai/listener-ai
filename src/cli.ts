@@ -35,10 +35,15 @@ import {
   listTranscriptions,
   migrateV1ToV2,
   readTranscription,
+  withTranscriptionSnapshot,
+  repairMissingAudioFiles,
+  repairRenamedRecordingSidecars,
   sanitizeForPath,
   saveTranscription,
 } from './outputService';
 import { ALL_FIELDS, type SearchField, resolveFields, searchTranscriptions } from './searchService';
+import { withMeetingLock } from './meetingLock';
+import { recoverInterruptedRegenerations } from './regenerateTranscription';
 import { concatAudioFiles } from './services/audioConcatService';
 import { FFmpegManager } from './services/ffmpegManager';
 import { currentMonthString, formatUsd, monthRange, summarizeUsage } from './services/usageTracker';
@@ -55,13 +60,27 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.webm',
 ]);
 
-/** Commands that don't trigger the one-shot v1->v2 startup migration:
- * - `config`/`codex` never touch the transcriptions directory.
- * - `migrate` IS the migration command itself; its own loop scans for v1
- *   folders. Running the startup auto-migrate first would convert everything
- *   to v2 before `--dry-run` could observe it. The `migrate` handler is
- *   responsible for any conversion it does. */
-const COMMANDS_WITHOUT_DATA_ACCESS = new Set(['config', 'codex', 'migrate']);
+const MEETING_READER_COMMANDS = new Set(['list', 'show', 'export', 'search', 'merge', 'ask']);
+const COMMANDS_WITHOUT_MIGRATION = new Set([
+  'config',
+  'codex',
+  'migrate', // Its own handler must see v1 folders, including --dry-run.
+  'transcript',
+  'usage',
+  'google',
+]);
+
+function commandUsesMeetingData(args: string[]): boolean {
+  return (
+    MEETING_READER_COMMANDS.has(args[0]) ||
+    (args[0] === 'google' && (args[1] === 'upload' || args[1] === 'sync'))
+  );
+}
+
+function commandNeedsMigration(args: string[]): boolean {
+  // The default `listener <audio-file>` command writes a new meeting.
+  return commandUsesMeetingData(args) || !COMMANDS_WITHOUT_MIGRATION.has(args[0]);
+}
 
 const VERSION = (() => {
   try {
@@ -440,18 +459,20 @@ async function handleGoogleUpload(
   // Gather every regular file in the meeting folder. Drive mirrors the local
   // layout, so anything in the folder (summary, transcript, audio, optional
   // attachments) goes up. Hidden files (.DS_Store etc.) are skipped.
-  const entries = fs.readdirSync(folderPath, { withFileTypes: true });
-  const files = entries
-    .filter((e) => e.isFile() && !e.name.startsWith('.'))
-    .map((e) => {
-      const filePath = path.join(folderPath, e.name);
-      const content = fs.readFileSync(filePath);
-      return {
-        name: e.name,
-        content,
-        mimeType: mimeTypeForFile(e.name),
-      };
-    });
+  const files = await withMeetingLock(folderPath, () => {
+    const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+    return entries
+      .filter((e) => e.isFile() && !e.name.startsWith('.'))
+      .map((e) => {
+        const filePath = path.join(folderPath, e.name);
+        const content = fs.readFileSync(filePath);
+        return {
+          name: e.name,
+          content,
+          mimeType: mimeTypeForFile(e.name),
+        };
+      });
+  });
 
   if (files.length === 0) {
     process.stderr.write(`Error: No files to upload in ${folderPath}\n`);
@@ -753,10 +774,10 @@ async function handleExport(args: string[]): Promise<void> {
     process.exit(1);
   }
   if (targetPath) {
-    targetPath = path.resolve(targetPath);
-    fs.mkdirSync(targetPath, { recursive: true });
-    copyExportedFiles(folderPath, targetPath);
-    process.stderr.write(`Exported to ${targetPath}\n`);
+    const exportDir = path.resolve(targetPath);
+    fs.mkdirSync(exportDir, { recursive: true });
+    await withMeetingLock(folderPath, () => copyExportedFiles(folderPath, exportDir));
+    process.stderr.write(`Exported to ${exportDir}\n`);
     return;
   }
 
@@ -783,19 +804,28 @@ async function handleExport(args: string[]): Promise<void> {
     }
     process.stdout.write(`${JSON.stringify(obj, null, 2)}\n`);
   } else {
-    const md = await renderV2Markdown(folderPath);
-    if (md === null) {
+    const output = await withTranscriptionSnapshot(folderPath, {}, (data) => {
+      if (!data) return null;
+      let markdown = formatSummary(
+        data,
+        data.title,
+        data.mergedFrom,
+        data.liveNotes,
+        data.highlights,
+      );
+      if (includeTranscript) {
+        const transcriptPath = path.join(folderPath, TRANSCRIPT_FILE);
+        if (fs.existsSync(transcriptPath)) {
+          markdown += `\n${fs.readFileSync(transcriptPath, 'utf-8')}`;
+        }
+      }
+      return markdown;
+    });
+    if (output === null) {
       process.stderr.write(`Error: could not read transcription at ${folderPath}\n`);
       process.exit(1);
     }
-    process.stdout.write(md);
-    if (includeTranscript) {
-      const transcriptPath = path.join(folderPath, TRANSCRIPT_FILE);
-      if (fs.existsSync(transcriptPath)) {
-        const transcriptContent = fs.readFileSync(transcriptPath, 'utf-8');
-        process.stdout.write(`\n${transcriptContent}`);
-      }
-    }
+    process.stdout.write(output);
   }
 }
 
@@ -1342,11 +1372,11 @@ async function main(): Promise<void> {
 
   // One-shot v1 -> v2 migration is the runtime's responsibility on every
   // entry point. Skip for commands that don't touch the transcriptions dir
-  // (`config`, `codex`, `google login/logout/status`) so we don't pay the
+  // (`config`, `codex`, `usage`, `transcript`, `google login/logout/status`) so we don't pay the
   // dir-scan when it's irrelevant. Also skip when `LISTENER_SKIP_AUTO_MIGRATE`
   // is set -- the migrate-command tests use this to drive the explicit
   // `listener migrate` flow on un-migrated fixtures.
-  if (!COMMANDS_WITHOUT_DATA_ACCESS.has(args[0]) && !process.env.LISTENER_SKIP_AUTO_MIGRATE) {
+  if (commandNeedsMigration(args) && !process.env.LISTENER_SKIP_AUTO_MIGRATE) {
     try {
       await autoMigrateLegacyOnStartup(getDataPath());
     } catch (err) {
@@ -1354,6 +1384,24 @@ async function main(): Promise<void> {
         `Error: legacy migration failed: ${err instanceof Error ? err.message : String(err)}\n`,
       );
       process.exit(1);
+    }
+  }
+
+  // Backfill notes whose meta.audioFile still names a pre-rename recording
+  // (#209) so `merge` reads the real recording. Best-effort.
+  if (commandUsesMeetingData(args)) {
+    // The CLI may be the first reader after a GUI crash during Regenerate.
+    // Restore the previous complete note before list/show/export/merge sees it.
+    for (const folder of await recoverInterruptedRegenerations(getDataPath(), { strict: true })) {
+      process.stderr.write(`Recovered interrupted regeneration: ${folder}\n`);
+    }
+    try {
+      await repairRenamedRecordingSidecars(getDataPath());
+      await repairMissingAudioFiles(getDataPath());
+    } catch (err) {
+      process.stderr.write(
+        `Warning: audio path repair failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
     }
   }
 

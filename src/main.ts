@@ -38,8 +38,12 @@ import {
   getTranscriptionsDir,
   type LiveNote,
   readTranscription,
+  readTranscriptionGeneration,
+  repairMissingAudioFiles,
+  repairRenamedRecordingSidecars,
   updateTranscriptionStatus,
 } from './outputService';
+import { recoverInterruptedRegenerations } from './regenerateTranscription';
 import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
 import { initMainSentry, reportError, setSentryEnabled } from './sentry';
 import { autoUpdaterService } from './services/autoUpdaterService';
@@ -655,21 +659,46 @@ app.whenReady().then(async () => {
     }
     // Clean up backup directories older than 30 days. Best-effort; never fatal.
     gcLegacyBackups(getDataPath()).catch((err) => console.warn('[migrate] backup GC failed:', err));
+    // A failed restore must stop startup before readers see a partial swap.
+    for (const folder of await recoverInterruptedRegenerations(getDataPath(), { strict: true })) {
+      console.log(`[regenerate] Restored ${folder} after an interrupted regenerate.`);
+    }
   } catch (err) {
-    console.error('[migrate] startup migration failed:', err);
-    const message =
-      err instanceof Error
-        ? err.message
-        : 'Unknown error converting your transcriptions to the new layout.';
+    console.error('[startup] migration or note recovery failed:', err);
+    const message = err instanceof Error ? err.message : 'Unknown error preparing your meetings.';
     dialog.showErrorBox(
       'Listener.AI could not start',
-      `Migrating your existing meetings to the new storage layout failed:\n\n${message}\n\n` +
-        `Your original files are backed up under ${getDataPath()}/.v1-backup-<timestamp>/ ` +
-        `(if the backup step completed). The app will now quit. ` +
+      `Preparing your existing meetings failed:\n\n${message}\n\n` +
+        `Your files were kept under ${getDataPath()}. The app will now quit. ` +
         `Please report this to the maintainer.`,
     );
     app.quit();
     return;
+  }
+
+  // Backfill notes whose meta.audioFile still names a pre-rename recording
+  // (#209). Best-effort: a failure only leaves those notes as they were.
+  try {
+    const sidecars = await repairRenamedRecordingSidecars(getDataPath());
+    if (
+      sidecars.repaired.length > 0 ||
+      sidecars.ambiguous.length > 0 ||
+      sidecars.failed.length > 0
+    ) {
+      console.log(
+        `[audio-repair] Repaired ${sidecars.repaired.length} recording sidecar(s);` +
+          ` skipped ${sidecars.ambiguous.length} ambiguous; ${sidecars.failed.length} failed.`,
+      );
+    }
+    const repair = await repairMissingAudioFiles(getDataPath());
+    if (repair.repaired.length > 0 || repair.ambiguous.length > 0 || repair.failed.length > 0) {
+      console.log(
+        `[audio-repair] Repaired ${repair.repaired.length} note audio path(s);` +
+          ` skipped ${repair.ambiguous.length} ambiguous; ${repair.failed.length} failed.`,
+      );
+    }
+  } catch (err) {
+    console.warn('[audio-repair] failed:', err);
   }
 
   // Create menu with DevTools option
@@ -1489,6 +1518,7 @@ ipcMain.handle(
       transcriptionData: any;
       audioFilePath?: string;
       transcriptionPath?: string;
+      expectedGenerationId?: string | null;
     },
   ) => {
     try {
@@ -1511,6 +1541,16 @@ ipcMain.handle(
 
       // Add "by L.AI" to the title for distinction
       const titleWithSuffix = `${data.title} by L.AI`;
+      const generation = isContainedTranscriptionPath(data.transcriptionPath)
+        ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
+        : undefined;
+      if (
+        isContainedTranscriptionPath(data.transcriptionPath) &&
+        data.expectedGenerationId !== undefined &&
+        generation !== data.expectedGenerationId
+      ) {
+        return { success: false, error: 'This note changed. Reopen it before uploading.' };
+      }
 
       const result = await notionService.createMeetingNote(
         titleWithSuffix,
@@ -1519,11 +1559,20 @@ ipcMain.handle(
         data.audioFilePath,
       );
 
-      if (result.success && result.url && isContainedTranscriptionPath(data.transcriptionPath)) {
+      if (
+        result.success &&
+        result.url &&
+        generation !== undefined &&
+        isContainedTranscriptionPath(data.transcriptionPath)
+      ) {
         try {
-          await updateTranscriptionStatus(data.transcriptionPath, {
-            notionPageUrl: result.url,
-          });
+          await updateTranscriptionStatus(
+            data.transcriptionPath,
+            {
+              notionPageUrl: result.url,
+            },
+            generation,
+          );
         } catch (error) {
           console.error('Failed to persist Notion URL to transcription:', error);
           reportError(error, { operation: 'notion.persistUrl', severity: 'warning' });
@@ -1554,6 +1603,7 @@ ipcMain.handle(
       title: string;
       transcriptionData: any;
       transcriptionPath?: string;
+      expectedGenerationId?: string | null;
       notionUrl?: string;
       notionError?: string;
     },
@@ -1565,11 +1615,21 @@ ipcMain.handle(
       if (!service) {
         return { success: false, error: 'Slack webhook URL is not configured' };
       }
+      const generation = isContainedTranscriptionPath(data.transcriptionPath)
+        ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
+        : undefined;
+      if (
+        isContainedTranscriptionPath(data.transcriptionPath) &&
+        data.expectedGenerationId !== undefined &&
+        generation !== data.expectedGenerationId
+      ) {
+        return { success: false, error: 'This note changed. Reopen it before sending.' };
+      }
 
       // For a historical resend, use the original meeting time from frontmatter
       // so the Slack message shows when the meeting actually happened, not now.
       let meetingDate = new Date();
-      if (isContainedTranscriptionPath(data.transcriptionPath)) {
+      if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
         const stored = await readTranscription(data.transcriptionPath).catch(() => null);
         if (stored?.transcribedAt) {
           const parsed = new Date(stored.transcribedAt);
@@ -1585,14 +1645,18 @@ ipcMain.handle(
         notionError: data.notionError,
       });
 
-      if (isContainedTranscriptionPath(data.transcriptionPath)) {
+      if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
         try {
           // Preserve the previous successful slackSentAt on a failed resend;
           // only the error field reflects the new failure.
-          await updateTranscriptionStatus(data.transcriptionPath, {
-            ...(result.success ? { slackSentAt: result.sentAt } : {}),
-            slackError: result.success ? null : result.error,
-          });
+          await updateTranscriptionStatus(
+            data.transcriptionPath,
+            {
+              ...(result.success ? { slackSentAt: result.sentAt } : {}),
+              slackError: result.success ? null : result.error,
+            },
+            generation,
+          );
         } catch (error) {
           console.error('Failed to persist Slack status to transcription:', error);
           reportError(error, { operation: 'slack.persistStatus', severity: 'warning' });
@@ -1653,6 +1717,7 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
           data: {
             ...metadata,
             folderName: path.basename(metadata.transcriptionPath),
+            generationId: transcription.generationId,
             transcript: transcription.transcript,
             summary: transcription.summary,
             keyPoints: transcription.keyPoints,
