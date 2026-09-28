@@ -1544,7 +1544,11 @@ ipcMain.handle(
       const generation = isContainedTranscriptionPath(data.transcriptionPath)
         ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
         : undefined;
-      if (data.expectedGenerationId !== undefined && generation !== data.expectedGenerationId) {
+      if (
+        isContainedTranscriptionPath(data.transcriptionPath) &&
+        data.expectedGenerationId !== undefined &&
+        generation !== data.expectedGenerationId
+      ) {
         return { success: false, error: 'This note changed. Reopen it before uploading.' };
       }
 
@@ -1614,7 +1618,11 @@ ipcMain.handle(
       const generation = isContainedTranscriptionPath(data.transcriptionPath)
         ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
         : undefined;
-      if (data.expectedGenerationId !== undefined && generation !== data.expectedGenerationId) {
+      if (
+        isContainedTranscriptionPath(data.transcriptionPath) &&
+        data.expectedGenerationId !== undefined &&
+        generation !== data.expectedGenerationId
+      ) {
         return { success: false, error: 'This note changed. Reopen it before sending.' };
       }
 
