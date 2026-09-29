@@ -1869,137 +1869,20 @@ Requirements:
         progressCallback(85, 'Generating summary and key points...');
       }
 
-      const basePrompt = customSummaryPrompt || DEFAULT_SUMMARY_PROMPT;
-
-      const enrichableNotes = (liveNotes ?? []).filter((n) => (n.text ?? '').trim().length > 0);
-      const highlightsBlock = buildHighlightsPromptBlock(enrichableNotes);
-      // Same additive pattern as the highlights block: appended to custom
-      // summary prompts too, since the shared parser tolerates the extra key.
-      const summaryPrompt = [
-        basePrompt,
-        highlightsBlock,
-        TRANSCRIPT_QUALITY_PROMPT_BLOCK +
-          buildScriptMixPromptLine(scriptOutlierPositions, scriptSegmented ? 'segment' : 'window'),
-      ]
-        .filter(Boolean)
-        .join('\n\n');
-
-      const summaryText = await this.generateSummary(
-        summaryPrompt,
+      const { summaryData, customFields, highlights, rawQualityNotes } = await this.buildReport(
         fullTranscript,
-        signal,
-        costSession,
+        {
+          customSummaryPrompt,
+          liveNotes,
+          qualityPromptLine: buildScriptMixPromptLine(
+            scriptOutlierPositions,
+            scriptSegmented ? 'segment' : 'window',
+          ),
+          lostSegments,
+          signal,
+          costSession,
+        },
       );
-
-      let summaryData: {
-        suggestedTitle: string;
-        summary: string;
-        keyPoints: string[];
-        actionItems: string[];
-        emoji: string;
-        summarySections?: SummarySection[];
-        actionItemGroups?: ActionItemGroup[];
-      } = {
-        suggestedTitle: '',
-        summary: '',
-        keyPoints: [] as string[],
-        actionItems: [] as string[],
-        emoji: '📝',
-      };
-
-      const KNOWN_KEYS = new Set([
-        'suggestedTitle',
-        'summary',
-        'keyPoints',
-        'actionItems',
-        'summarySections',
-        'actionItemGroups',
-        'emoji',
-        'highlights',
-        'transcriptQualityNotes',
-      ]);
-      const customFields: Record<string, unknown> = {};
-      let rawHighlights: unknown;
-      let rawQualityNotes: unknown;
-
-      try {
-        const parsed = parseSummaryJsonObject(summaryText);
-        const parsedSections = parseSummarySections(parsed.summarySections);
-        const summarySections = parsedSections.length > 0 ? parsedSections : undefined;
-        const parsedGroups = parseActionItemGroups(parsed.actionItemGroups, {
-          dropPlaceholderOwners: true,
-        });
-        const actionItemGroups = parsedGroups.length > 0 ? parsedGroups : undefined;
-        const legacySummary = normalizeString(parsed.summary);
-        const keyPoints = normalizeStringArray(parsed.keyPoints);
-        const legacyActionItems = normalizeStringArray(parsed.actionItems);
-        // No `summary`/`summarySections` is valid: a custom prompt may ask
-        // only for action items, key points or custom fields (v2.14.0 saved
-        // whatever the object carried).
-        summaryData = {
-          suggestedTitle: normalizeString(parsed.suggestedTitle),
-          summary:
-            legacySummary ||
-            summarySections
-              ?.map(
-                (section) =>
-                  `${section.heading}\n${section.bullets.map((bullet) => `- ${bullet}`).join('\n')}`,
-              )
-              .join('\n\n') ||
-            '',
-          keyPoints,
-          actionItems:
-            legacyActionItems.length > 0
-              ? legacyActionItems
-              : (actionItemGroups?.flatMap((group) =>
-                  group.items.map((item) => `${group.owner}: ${item}`),
-                ) ?? []),
-          emoji: normalizeString(parsed.emoji) || '📝',
-          summarySections,
-          actionItemGroups,
-        };
-        rawHighlights = (parsed as { highlights?: unknown }).highlights;
-        rawQualityNotes = (parsed as { transcriptQualityNotes?: unknown }).transcriptQualityNotes;
-
-        // Extract custom fields (any keys not in the known set)
-        for (const [key, value] of Object.entries(parsed)) {
-          if (!KNOWN_KEYS.has(key)) {
-            customFields[key] = value;
-          }
-        }
-      } catch (e) {
-        console.error('Error parsing summary JSON:', e);
-        reportError(e, { operation: 'summary.parse', severity: 'warning' });
-        summaryData.summary = salvageSummaryText(summaryText);
-      }
-
-      // Silent transcript loss (issue #197). The gate already knew which
-      // stretches produced nothing, and the stored summary still read as if
-      // the whole meeting had been captured. Put one plain sentence at the top
-      // of both summary representations: consumers that render structured
-      // sections ignore the flat string entirely, and vice versa. Runs once,
-      // on the linear path after the summary JSON is parsed, so the notice
-      // cannot be added twice. `transcriptOnly` returned long before this.
-      const lossNotice = formatTranscriptLossNotice(lostSegments, (seconds) =>
-        this.formatTime(seconds),
-      );
-      if (lossNotice) {
-        console.error(
-          `[transcript-quality] ${lostSegments.length} segment(s) produced no transcript; ` +
-            'prepending a coverage notice to the summary',
-        );
-        summaryData.summary = summaryData.summary
-          ? `${lossNotice}\n\n${summaryData.summary}`
-          : lossNotice;
-        if (summaryData.summarySections?.length) {
-          summaryData.summarySections = [
-            { heading: TRANSCRIPT_COVERAGE_HEADING, bullets: [lossNotice] },
-            ...summaryData.summarySections,
-          ];
-        }
-      }
-
-      const highlights = mergeHighlights(liveNotes, rawHighlights);
 
       // Persist the final-stage quality picture on the note (meta.json
       // customFields) when cleanup, kept uncertainty, the analyzer, or the
@@ -2085,6 +1968,209 @@ Requirements:
       console.error('Error in two-step transcription:', error);
       throw error;
     }
+  }
+
+  /**
+   * Rebuild a report from transcript text alone, without touching audio: used
+   * when a saved note's transcript tail cutoff changes. The result carries
+   * the given transcript unchanged. `lostSegments` re-adds the saved note's
+   * coverage notice; transcript-quality diagnostics are not recomputed here.
+   */
+  async summarizeTranscript(
+    transcript: string,
+    options: {
+      customSummaryPrompt?: string;
+      liveNotes?: LiveNote[];
+      lostSegments?: LostSegment[];
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<TranscriptionResult> {
+    options.signal?.throwIfAborted();
+    const costSession = createCostSession();
+    const { summaryData, customFields, highlights } = await this.buildReport(transcript, {
+      customSummaryPrompt: options.customSummaryPrompt,
+      liveNotes: options.liveNotes,
+      lostSegments: options.lostSegments ?? [],
+      signal: options.signal,
+      costSession,
+    });
+    return attachCost(
+      {
+        transcript,
+        summary: summaryData.summary,
+        keyPoints: summaryData.keyPoints,
+        actionItems: summaryData.actionItems,
+        emoji: summaryData.emoji,
+        suggestedTitle: summaryData.suggestedTitle,
+        summarySections: summaryData.summarySections,
+        actionItemGroups: summaryData.actionItemGroups,
+        customFields: Object.keys(customFields).length > 0 ? customFields : undefined,
+        highlights,
+      },
+      costSession,
+    );
+  }
+
+  // Step 2 of transcription, also used on its own to rebuild a saved note's
+  // report from transcript text: summary prompt (plus the highlights and
+  // quality-review blocks), the model call, JSON parsing, and the transcript
+  // coverage notice for segments that produced no text.
+  private async buildReport(
+    transcript: string,
+    opts: {
+      customSummaryPrompt?: string;
+      liveNotes?: LiveNote[];
+      qualityPromptLine?: string;
+      lostSegments: LostSegment[];
+      signal?: AbortSignal;
+      costSession?: CostSession;
+    },
+  ): Promise<{
+    summaryData: {
+      suggestedTitle: string;
+      summary: string;
+      keyPoints: string[];
+      actionItems: string[];
+      emoji: string;
+      summarySections?: SummarySection[];
+      actionItemGroups?: ActionItemGroup[];
+    };
+    customFields: Record<string, unknown>;
+    highlights: HighlightEntry[] | undefined;
+    rawQualityNotes: unknown;
+  }> {
+    const basePrompt = opts.customSummaryPrompt || DEFAULT_SUMMARY_PROMPT;
+
+    const enrichableNotes = (opts.liveNotes ?? []).filter((n) => (n.text ?? '').trim().length > 0);
+    const highlightsBlock = buildHighlightsPromptBlock(enrichableNotes);
+    // Same additive pattern as the highlights block: appended to custom
+    // summary prompts too, since the shared parser tolerates the extra key.
+    const summaryPrompt = [
+      basePrompt,
+      highlightsBlock,
+      TRANSCRIPT_QUALITY_PROMPT_BLOCK + (opts.qualityPromptLine ?? ''),
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    const summaryText = await this.generateSummary(
+      summaryPrompt,
+      transcript,
+      opts.signal,
+      opts.costSession,
+    );
+
+    let summaryData: {
+      suggestedTitle: string;
+      summary: string;
+      keyPoints: string[];
+      actionItems: string[];
+      emoji: string;
+      summarySections?: SummarySection[];
+      actionItemGroups?: ActionItemGroup[];
+    } = {
+      suggestedTitle: '',
+      summary: '',
+      keyPoints: [] as string[],
+      actionItems: [] as string[],
+      emoji: '📝',
+    };
+
+    const KNOWN_KEYS = new Set([
+      'suggestedTitle',
+      'summary',
+      'keyPoints',
+      'actionItems',
+      'summarySections',
+      'actionItemGroups',
+      'emoji',
+      'highlights',
+      'transcriptQualityNotes',
+    ]);
+    const customFields: Record<string, unknown> = {};
+    let rawHighlights: unknown;
+    let rawQualityNotes: unknown;
+
+    try {
+      const parsed = parseSummaryJsonObject(summaryText);
+      const parsedSections = parseSummarySections(parsed.summarySections);
+      const summarySections = parsedSections.length > 0 ? parsedSections : undefined;
+      const parsedGroups = parseActionItemGroups(parsed.actionItemGroups, {
+        dropPlaceholderOwners: true,
+      });
+      const actionItemGroups = parsedGroups.length > 0 ? parsedGroups : undefined;
+      const legacySummary = normalizeString(parsed.summary);
+      const keyPoints = normalizeStringArray(parsed.keyPoints);
+      const legacyActionItems = normalizeStringArray(parsed.actionItems);
+      // No `summary`/`summarySections` is valid: a custom prompt may ask
+      // only for action items, key points or custom fields (v2.14.0 saved
+      // whatever the object carried).
+      summaryData = {
+        suggestedTitle: normalizeString(parsed.suggestedTitle),
+        summary:
+          legacySummary ||
+          summarySections
+            ?.map(
+              (section) =>
+                `${section.heading}\n${section.bullets.map((bullet) => `- ${bullet}`).join('\n')}`,
+            )
+            .join('\n\n') ||
+          '',
+        keyPoints,
+        actionItems:
+          legacyActionItems.length > 0
+            ? legacyActionItems
+            : (actionItemGroups?.flatMap((group) =>
+                group.items.map((item) => `${group.owner}: ${item}`),
+              ) ?? []),
+        emoji: normalizeString(parsed.emoji) || '📝',
+        summarySections,
+        actionItemGroups,
+      };
+      rawHighlights = (parsed as { highlights?: unknown }).highlights;
+      rawQualityNotes = (parsed as { transcriptQualityNotes?: unknown }).transcriptQualityNotes;
+
+      // Extract custom fields (any keys not in the known set)
+      for (const [key, value] of Object.entries(parsed)) {
+        if (!KNOWN_KEYS.has(key)) {
+          customFields[key] = value;
+        }
+      }
+    } catch (e) {
+      console.error('Error parsing summary JSON:', e);
+      reportError(e, { operation: 'summary.parse', severity: 'warning' });
+      summaryData.summary = salvageSummaryText(summaryText);
+    }
+
+    // Silent transcript loss (issue #197). The gate already knew which
+    // stretches produced nothing, and the stored summary still read as if
+    // the whole meeting had been captured. Put one plain sentence at the top
+    // of both summary representations: consumers that render structured
+    // sections ignore the flat string entirely, and vice versa. Runs once,
+    // on the linear path after the summary JSON is parsed, so the notice
+    // cannot be added twice. `transcriptOnly` returned long before this.
+    const lossNotice = formatTranscriptLossNotice(opts.lostSegments, (seconds) =>
+      this.formatTime(seconds),
+    );
+    if (lossNotice) {
+      console.error(
+        `[transcript-quality] ${opts.lostSegments.length} segment(s) produced no transcript; ` +
+          'prepending a coverage notice to the summary',
+      );
+      summaryData.summary = summaryData.summary
+        ? `${lossNotice}\n\n${summaryData.summary}`
+        : lossNotice;
+      if (summaryData.summarySections?.length) {
+        summaryData.summarySections = [
+          { heading: TRANSCRIPT_COVERAGE_HEADING, bullets: [lossNotice] },
+          ...summaryData.summarySections,
+        ];
+      }
+    }
+
+    const highlights = mergeHighlights(opts.liveNotes, rawHighlights);
+
+    return { summaryData, customFields, highlights, rawQualityNotes };
   }
 
   // Get transcript for short audio files

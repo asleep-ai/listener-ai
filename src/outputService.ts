@@ -14,6 +14,11 @@ import {
   type SummarySection,
 } from './meetingRecord';
 import type { CostSnapshot } from './services/usageTracker';
+import {
+  parseTranscriptCutoff,
+  resolveTranscriptCutoff,
+  type TranscriptCutoff,
+} from './transcriptCutoff';
 
 /** One timestamped note captured while recording. Empty `text` = bare flag. */
 export interface LiveNote {
@@ -64,7 +69,9 @@ export function formatTimestamp(): string {
 //     summary.md          plain summary text (no headings, no frontmatter)
 //     key-points.md       bullet list (`- item` per line)
 //     action-items.md     bullet list
-//     transcript.md       plain transcript text (no `# title` heading)
+//     transcript.md       plain transcript text (no `# title` heading); always the
+//                         full transcript, even when meta.transcriptCutoff
+//                         excludes a tail from the report
 //     notes.json          live notes (optional)
 //     highlights.json     AI-enriched highlights (optional)
 //     <audio file>        original recording (optional, path stored in meta)
@@ -112,8 +119,13 @@ export interface MeetingMetaV2 {
   summarySections?: SummarySection[];
   actionItemGroups?: ActionItemGroup[];
   merge?: { sourceIds: string[] };
+  // Report built from the transcript text before this point; absent = full transcript.
+  transcriptCutoff?: TranscriptCutoff;
   exports?: {
     notion?: { pageUrl: string; uploadedAt?: string };
+    // A Notion page uploaded before the report was regenerated for a cutoff
+    // change. The page itself was not modified and still shows the old report.
+    notionSuperseded?: { pageUrl: string; supersededAt: string };
     slack?: { sentAt?: string; error?: string | null };
   };
   // Forward-compat: writers preserve unknown keys.
@@ -198,7 +210,7 @@ export function parseBullets(text: string): string[] {
 }
 
 /** Render an array of bullets back into markdown. */
-function formatBullets(items: string[]): string {
+export function formatBullets(items: string[]): string {
   return items.map((item) => `- ${normalizeBulletItem(item)}`).join('\n') + '\n';
 }
 
@@ -815,9 +827,16 @@ export interface ReadTranscriptionResult {
   liveNotes?: LiveNote[];
   highlights?: HighlightEntry[];
   notionPageUrl?: string;
+  /** Notion page that still shows the report from before the last cutoff change. */
+  supersededNotionPageUrl?: string;
   slackSentAt?: string;
   slackError?: string;
   cost?: CostSnapshot;
+  /** Tail cutoff that still matches `transcript`; absent = the full transcript is the report input. */
+  transcriptCutoff?: TranscriptCutoff;
+  /** meta.json holds a cutoff that no longer matches `transcript` (for example a
+   * transcript changed by sync); exports must not guess where the report ends. */
+  transcriptCutoffMismatch?: true;
 }
 
 /**
@@ -933,11 +952,19 @@ async function readTranscriptionUnlocked(
       }
     }
 
+    const transcriptText = (transcript ?? '').trim();
+    // Without the transcript the offset cannot be checked, so only the shape is.
+    const transcriptCutoff = opts.skipTranscript
+      ? parseTranscriptCutoff(meta.transcriptCutoff)
+      : resolveTranscriptCutoff(transcriptText, meta.transcriptCutoff);
+    const transcriptCutoffMismatch =
+      !opts.skipTranscript && meta.transcriptCutoff !== undefined && !transcriptCutoff;
+
     return {
       title: meta.title || path.basename(folderPath),
       generationId: meta.generationId ?? null,
       suggestedTitle: meta.suggestedTitle,
-      transcript: (transcript ?? '').trim(),
+      transcript: transcriptText,
       summary: (summary ?? '').trim(),
       keyPoints: keyPoints && keyPoints.length > 0 ? keyPoints : undefined,
       actionItems: actionItems && actionItems.length > 0 ? actionItems : undefined,
@@ -951,9 +978,12 @@ async function readTranscriptionUnlocked(
       liveNotes,
       highlights,
       notionPageUrl: meta.exports?.notion?.pageUrl,
+      supersededNotionPageUrl: meta.exports?.notionSuperseded?.pageUrl,
       slackSentAt: meta.exports?.slack?.sentAt,
       slackError: meta.exports?.slack?.error ?? undefined,
       cost: meta.cost,
+      ...(transcriptCutoff ? { transcriptCutoff } : {}),
+      ...(transcriptCutoffMismatch ? { transcriptCutoffMismatch: true as const } : {}),
     };
   } catch (e) {
     console.warn(`Failed to read v2 transcription at ${folderPath}:`, e);
@@ -1112,6 +1142,9 @@ function applyV2Notion(
     return;
   }
   exportsMeta.notion = { ...exportsMeta.notion, pageUrl: value };
+  // The new page carries the current report, so the notice about the older
+  // page is no longer needed.
+  delete exportsMeta.notionSuperseded;
 }
 
 function applyV2Slack(

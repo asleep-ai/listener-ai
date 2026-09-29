@@ -2973,3 +2973,56 @@ describe('GeminiService whole-file transport retries', () => {
     }
   });
 });
+
+describe('GeminiService.summarizeTranscript (report from text only)', () => {
+  const dir = makeTempDir('summarize-transcript');
+  after(() => rmDir(dir));
+
+  it('sends only the given text to the summary model and never touches audio', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: dir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    }) as unknown as {
+      generateSummary(promptText: string, transcript: string): Promise<string>;
+      prepareAudioForProvider(): never;
+      summarizeTranscript: GeminiService['summarizeTranscript'];
+    };
+    const sent: Array<{ prompt: string; transcript: string }> = [];
+    service.generateSummary = async (prompt, transcript) => {
+      sent.push({ prompt, transcript });
+      return JSON.stringify({
+        suggestedTitle: '출시 일정',
+        summarySections: [{ heading: '일정', bullets: ['화요일 출시'] }],
+        keyPoints: ['화요일'],
+        actionItems: [],
+        emoji: '🚀',
+        highlights: [{ offsetMs: 1000, subtitle: '킥오프', bullets: ['시작'] }],
+        decisions: ['ship'],
+      });
+    };
+    service.prepareAudioForProvider = () => {
+      throw new Error('audio must not be used');
+    };
+
+    const included = '참가자1: 화요일에 출시합니다.';
+    const result = await service.summarizeTranscript(included, {
+      customSummaryPrompt: 'CUSTOM PROMPT',
+      liveNotes: [{ offsetMs: 1000, text: 'kickoff' }],
+      lostSegments: [{ segment: 2, start: 300, end: 600, reason: 'empty' }],
+    });
+
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].transcript, included);
+    assert.ok(sent[0].prompt.startsWith('CUSTOM PROMPT'));
+    assert.ok(sent[0].prompt.includes('kickoff'), 'live notes are enriched from the included text');
+    assert.equal(result.transcript, included);
+    assert.equal(result.emoji, '🚀');
+    assert.deepEqual(result.keyPoints, ['화요일']);
+    assert.deepEqual(result.customFields, { decisions: ['ship'] });
+    assert.equal(result.highlights?.[0].subtitle, '킥오프');
+    assert.equal(result.summarySections?.[0].heading, 'Transcript coverage');
+    assert.match(result.summary, /5 minutes of this recording produced no transcript/);
+  });
+});

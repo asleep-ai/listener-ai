@@ -59,6 +59,11 @@ import {
   type UsageSummaryResult,
 } from './services/usageTracker';
 import {
+  exportPayloadFromNote,
+  titleForSavedReport,
+  withIncludedTranscript,
+} from './transcriptCutoff';
+import {
   createOpenAiRealtimeClientConfig,
   type OpenAiRealtimeBearer,
 } from './openAiRealtimeClient';
@@ -1508,6 +1513,11 @@ ipcMain.handle('get-meeting-status', async () => {
   };
 });
 
+const CUTOFF_MISMATCH_UPLOAD_ERROR =
+  'The saved transcript cutoff no longer matches this transcript. Open the Transcript tab and set the cutoff again, or restore the full transcript, before uploading.';
+const CUTOFF_MISMATCH_SEND_ERROR =
+  'The saved transcript cutoff no longer matches this transcript. Open the Transcript tab and set the cutoff again, or restore the full transcript, before sending.';
+
 // Notion upload handler
 ipcMain.handle(
   'upload-to-notion',
@@ -1539,11 +1549,16 @@ ipcMain.handle(
         });
       }
 
-      // Add "by L.AI" to the title for distinction
-      const titleWithSuffix = `${data.title} by L.AI`;
+      let uploadTitle = data.title;
       const generation = isContainedTranscriptionPath(data.transcriptionPath)
         ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
         : undefined;
+      if (isContainedTranscriptionPath(data.transcriptionPath) && generation === undefined) {
+        return {
+          success: false,
+          error: 'This note could not be read. Reopen it before uploading.',
+        };
+      }
       if (
         isContainedTranscriptionPath(data.transcriptionPath) &&
         data.expectedGenerationId !== undefined &&
@@ -1552,10 +1567,35 @@ ipcMain.handle(
         return { success: false, error: 'This note changed. Reopen it before uploading.' };
       }
 
+      // What leaves the app is decided here, not by the renderer payload: a
+      // saved note is re-read so Notion gets its current report and only the
+      // transcript text before its tail cutoff.
+      if (data.transcriptionData?.transcriptCutoffMismatch === true) {
+        return { success: false, error: CUTOFF_MISMATCH_UPLOAD_ERROR };
+      }
+      let transcriptionData = withIncludedTranscript(data.transcriptionData ?? {});
+      if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
+        const stored = await readTranscription(data.transcriptionPath);
+        if (!stored || (stored.generationId ?? null) !== generation) {
+          return { success: false, error: 'This note changed. Reopen it before uploading.' };
+        }
+        // Fail closed: never guess where the report ends.
+        if (stored.transcriptCutoffMismatch) {
+          return { success: false, error: CUTOFF_MISMATCH_UPLOAD_ERROR };
+        }
+        transcriptionData = exportPayloadFromNote(transcriptionData, stored);
+        const sidecar = data.audioFilePath
+          ? await metadataService.getMetadata(data.audioFilePath)
+          : null;
+        uploadTitle = sidecar?.suggestedTitle
+          ? titleForSavedReport(data.title, sidecar.suggestedTitle, stored.title)
+          : stored.title;
+      }
+
       const result = await notionService.createMeetingNote(
-        titleWithSuffix,
+        `${uploadTitle} by L.AI`,
         new Date(),
-        data.transcriptionData,
+        transcriptionData,
         data.audioFilePath,
       );
 
@@ -1584,7 +1624,7 @@ ipcMain.handle(
         });
       }
 
-      notificationService.notifyUploadComplete(data.title);
+      notificationService.notifyUploadComplete(uploadTitle);
       return result;
     } catch (error) {
       console.error('Error uploading to Notion:', error);
@@ -1618,6 +1658,9 @@ ipcMain.handle(
       const generation = isContainedTranscriptionPath(data.transcriptionPath)
         ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
         : undefined;
+      if (isContainedTranscriptionPath(data.transcriptionPath) && generation === undefined) {
+        return { success: false, error: 'This note could not be read. Reopen it before sending.' };
+      }
       if (
         isContainedTranscriptionPath(data.transcriptionPath) &&
         data.expectedGenerationId !== undefined &&
@@ -1629,18 +1672,31 @@ ipcMain.handle(
       // For a historical resend, use the original meeting time from frontmatter
       // so the Slack message shows when the meeting actually happened, not now.
       let meetingDate = new Date();
+      let transcriptionData = data.transcriptionData;
+      if (transcriptionData?.transcriptCutoffMismatch === true) {
+        return { success: false, error: CUTOFF_MISMATCH_SEND_ERROR };
+      }
       if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
         const stored = await readTranscription(data.transcriptionPath).catch(() => null);
+        if (!stored || (stored.generationId ?? null) !== generation) {
+          return { success: false, error: 'This note changed. Reopen it before sending.' };
+        }
+        if (stored.transcriptCutoffMismatch) {
+          return { success: false, error: CUTOFF_MISMATCH_SEND_ERROR };
+        }
         if (stored?.transcribedAt) {
           const parsed = new Date(stored.transcribedAt);
           if (!Number.isNaN(parsed.getTime())) meetingDate = parsed;
         }
+        // Send the report as saved (it may have been regenerated for a
+        // transcript cutoff), not whatever copy the renderer still holds.
+        transcriptionData = exportPayloadFromNote(transcriptionData ?? {}, stored);
       }
 
       const result = await service.sendMeetingSummary({
         title: data.title,
         date: meetingDate,
-        result: data.transcriptionData,
+        result: transcriptionData,
         notionUrl: data.notionUrl,
         notionError: data.notionError,
       });
@@ -1717,6 +1773,8 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
           data: {
             ...metadata,
             folderName: path.basename(metadata.transcriptionPath),
+            reportTitle: transcription.title,
+            reportSuggestedTitle: transcription.suggestedTitle,
             generationId: transcription.generationId,
             transcript: transcription.transcript,
             summary: transcription.summary,
@@ -1724,14 +1782,20 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
             actionItems: transcription.actionItems,
             summarySections: transcription.summarySections,
             actionItemGroups: transcription.actionItemGroups,
-            customFields: transcription.customFields ?? metadata.customFields,
+            customFields:
+              transcription.transcriptCutoff || transcription.transcriptCutoffMismatch
+                ? transcription.customFields
+                : (transcription.customFields ?? metadata.customFields),
             emoji: transcription.emoji,
             liveNotes: transcription.liveNotes ?? metadata.liveNotes,
             highlights: transcription.highlights,
             notionPageUrl: transcription.notionPageUrl,
+            supersededNotionPageUrl: transcription.supersededNotionPageUrl,
             slackSentAt: transcription.slackSentAt,
             slackError: transcription.slackError,
             cost: transcription.cost,
+            transcriptCutoff: transcription.transcriptCutoff,
+            transcriptCutoffMismatch: transcription.transcriptCutoffMismatch,
           },
         };
       }
@@ -1825,6 +1889,11 @@ ipcMain.handle(
         snippet: h.snippet,
         snippetField: h.snippetField ?? null,
         data: {
+          // The saved note behind the hit, so the modal treats it like one
+          // opened from the recordings list: exports re-read it and a stale
+          // cutoff fails closed instead of sending the full transcript.
+          transcriptionPath: h.entry.folderPath,
+          generationId: h.data.generationId ?? null,
           title: h.data.title,
           suggestedTitle: h.data.suggestedTitle,
           summary: h.data.summary,
@@ -1835,6 +1904,13 @@ ipcMain.handle(
           actionItemGroups: h.data.actionItemGroups ?? [],
           customFields: h.data.customFields ?? {},
           emoji: h.data.emoji,
+          liveNotes: h.data.liveNotes,
+          highlights: h.data.highlights,
+          notionPageUrl: h.data.notionPageUrl,
+          supersededNotionPageUrl: h.data.supersededNotionPageUrl,
+          slackSentAt: h.data.slackSentAt,
+          transcriptCutoff: h.data.transcriptCutoff,
+          transcriptCutoffMismatch: h.data.transcriptCutoffMismatch,
         },
       }));
 

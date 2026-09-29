@@ -15,6 +15,7 @@ import {
   saveTranscription,
 } from './outputService';
 import {
+  applyTranscriptCutoff,
   recoverInterruptedRegenerations,
   saveRegeneratedTranscription,
 } from './regenerateTranscription';
@@ -538,5 +539,426 @@ describe('recoverInterruptedRegenerations', () => {
     fs.utimesSync(path.join(scratch, 'swap.json'), stale, stale);
     assert.deepEqual(await recoverInterruptedRegenerations(dataPath), []);
     assert.ok(!fs.existsSync(scratch));
+  });
+});
+
+describe('applyTranscriptCutoff', () => {
+  const transcript = [
+    '참가자1: 오늘 안건은 출시 일정입니다.',
+    '참가자2: 다음 주 화요일로 하죠.',
+    '참가자1: 회의 끝.',
+    '참가자2: 점심 뭐 먹을까요? 사적인 이야기.',
+  ].join('\n');
+  const cutAt = transcript.indexOf('참가자2: 점심');
+
+  const cutResult: TranscriptionResult = {
+    transcript: 'ignored: the saved transcript is never rewritten',
+    summary: 'Cut summary.',
+    keyPoints: [],
+    actionItems: ['cut action'],
+    emoji: '✂️',
+    customFields: { decisions: ['ship Tuesday'], transcriptQuality: { modelNotes: ['new'] } },
+    highlights: [{ offsetMs: 1000, userText: 'kickoff', subtitle: 'Schedule' }],
+  } as TranscriptionResult;
+
+  function makeNote(): { dataPath: string; folder: string; generationId: string } {
+    const dataPath = makeDataPath();
+    const folder = saveTranscription({
+      title: 'Launch sync',
+      result: {
+        ...oldResult,
+        transcript,
+        customFields: {
+          transcriptQuality: {
+            lostSegments: [{ segment: 2, start: 300, end: 600, reason: 'empty' }],
+          },
+        },
+      } as TranscriptionResult,
+      audioFilePath: path.join(dataPath, 'recordings', 'launch.webm'),
+      dataPath,
+      liveNotes: [{ offsetMs: 1000, text: 'kickoff' }],
+    });
+    const meta = JSON.parse(fs.readFileSync(path.join(folder, META_JSON), 'utf-8'));
+    meta.exports = { notion: { pageUrl: 'https://notion.so/old-page' }, slack: { sentAt: 'x' } };
+    fs.writeFileSync(path.join(folder, META_JSON), JSON.stringify(meta));
+    return { dataPath, folder, generationId: meta.generationId };
+  }
+
+  it('regenerates the report from the included text and keeps transcript, notes and audio path', async () => {
+    const { dataPath, folder, generationId } = makeNote();
+    const before = snapshot(folder);
+    const calls: Array<{ text: string; lost: number; notes?: number }> = [];
+
+    const res = await applyTranscriptCutoff({
+      dataPath,
+      folderPath: folder,
+      expectedGenerationId: generationId,
+      cutoffOffset: cutAt,
+      now: new Date('2026-09-29T00:00:00.000Z'),
+      summarize: async (text, context) => {
+        calls.push({ text, lost: context.lostSegments.length, notes: context.liveNotes?.length });
+        return cutResult;
+      },
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(
+      calls[0].text.includes('점심'),
+      false,
+      'the excluded tail never reaches the model',
+    );
+    assert.equal(calls[0].text.endsWith('회의 끝.'), true);
+    assert.equal(calls[0].lost, 1, 'the coverage notice inputs are passed through');
+    assert.equal(
+      calls[0].notes,
+      0,
+      'a whole-file transcript cannot place the flagged note before the cutoff, so it is withheld',
+    );
+
+    const after = snapshot(folder);
+    assert.equal(
+      after.get('transcript.md'),
+      before.get('transcript.md'),
+      'full transcript is untouched',
+    );
+    assert.equal(after.get('notes.json'), before.get('notes.json'));
+    assert.equal(after.get('summary.md'), 'Cut summary.\n');
+    assert.equal(after.get(KEY_POINTS_FILE), '', 'a dropped section is truncated, not deleted');
+    assert.equal(after.get('action-items.md'), '- cut action\n');
+    assert.deepEqual(scratchDirs(dataPath), []);
+
+    const meta = JSON.parse(after.get(META_JSON) as string);
+    assert.notEqual(meta.generationId, generationId);
+    assert.equal(res.generationId, meta.generationId);
+    assert.equal(meta.transcriptCutoff.offset, cutAt);
+    assert.equal(meta.title, 'Launch sync');
+    assert.equal(meta.audioFile, path.join(dataPath, 'recordings', 'launch.webm'));
+    assert.equal(meta.emoji, '✂️');
+    assert.deepEqual(meta.customFields.decisions, ['ship Tuesday']);
+    assert.deepEqual(
+      meta.customFields.transcriptQuality,
+      { lostSegments: [{ segment: 2, start: 300, end: 600, reason: 'empty' }] },
+      'transcription diagnostics are kept, not replaced by the report run',
+    );
+    assert.equal(meta.exports.notion, undefined);
+    assert.deepEqual(meta.exports.notionSuperseded, {
+      pageUrl: 'https://notion.so/old-page',
+      supersededAt: '2026-09-29T00:00:00.000Z',
+    });
+    assert.equal(meta.exports.slack.sentAt, 'x');
+
+    const note = await readTranscription(folder);
+    assert.equal(note?.transcript, transcript);
+    assert.equal(note?.transcriptCutoff?.offset, cutAt);
+    assert.equal(note?.notionPageUrl, undefined);
+    assert.equal(note?.supersededNotionPageUrl, 'https://notion.so/old-page');
+    assert.equal(note?.highlights?.[0].subtitle, 'Schedule');
+  });
+
+  it('updates an AI suggested title from the included transcript', async () => {
+    const dataPath = makeDataPath();
+    const folder = saveTranscription({
+      title: 'Old Title',
+      result: { ...oldResult, transcript },
+      dataPath,
+    });
+    const before = await readTranscription(folder);
+    assert.equal(before?.suggestedTitle, 'Old Title');
+
+    await applyTranscriptCutoff({
+      dataPath,
+      folderPath: folder,
+      expectedGenerationId: before?.generationId ?? null,
+      cutoffOffset: cutAt,
+      summarize: async () => ({ ...cutResult, suggestedTitle: 'New Title' }),
+    });
+
+    const after = await readTranscription(folder);
+    assert.equal(after?.title, 'New Title');
+    assert.equal(after?.suggestedTitle, 'New Title');
+    assert.equal(after?.transcript, transcript);
+  });
+
+  it('feeds the model only the flagged notes the segment headers place before the cutoff', async () => {
+    const segmented = [
+      '[Segment 1: 00:00:00 ~ 00:05:00]',
+      '',
+      '참가자1: 첫 번째 안건입니다.',
+      '',
+      '---',
+      '',
+      '[Segment 2: 00:05:00 ~ 00:10:00]',
+      '',
+      '참가자2: 두 번째 안건입니다. 결정합시다.',
+      '',
+      '---',
+      '',
+      '[Segment 3: 00:10:00 ~ 00:15:00]',
+      '',
+      '참가자1: 이제 잡담이나 하죠.',
+    ].join('\n');
+    const notes = [
+      { offsetMs: 30_000, text: 'first' },
+      { offsetMs: 400_000, text: 'in the cut segment' },
+      { offsetMs: 700_000, text: 'tail' },
+    ];
+    const dataPath = makeDataPath();
+    const folder = saveTranscription({
+      title: 'Long sync',
+      result: {
+        ...oldResult,
+        transcript: segmented,
+        customFields: {
+          transcriptQuality: {
+            lostSegments: [
+              { segment: 1, start: 0, end: 300, reason: 'cleaned' },
+              { segment: 3, start: 600, end: 900, reason: 'empty' },
+            ],
+          },
+        },
+      } as TranscriptionResult,
+      dataPath,
+      liveNotes: notes,
+    });
+    const meta = JSON.parse(fs.readFileSync(path.join(folder, META_JSON), 'utf-8'));
+    const seen: Array<{ notes?: string[]; lost: number[] }> = [];
+    const res = await applyTranscriptCutoff({
+      dataPath,
+      folderPath: folder,
+      expectedGenerationId: meta.generationId,
+      cutoffOffset: segmented.indexOf('결정합시다'),
+      summarize: async (_text, context) => {
+        seen.push({
+          notes: context.liveNotes?.map((n) => n.text),
+          lost: context.lostSegments.map((l) => l.segment),
+        });
+        return {
+          ...cutResult,
+          highlights: context.liveNotes?.map((n) => ({ offsetMs: n.offsetMs, userText: n.text })),
+        };
+      },
+    });
+    assert.deepEqual(seen, [{ notes: ['first'], lost: [1] }]);
+    assert.equal(res.excludedNotes, 2);
+    const note = await readTranscription(folder);
+    assert.deepEqual(note?.liveNotes, notes, 'the stored notes are untouched');
+    assert.deepEqual(
+      note?.highlights?.map((h) => h.userText),
+      ['first'],
+    );
+  });
+
+  it('withholds every flagged note from a whole-file transcript and brings them back on restore', async () => {
+    const { dataPath, folder, generationId } = makeNote();
+    const seen: Array<string[] | undefined> = [];
+    const summarize = async (_text: string, context: { liveNotes?: Array<{ text: string }> }) => {
+      seen.push(context.liveNotes?.map((n) => n.text));
+      return { ...cutResult, highlights: context.liveNotes?.length ? cutResult.highlights : [] };
+    };
+    const cut = await applyTranscriptCutoff({
+      dataPath,
+      folderPath: folder,
+      expectedGenerationId: generationId,
+      cutoffOffset: cutAt,
+      summarize,
+    });
+    assert.equal(cut.excludedNotes, 1);
+    assert.equal(
+      fs.readFileSync(path.join(folder, HIGHLIGHTS_JSON_FILE), 'utf-8'),
+      '',
+      'no highlight may describe a note that cannot be placed before the cutoff',
+    );
+    assert.deepEqual((await readTranscription(folder))?.liveNotes, [
+      { offsetMs: 1000, text: 'kickoff' },
+    ]);
+
+    const restored = await applyTranscriptCutoff({
+      dataPath,
+      folderPath: folder,
+      expectedGenerationId: cut.generationId,
+      cutoffOffset: null,
+      summarize,
+    });
+    assert.equal(restored.excludedNotes, 0);
+    assert.deepEqual(seen, [[], ['kickoff']]);
+    assert.equal((await readTranscription(folder))?.highlights?.[0].userText, 'kickoff');
+  });
+
+  it('uses sidecar notes when the note stores none, and keeps highlights it cannot rebuild', async () => {
+    const dataPath = makeDataPath();
+    const folder = saveTranscription({
+      title: 'Legacy',
+      result: { ...oldResult, transcript } as TranscriptionResult,
+      dataPath,
+    });
+    const meta = JSON.parse(fs.readFileSync(path.join(folder, META_JSON), 'utf-8'));
+    const highlightsBefore = fs.readFileSync(path.join(folder, HIGHLIGHTS_JSON_FILE), 'utf-8');
+    assert.match(highlightsBefore, /old highlight/);
+
+    // No notes anywhere: the existing highlights file is left as it is.
+    const first = await applyTranscriptCutoff({
+      dataPath,
+      folderPath: folder,
+      expectedGenerationId: meta.generationId,
+      cutoffOffset: cutAt,
+      summarize: async () => ({ ...cutResult, highlights: undefined }),
+    });
+    assert.equal(
+      fs.readFileSync(path.join(folder, HIGHLIGHTS_JSON_FILE), 'utf-8'),
+      highlightsBefore,
+    );
+
+    // Sidecar notes stand in for notes.json and are filtered like stored ones.
+    let seen: string[] | undefined;
+    const second = await applyTranscriptCutoff({
+      dataPath,
+      folderPath: folder,
+      expectedGenerationId: first.generationId,
+      cutoffOffset: null,
+      fallbackLiveNotes: [{ offsetMs: 5000, text: 'from sidecar' }],
+      summarize: async (_text, context) => {
+        seen = context.liveNotes?.map((n) => n.text);
+        return {
+          ...cutResult,
+          highlights: [{ offsetMs: 5000, userText: 'from sidecar', subtitle: 'Legacy' }],
+        };
+      },
+    });
+    assert.deepEqual(seen, ['from sidecar']);
+    assert.equal(second.excludedNotes, 0);
+    assert.equal((await readTranscription(folder))?.highlights?.[0].subtitle, 'Legacy');
+    assert.equal(
+      fs.existsSync(path.join(folder, 'notes.json')),
+      false,
+      'sidecar notes are not copied in',
+    );
+  });
+
+  it('restores the full transcript when the cutoff is removed', async () => {
+    const { dataPath, folder, generationId } = makeNote();
+    const first = await applyTranscriptCutoff({
+      dataPath,
+      folderPath: folder,
+      expectedGenerationId: generationId,
+      cutoffOffset: cutAt,
+      summarize: async () => cutResult,
+    });
+    let seen = '';
+    await applyTranscriptCutoff({
+      dataPath,
+      folderPath: folder,
+      expectedGenerationId: first.generationId,
+      cutoffOffset: null,
+      summarize: async (text) => {
+        seen = text;
+        return { ...cutResult, summary: 'Full summary.' };
+      },
+    });
+    assert.equal(seen, transcript);
+    const note = await readTranscription(folder);
+    assert.equal(note?.transcriptCutoff, undefined);
+    assert.equal(note?.summary, 'Full summary.');
+    const meta = JSON.parse(fs.readFileSync(path.join(folder, META_JSON), 'utf-8'));
+    assert.equal('transcriptCutoff' in meta, false);
+  });
+
+  it('refuses a stale generation or an invalid offset without calling the model', async () => {
+    const { dataPath, folder, generationId } = makeNote();
+    const before = snapshot(folder);
+    let called = false;
+    const summarize = async () => {
+      called = true;
+      return cutResult;
+    };
+    await assert.rejects(
+      applyTranscriptCutoff({
+        dataPath,
+        folderPath: folder,
+        expectedGenerationId: 'stale',
+        cutoffOffset: cutAt,
+        summarize,
+      }),
+      /This note changed/,
+    );
+    await assert.rejects(
+      applyTranscriptCutoff({
+        dataPath,
+        folderPath: folder,
+        expectedGenerationId: generationId,
+        cutoffOffset: transcript.length,
+        summarize,
+      }),
+      /outside the transcript/,
+    );
+    assert.equal(called, false);
+    assert.deepEqual(snapshot(folder), before);
+  });
+
+  it('does not save over a note that changed while the report was generating', async () => {
+    const { dataPath, folder, generationId } = makeNote();
+    await assert.rejects(
+      applyTranscriptCutoff({
+        dataPath,
+        folderPath: folder,
+        expectedGenerationId: generationId,
+        cutoffOffset: cutAt,
+        summarize: async () => {
+          // A regenerate from another window lands mid-summary.
+          saveRegeneratedTranscription({
+            title: 'Launch sync',
+            result: newResult,
+            audioFilePath: path.join(dataPath, 'recordings', 'launch.webm'),
+            dataPath,
+            previousFolderPath: folder,
+          });
+          return cutResult;
+        },
+      }),
+      /This note changed/,
+    );
+    const note = await readTranscription(folder);
+    assert.equal(note?.summary, 'New summary.');
+    assert.equal(note?.transcriptCutoff, undefined);
+  });
+
+  it('restores the previous files when the swap fails midway', async () => {
+    const { dataPath, folder, generationId } = makeNote();
+    const before = snapshot(folder);
+    await assert.rejects(
+      applyTranscriptCutoff({
+        dataPath,
+        folderPath: folder,
+        expectedGenerationId: generationId,
+        cutoffOffset: cutAt,
+        summarize: async () => cutResult,
+        onFileSwapped: (name) => {
+          if (name === 'action-items.md') throw new Error('disk full');
+        },
+      }),
+      /disk full/,
+    );
+    assert.deepEqual(snapshot(folder), before);
+    assert.deepEqual(scratchDirs(dataPath), []);
+  });
+
+  it('is dropped by a full re-transcription, whose text no longer matches the offset', async () => {
+    const { dataPath, folder, generationId } = makeNote();
+    await applyTranscriptCutoff({
+      dataPath,
+      folderPath: folder,
+      expectedGenerationId: generationId,
+      cutoffOffset: cutAt,
+      summarize: async () => cutResult,
+    });
+    saveRegeneratedTranscription({
+      title: 'Launch sync',
+      result: newResult,
+      audioFilePath: path.join(dataPath, 'recordings', 'launch.webm'),
+      dataPath,
+      previousFolderPath: folder,
+    });
+    const meta = JSON.parse(fs.readFileSync(path.join(folder, META_JSON), 'utf-8'));
+    assert.equal('transcriptCutoff' in meta, false);
+    assert.equal(meta.exports, undefined);
   });
 });

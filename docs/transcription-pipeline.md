@@ -182,6 +182,20 @@ kept, or another quality finding exists. The transcript is stored after the
 retry/cleanup gate and boundary reconciliation. Flagged but unrecovered text
 is kept and marked.
 
+A saved note can later exclude a transcript tail from its report
+(`meta.transcriptCutoff`, a text offset). That regenerates only the report
+from the included text through `GeminiService.summarizeTranscript`; the
+stored transcript, audio and `transcriptQuality` above are never rewritten.
+An AI-suggested title follows the regenerated report; a title chosen by the
+user stays as it was. The note folder and audio filename stay unchanged.
+Flagged live notes are timed, so under a cutoff only the notes the segment
+headers above prove to precede the cut segment reach the summary prompt and
+highlights; the rest (and every note of a header-less transcript) are
+withheld, not placed by guess (`splitNotesAtCutoff`). `lostSegments` past the
+cut segment are likewise left out of the coverage notice.
+Custom fields removed by the new report are not restored from the recording
+metadata sidecar when the cut note is reopened or exported.
+
 ## Defect guards
 
 A store-wide audit of the saved store (2026-09-18; 102 substantive transcripts

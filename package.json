@@ -39,6 +39,7 @@
     "dist/piAiClient.js",
     "dist/outputService.js",
     "dist/regenerateTranscription.js",
+    "dist/transcriptCutoff.js",
     "dist/searchService.js",
     "dist/agentService.js",
     "dist/audioFormats.js",

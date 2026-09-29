@@ -1,10 +1,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'node:crypto';
+import type { TranscriptionResult } from './geminiService';
 import { withMeetingLock } from './meetingLock';
 import {
   ACTION_ITEMS_FILE,
   HIGHLIGHTS_JSON_FILE,
   KEY_POINTS_FILE,
+  type LiveNote,
   META_JSON,
   META_SCHEMA_VERSION,
   type MeetingMetaV2,
@@ -12,9 +15,19 @@ import {
   SUMMARY_FILE,
   type SaveTranscriptionOptions,
   TRANSCRIPT_FILE,
+  formatBullets,
   getTranscriptionsDir,
+  readTranscription,
   saveTranscription,
 } from './outputService';
+import {
+  type TranscriptCutoff,
+  createTranscriptCutoff,
+  fingerprintTranscript,
+  splitNotesAtCutoff,
+  splitTranscriptAtCutoff,
+} from './transcriptCutoff';
+import type { LostSegment } from './transcriptQuality';
 
 // Content files swapped by a regenerate, in `writeV2Files` order. meta.json is
 // handled separately and always swapped LAST so a folder only reports the new
@@ -45,6 +58,9 @@ const TRANSCRIPTION_META_KEYS = new Set([
   'actionItemGroups',
   'merge',
   'exports',
+  // The offset points into the previous transcript text, which a fresh
+  // transcription replaces.
+  'transcriptCutoff',
 ]);
 
 // Scratch folders live directly under dataPath (same filesystem as
@@ -131,54 +147,283 @@ export function saveRegeneratedTranscription(opts: RegenerateTranscriptionOption
       'utf-8',
     );
 
-    const backup = path.join(scratch, 'backup');
-    fs.mkdirSync(backup);
-    for (const name of NOTE_FILES) {
-      const src = path.join(target.folderPath, name);
-      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(backup, name));
-    }
-
     // Truncate instead of deleting files the new result no longer produces:
     // the sync engine downloads a file that is missing locally but still on
     // Drive, which would bring the old content back. Readers treat an empty
     // file the same as an absent one.
     for (const name of NOTE_CONTENT_FILES) {
-      if (fs.existsSync(path.join(backup, name)) && !fs.existsSync(path.join(staged, name))) {
+      if (
+        fs.existsSync(path.join(target.folderPath, name)) &&
+        !fs.existsSync(path.join(staged, name))
+      ) {
         fs.writeFileSync(path.join(staged, name), '', 'utf-8');
       }
     }
 
-    writeMarker(markerPath, {
-      pid: process.pid,
-      target: target.folderPath,
-      staged: path.relative(scratch, staged),
-    });
-    const swapped: string[] = [];
-    try {
-      for (const name of NOTE_FILES) {
-        const src = path.join(staged, name);
-        if (!fs.existsSync(src)) continue;
-        fs.renameSync(src, path.join(target.folderPath, name));
-        swapped.push(name);
-        onFileSwapped?.(name);
-      }
-    } catch (err) {
-      try {
-        restoreFromBackup(target.folderPath, backup, swapped);
-      } catch (restoreErr) {
+    swapStagedFiles(scratch, markerPath, staged, target.folderPath, {
+      onFileSwapped,
+      onRestoreFailed: () => {
         keepScratch = true;
-        console.error(
-          `Failed to restore ${target.folderPath} after a failed regenerate; previous files kept at ${backup}:`,
-          restoreErr,
-        );
-      }
-      throw err;
-    }
-
+      },
+    });
     return target.folderPath;
   } finally {
     if (!keepScratch) fs.rmSync(scratch, { recursive: true, force: true });
   }
+}
+
+/**
+ * Back up the target's note files, then rename each staged file into it
+ * (meta.json last). A failed rename restores the backup and rethrows; the
+ * marker lets `recoverInterruptedRegenerations` do the same after a crash.
+ * `onRestoreFailed` fires when even the restore failed, so the caller keeps
+ * the scratch folder holding the backup. Files absent from `staged` are left
+ * untouched in the target.
+ */
+function swapStagedFiles(
+  scratch: string,
+  markerPath: string,
+  staged: string,
+  targetFolder: string,
+  hooks: { onFileSwapped?: (filename: string) => void; onRestoreFailed: () => void },
+): void {
+  const backup = path.join(scratch, 'backup');
+  fs.mkdirSync(backup);
+  for (const name of NOTE_FILES) {
+    const src = path.join(targetFolder, name);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(backup, name));
+  }
+
+  writeMarker(markerPath, {
+    pid: process.pid,
+    target: targetFolder,
+    staged: path.relative(scratch, staged),
+  });
+  const swapped: string[] = [];
+  try {
+    for (const name of NOTE_FILES) {
+      const src = path.join(staged, name);
+      if (!fs.existsSync(src)) continue;
+      fs.renameSync(src, path.join(targetFolder, name));
+      swapped.push(name);
+      hooks.onFileSwapped?.(name);
+    }
+  } catch (err) {
+    try {
+      restoreFromBackup(targetFolder, backup, swapped);
+    } catch (restoreErr) {
+      hooks.onRestoreFailed();
+      console.error(
+        `Failed to restore ${targetFolder} after a failed note update; previous files kept at ${backup}:`,
+        restoreErr,
+      );
+    }
+    throw err;
+  }
+}
+
+export const NOTE_CHANGED_ERROR = 'This note changed. Reopen it and try again.';
+
+export interface ApplyTranscriptCutoffOptions {
+  dataPath: string;
+  folderPath: string;
+  /** Generation the caller showed the user; the change is refused if the note moved on. */
+  expectedGenerationId: string | null;
+  /** Offset into the stored transcript where the excluded tail begins; null restores the full transcript. */
+  cutoffOffset: number | null;
+  /**
+   * Flagged notes kept outside the note folder (the recording's metadata
+   * sidecar). Used only when the note itself stores none, so older recordings
+   * keep their highlights through a cutoff change.
+   */
+  fallbackLiveNotes?: LiveNote[];
+  /** Rebuild the report from transcript text alone. Never re-transcribes audio. */
+  summarize: (
+    transcript: string,
+    context: { liveNotes?: LiveNote[]; lostSegments: LostSegment[] },
+  ) => Promise<TranscriptionResult>;
+  now?: Date;
+  /** Test hook: called after each file lands in the note folder. */
+  onFileSwapped?: (filename: string) => void;
+}
+
+export interface ApplyTranscriptCutoffResult {
+  generationId: string;
+  transcriptCutoff?: TranscriptCutoff;
+  /** Flagged notes the cutoff left out of the report (see `splitNotesAtCutoff`). */
+  excludedNotes: number;
+}
+
+/**
+ * Set, move or remove a saved note's transcript tail cutoff, and regenerate
+ * the report (summary, key points, action items, highlights and custom
+ * fields) from the included text. transcript.md, notes.json and the audio are
+ * left untouched, so the cutoff can always be moved or removed later.
+ *
+ * The note gets a new `generationId`, so an upload or send prepared from the
+ * previous report is refused. A Notion page uploaded before the change is not
+ * modified; it moves to `exports.notionSuperseded` so the app can say the
+ * page shows the older report, and the next upload creates a new page.
+ * Internal transcript-quality diagnostics describe the transcription, not
+ * the report, and are kept as they were.
+ *
+ * Flagged notes are timed while the cutoff is a text position, so with a
+ * cutoff only notes the transcript's segment headers prove to precede it
+ * feed the summary and highlights (`splitNotesAtCutoff`); the rest, and every
+ * note when there are no headers, are left out rather than placed by guess.
+ * The stored notes are untouched and return when the cutoff is removed. A
+ * note that stores no notes at all keeps its existing highlights file: there
+ * is nothing to rebuild it from, and no evidence to discard it on.
+ */
+export async function applyTranscriptCutoff(
+  opts: ApplyTranscriptCutoffOptions,
+): Promise<ApplyTranscriptCutoffResult> {
+  if (!resolveReplaceableFolder(opts.dataPath, opts.folderPath)) {
+    throw new Error('This note cannot be changed.');
+  }
+  const note = await readTranscription(opts.folderPath);
+  if (!note) throw new Error('This note could not be read.');
+  if ((note.generationId ?? null) !== opts.expectedGenerationId) {
+    throw new Error(NOTE_CHANGED_ERROR);
+  }
+
+  const now = opts.now ?? new Date();
+  const cutoff =
+    opts.cutoffOffset === null
+      ? undefined
+      : createTranscriptCutoff(note.transcript, opts.cutoffOffset, now);
+  const quality = note.customFields?.transcriptQuality;
+  const sourceNotes = note.liveNotes ?? opts.fallbackLiveNotes;
+  const notes = splitNotesAtCutoff(note.transcript, cutoff?.offset ?? null, sourceNotes ?? []);
+  // Lost segments are numbered like the headers, so with header evidence the
+  // coverage notice can skip segments that lie wholly in the excluded tail.
+  const lostSegments = parseLostSegments(quality).filter(
+    (lost) => !notes.cutoffSegment || lost.segment <= notes.cutoffSegment.segment,
+  );
+  const result = await opts.summarize(splitTranscriptAtCutoff(note.transcript, cutoff).included, {
+    liveNotes: sourceNotes ? notes.included : undefined,
+    lostSegments,
+  });
+
+  return withMeetingLock(opts.folderPath, () => {
+    // The report took a while; the note may have been regenerated, synced or
+    // deleted meanwhile. Only write over the exact content it was built from.
+    const target = resolveReplaceableFolder(opts.dataPath, opts.folderPath);
+    if (!target || (target.meta.generationId ?? null) !== opts.expectedGenerationId) {
+      throw new Error(NOTE_CHANGED_ERROR);
+    }
+    const transcriptPath = path.join(target.folderPath, TRANSCRIPT_FILE);
+    const transcript = fs.existsSync(transcriptPath)
+      ? fs.readFileSync(transcriptPath, 'utf-8').trim()
+      : '';
+    if (fingerprintTranscript(transcript) !== fingerprintTranscript(note.transcript)) {
+      throw new Error(NOTE_CHANGED_ERROR);
+    }
+
+    const customFields: Record<string, unknown> = { ...result.customFields };
+    delete customFields.transcriptQuality;
+    if (quality !== undefined) customFields.transcriptQuality = quality;
+
+    const meta: MeetingMetaV2 = { ...target.meta, generationId: randomUUID() };
+    const suggestedTitle = result.suggestedTitle?.trim();
+    if (suggestedTitle) {
+      // Follow the new report only when the previous title was itself the AI
+      // suggestion. Preserve titles that the user chose or changed.
+      if (meta.title === meta.suggestedTitle) meta.title = suggestedTitle;
+      meta.suggestedTitle = suggestedTitle;
+    }
+    setOrDelete(meta, 'emoji', result.emoji || undefined);
+    setOrDelete(
+      meta,
+      'summarySections',
+      result.summarySections?.length ? result.summarySections : undefined,
+    );
+    setOrDelete(
+      meta,
+      'actionItemGroups',
+      result.actionItemGroups?.length ? result.actionItemGroups : undefined,
+    );
+    setOrDelete(
+      meta,
+      'customFields',
+      Object.keys(customFields).length > 0 ? customFields : undefined,
+    );
+    setOrDelete(meta, 'transcriptCutoff', cutoff);
+    if (meta.exports?.notion) {
+      const { notion, ...rest } = meta.exports;
+      meta.exports = {
+        ...rest,
+        notionSuperseded: { pageUrl: notion.pageUrl, supersededAt: now.toISOString() },
+      };
+    }
+
+    const highlights = result.highlights?.length ? result.highlights : undefined;
+    const files: Record<string, string | null> = {
+      [SUMMARY_FILE]: result.summary ? `${result.summary.trim()}\n` : '',
+      [KEY_POINTS_FILE]: result.keyPoints?.length ? formatBullets(result.keyPoints) : null,
+      [ACTION_ITEMS_FILE]: result.actionItems?.length ? formatBullets(result.actionItems) : null,
+      // Without source notes the highlights cannot be rebuilt; a file absent
+      // from `files` is left as it is in the note folder.
+      ...(sourceNotes
+        ? { [HIGHLIGHTS_JSON_FILE]: highlights ? `${JSON.stringify(highlights, null, 2)}\n` : null }
+        : {}),
+      [META_JSON]: `${JSON.stringify(meta, null, 2)}\n`,
+    };
+
+    const scratch = fs.mkdtempSync(path.join(opts.dataPath, SCRATCH_PREFIX));
+    const markerPath = path.join(scratch, SWAP_MARKER);
+    writeMarker(markerPath, { pid: process.pid });
+    let keepScratch = false;
+    try {
+      const staged = path.join(scratch, 'new');
+      fs.mkdirSync(staged);
+      for (const [name, content] of Object.entries(files)) {
+        // Truncate, never delete, a file the new report no longer produces:
+        // Drive sync would otherwise download the old copy back.
+        if (content !== null) {
+          fs.writeFileSync(path.join(staged, name), content, 'utf-8');
+        } else if (fs.existsSync(path.join(target.folderPath, name))) {
+          fs.writeFileSync(path.join(staged, name), '', 'utf-8');
+        }
+      }
+      swapStagedFiles(scratch, markerPath, staged, target.folderPath, {
+        onFileSwapped: opts.onFileSwapped,
+        onRestoreFailed: () => {
+          keepScratch = true;
+        },
+      });
+    } finally {
+      if (!keepScratch) fs.rmSync(scratch, { recursive: true, force: true });
+    }
+    return {
+      generationId: meta.generationId as string,
+      ...(cutoff ? { transcriptCutoff: cutoff } : {}),
+      excludedNotes: notes.excluded.length,
+    };
+  });
+}
+
+function setOrDelete<K extends keyof MeetingMetaV2>(
+  meta: MeetingMetaV2,
+  key: K,
+  value: MeetingMetaV2[K] | undefined,
+): void {
+  if (value === undefined) delete meta[key];
+  else meta[key] = value;
+}
+
+/** Lost-segment records persisted under customFields.transcriptQuality, if well-formed. */
+function parseLostSegments(quality: unknown): LostSegment[] {
+  const raw = (quality as { lostSegments?: unknown } | undefined)?.lostSegments;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (item): item is LostSegment =>
+      !!item &&
+      typeof item === 'object' &&
+      Number.isFinite((item as LostSegment).segment) &&
+      Number.isFinite((item as LostSegment).start) &&
+      Number.isFinite((item as LostSegment).end),
+  );
 }
 
 /**

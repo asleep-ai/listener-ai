@@ -15,6 +15,7 @@ import type {
   RendererLogPayload,
   SlackSendApiResult,
   SystemAudioStartResult,
+  TranscriptCutoffApiResult,
   TranscriptionErrorPayload,
 } from './electronApiTypes';
 import type { LiveNote } from './outputService';
@@ -137,6 +138,13 @@ const api = {
     notionUrl?: string;
     notionError?: string;
   }): Promise<SlackSendApiResult> => invoke('send-to-slack', data),
+  // Set (offset) or remove (null) a saved note's transcript tail cutoff and
+  // regenerate its report from the included text. Never re-transcribes.
+  applyTranscriptCutoff: (data: {
+    transcriptionPath: string;
+    expectedGenerationId: string | null;
+    cutoffOffset: number | null;
+  }): Promise<TranscriptCutoffApiResult> => invoke('apply-transcript-cutoff', data),
   testSlackWebhook: (webhookUrl?: string): Promise<SlackSendApiResult> =>
     invoke('test-slack-webhook', webhookUrl),
   openExternal: (url: string): Promise<void> => invoke('open-external', url),

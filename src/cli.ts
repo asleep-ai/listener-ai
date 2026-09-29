@@ -44,6 +44,7 @@ import {
 import { ALL_FIELDS, type SearchField, resolveFields, searchTranscriptions } from './searchService';
 import { withMeetingLock } from './meetingLock';
 import { recoverInterruptedRegenerations } from './regenerateTranscription';
+import { includedTranscript, reportNotesAtCutoff } from './transcriptCutoff';
 import { concatAudioFiles } from './services/audioConcatService';
 import { FFmpegManager } from './services/ffmpegManager';
 import { currentMonthString, formatUsd, monthRange, summarizeUsage } from './services/usageTracker';
@@ -719,7 +720,9 @@ async function handleShow(args: string[]): Promise<void> {
 async function renderV2Markdown(folderPath: string): Promise<string | null> {
   const data = await readTranscription(folderPath);
   if (!data) return null;
-  return formatSummary(data, data.title, data.mergedFrom, data.liveNotes, data.highlights);
+  // The rendered report shows only the flagged notes its cutoff keeps.
+  const notes = reportNotesAtCutoff(data);
+  return formatSummary(data, data.title, data.mergedFrom, notes.liveNotes, notes.highlights);
 }
 
 async function handleExport(args: string[]): Promise<void> {
@@ -798,6 +801,9 @@ async function handleExport(args: string[]): Promise<void> {
       customFields: data.customFields ?? {},
       ...(data.liveNotes ? { liveNotes: data.liveNotes } : {}),
       ...(data.highlights ? { highlights: data.highlights } : {}),
+      // Raw data: `transcript` stays the full text; the report above covers
+      // only `transcript.slice(0, transcriptCutoff.offset)`.
+      ...(data.transcriptCutoff ? { transcriptCutoff: data.transcriptCutoff } : {}),
     };
     if (includeTranscript) {
       obj.transcript = data.transcript || '';
@@ -806,14 +812,19 @@ async function handleExport(args: string[]): Promise<void> {
   } else {
     const output = await withTranscriptionSnapshot(folderPath, {}, (data) => {
       if (!data) return null;
+      const notes = reportNotesAtCutoff(data);
       let markdown = formatSummary(
         data,
         data.title,
         data.mergedFrom,
-        data.liveNotes,
-        data.highlights,
+        notes.liveNotes,
+        notes.highlights,
       );
-      if (includeTranscript) {
+      if (includeTranscript && data.transcriptCutoff) {
+        // The rendered report covers only the text before the cutoff.
+        markdown += `\n${includedTranscript(data.transcript, data.transcriptCutoff)}\n`;
+        markdown += `\n_Transcript shown up to the report cutoff. The full transcript is kept in ${TRANSCRIPT_FILE}._\n`;
+      } else if (includeTranscript) {
         const transcriptPath = path.join(folderPath, TRANSCRIPT_FILE);
         if (fs.existsSync(transcriptPath)) {
           markdown += `\n${fs.readFileSync(transcriptPath, 'utf-8')}`;
