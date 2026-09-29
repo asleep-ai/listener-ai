@@ -14,6 +14,11 @@ test('dragging in the saved transcript previews a reversible tail cutoff', async
   const audioPath = join(dataDir, 'recordings', 'Cutoff_QA_2026-09-29T02-43-29-413Z.wav');
   mkdirSync(join(dataDir, 'recordings'));
   mkdirSync(join(dataDir, 'metadata'));
+  // Skip the first-run native credentials prompt so recording-list startup is deterministic.
+  writeFileSync(
+    join(dataDir, 'config.json'),
+    JSON.stringify({ aiProvider: 'gemini', geminiApiKey: 'e2e-unused' }),
+  );
   writeFileSync(audioPath, Buffer.alloc(44));
 
   // The compiled writer produces the same saved-note layout the app reads.
@@ -89,6 +94,10 @@ test('reopened cut report uses its new title and does not revive old sidecar fie
   const audioPath = join(dataDir, 'recordings', 'Old_Title_2026-09-29T02-43-29-413Z.wav');
   mkdirSync(join(dataDir, 'recordings'));
   mkdirSync(join(dataDir, 'metadata'));
+  writeFileSync(
+    join(dataDir, 'config.json'),
+    JSON.stringify({ aiProvider: 'gemini', geminiApiKey: 'e2e-unused' }),
+  );
   writeFileSync(audioPath, Buffer.alloc(44));
   const { saveTranscription } =
     require('../dist/outputService.js') as typeof import('../src/outputService');
