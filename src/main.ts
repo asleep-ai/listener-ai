@@ -544,8 +544,8 @@ function startRecordingsWatcher(): void {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 700,
+    width: 1200,
+    height: 850,
     minWidth: 480,
     minHeight: 520,
     webPreferences: {
