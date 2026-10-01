@@ -6,6 +6,10 @@
 
 import type { ConfigValues, PayloadConfigKey } from './configKeys';
 import type { StreamingLiveSttProvider } from './liveSttProvider';
+import type { HighlightEntry } from './geminiService';
+import type { ActionItemGroup, SummarySection } from './meetingRecord';
+import type { LiveNote } from './outputService';
+import type { TranscriptCutoff } from './transcriptCutoff';
 
 export interface TranscriptionErrorPayload {
   userMessage: string;
@@ -137,6 +141,33 @@ export type GoogleSyncProgress =
 
 export type SlackSendApiResult =
   | { success: true; sentAt: string }
+  | { success: false; error: string };
+
+// Report fields of a saved note after its transcript tail cutoff changed.
+// `transcript` is always the full transcript; `transcriptCutoff` (absent =
+// no cutoff) says where the part used for the report ends.
+export interface TranscriptCutoffNotePayload {
+  generationId: string | null;
+  title: string;
+  suggestedTitle?: string;
+  transcript: string;
+  summary: string;
+  keyPoints?: string[];
+  actionItems?: string[];
+  summarySections?: SummarySection[];
+  actionItemGroups?: ActionItemGroup[];
+  customFields?: Record<string, unknown>;
+  emoji?: string;
+  liveNotes?: LiveNote[];
+  highlights?: HighlightEntry[];
+  notionPageUrl?: string;
+  supersededNotionPageUrl?: string;
+  slackSentAt?: string;
+  transcriptCutoff?: TranscriptCutoff;
+}
+
+export type TranscriptCutoffApiResult =
+  | { success: true; data: TranscriptCutoffNotePayload }
   | { success: false; error: string };
 
 export type SystemAudioStartResult =

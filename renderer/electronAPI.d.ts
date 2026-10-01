@@ -21,6 +21,8 @@ export type {
   RendererLogPayload,
   SlackSendApiResult,
   SystemAudioStartResult,
+  TranscriptCutoffApiResult,
+  TranscriptCutoffNotePayload,
   TranscriptionErrorPayload,
 } from '../src/electronApiTypes';
 

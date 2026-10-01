@@ -1,6 +1,13 @@
+import * as fs from 'fs';
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
-import type { ReadTranscriptionResult, TranscriptionEntry } from './outputService';
+import { after, describe, it } from 'node:test';
+import * as path from 'path';
+import {
+  META_JSON,
+  type ReadTranscriptionResult,
+  type TranscriptionEntry,
+  saveTranscription,
+} from './outputService';
 import {
   ALL_FIELDS,
   DEFAULT_FIELDS,
@@ -8,7 +15,10 @@ import {
   makeSnippet,
   resolveFields,
   scoreRecord,
+  searchTranscriptions,
 } from './searchService';
+import { makeTempDir, rmDir } from './test-helpers';
+import { createTranscriptCutoff } from './transcriptCutoff';
 
 const sampleEntry: TranscriptionEntry = {
   folderPath: '/tmp/Roadmap_20260420_143000',
@@ -160,5 +170,51 @@ describe('scoreRecord', () => {
     assert.ok(hit);
     assert.equal(hit!.snippet, '');
     assert.equal(hit!.snippetField, undefined);
+  });
+});
+
+describe('searchTranscriptions', () => {
+  const dirs: string[] = [];
+  after(() => {
+    for (const dir of dirs) rmDir(dir);
+  });
+
+  it('carries the saved note identity and cutoff state a hit needs to export safely', async () => {
+    const dataPath = makeTempDir('search-hits');
+    dirs.push(dataPath);
+    const transcript = 'Speaker 1: roadmap decision.\nSpeaker 2: tail chat.';
+    const folder = saveTranscription({
+      title: 'Roadmap',
+      result: {
+        transcript,
+        summary: 'Roadmap summary.',
+        keyPoints: [],
+        actionItems: [],
+        emoji: '',
+      },
+      dataPath,
+    });
+    const metaPath = path.join(folder, META_JSON);
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    // A cutoff set against a transcript that has since changed (for example
+    // through sync) must surface as a mismatch, never as "no cutoff".
+    meta.transcriptCutoff = createTranscriptCutoff(
+      `${transcript} `,
+      transcript.indexOf('Speaker 2'),
+    );
+    fs.writeFileSync(metaPath, JSON.stringify(meta));
+
+    const hits = await searchTranscriptions(dataPath, { query: 'roadmap', fields: ALL_FIELDS });
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].entry.folderPath, folder);
+    assert.equal(hits[0].data.generationId, meta.generationId);
+    assert.equal(hits[0].data.transcriptCutoff, undefined);
+    assert.equal(hits[0].data.transcriptCutoffMismatch, true);
+
+    // Without the transcript in scope the offset cannot be checked, so the
+    // hit still names the note and generation; exports re-read it from disk.
+    const summaryOnly = await searchTranscriptions(dataPath, { query: 'roadmap' });
+    assert.equal(summaryOnly[0].entry.folderPath, folder);
+    assert.equal(summaryOnly[0].data.generationId, meta.generationId);
   });
 });

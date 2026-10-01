@@ -38,10 +38,8 @@ import {
   getTranscriptionsDir,
   type LiveNote,
   readTranscription,
-  readTranscriptionGeneration,
   repairMissingAudioFiles,
   repairRenamedRecordingSidecars,
-  updateTranscriptionStatus,
 } from './outputService';
 import { recoverInterruptedRegenerations } from './regenerateTranscription';
 import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
@@ -58,6 +56,7 @@ import {
   summarizeUsage,
   type UsageSummaryResult,
 } from './services/usageTracker';
+import { reportCustomFields } from './transcriptCutoff';
 import {
   createOpenAiRealtimeClientConfig,
   type OpenAiRealtimeBearer,
@@ -545,8 +544,8 @@ function startRecordingsWatcher(): void {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 700,
+    width: 1200,
+    height: 850,
     minWidth: 480,
     minHeight: 520,
     webPreferences: {
@@ -1057,6 +1056,8 @@ registerAllIpc({
   sanitizeLiveNotes,
   applyConfigSideEffects,
   broadcastConfigChanged,
+  getNotionService,
+  getSlackService,
 });
 
 // Audio capture runs in the renderer via MediaRecorder; chunks stream over IPC as
@@ -1271,6 +1272,18 @@ function applyConfigSideEffects(changed: Partial<AppConfig>): void {
   if (changed.googleDriveEnabled !== undefined || changed.googleOAuth !== undefined) {
     refreshGoogleSyncTimer();
   }
+}
+
+function getNotionService(): NotionService | null {
+  if (notionService) return notionService;
+  const notionApiKey = configService.getNotionApiKey();
+  const notionDatabaseId = configService.getNotionDatabaseId();
+  if (!notionApiKey || !notionDatabaseId) return null;
+  notionService = new NotionService({
+    apiKey: notionApiKey,
+    databaseId: notionDatabaseId,
+  });
+  return notionService;
 }
 
 function getSlackService(): SlackService | null {
@@ -1508,175 +1521,6 @@ ipcMain.handle('get-meeting-status', async () => {
   };
 });
 
-// Notion upload handler
-ipcMain.handle(
-  'upload-to-notion',
-  async (
-    _,
-    data: {
-      title: string;
-      transcriptionData: any;
-      audioFilePath?: string;
-      transcriptionPath?: string;
-      expectedGenerationId?: string | null;
-    },
-  ) => {
-    try {
-      console.log('Uploading to Notion:', data.title);
-
-      // Initialize Notion service if not already initialized
-      if (!notionService) {
-        const notionApiKey = configService.getNotionApiKey();
-        const notionDatabaseId = configService.getNotionDatabaseId();
-
-        if (!notionApiKey || !notionDatabaseId) {
-          return { success: false, error: 'Notion configuration not found' };
-        }
-
-        notionService = new NotionService({
-          apiKey: notionApiKey,
-          databaseId: notionDatabaseId,
-        });
-      }
-
-      // Add "by L.AI" to the title for distinction
-      const titleWithSuffix = `${data.title} by L.AI`;
-      const generation = isContainedTranscriptionPath(data.transcriptionPath)
-        ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
-        : undefined;
-      if (
-        isContainedTranscriptionPath(data.transcriptionPath) &&
-        data.expectedGenerationId !== undefined &&
-        generation !== data.expectedGenerationId
-      ) {
-        return { success: false, error: 'This note changed. Reopen it before uploading.' };
-      }
-
-      const result = await notionService.createMeetingNote(
-        titleWithSuffix,
-        new Date(),
-        data.transcriptionData,
-        data.audioFilePath,
-      );
-
-      if (
-        result.success &&
-        result.url &&
-        generation !== undefined &&
-        isContainedTranscriptionPath(data.transcriptionPath)
-      ) {
-        try {
-          await updateTranscriptionStatus(
-            data.transcriptionPath,
-            {
-              notionPageUrl: result.url,
-            },
-            generation,
-          );
-        } catch (error) {
-          console.error('Failed to persist Notion URL to transcription:', error);
-          reportError(error, { operation: 'notion.persistUrl', severity: 'warning' });
-        }
-      } else if (!result.success) {
-        reportError(new Error('Notion upload reported failure'), {
-          operation: 'notion.upload',
-          severity: 'error',
-        });
-      }
-
-      notificationService.notifyUploadComplete(data.title);
-      return result;
-    } catch (error) {
-      console.error('Error uploading to Notion:', error);
-      reportError(error, { operation: 'notion.upload', severity: 'error' });
-      notificationService.notifyUploadFailed('Upload failed. Check the app for details.');
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  },
-);
-
-ipcMain.handle(
-  'send-to-slack',
-  async (
-    _,
-    data: {
-      title: string;
-      transcriptionData: any;
-      transcriptionPath?: string;
-      expectedGenerationId?: string | null;
-      notionUrl?: string;
-      notionError?: string;
-    },
-  ) => {
-    try {
-      console.log('Sending to Slack:', data.title);
-
-      const service = getSlackService();
-      if (!service) {
-        return { success: false, error: 'Slack webhook URL is not configured' };
-      }
-      const generation = isContainedTranscriptionPath(data.transcriptionPath)
-        ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
-        : undefined;
-      if (
-        isContainedTranscriptionPath(data.transcriptionPath) &&
-        data.expectedGenerationId !== undefined &&
-        generation !== data.expectedGenerationId
-      ) {
-        return { success: false, error: 'This note changed. Reopen it before sending.' };
-      }
-
-      // For a historical resend, use the original meeting time from frontmatter
-      // so the Slack message shows when the meeting actually happened, not now.
-      let meetingDate = new Date();
-      if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
-        const stored = await readTranscription(data.transcriptionPath).catch(() => null);
-        if (stored?.transcribedAt) {
-          const parsed = new Date(stored.transcribedAt);
-          if (!Number.isNaN(parsed.getTime())) meetingDate = parsed;
-        }
-      }
-
-      const result = await service.sendMeetingSummary({
-        title: data.title,
-        date: meetingDate,
-        result: data.transcriptionData,
-        notionUrl: data.notionUrl,
-        notionError: data.notionError,
-      });
-
-      if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
-        try {
-          // Preserve the previous successful slackSentAt on a failed resend;
-          // only the error field reflects the new failure.
-          await updateTranscriptionStatus(
-            data.transcriptionPath,
-            {
-              ...(result.success ? { slackSentAt: result.sentAt } : {}),
-              slackError: result.success ? null : result.error,
-            },
-            generation,
-          );
-        } catch (error) {
-          console.error('Failed to persist Slack status to transcription:', error);
-          reportError(error, { operation: 'slack.persistStatus', severity: 'warning' });
-        }
-      }
-
-      if (!result.success) {
-        reportError(new Error(result.error), { operation: 'slack.send', severity: 'error' });
-      }
-
-      return result;
-    } catch (error) {
-      console.error('Error sending to Slack:', error);
-      reportError(error, { operation: 'slack.send', severity: 'error' });
-      const message = error instanceof Error ? error.message : String(error);
-      return { success: false, error: message };
-    }
-  },
-);
-
 ipcMain.handle('test-slack-webhook', async (_, webhookUrl?: string) => {
   try {
     const url = (webhookUrl ?? configService.getSlackWebhookUrl() ?? '').trim();
@@ -1717,6 +1561,8 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
           data: {
             ...metadata,
             folderName: path.basename(metadata.transcriptionPath),
+            reportTitle: transcription.title,
+            reportSuggestedTitle: transcription.suggestedTitle,
             generationId: transcription.generationId,
             transcript: transcription.transcript,
             summary: transcription.summary,
@@ -1724,14 +1570,17 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
             actionItems: transcription.actionItems,
             summarySections: transcription.summarySections,
             actionItemGroups: transcription.actionItemGroups,
-            customFields: transcription.customFields ?? metadata.customFields,
+            customFields: reportCustomFields(transcription, metadata.customFields),
             emoji: transcription.emoji,
             liveNotes: transcription.liveNotes ?? metadata.liveNotes,
             highlights: transcription.highlights,
             notionPageUrl: transcription.notionPageUrl,
+            supersededNotionPageUrl: transcription.supersededNotionPageUrl,
             slackSentAt: transcription.slackSentAt,
             slackError: transcription.slackError,
             cost: transcription.cost,
+            transcriptCutoff: transcription.transcriptCutoff,
+            transcriptCutoffMismatch: transcription.transcriptCutoffMismatch,
           },
         };
       }
@@ -1825,6 +1674,11 @@ ipcMain.handle(
         snippet: h.snippet,
         snippetField: h.snippetField ?? null,
         data: {
+          // The saved note behind the hit, so the modal treats it like one
+          // opened from the recordings list: exports re-read it and a stale
+          // cutoff fails closed instead of sending the full transcript.
+          transcriptionPath: h.entry.folderPath,
+          generationId: h.data.generationId ?? null,
           title: h.data.title,
           suggestedTitle: h.data.suggestedTitle,
           summary: h.data.summary,
@@ -1835,6 +1689,13 @@ ipcMain.handle(
           actionItemGroups: h.data.actionItemGroups ?? [],
           customFields: h.data.customFields ?? {},
           emoji: h.data.emoji,
+          liveNotes: h.data.liveNotes,
+          highlights: h.data.highlights,
+          notionPageUrl: h.data.notionPageUrl,
+          supersededNotionPageUrl: h.data.supersededNotionPageUrl,
+          slackSentAt: h.data.slackSentAt,
+          transcriptCutoff: h.data.transcriptCutoff,
+          transcriptCutoffMismatch: h.data.transcriptCutoffMismatch,
         },
       }));
 
