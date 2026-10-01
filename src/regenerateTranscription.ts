@@ -343,11 +343,10 @@ export async function applyTranscriptCutoff(
       'actionItemGroups',
       result.actionItemGroups?.length ? result.actionItemGroups : undefined,
     );
-    setOrDelete(
-      meta,
-      'customFields',
-      Object.keys(customFields).length > 0 ? customFields : undefined,
-    );
+    // Stored even when empty: the regenerated report owns its custom fields,
+    // and an explicit `{}` keeps readers from falling back to the recording
+    // sidecar, which still holds the fields of an older report.
+    meta.customFields = customFields;
     setOrDelete(meta, 'transcriptCutoff', cutoff);
     if (meta.exports?.notion) {
       const { notion, ...rest } = meta.exports;

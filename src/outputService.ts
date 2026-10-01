@@ -957,8 +957,14 @@ async function readTranscriptionUnlocked(
     const transcriptCutoff = opts.skipTranscript
       ? parseTranscriptCutoff(meta.transcriptCutoff)
       : resolveTranscriptCutoff(transcriptText, meta.transcriptCutoff);
+    // Only a well-formed cutoff that no longer fits this transcript fails
+    // closed: the report may have been built from text before an offset that
+    // is now meaningless. A value with the wrong shape (null, or written by a
+    // future or foreign writer) is ignored like an absent one.
     const transcriptCutoffMismatch =
-      !opts.skipTranscript && meta.transcriptCutoff !== undefined && !transcriptCutoff;
+      !opts.skipTranscript &&
+      parseTranscriptCutoff(meta.transcriptCutoff) !== undefined &&
+      !transcriptCutoff;
 
     return {
       title: meta.title || path.basename(folderPath),

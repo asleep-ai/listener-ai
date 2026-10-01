@@ -193,8 +193,39 @@ headers above prove to precede the cut segment reach the summary prompt and
 highlights; the rest (and every note of a header-less transcript) are
 withheld, not placed by guess (`splitNotesAtCutoff`). `lostSegments` past the
 cut segment are likewise left out of the coverage notice.
-Custom fields removed by the new report are not restored from the recording
-metadata sidecar when the cut note is reopened or exported.
+A regenerated report always stores its own custom fields in `meta.json`,
+`{}` when it has none, so fields from an older report are not restored from
+the recording metadata sidecar when the note is reopened or exported, whether
+the cutoff was set or removed. Only a note that never stored custom fields
+falls back to the sidecar copy.
+
+A cutoff with the wrong shape is ignored like an absent one. A well-formed
+cutoff that no longer matches the stored transcript fails closed: Notion and
+Slack refuse the note until the cutoff is set again or removed, and the CLI
+prints a warning but keeps its local output whole. In the app, an upload or
+send of a note and a cutoff change of the same note run one at a time
+(`withNoteOperation`): a cutoff waits for an in-flight export to record its
+result, then marks the Notion page superseded, and an export requested during
+a cutoff waits and publishes the new report (or is refused when the caller
+expected the old one). Regenerate of a linked note saves through the same
+queue (only the save waits; transcription runs meanwhile), so an in-flight
+export records its status against the previous note before it is replaced.
+
+Known limitations, both from Drive sync working per file without a note-level
+transaction:
+
+- An app version from before the cutoff feature that receives a cut note does
+  not know `transcriptCutoff`. Its Notion and Slack exports send the full
+  transcript with the cut report. A full Regenerate on that version keeps the
+  key as unknown metadata against the new transcript, so a current version
+  then sees a mismatch and fails closed.
+- Two devices changing the cutoff of the same note at about the same time can
+  each win different files under last-writer-wins sync, for example one
+  device's `summary.md` with the other's `meta.json`. The fingerprint checks
+  the cutoff against the transcript, not against the report files, so such a
+  mix is not detected. A full Regenerate has the same exposure. The
+  coordination above is per process and does not cover the CLI or another
+  device.
 
 ## Defect guards
 

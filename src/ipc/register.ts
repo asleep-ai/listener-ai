@@ -1,5 +1,6 @@
 import * as googleDriveIpc from './googleDrive';
 import * as meetingsManagementIpc from './meetingsManagement';
+import * as noteExportsIpc from './noteExports';
 import * as transcriptionIpc from './transcription';
 import * as transcriptCutoffIpc from './transcriptCutoff';
 import type { IpcContext } from './types';
@@ -14,5 +15,6 @@ export function registerAllIpc(ctx: IpcContext): void {
   meetingsManagementIpc.register(ctx);
   transcriptionIpc.register(ctx);
   transcriptCutoffIpc.register(ctx);
+  noteExportsIpc.register(ctx);
   googleDriveIpc.register(ctx);
 }

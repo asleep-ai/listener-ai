@@ -717,9 +717,20 @@ async function handleShow(args: string[]): Promise<void> {
   process.stdout.write(md);
 }
 
+// Local output keeps the full transcript when a saved cutoff no longer
+// matches it (the app refuses Notion/Slack for such a note instead), so say
+// that the report above it may cover only part of the transcript.
+function warnTranscriptCutoffMismatch(data: { transcriptCutoffMismatch?: true }): void {
+  if (!data.transcriptCutoffMismatch) return;
+  process.stderr.write(
+    `Warning: the saved transcript cutoff no longer matches ${TRANSCRIPT_FILE}, so the report may cover only part of the transcript. Set the cutoff again or restore the full transcript in the app.\n`,
+  );
+}
+
 async function renderV2Markdown(folderPath: string): Promise<string | null> {
   const data = await readTranscription(folderPath);
   if (!data) return null;
+  warnTranscriptCutoffMismatch(data);
   // The rendered report shows only the flagged notes its cutoff keeps.
   const notes = reportNotesAtCutoff(data);
   return formatSummary(data, data.title, data.mergedFrom, notes.liveNotes, notes.highlights);
@@ -790,6 +801,7 @@ async function handleExport(args: string[]): Promise<void> {
       process.stderr.write(`Error: could not read transcription at ${folderPath}\n`);
       process.exit(1);
     }
+    warnTranscriptCutoffMismatch(data);
     const obj: Record<string, unknown> = {
       title: data.title || '',
       transcribedAt: data.transcribedAt || '',
@@ -812,6 +824,7 @@ async function handleExport(args: string[]): Promise<void> {
   } else {
     const output = await withTranscriptionSnapshot(folderPath, {}, (data) => {
       if (!data) return null;
+      warnTranscriptCutoffMismatch(data);
       const notes = reportNotesAtCutoff(data);
       let markdown = formatSummary(
         data,

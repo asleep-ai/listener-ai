@@ -1507,6 +1507,32 @@ describe('transcript cutoff in meta.json', () => {
     assert.equal(changed!.transcriptCutoffMismatch, true, 'and is flagged so exports fail closed');
   });
 
+  it('ignores a structurally invalid cutoff like an absent one instead of failing closed', async () => {
+    for (const raw of [
+      null,
+      'not an object',
+      { offset: 'invalid' },
+      { offset: cutAt, transcriptLength: transcript.length },
+    ]) {
+      const folderPath = saveWithMeta((meta) => {
+        meta.transcriptCutoff = raw;
+      });
+      const data = await readTranscription(folderPath);
+      assert.equal(data!.transcriptCutoff, undefined, JSON.stringify(raw));
+      assert.equal(data!.transcriptCutoffMismatch, undefined, JSON.stringify(raw));
+    }
+  });
+
+  it('fails closed on a well-formed cutoff whose offset no longer fits the transcript', async () => {
+    const folderPath = saveWithMeta((meta) => {
+      // Matching fingerprint, but an offset no cutoff could have been set at.
+      meta.transcriptCutoff = { ...createTranscriptCutoff(transcript, cutAt), offset: 0 };
+    });
+    const data = await readTranscription(folderPath);
+    assert.equal(data!.transcriptCutoff, undefined);
+    assert.equal(data!.transcriptCutoffMismatch, true);
+  });
+
   it('clears the superseded Notion notice once a new page is uploaded', async () => {
     const folderPath = saveWithMeta((meta) => {
       meta.exports = {

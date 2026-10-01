@@ -941,6 +941,44 @@ describe('applyTranscriptCutoff', () => {
     assert.deepEqual(scratchDirs(dataPath), []);
   });
 
+  it('recovers the previous report, transcript and audio after a crash mid cutoff swap', async () => {
+    const { dataPath, folder, generationId } = makeNote();
+    const audioFilePath = path.join(dataPath, 'recordings', 'launch.webm');
+    fs.mkdirSync(path.dirname(audioFilePath), { recursive: true });
+    fs.writeFileSync(audioFilePath, 'AUDIO_BYTES');
+    const before = snapshot(folder);
+
+    // Exit hard once the new summary.md has landed but meta.json has not.
+    const script = `
+      const { applyTranscriptCutoff } = require(${JSON.stringify(require.resolve('./regenerateTranscription'))});
+      applyTranscriptCutoff({
+        dataPath: ${JSON.stringify(dataPath)},
+        folderPath: ${JSON.stringify(folder)},
+        expectedGenerationId: ${JSON.stringify(generationId)},
+        cutoffOffset: ${cutAt},
+        summarize: async () => (${JSON.stringify(cutResult)}),
+        onFileSwapped: (name) => { if (name === 'action-items.md') process.exit(7); },
+      }).catch((err) => { console.error(err); process.exit(3); });
+    `;
+    const child = spawnSync(process.execPath, ['-e', script], { encoding: 'utf-8' });
+    assert.equal(child.status, 7, child.stderr);
+    assert.equal(fs.readFileSync(path.join(folder, 'summary.md'), 'utf-8').trim(), 'Cut summary.');
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(folder, META_JSON), 'utf-8')).generationId,
+      generationId,
+      'the crash left the new summary behind the old meta.json',
+    );
+
+    assert.deepEqual(await recoverInterruptedRegenerations(dataPath), [folder]);
+    assert.deepEqual(snapshot(folder), before);
+    const note = await readTranscription(folder);
+    assert.equal(note?.summary, 'Old summary.');
+    assert.equal(note?.transcript, transcript);
+    assert.equal(note?.transcriptCutoff, undefined);
+    assert.equal(fs.readFileSync(audioFilePath, 'utf-8'), 'AUDIO_BYTES');
+    assert.deepEqual(scratchDirs(dataPath), []);
+  });
+
   it('is dropped by a full re-transcription, whose text no longer matches the offset', async () => {
     const { dataPath, folder, generationId } = makeNote();
     await applyTranscriptCutoff({

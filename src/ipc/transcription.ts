@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { app, ipcMain } from 'electron';
 import { withMeetingLock } from '../meetingLock';
+import { withNoteOperation } from '../noteOperationQueue';
 import { META_JSON } from '../outputService';
 import { saveRegeneratedTranscription } from '../regenerateTranscription';
 import { reportError } from '../sentry';
@@ -202,8 +203,14 @@ export function register(ctx: IpcContext): void {
           }
           return savedPath;
         };
+        // A linked note is replaced in the same per-note queue as Notion/Slack
+        // exports, so an export in flight records its status against the note
+        // it published before the replacement, and one requested meanwhile
+        // reads the new note (or is refused as stale) afterwards.
         transcriptionPath = lockPath
-          ? await withMeetingLock(lockPath, save, { signal })
+          ? await withNoteOperation(lockPath, () => withMeetingLock(lockPath, save, { signal }), {
+              signal,
+            })
           : await save();
         noteCommitted = true;
         console.log('Transcription saved to:', transcriptionPath);

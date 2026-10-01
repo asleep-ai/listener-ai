@@ -38,10 +38,8 @@ import {
   getTranscriptionsDir,
   type LiveNote,
   readTranscription,
-  readTranscriptionGeneration,
   repairMissingAudioFiles,
   repairRenamedRecordingSidecars,
-  updateTranscriptionStatus,
 } from './outputService';
 import { recoverInterruptedRegenerations } from './regenerateTranscription';
 import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
@@ -58,11 +56,7 @@ import {
   summarizeUsage,
   type UsageSummaryResult,
 } from './services/usageTracker';
-import {
-  exportPayloadFromNote,
-  titleForSavedReport,
-  withIncludedTranscript,
-} from './transcriptCutoff';
+import { reportCustomFields } from './transcriptCutoff';
 import {
   createOpenAiRealtimeClientConfig,
   type OpenAiRealtimeBearer,
@@ -1062,6 +1056,8 @@ registerAllIpc({
   sanitizeLiveNotes,
   applyConfigSideEffects,
   broadcastConfigChanged,
+  getNotionService,
+  getSlackService,
 });
 
 // Audio capture runs in the renderer via MediaRecorder; chunks stream over IPC as
@@ -1276,6 +1272,18 @@ function applyConfigSideEffects(changed: Partial<AppConfig>): void {
   if (changed.googleDriveEnabled !== undefined || changed.googleOAuth !== undefined) {
     refreshGoogleSyncTimer();
   }
+}
+
+function getNotionService(): NotionService | null {
+  if (notionService) return notionService;
+  const notionApiKey = configService.getNotionApiKey();
+  const notionDatabaseId = configService.getNotionDatabaseId();
+  if (!notionApiKey || !notionDatabaseId) return null;
+  notionService = new NotionService({
+    apiKey: notionApiKey,
+    databaseId: notionDatabaseId,
+  });
+  return notionService;
 }
 
 function getSlackService(): SlackService | null {
@@ -1513,226 +1521,6 @@ ipcMain.handle('get-meeting-status', async () => {
   };
 });
 
-const CUTOFF_MISMATCH_UPLOAD_ERROR =
-  'The saved transcript cutoff no longer matches this transcript. Open the Transcript tab and set the cutoff again, or restore the full transcript, before uploading.';
-const CUTOFF_MISMATCH_SEND_ERROR =
-  'The saved transcript cutoff no longer matches this transcript. Open the Transcript tab and set the cutoff again, or restore the full transcript, before sending.';
-
-// Notion upload handler
-ipcMain.handle(
-  'upload-to-notion',
-  async (
-    _,
-    data: {
-      title: string;
-      transcriptionData: any;
-      audioFilePath?: string;
-      transcriptionPath?: string;
-      expectedGenerationId?: string | null;
-    },
-  ) => {
-    try {
-      console.log('Uploading to Notion:', data.title);
-
-      // Initialize Notion service if not already initialized
-      if (!notionService) {
-        const notionApiKey = configService.getNotionApiKey();
-        const notionDatabaseId = configService.getNotionDatabaseId();
-
-        if (!notionApiKey || !notionDatabaseId) {
-          return { success: false, error: 'Notion configuration not found' };
-        }
-
-        notionService = new NotionService({
-          apiKey: notionApiKey,
-          databaseId: notionDatabaseId,
-        });
-      }
-
-      let uploadTitle = data.title;
-      const generation = isContainedTranscriptionPath(data.transcriptionPath)
-        ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
-        : undefined;
-      if (isContainedTranscriptionPath(data.transcriptionPath) && generation === undefined) {
-        return {
-          success: false,
-          error: 'This note could not be read. Reopen it before uploading.',
-        };
-      }
-      if (
-        isContainedTranscriptionPath(data.transcriptionPath) &&
-        data.expectedGenerationId !== undefined &&
-        generation !== data.expectedGenerationId
-      ) {
-        return { success: false, error: 'This note changed. Reopen it before uploading.' };
-      }
-
-      // What leaves the app is decided here, not by the renderer payload: a
-      // saved note is re-read so Notion gets its current report and only the
-      // transcript text before its tail cutoff.
-      if (data.transcriptionData?.transcriptCutoffMismatch === true) {
-        return { success: false, error: CUTOFF_MISMATCH_UPLOAD_ERROR };
-      }
-      let transcriptionData = withIncludedTranscript(data.transcriptionData ?? {});
-      if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
-        const stored = await readTranscription(data.transcriptionPath);
-        if (!stored || (stored.generationId ?? null) !== generation) {
-          return { success: false, error: 'This note changed. Reopen it before uploading.' };
-        }
-        // Fail closed: never guess where the report ends.
-        if (stored.transcriptCutoffMismatch) {
-          return { success: false, error: CUTOFF_MISMATCH_UPLOAD_ERROR };
-        }
-        transcriptionData = exportPayloadFromNote(transcriptionData, stored);
-        const sidecar = data.audioFilePath
-          ? await metadataService.getMetadata(data.audioFilePath)
-          : null;
-        uploadTitle = sidecar?.suggestedTitle
-          ? titleForSavedReport(data.title, sidecar.suggestedTitle, stored.title)
-          : stored.title;
-      }
-
-      const result = await notionService.createMeetingNote(
-        `${uploadTitle} by L.AI`,
-        new Date(),
-        transcriptionData,
-        data.audioFilePath,
-      );
-
-      if (
-        result.success &&
-        result.url &&
-        generation !== undefined &&
-        isContainedTranscriptionPath(data.transcriptionPath)
-      ) {
-        try {
-          await updateTranscriptionStatus(
-            data.transcriptionPath,
-            {
-              notionPageUrl: result.url,
-            },
-            generation,
-          );
-        } catch (error) {
-          console.error('Failed to persist Notion URL to transcription:', error);
-          reportError(error, { operation: 'notion.persistUrl', severity: 'warning' });
-        }
-      } else if (!result.success) {
-        reportError(new Error('Notion upload reported failure'), {
-          operation: 'notion.upload',
-          severity: 'error',
-        });
-      }
-
-      notificationService.notifyUploadComplete(uploadTitle);
-      return result;
-    } catch (error) {
-      console.error('Error uploading to Notion:', error);
-      reportError(error, { operation: 'notion.upload', severity: 'error' });
-      notificationService.notifyUploadFailed('Upload failed. Check the app for details.');
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  },
-);
-
-ipcMain.handle(
-  'send-to-slack',
-  async (
-    _,
-    data: {
-      title: string;
-      transcriptionData: any;
-      transcriptionPath?: string;
-      expectedGenerationId?: string | null;
-      notionUrl?: string;
-      notionError?: string;
-    },
-  ) => {
-    try {
-      console.log('Sending to Slack:', data.title);
-
-      const service = getSlackService();
-      if (!service) {
-        return { success: false, error: 'Slack webhook URL is not configured' };
-      }
-      const generation = isContainedTranscriptionPath(data.transcriptionPath)
-        ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
-        : undefined;
-      if (isContainedTranscriptionPath(data.transcriptionPath) && generation === undefined) {
-        return { success: false, error: 'This note could not be read. Reopen it before sending.' };
-      }
-      if (
-        isContainedTranscriptionPath(data.transcriptionPath) &&
-        data.expectedGenerationId !== undefined &&
-        generation !== data.expectedGenerationId
-      ) {
-        return { success: false, error: 'This note changed. Reopen it before sending.' };
-      }
-
-      // For a historical resend, use the original meeting time from frontmatter
-      // so the Slack message shows when the meeting actually happened, not now.
-      let meetingDate = new Date();
-      let transcriptionData = data.transcriptionData;
-      if (transcriptionData?.transcriptCutoffMismatch === true) {
-        return { success: false, error: CUTOFF_MISMATCH_SEND_ERROR };
-      }
-      if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
-        const stored = await readTranscription(data.transcriptionPath).catch(() => null);
-        if (!stored || (stored.generationId ?? null) !== generation) {
-          return { success: false, error: 'This note changed. Reopen it before sending.' };
-        }
-        if (stored.transcriptCutoffMismatch) {
-          return { success: false, error: CUTOFF_MISMATCH_SEND_ERROR };
-        }
-        if (stored?.transcribedAt) {
-          const parsed = new Date(stored.transcribedAt);
-          if (!Number.isNaN(parsed.getTime())) meetingDate = parsed;
-        }
-        // Send the report as saved (it may have been regenerated for a
-        // transcript cutoff), not whatever copy the renderer still holds.
-        transcriptionData = exportPayloadFromNote(transcriptionData ?? {}, stored);
-      }
-
-      const result = await service.sendMeetingSummary({
-        title: data.title,
-        date: meetingDate,
-        result: transcriptionData,
-        notionUrl: data.notionUrl,
-        notionError: data.notionError,
-      });
-
-      if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
-        try {
-          // Preserve the previous successful slackSentAt on a failed resend;
-          // only the error field reflects the new failure.
-          await updateTranscriptionStatus(
-            data.transcriptionPath,
-            {
-              ...(result.success ? { slackSentAt: result.sentAt } : {}),
-              slackError: result.success ? null : result.error,
-            },
-            generation,
-          );
-        } catch (error) {
-          console.error('Failed to persist Slack status to transcription:', error);
-          reportError(error, { operation: 'slack.persistStatus', severity: 'warning' });
-        }
-      }
-
-      if (!result.success) {
-        reportError(new Error(result.error), { operation: 'slack.send', severity: 'error' });
-      }
-
-      return result;
-    } catch (error) {
-      console.error('Error sending to Slack:', error);
-      reportError(error, { operation: 'slack.send', severity: 'error' });
-      const message = error instanceof Error ? error.message : String(error);
-      return { success: false, error: message };
-    }
-  },
-);
-
 ipcMain.handle('test-slack-webhook', async (_, webhookUrl?: string) => {
   try {
     const url = (webhookUrl ?? configService.getSlackWebhookUrl() ?? '').trim();
@@ -1782,10 +1570,7 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
             actionItems: transcription.actionItems,
             summarySections: transcription.summarySections,
             actionItemGroups: transcription.actionItemGroups,
-            customFields:
-              transcription.transcriptCutoff || transcription.transcriptCutoffMismatch
-                ? transcription.customFields
-                : (transcription.customFields ?? metadata.customFields),
+            customFields: reportCustomFields(transcription, metadata.customFields),
             emoji: transcription.emoji,
             liveNotes: transcription.liveNotes ?? metadata.liveNotes,
             highlights: transcription.highlights,

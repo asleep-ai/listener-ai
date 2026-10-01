@@ -1,8 +1,24 @@
 import { test, expect } from '@playwright/test';
-import { _electron as electron } from 'playwright';
+import { type ElectronApplication, type Page, _electron as electron } from 'playwright';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// An unpackaged launch also opens a DevTools window, which can be the first
+// window Playwright sees, so wait for the page that loaded the app itself.
+async function appWindow(electronApp: ElectronApplication): Promise<Page> {
+  let page: Page | undefined;
+  await expect
+    .poll(
+      () => {
+        page = electronApp.windows().find((w) => w.url().endsWith('/renderer/index.html'));
+        return page;
+      },
+      { timeout: 30_000, message: 'The application window did not open' },
+    )
+    .toBeTruthy();
+  return page!;
+}
 
 test('dragging in the saved transcript previews a reversible tail cutoff', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'listener-cutoff-e2e-'));
@@ -57,7 +73,7 @@ test('dragging in the saved transcript previews a reversible tail cutoff', async
     env: { ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: dataDir },
   });
   try {
-    const window = await electronApp.firstWindow();
+    const window = await appWindow(electronApp);
     window.on('dialog', (dialog) => void dialog.dismiss());
     await window.waitForLoadState('domcontentloaded');
     await window.getByRole('button', { name: 'Open transcript for Cutoff_QA' }).click();
@@ -143,7 +159,7 @@ test('reopened cut report uses its new title and does not revive old sidecar fie
     env: { ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: dataDir },
   });
   try {
-    const window = await electronApp.firstWindow();
+    const window = await appWindow(electronApp);
     window.on('dialog', (dialog) => void dialog.dismiss());
     await window.waitForLoadState('domcontentloaded');
     await window.getByRole('button', { name: 'Open transcript for Old_Title' }).click();

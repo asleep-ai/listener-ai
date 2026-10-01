@@ -405,9 +405,8 @@ export interface StoredReportFields {
  * only the transcript text before its cutoff. Flagged notes and highlights
  * are limited to those the cutoff keeps (`reportNotesAtCutoff`). Fields the
  * renderer sent that the note does not own (for example `cost`) are kept
- * from `base`; so are `liveNotes` when the note stores none. Older uncut
- * recordings can also keep custom fields only in their metadata sidecar, but
- * a cut report must never revive fields its regeneration removed.
+ * from `base`; so are `liveNotes` when the note stores none, and custom
+ * fields only as `reportCustomFields` allows.
  */
 export function exportPayloadFromNote<T extends object>(
   base: T,
@@ -429,13 +428,26 @@ export function exportPayloadFromNote<T extends object>(
     keyPoints: note.keyPoints ?? [],
     actionItems: note.actionItems ?? [],
     actionItemGroups: note.actionItemGroups,
-    customFields: note.transcriptCutoff
-      ? note.customFields
-      : (note.customFields ?? sidecar.customFields),
+    customFields: reportCustomFields(note, sidecar.customFields),
     emoji: note.emoji,
     liveNotes: notes.liveNotes,
     highlights: notes.highlights,
   };
+}
+
+/**
+ * Custom fields to show and publish for a saved note. Older recordings keep
+ * them only in their metadata sidecar, so a note that stores none falls back
+ * to that copy. A report regenerated for a cutoff change always stores its
+ * own, possibly empty, fields, and a cut or mismatched note never falls back:
+ * the sidecar holds the fields of an older report.
+ */
+export function reportCustomFields<T>(
+  note: { customFields?: T; transcriptCutoff?: unknown; transcriptCutoffMismatch?: boolean },
+  sidecarCustomFields: T | undefined,
+): T | undefined {
+  if (note.transcriptCutoff || note.transcriptCutoffMismatch) return note.customFields;
+  return note.customFields ?? sidecarCustomFields;
 }
 
 function timedNotes(value: unknown): TimedNote[] | undefined {

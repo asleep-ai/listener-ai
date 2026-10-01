@@ -564,6 +564,45 @@ describe('listener show / export across v1 + v2 folders', () => {
     assert.match(md.stdout, /full transcript is kept in transcript\.md/);
   });
 
+  it('warns on stderr when a saved cutoff no longer matches, keeping local output whole', async () => {
+    const transcript = 'Speaker 1: KEPT_BODY\nSpeaker 2: TAIL_TEXT';
+    const folderPath = saveTranscription({
+      title: 'V2 Cutoff Mismatch',
+      result: { transcript, summary: 's', keyPoints: [], actionItems: [], emoji: 'E' },
+      dataPath: showDataPath,
+    });
+    const metaPath = path.join(folderPath, 'meta.json');
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    meta.transcriptCutoff = createTranscriptCutoff(
+      'Speaker 1: OTHER\nSpeaker 2: TRANSCRIPT',
+      'Speaker 1: OTHER\n'.length,
+    );
+    fs.writeFileSync(metaPath, JSON.stringify(meta));
+    const ref = path.basename(folderPath);
+
+    const md = await runCli(['export', ref, '--transcript']);
+    assert.equal(md.code, 0);
+    assert.match(md.stderr, /saved transcript cutoff no longer matches transcript\.md/);
+    assert.match(md.stdout, /TAIL_TEXT/, 'the full local transcript is still exported');
+
+    const json = await runCli(['export', ref, '--json', '--transcript']);
+    assert.equal(json.code, 0);
+    assert.match(json.stderr, /no longer matches/);
+    assert.equal(JSON.parse(json.stdout).transcript, transcript);
+
+    const show = await runCli(['show', ref]);
+    assert.equal(show.code, 0);
+    assert.match(show.stderr, /no longer matches/);
+
+    // A cutoff with the wrong shape is ignored like an absent one: no warning.
+    meta.transcriptCutoff = null;
+    fs.writeFileSync(metaPath, JSON.stringify(meta));
+    const malformed = await runCli(['export', ref, '--transcript']);
+    assert.equal(malformed.code, 0);
+    assert.doesNotMatch(malformed.stderr, /no longer matches/);
+    assert.match(malformed.stdout, /TAIL_TEXT/);
+  });
+
   it('list shows mixed v1 + v2 folders', async () => {
     const { stdout, code } = await runCli(['list', '--limit', '0']);
     assert.equal(code, 0);

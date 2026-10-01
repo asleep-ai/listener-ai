@@ -1,9 +1,11 @@
 import type { BrowserWindow } from 'electron';
 import type { AppConfig, ConfigService } from '../configService';
 import type { GeminiService, TranscriptionErrorPayload } from '../geminiService';
+import type { NotionService } from '../notionService';
 import type { LiveNote } from '../outputService';
 import type { NotificationService } from '../services/notificationService';
 import type { FFmpegManager } from '../services/ffmpegManager';
+import type { SlackService } from '../slackService';
 
 // Context handed to every src/ipc/<domain>.ts module's register() entry point.
 //
@@ -51,4 +53,8 @@ export interface IpcContext {
   // Pushes the latest masked config to the renderer so the settings modal
   // reflects writes made from inside an IPC handler.
   broadcastConfigChanged(): void;
+  // Export clients, created lazily from config and dropped by main when their
+  // settings change. Null while the integration is not configured.
+  getNotionService(): NotionService | null;
+  getSlackService(): SlackService | null;
 }
