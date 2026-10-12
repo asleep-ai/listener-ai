@@ -1,24 +1,10 @@
 import { test, expect } from '@playwright/test';
-import { type ElectronApplication, type Page, _electron as electron } from 'playwright';
+import type { ElectronApplication } from 'playwright';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-
-// An unpackaged launch also opens a DevTools window, which can be the first
-// window Playwright sees, so wait for the page that loaded the app itself.
-async function appWindow(electronApp: ElectronApplication): Promise<Page> {
-  let page: Page | undefined;
-  await expect
-    .poll(
-      () => {
-        page = electronApp.windows().find((w) => w.url().endsWith('/renderer/index.html'));
-        return page;
-      },
-      { timeout: 30_000, message: 'The application window did not open' },
-    )
-    .toBeTruthy();
-  return page!;
-}
+import { appWindow, launchApp } from './support/launch';
+import { scriptDialogs, scriptedDialogs, visibleWindows } from './support/dialogs';
 
 test('dragging in the saved transcript previews a reversible tail cutoff', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'listener-cutoff-e2e-'));
@@ -66,16 +52,17 @@ test('dragging in the saved transcript previews a reversible tail cutoff', async
   const originalMeta = readFileSync(metaPath, 'utf8');
   const originalTranscript = readFileSync(transcriptPath, 'utf8');
 
-  const electronApp = await electron.launch({
-    executablePath: require('electron') as string,
-    args: ['.', '--disable-gpu', '--no-sandbox'],
-    cwd: process.cwd(),
-    env: { ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: dataDir },
+  const electronApp = await launchApp({
+    ...process.env,
+    NODE_ENV: 'test',
+    LISTENER_DATA_PATH: dataDir,
   });
   try {
     const window = await appWindow(electronApp);
+    // Safety net only: scriptDialogs keeps dialogs from going native at all.
     window.on('dialog', (dialog) => void dialog.dismiss());
     await window.waitForLoadState('domcontentloaded');
+    await scriptDialogs(electronApp, window);
     await window.getByRole('button', { name: 'Open transcript for Cutoff_QA' }).click();
     await window.locator('[data-tab="transcript"]').click();
 
@@ -98,7 +85,9 @@ test('dragging in the saved transcript previews a reversible tail cutoff', async
     await expect(window.locator('#transcriptCutoffStatus')).toContainText('Not applied yet');
     expect(readFileSync(metaPath, 'utf8')).toBe(originalMeta);
     expect(readFileSync(transcriptPath, 'utf8')).toBe(originalTranscript);
+    expect(await scriptedDialogs(window)).toEqual([]);
   } finally {
+    await expectHidden(electronApp);
     await electronApp.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
@@ -152,16 +141,17 @@ test('reopened cut report uses its new title and does not revive old sidecar fie
     }),
   );
 
-  const electronApp = await electron.launch({
-    executablePath: require('electron') as string,
-    args: ['.', '--disable-gpu', '--no-sandbox'],
-    cwd: process.cwd(),
-    env: { ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: dataDir },
+  const electronApp = await launchApp({
+    ...process.env,
+    NODE_ENV: 'test',
+    LISTENER_DATA_PATH: dataDir,
   });
   try {
     const window = await appWindow(electronApp);
+    // Safety net only: scriptDialogs keeps dialogs from going native at all.
     window.on('dialog', (dialog) => void dialog.dismiss());
     await window.waitForLoadState('domcontentloaded');
+    await scriptDialogs(electronApp, window);
     await window.getByRole('button', { name: 'Open transcript for Old_Title' }).click();
     await expect(window.locator('#transcriptionTitle')).toHaveText('Transcription - New Title');
     await expect(window.getByText('TAIL_SECRET')).toHaveCount(0);
@@ -169,8 +159,17 @@ test('reopened cut report uses its new title and does not revive old sidecar fie
     await expect(window.getByRole('group', { name: 'Excluded from the report' })).toContainText(
       'Unrelated tail topic',
     );
+    expect(await scriptedDialogs(window)).toEqual([]);
   } finally {
+    await expectHidden(electronApp);
     await electronApp.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+// Soft, so a failure earlier in the test keeps its own error.
+async function expectHidden(app: ElectronApplication): Promise<void> {
+  if (process.env.LISTENER_E2E_SHOW === '1') return;
+  const visible = await visibleWindows(app).catch(() => []);
+  expect.soft(visible, 'app windows stayed hidden').toEqual([]);
+}

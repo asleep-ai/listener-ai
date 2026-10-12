@@ -10,16 +10,10 @@ import { META_JSON, formatTimestamp, sanitizeForPath, saveTranscription } from '
 import { reportError } from '../sentry';
 import { concatAudioFiles } from '../services/audioConcatService';
 import { metadataService } from '../services/metadataService';
+import { type TranscriptionJobHandle, transcriptionJobs } from '../transcriptionJobs';
 import type { IpcContext } from './types';
 
 const execFileAsync = promisify(execFile);
-
-// Single-flight gate for `merge-recordings`. A second click while a merge is
-// running returns `{ code: 'merge-busy' }` rather than racing against the
-// in-flight one for the shared GeminiService and the merged-output filename
-// slot. Lives at module scope (not on ctx) because this state is local to
-// this handler set and shouldn't leak into the IpcContext surface.
-let mergeInFlight = false;
 
 export function register(ctx: IpcContext): void {
   // Permanently removes a meeting: audio file, metadata JSON, and the
@@ -174,172 +168,195 @@ export function register(ctx: IpcContext): void {
   //
   // Single-flight: a second click while a merge is running returns
   // `{ code: 'merge-busy' }` rather than racing against the in-flight one for
-  // the shared geminiService and the merged-output filename slot.
+  // the shared geminiService and the merged-output filename slot. The running
+  // merge is a job in the main-owned registry, so a reloaded renderer can find
+  // it and keep showing its progress and result.
   ipcMain.handle('merge-recordings', async (_, opts: { paths: string[]; title?: string }) => {
-    if (mergeInFlight) {
+    if (transcriptionJobs.hasActive('merge')) {
       return {
         success: false,
         code: 'merge-busy',
         error: 'Another merge is already running. Wait for it to finish.',
       };
     }
-    mergeInFlight = true;
-    const sendProgress = (percent: number, message: string) => {
-      const mainWindow = ctx.getMainWindow();
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('transcription-progress', { percent, message });
-      }
-    };
-    try {
-      const inputPaths = Array.isArray(opts?.paths) ? opts.paths : [];
-      if (inputPaths.length < 2) {
-        return { success: false, error: 'At least 2 recordings are required to merge' };
-      }
-
-      // Ensure recordings dir exists before realpath so symlink resolution can't
-      // throw on a fresh install. Containment: every input must then resolve
-      // inside that directory.
-      const recordingsDir = path.join(app.getPath('userData'), 'recordings');
-      await fs.promises.mkdir(recordingsDir, { recursive: true });
-      const resolvedRoot = await fs.promises.realpath(recordingsDir);
-      const resolvedInputs: string[] = [];
-      for (const p of inputPaths) {
-        if (typeof p !== 'string' || !p) {
-          return { success: false, error: 'Invalid input path' };
-        }
-        let resolved: string;
-        try {
-          resolved = await fs.promises.realpath(p);
-        } catch {
-          return { success: false, error: `Recording not found: ${path.basename(p)}` };
-        }
-        if (!resolved.startsWith(resolvedRoot + path.sep)) {
-          return { success: false, error: 'Source path is outside the recordings directory' };
-        }
-        resolvedInputs.push(resolved);
-      }
-
-      const geminiService = ctx.ensureGeminiService();
-      if (!geminiService) {
-        return { success: false, error: ctx.formatAiCredentialsError() };
-      }
-
-      const ffmpegPath = await ctx.ffmpegManager.ensureFFmpeg();
-      if (!ffmpegPath) {
-        return {
-          success: false,
-          code: 'ffmpeg-missing',
-          error: 'FFmpeg is required to merge recordings.',
-        };
-      }
-
-      const rawTitle = opts.title?.trim() || 'Merged Meeting';
-      const safeTitle = sanitizeForPath(rawTitle) || 'Merged Meeting';
-      // Always emit webm/opus -- matches MediaRecorder native output and survives
-      // the stream-copy fast path when all inputs are also webm. UUID suffix
-      // avoids collisions when two merges with the same title start in the same
-      // second (formatTimestamp is second-granularity).
-      const mergedExt = extensionForMimeType('audio/webm');
-      const mergedAudioPath = path.join(
-        recordingsDir,
-        `${safeTitle}_${formatTimestamp()}_${randomUUID().slice(0, 8)}.${mergedExt}`,
-      );
-
-      sendProgress(5, 'Merging audio files...');
-
-      // Run the metadata lookup concurrently with the ffmpeg concat -- they're
-      // independent and concat is the long pole, so the metadata reads are free.
-      // Recordings without a transcription contribute nothing to mergedFrom; we
-      // also drop entries whose transcription folder no longer exists on disk
-      // so the merged note's Sources section never references stale ghosts.
-      const [, metas] = await Promise.all([
-        concatAudioFiles({ ffmpegPath, inputPaths: resolvedInputs, outputPath: mergedAudioPath }),
-        Promise.all(resolvedInputs.map((p) => metadataService.getMetadata(p))),
-      ]);
-      const sourceFolders = metas
-        .filter((m): m is NonNullable<typeof m> => !!m?.transcriptionPath)
-        .filter((m) => fs.existsSync(m.transcriptionPath!))
-        .map((m) => path.basename(m.transcriptionPath!));
-
-      sendProgress(15, 'Transcribing merged recording...');
-
-      // Compress the transcription progress into 15-95% to leave room for the
-      // concat phase at the start and the save phase at the end.
-      const progressCallback = (percent: number, message: string) => {
-        sendProgress(15 + Math.round(percent * 0.8), message);
-      };
-
-      const summaryPrompt = ctx.configService.getSummaryPrompt();
-      const result = await geminiService.transcribeAudio(
-        mergedAudioPath,
-        progressCallback,
-        summaryPrompt,
-      );
-
-      // User-supplied title takes precedence; only fall back to Gemini's
-      // suggestion when the user didn't provide one. Gemini almost always
-      // returns a suggestedTitle, so the previous order silently overrode the
-      // user's --title flag / dialog input.
-      const finalTitle = opts.title?.trim() || result.suggestedTitle || rawTitle;
-      let transcriptionPath: string;
-      let generationId: string | null;
-      try {
-        transcriptionPath = saveTranscription({
-          title: finalTitle,
-          result,
-          audioFilePath: mergedAudioPath,
-          dataPath: app.getPath('userData'),
-          mergedFrom: sourceFolders,
-        });
-        generationId =
-          JSON.parse(fs.readFileSync(path.join(transcriptionPath, META_JSON), 'utf-8'))
-            .generationId ?? null;
-        ctx.maybeAutoSync();
-      } catch (error) {
-        console.error('Failed to save merged transcription files:', error);
-        reportError(error, { operation: 'recording.merge.save', severity: 'error' });
-        const message = error instanceof Error ? error.message : String(error);
-        ctx.notificationService.notifyTranscriptionFailed(
-          'Merge failed: could not save the transcription.',
-        );
-        return { success: false, error: `Failed to save merged transcription: ${message}` };
-      }
-
-      try {
-        await metadataService.saveMetadata(mergedAudioPath, {
-          title: finalTitle,
-          suggestedTitle: result.suggestedTitle,
-          transcriptionPath,
-          customFields: result.customFields,
-          transcribedAt: new Date().toISOString(),
-        });
-      } catch (error) {
-        // Metadata write is best-effort -- the transcription folder is the
-        // source of truth. Log and continue rather than fail the merge.
-        console.error('Failed to save merged metadata:', error);
-      }
-
-      sendProgress(100, 'Merge complete');
-
-      ctx.notificationService.notifyTranscriptionComplete(finalTitle);
-      return {
-        success: true,
-        data: result,
-        mergedAudioPath,
-        transcriptionPath,
-        generationId,
-        mergedFrom: sourceFolders,
-      };
-    } catch (error) {
-      console.error('Error merging recordings:', error);
-      reportError(error, { operation: 'recording.merge', severity: 'error' });
-      const stderr = (error as { stderr?: string } | null)?.stderr;
-      const baseMessage = error instanceof Error ? error.message : String(error);
-      const message = stderr ? `${baseMessage.split('\n')[0]} — ${stderr.trim()}` : baseMessage;
-      ctx.notificationService.notifyTranscriptionFailed('Merge failed. Check the app for details.');
-      return { success: false, error: message };
-    } finally {
-      mergeInFlight = false;
-    }
+    const sourcePaths = Array.isArray(opts?.paths)
+      ? opts.paths.filter((p): p is string => typeof p === 'string')
+      : [];
+    const title = typeof opts?.title === 'string' ? opts.title.trim() : '';
+    const { job, promise } = transcriptionJobs.start(
+      { kind: 'merge', sourcePaths, ...(title ? { title } : {}) },
+      (handle) => runMerge(ctx, opts, handle),
+    );
+    const result = await promise;
+    return { ...result, jobId: job.id };
   });
+}
+
+async function runMerge(
+  ctx: IpcContext,
+  opts: { paths: string[]; title?: string },
+  handle: TranscriptionJobHandle,
+) {
+  const sendProgress = (percent: number, message: string) => {
+    handle.progress(percent, message);
+    const mainWindow = ctx.getMainWindow();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('transcription-progress', {
+        percent,
+        message,
+        jobId: handle.id,
+      });
+    }
+  };
+  try {
+    const inputPaths = Array.isArray(opts?.paths) ? opts.paths : [];
+    if (inputPaths.length < 2) {
+      return { success: false, error: 'At least 2 recordings are required to merge' };
+    }
+
+    // Ensure recordings dir exists before realpath so symlink resolution can't
+    // throw on a fresh install. Containment: every input must then resolve
+    // inside that directory.
+    const recordingsDir = path.join(app.getPath('userData'), 'recordings');
+    await fs.promises.mkdir(recordingsDir, { recursive: true });
+    const resolvedRoot = await fs.promises.realpath(recordingsDir);
+    const resolvedInputs: string[] = [];
+    for (const p of inputPaths) {
+      if (typeof p !== 'string' || !p) {
+        return { success: false, error: 'Invalid input path' };
+      }
+      let resolved: string;
+      try {
+        resolved = await fs.promises.realpath(p);
+      } catch {
+        return { success: false, error: `Recording not found: ${path.basename(p)}` };
+      }
+      if (!resolved.startsWith(resolvedRoot + path.sep)) {
+        return { success: false, error: 'Source path is outside the recordings directory' };
+      }
+      resolvedInputs.push(resolved);
+    }
+
+    const geminiService = ctx.ensureGeminiService();
+    if (!geminiService) {
+      return { success: false, error: ctx.formatAiCredentialsError() };
+    }
+
+    const ffmpegPath = await ctx.ffmpegManager.ensureFFmpeg();
+    if (!ffmpegPath) {
+      return {
+        success: false,
+        code: 'ffmpeg-missing',
+        error: 'FFmpeg is required to merge recordings.',
+      };
+    }
+
+    const rawTitle = opts.title?.trim() || 'Merged Meeting';
+    const safeTitle = sanitizeForPath(rawTitle) || 'Merged Meeting';
+    // Always emit webm/opus -- matches MediaRecorder native output and survives
+    // the stream-copy fast path when all inputs are also webm. UUID suffix
+    // avoids collisions when two merges with the same title start in the same
+    // second (formatTimestamp is second-granularity).
+    const mergedExt = extensionForMimeType('audio/webm');
+    const mergedAudioPath = path.join(
+      recordingsDir,
+      `${safeTitle}_${formatTimestamp()}_${randomUUID().slice(0, 8)}.${mergedExt}`,
+    );
+    handle.update({ mergedAudioPath });
+
+    sendProgress(5, 'Merging audio files...');
+
+    // Run the metadata lookup concurrently with the ffmpeg concat -- they're
+    // independent and concat is the long pole, so the metadata reads are free.
+    // Recordings without a transcription contribute nothing to mergedFrom; we
+    // also drop entries whose transcription folder no longer exists on disk
+    // so the merged note's Sources section never references stale ghosts.
+    const [, metas] = await Promise.all([
+      concatAudioFiles({ ffmpegPath, inputPaths: resolvedInputs, outputPath: mergedAudioPath }),
+      Promise.all(resolvedInputs.map((p) => metadataService.getMetadata(p))),
+    ]);
+    const sourceFolders = metas
+      .filter((m): m is NonNullable<typeof m> => !!m?.transcriptionPath)
+      .filter((m) => fs.existsSync(m.transcriptionPath!))
+      .map((m) => path.basename(m.transcriptionPath!));
+
+    sendProgress(15, 'Transcribing merged recording...');
+
+    // Compress the transcription progress into 15-95% to leave room for the
+    // concat phase at the start and the save phase at the end.
+    const progressCallback = (percent: number, message: string) => {
+      sendProgress(15 + Math.round(percent * 0.8), message);
+    };
+
+    const summaryPrompt = ctx.configService.getSummaryPrompt();
+    const result = await geminiService.transcribeAudio(
+      mergedAudioPath,
+      progressCallback,
+      summaryPrompt,
+    );
+
+    // User-supplied title takes precedence; only fall back to Gemini's
+    // suggestion when the user didn't provide one. Gemini almost always
+    // returns a suggestedTitle, so the previous order silently overrode the
+    // user's --title flag / dialog input.
+    const finalTitle = opts.title?.trim() || result.suggestedTitle || rawTitle;
+    let transcriptionPath: string;
+    let generationId: string | null;
+    try {
+      transcriptionPath = saveTranscription({
+        title: finalTitle,
+        result,
+        audioFilePath: mergedAudioPath,
+        dataPath: app.getPath('userData'),
+        mergedFrom: sourceFolders,
+      });
+      handle.commit();
+      generationId =
+        JSON.parse(fs.readFileSync(path.join(transcriptionPath, META_JSON), 'utf-8'))
+          .generationId ?? null;
+      ctx.maybeAutoSync();
+    } catch (error) {
+      console.error('Failed to save merged transcription files:', error);
+      reportError(error, { operation: 'recording.merge.save', severity: 'error' });
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.notificationService.notifyTranscriptionFailed(
+        'Merge failed: could not save the transcription.',
+      );
+      return { success: false, error: `Failed to save merged transcription: ${message}` };
+    }
+
+    try {
+      await metadataService.saveMetadata(mergedAudioPath, {
+        title: finalTitle,
+        suggestedTitle: result.suggestedTitle,
+        transcriptionPath,
+        customFields: result.customFields,
+        transcribedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      // Metadata write is best-effort -- the transcription folder is the
+      // source of truth. Log and continue rather than fail the merge.
+      console.error('Failed to save merged metadata:', error);
+    }
+
+    sendProgress(100, 'Merge complete');
+
+    ctx.notificationService.notifyTranscriptionComplete(finalTitle);
+    return {
+      success: true,
+      data: result,
+      mergedAudioPath,
+      transcriptionPath,
+      generationId,
+      mergedFrom: sourceFolders,
+    };
+  } catch (error) {
+    console.error('Error merging recordings:', error);
+    reportError(error, { operation: 'recording.merge', severity: 'error' });
+    const stderr = (error as { stderr?: string } | null)?.stderr;
+    const baseMessage = error instanceof Error ? error.message : String(error);
+    const message = stderr ? `${baseMessage.split('\n')[0]} — ${stderr.trim()}` : baseMessage;
+    ctx.notificationService.notifyTranscriptionFailed('Merge failed. Check the app for details.');
+    return { success: false, error: message };
+  }
 }

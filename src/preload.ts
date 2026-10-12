@@ -17,6 +17,9 @@ import type {
   SystemAudioStartResult,
   TranscriptCutoffApiResult,
   TranscriptionErrorPayload,
+  TranscriptionJobExports,
+  TranscriptionJobSnapshot,
+  TranscriptionJobsList,
 } from './electronApiTypes';
 import type { LiveNote } from './outputService';
 import type { FileInfoResult } from './services/fileInfoTypes';
@@ -107,9 +110,13 @@ const api = {
   onGoogleSyncProgress: (callback: (event: SyncProgressEvent) => void) => {
     ipcRenderer.on('google-sync-progress', (_, event) => callback(event));
   },
+  // A request for a recording that is already transcribing joins that job
+  // (`joined: true`) instead of starting another. `autoExport` makes main run
+  // the configured Notion/Slack follow-ups as part of the job.
   transcribeAudio: (
     filePath: string,
     liveNotes?: LiveNote[],
+    options?: { autoExport?: boolean; recordingTitle?: string },
   ): Promise<{
     success: boolean;
     data?: any;
@@ -119,9 +126,19 @@ const api = {
     error?: string;
     errorDetails?: TranscriptionErrorPayload;
     cancelled?: boolean;
-  }> => invoke('transcribe-audio', filePath, liveNotes),
-  cancelTranscription: (filePath: string): Promise<{ success: boolean; reason?: 'not-running' }> =>
+    jobId?: string;
+    joined?: true;
+    exports?: TranscriptionJobExports;
+  }> => invoke('transcribe-audio', filePath, liveNotes, options),
+  // `committed`: the note is already saved, so the job finishes normally.
+  cancelTranscription: (
+    filePath: string,
+  ): Promise<{ success: boolean; reason?: 'not-running' | 'committed' }> =>
     invoke('cancel-transcription', filePath),
+  getTranscriptionJobs: (): Promise<TranscriptionJobsList> => invoke('get-transcription-jobs'),
+  onTranscriptionJobChanged: (callback: (job: TranscriptionJobSnapshot) => void) => {
+    ipcRenderer.on('transcription-job-changed', (_, job) => callback(job));
+  },
   uploadToNotion: (data: {
     title: string;
     transcriptionData: any;
@@ -241,7 +258,12 @@ const api = {
     ipcRenderer.on('config-changed', (_, config) => callback(config));
   },
   onTranscriptionProgress: (
-    callback: (progress: { percent: number; message: string; filePath?: string }) => void,
+    callback: (progress: {
+      percent: number;
+      message: string;
+      filePath?: string;
+      jobId?: string;
+    }) => void,
   ) => {
     ipcRenderer.on('transcription-progress', (_, progress) => callback(progress));
   },
@@ -275,6 +297,7 @@ const api = {
     folderName?: string;
     generationId?: string | null;
     error?: string;
+    jobId?: string;
   }> => invoke('merge-recordings', opts),
 
   // Pushed by main when the recordings directory changes externally

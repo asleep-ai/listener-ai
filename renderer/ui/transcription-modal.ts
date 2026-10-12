@@ -20,6 +20,8 @@ import {
 } from './markdown-utils';
 import { showToast } from './notifications';
 import { refreshRecordingsList } from './recordings-list';
+import { jobMatchesPath } from '../../src/transcriptionJobView';
+import { getTranscriptionJob } from './transcription-jobs';
 import { showTranscriptionErrorDialog } from './transcription-error-dialog';
 import {
   clearTranscriptCutoffBusy,
@@ -45,6 +47,42 @@ let currentNotionUrl: string | null = null;
 let supersededNotionUrl: string | null = null;
 let currentSlackSentAt: string | null = null;
 let cutoffInFlight = false;
+
+// Which job the modal's progress bar and pending result belong to. Several
+// jobs can run at once (row transcriptions, a merge), so progress and results
+// for anything else must not land in the modal. `modalSession` changes
+// whenever the modal starts showing something else; a result that arrives for
+// an older session is not shown.
+export type ModalJobTarget =
+  | { kind: 'transcribe'; filePath: string }
+  | { kind: 'merge'; jobId?: string };
+let modalJobTarget: ModalJobTarget | null = null;
+let modalSession = 0;
+
+export function getModalSession(): number {
+  return modalSession;
+}
+
+export function progressBelongsToModal(progress: { filePath?: string; jobId?: string }): boolean {
+  const target = modalJobTarget;
+  if (!target) return false;
+  const job = progress.jobId ? getTranscriptionJob(progress.jobId) : undefined;
+  if (target.kind === 'merge') {
+    if (target.jobId) return progress.jobId === target.jobId;
+    // Merges are single-flight; a merge job (or a legacy event without a
+    // path) is the one this modal started.
+    return job ? job.kind === 'merge' : !progress.filePath;
+  }
+  if (progress.filePath === target.filePath) return true;
+  return !!job && job.kind === 'transcribe' && jobMatchesPath(job, target.filePath);
+}
+
+export function setModalProgress(percent: number, message: string): void {
+  const { progressContainer, progressFill, progressText } = getDom();
+  if (!progressContainer || progressContainer.style.display === 'none') return;
+  if (progressFill) progressFill.style.width = `${percent}%`;
+  if (progressText && message) progressText.textContent = message;
+}
 
 let transcriptionModal: HTMLDialogElement | null = null;
 let closeTranscriptionBtn: Element | null = null;
@@ -169,6 +207,8 @@ export function showSavedTranscript(
 
   // Show transcription modal
   if (modal) {
+    modalJobTarget = null;
+    modalSession++;
     if (!modal.open) modal.showModal();
     const titleEl = document.getElementById('transcriptionTitle');
     const reportTitle = titleForSavedReport(
@@ -272,12 +312,15 @@ export async function requireAiAuth(): Promise<boolean> {
 // result so callers don't need to know about the recovery path.
 export async function transcribeWithFfmpegRetry(
   filePath: string,
+  ownsSession: () => boolean = () => true,
 ): Promise<Awaited<ReturnType<typeof window.electronAPI.transcribeAudio>>> {
   let result = await window.electronAPI.transcribeAudio(filePath);
   if (!result.success && (result as { code?: string }).code === 'ffmpeg-missing') {
+    if (!ownsSession()) return result;
     const { showFFmpegDownloadDialog } = await import('./ffmpeg-dialog');
+    if (!ownsSession()) return result;
     const dlResult = await showFFmpegDownloadDialog();
-    if (dlResult.success) {
+    if (dlResult.success && ownsSession()) {
       result = await window.electronAPI.transcribeAudio(filePath);
     }
   }
@@ -291,9 +334,18 @@ export async function handleTranscribe(filePath: string, title: string): Promise
   // upload step and shouldn't gate the recording -> transcript flow.
   if (!(await requireAiAuth())) return;
 
-  if (!prepareTranscriptionModal(`Transcription - ${title}`, 'Initializing transcription...')) {
+  if (
+    !prepareTranscriptionModal(
+      `Transcription - ${title}`,
+      'Initializing transcription...',
+      undefined,
+      { kind: 'transcribe', filePath },
+    )
+  ) {
     return;
   }
+  const session = modalSession;
+  const ownsSession = () => session === modalSession;
 
   const button = document.querySelector(
     `[data-filepath="${filePath}"]`,
@@ -304,8 +356,14 @@ export async function handleTranscribe(filePath: string, title: string): Promise
   }
 
   try {
-    const result = await transcribeWithFfmpegRetry(filePath);
+    const result = await transcribeWithFfmpegRetry(filePath, ownsSession);
 
+    if (!ownsSession()) {
+      // The modal shows something else now; keep it, just surface a new note.
+      if (result.success) await refreshRecordingsList();
+      return;
+    }
+    if (result.cancelled) return;
     if (result.success) {
       // Hide progress bar
       const { progressContainer } = getDom();
@@ -348,6 +406,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       await refreshRecordingsList();
 
       const cfg = await window.electronAPI.getConfig();
+      if (!ownsSession()) return;
       if (uploadToNotionBtn) {
         uploadToNotionBtn.style.display =
           cfg.notionApiKey && cfg.notionDatabaseId ? 'flex' : 'none';
@@ -362,6 +421,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       );
     }
   } catch (error) {
+    if (!ownsSession()) return;
     const message = error instanceof Error ? error.message : String(error);
     await showTranscriptionErrorDialog(undefined, `Error transcribing audio: ${message}`);
   } finally {
@@ -379,12 +439,15 @@ export function prepareTranscriptionModal(
   modalTitle: string,
   progressMessage: string,
   allLoadingText?: string,
+  target?: ModalJobTarget,
 ): boolean {
   const modal = ensureTranscriptionModal();
   if (!modal) {
     console.error('Transcription modal not found');
     return false;
   }
+  modalJobTarget = target ?? null;
+  modalSession++;
   if (!modal.open) modal.showModal();
   const titleEl = document.getElementById('transcriptionTitle');
   if (titleEl) titleEl.textContent = modalTitle;
