@@ -1689,6 +1689,14 @@ ipcMain.handle('check-config', async () => {
 
 // Global shortcut handlers
 ipcMain.handle('validate-shortcut', async (_, shortcut: string) => {
+  // Validation needs a real OS registration; background tests must not make one.
+  if (backgroundTestMode) {
+    return {
+      valid: false,
+      unavailable: true,
+      error: 'Shortcut validation is unavailable in background test mode',
+    };
+  }
   try {
     // Temporarily register the shortcut to check if it's valid
     const isValid = globalShortcut.register(shortcut, () => {});

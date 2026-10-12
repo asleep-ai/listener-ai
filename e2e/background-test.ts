@@ -11,6 +11,7 @@ function assertBackgroundMarkers(main: string, preload: string): void {
     'focusable: !backgroundTestMode',
     '.setSuppressed(backgroundTestMode)',
     '--listener-background-test',
+    'Shortcut validation is unavailable in background test mode',
   ];
   if (
     markers.some((marker) => !main.includes(marker)) ||
