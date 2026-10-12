@@ -1086,3 +1086,47 @@ describe('ConfigService: settings save only persists edited fields', () => {
     }
   });
 });
+
+describe('ConfigService: chunked live captions gate', () => {
+  it('needs only the batch STT backend when translation is off', () => {
+    // Signed-out ChatGPT plus an explicit OpenAI backend: captions can run,
+    // translating them cannot.
+    const cfg = new ConfigService(freshDataPath('chunked-transcription-only'));
+    cfg.setAiProvider('chatgpt');
+    cfg.setTranscriptionProvider('openai');
+    cfg.setOpenAiApiKey('sk-openai');
+    assert.equal(cfg.hasAiAuth(), false);
+    assert.equal(cfg.getChunkedLiveCaptionsBlocker(false), null);
+    assert.equal(cfg.getChunkedLiveCaptionsBlocker(true), 'ai');
+  });
+
+  it('follows the ChatGPT status projection, so a sign-in or sign-out counts', () => {
+    const cfg = new ConfigService(freshDataPath('chunked-chatgpt-status'));
+    cfg.setAiProvider('chatgpt');
+    cfg.setTranscriptionProvider('openai');
+    cfg.setOpenAiApiKey('sk-openai');
+    cfg.setChatGPTStatus({ connected: true, planEnabled: true, profileId: 'p1' });
+    assert.equal(cfg.getChunkedLiveCaptionsBlocker(true), null);
+    cfg.setChatGPTStatus({ connected: false, planEnabled: false });
+    assert.equal(cfg.getChunkedLiveCaptionsBlocker(true), 'ai');
+  });
+
+  it('blocks on an unresolvable or uncredentialed backend with an actionable message', () => {
+    const chatgptAuto = new ConfigService(freshDataPath('chunked-chatgpt-auto'));
+    chatgptAuto.setAiProvider('chatgpt');
+    chatgptAuto.setChatGPTStatus({ connected: true, planEnabled: true, profileId: 'p1' });
+    assert.equal(chatgptAuto.getChunkedLiveCaptionsBlocker(false), 'transcription');
+    assert.equal(
+      chatgptAuto.describeMissingTranscriptionAuth(),
+      chatgptAuto.getTranscriptionResolution().message,
+    );
+
+    const missingKey = new ConfigService(freshDataPath('chunked-missing-openai-key'));
+    missingKey.setTranscriptionProvider('openai');
+    assert.equal(missingKey.getChunkedLiveCaptionsBlocker(false), 'transcription');
+    assert.equal(
+      missingKey.describeMissingTranscriptionAuth(),
+      'Add the OpenAI API key for transcription.',
+    );
+  });
+});

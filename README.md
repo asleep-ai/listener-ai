@@ -66,6 +66,7 @@ listener config set geminiApiKey <your-key>
 
 # Option B -- ChatGPT plan for text, plus an explicit transcription provider
 listener chatgpt login                 # browser sign-in (Continue with ChatGPT)
+listener config set aiProvider chatgpt # sign-in alone does not switch providers
 listener config set transcriptionProvider openai   # or gemini / soniox
 listener config set openaiApiKey <your-openai-api-key>  # billed to your OpenAI API account
 ```
@@ -155,7 +156,7 @@ CLI and desktop app share the same config file. Existing installs that already h
 
 #### Sign in with ChatGPT (ChatGPT Plus/Pro)
 
-1. In the desktop app, open Settings -> AI connection, choose **ChatGPT plan** as the summary provider, and select **Continue with ChatGPT**. From the CLI, run `listener chatgpt login`.
+1. In the desktop app, open Settings -> AI connection, choose **ChatGPT plan** as the summary provider, and select **Continue with ChatGPT**. From the CLI, run `listener chatgpt login`, then `listener config set aiProvider chatgpt` (signing in does not switch providers).
 2. Complete the browser sign-in and allow plan usage.
 3. To transcribe recordings, choose a **Transcription service** under Settings -> Transcription and summary (Gemini, OpenAI API, or Soniox). The ChatGPT plan cannot transcribe audio, and `auto` refuses to pick a paid provider for you. Without one, ChatGPT still summarizes, regenerates reports, and answers questions about existing transcripts.
 

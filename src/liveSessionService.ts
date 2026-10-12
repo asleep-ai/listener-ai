@@ -85,9 +85,32 @@ export interface LiveRealtimeClientConfig {
   clientSecret: string;
 }
 
+// The chunked fallback cannot run as configured. Raised instead of reporting
+// captions that every later chunk would fail; the message is actionable.
+export class LiveChunkedCaptionsUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LiveChunkedCaptionsUnavailableError';
+  }
+}
+
 export interface LiveSessionServiceOptions {
   getDataPath(): string;
+  /** Text tasks (translation, Q&A). Null without text-provider credentials. */
   ensureGeminiService(): GeminiService | null;
+  /**
+   * Chunked snippet transcription on the batch STT backend, which can be
+   * configured without text-provider credentials. Defaults to
+   * `ensureGeminiService`.
+   */
+  ensureTranscriptionService?(): GeminiService | null;
+  /**
+   * Why chunked snippets cannot be transcribed on the batch STT backend (null
+   * when they can). Translation is not part of it: a caption the text provider
+   * cannot translate keeps a per-segment `translationError`. Absent = always
+   * available.
+   */
+  getChunkedCaptionsIssue?(): string | null;
   getAgentService(): AgentService | null;
   formatAiCredentialsError(): string;
   getLiveSttConfig(): LiveSttProviderConfig;
@@ -288,6 +311,7 @@ export class LiveSessionService {
     } else {
       this.setRealtimeProvider(session, config);
     }
+    if (session.mode === 'chunked') this.assertChunkedCaptionsAvailable(session);
     this.emit({
       type: 'status',
       sessionId: session.id,
@@ -340,6 +364,7 @@ export class LiveSessionService {
     session.mode = 'chunked';
     session.provider = 'chunked';
     session.usageModelId = null;
+    this.assertChunkedCaptionsAvailable(session);
     this.emit({
       type: 'status',
       sessionId: session.id,
@@ -485,6 +510,18 @@ export class LiveSessionService {
     return false;
   }
 
+  // Ends the session instead of announcing chunked captions that every chunk
+  // would then fail on. Never picks another STT backend or billing path.
+  private assertChunkedCaptionsAvailable(session: LiveSessionState): void {
+    const issue = this.opts.getChunkedCaptionsIssue?.() ?? null;
+    if (!issue) return;
+    session.active = false;
+    session.abortController.abort();
+    throw new LiveChunkedCaptionsUnavailableError(
+      `Live captions cannot continue with chunked transcription: ${issue}`,
+    );
+  }
+
   private startResult(session: LiveSessionState): LiveSessionStartResult {
     return {
       sessionId: session.id,
@@ -554,9 +591,13 @@ export class LiveSessionService {
     if (!session || session.id !== input.sessionId)
       throw new Error('Live session is no longer active.');
     if (!session.active || session.abortController.signal.aborted) return null;
-    const geminiService = this.opts.ensureGeminiService();
-    if (!geminiService) {
-      throw new Error(this.opts.formatAiCredentialsError());
+    const transcriber = this.opts.ensureTranscriptionService
+      ? this.opts.ensureTranscriptionService()
+      : this.opts.ensureGeminiService();
+    if (!transcriber) {
+      throw new Error(
+        this.opts.getChunkedCaptionsIssue?.() ?? this.opts.formatAiCredentialsError(),
+      );
     }
 
     const buffer = asBuffer(input.audioData);
@@ -566,7 +607,7 @@ export class LiveSessionService {
     try {
       if (!session.active || session.abortController.signal.aborted) return null;
       const transcript = cleanTranscript(
-        await geminiService.transcribeLiveSnippet(tempPath, {
+        await transcriber.transcribeLiveSnippet(tempPath, {
           signal: session.abortController.signal,
         }),
       );
@@ -581,10 +622,15 @@ export class LiveSessionService {
       let translation: string | undefined;
       let translationError: string | undefined;
       session.translate = input.translate !== false;
-      if (input.translate !== false) {
+      // Translation is the only text call here; without text credentials the
+      // caption stays and the segment says why it is untranslated.
+      const translator = input.translate !== false ? this.opts.ensureGeminiService() : null;
+      if (input.translate !== false && !translator) {
+        translationError = this.opts.formatAiCredentialsError();
+      } else if (translator) {
         try {
           translation = (
-            await geminiService.translateText(transcript, {
+            await translator.translateText(transcript, {
               targetLanguage: resolveLiveTranslationTarget(
                 this.opts.getLiveSttConfig().translationLanguage,
               ),

@@ -848,6 +848,13 @@ export interface GeminiServiceOptions {
    * attempted). Only meaningful when `transcriptionProvider` is absent.
    */
   transcriptionUnavailableMessage?: string;
+  /**
+   * Build for transcription only: no text-provider credential is required and
+   * none is used. Live chunked captions with translation off need only the
+   * batch STT backend (`transcribeLiveSnippet` makes no text call); every text
+   * task (summary, judge, cleanup, translation, agent) refuses.
+   */
+  transcriptionOnly?: boolean;
   dataPath?: string;
   knownWords?: string[];
   proModel: string;
@@ -866,6 +873,7 @@ export class GeminiService {
   private provider: AiProvider;
   private batchSttBackend?: BatchSttBackend;
   private sttUnavailableMessage?: string;
+  private transcriptionOnly: boolean;
   private ffmpegManager: FFmpegManager;
   private knownWords: string[];
   private proModel: string;
@@ -897,7 +905,8 @@ export class GeminiService {
     // path depends on it, while a transcription-only credential gap surfaces
     // from the first transcribe call with a friendlier message.
     const needsGemini = this.provider === 'gemini' || transcriptionProvider === 'gemini';
-    if (this.provider === 'gemini' && !options.apiKey) {
+    this.transcriptionOnly = options.transcriptionOnly === true;
+    if (this.provider === 'gemini' && !options.apiKey && !this.transcriptionOnly) {
       throw new Error('Gemini API key is required for the Gemini provider.');
     }
     if (needsGemini && options.apiKey) {
@@ -916,7 +925,7 @@ export class GeminiService {
     this.sonioxApiKey = options.sonioxApiKey;
     // Same for the OpenAI API key: transcription-only, never used for text.
     this.openaiApiKey = options.openaiApiKey;
-    if (this.provider === 'chatgpt') {
+    if (this.provider === 'chatgpt' && !this.transcriptionOnly) {
       this.chatgpt = options.chatgptBinding ?? new ChatGPTBinding({ model: options.chatgptModel });
     }
     this.ffmpegManager = new FFmpegManager(options.dataPath);
@@ -1158,6 +1167,11 @@ export class GeminiService {
     signal: AbortSignal | undefined,
     call: (model: PiAiModel, apiKey: string, signal: AbortSignal | undefined) => Promise<string>,
   ): Promise<string> {
+    if (this.transcriptionOnly) {
+      throw new Error(
+        'This service is configured for transcription only; no AI provider is available for text tasks.',
+      );
+    }
     if (this.provider === 'chatgpt') {
       const binding = this.requireChatGPTBinding();
       const model = await binding.model();

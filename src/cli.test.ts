@@ -1151,3 +1151,93 @@ describe(
     });
   },
 );
+
+// The browser sign-in is replaced in the CLI subprocess by a preload that
+// patches the auth prototype; nothing reaches OpenAI or opens a browser.
+describe('listener codex login (deprecated alias) provider selection', () => {
+  let aliasDir: string;
+  let preloadPath: string;
+
+  before(() => {
+    aliasDir = makeTempDir('cli-codex-alias');
+    preloadPath = path.join(aliasDir, 'stub-chatgpt-signin.js');
+    fs.writeFileSync(
+      preloadPath,
+      `const { ChatGPTAuth } = require(${JSON.stringify(path.join(__dirname, 'chatgptAuth.js'))});
+const mode = process.env.STUB_CHATGPT_SIGNIN;
+ChatGPTAuth.prototype.signIn = async () => {
+  if (mode === 'fail') throw new Error('stub sign-in failed');
+  return { connected: true, planEnabled: mode === 'plan', profileId: 'p1', email: 'user@example.com' };
+};
+ChatGPTAuth.prototype.listModels = async () => [{ slug: 'gpt-stub', display_name: 'Stub' }];
+`,
+    );
+  });
+
+  after(() => rmDir(aliasDir));
+
+  function runCli(
+    args: string[],
+    dataDir: string,
+    mode: 'plan' | 'identity' | 'fail',
+  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    return new Promise((resolve) => {
+      const { spawn } = require('child_process') as typeof import('child_process');
+      const child = spawn('node', ['--require', preloadPath, cliPath, ...args], {
+        env: {
+          ...process.env,
+          NODE_ENV: 'test',
+          LISTENER_AI_PROVIDER: '',
+          LISTENER_DATA_PATH: dataDir,
+          STUB_CHATGPT_SIGNIN: mode,
+        },
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d: Buffer) => {
+        stdout += d.toString();
+      });
+      child.stderr.on('data', (d: Buffer) => {
+        stderr += d.toString();
+      });
+      child.on('close', (code: number | null) => resolve({ stdout, stderr, code }));
+    });
+  }
+
+  async function aiProviderAfter(
+    args: string[],
+    mode: 'plan' | 'identity' | 'fail',
+  ): Promise<{ provider: string; code: number | null; stderr: string }> {
+    const dataDir = fs.mkdtempSync(path.join(aliasDir, 'data-'));
+    const login = await runCli(args, dataDir, mode);
+    const get = await runCli(['config', 'get', 'aiProvider'], dataDir, mode);
+    return { provider: get.stdout.trim(), code: login.code, stderr: login.stderr };
+  }
+
+  it('selects ChatGPT after a sign-in that granted plan usage, as the old command did', async () => {
+    const result = await aiProviderAfter(['codex', 'login'], 'plan');
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /deprecated/);
+    assert.match(result.stderr, /Set aiProvider=chatgpt/);
+    assert.equal(result.provider, 'chatgpt');
+  });
+
+  it('leaves the selection unchanged after a failed sign-in', async () => {
+    const result = await aiProviderAfter(['codex', 'login'], 'fail');
+    assert.equal(result.code, 1);
+    assert.equal(result.provider, 'gemini');
+  });
+
+  it('leaves the selection unchanged after an identity-only sign-in', async () => {
+    const result = await aiProviderAfter(['codex', 'login'], 'identity');
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.provider, 'gemini');
+  });
+
+  it('never selects a provider from `listener chatgpt login` itself', async () => {
+    const result = await aiProviderAfter(['chatgpt', 'login'], 'plan');
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /listener config set aiProvider chatgpt/);
+    assert.equal(result.provider, 'gemini');
+  });
+});

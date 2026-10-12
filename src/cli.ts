@@ -358,7 +358,9 @@ function createAgentService(config: ConfigService, dataPath: string): AgentServi
 
 // DEPRECATED: `listener codex` predates Sign in with ChatGPT. It no longer
 // runs the old Codex OAuth flow; login/status/logout redirect to `listener
-// chatgpt` and everything else is refused.
+// chatgpt` and everything else is refused. `codex login` used to select its
+// provider, so the aliased login still selects ChatGPT once plan usage is
+// granted (`chatgpt login` itself never changes the selection).
 async function handleCodex(args: string[]): Promise<void> {
   const sub = args[0];
   process.stderr.write(
@@ -371,7 +373,7 @@ async function handleCodex(args: string[]): Promise<void> {
     process.stderr.write('Error: Usage: listener chatgpt login|logout|status\n');
     process.exit(1);
   }
-  await handleChatGPT([sub]);
+  await handleChatGPT([sub], { selectProviderOnLogin: sub === 'login' });
 }
 
 function readFlag(args: string[], flag: string): string | undefined {
@@ -402,7 +404,10 @@ function printableAuthorizeUrl(raw: string): string {
   }
 }
 
-async function handleChatGPT(args: string[]): Promise<void> {
+async function handleChatGPT(
+  args: string[],
+  opts: { selectProviderOnLogin?: boolean } = {},
+): Promise<void> {
   const sub = args[0];
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
@@ -543,7 +548,15 @@ async function handleChatGPT(args: string[]): Promise<void> {
         );
       }
     }
-    if (config.getAiProvider() !== 'chatgpt') {
+    // Only a sign-in that can run summaries is selected; an identity-only
+    // sign-in would leave no working text provider.
+    if (opts.selectProviderOnLogin && status.planEnabled && config.getAiProvider() !== 'chatgpt') {
+      config.setAiProvider('chatgpt');
+      process.stderr.write(
+        'Set aiProvider=chatgpt, as `listener codex login` did. ' +
+          'Transcription needs its own provider: run `listener config set transcriptionProvider gemini|openai|soniox`.\n',
+      );
+    } else if (config.getAiProvider() !== 'chatgpt') {
       process.stderr.write(
         'To use it, run `listener config set aiProvider chatgpt` ' +
           '(transcription then needs its own provider: gemini, openai, or soniox).\n',

@@ -128,7 +128,7 @@ Renderer-to-main contract (implemented in preload by the integration worker; the
 - Old `config.json` values (`aiProvider=codex`, `codexOAuth`, `codexModel`, `codexTranscriptionModel`, `transcriptionProvider=codex`) are kept on disk for explicit migration and are never used for a request.
 - Old tokens (stored `codexOAuth`, `CODEX_OAUTH_*` / `OPENAI_CODEX_*` environment variables, and `~/.codex/auth.json`) are never read. They cannot be converted anyway: SIWC uses a different client registration, audience, scopes, and endpoints. Every user gives fresh consent through Continue with ChatGPT.
 - `transcriptionProvider=codex` and `auto` under ChatGPT refuse with a message that names the explicit choices (`gemini`, `openai` + `openaiApiKey`, `soniox`). Nothing redirects audio or billing automatically.
-- CLI: `listener chatgpt login|logout|status|models|accounts|use <id>`. `listener codex login|status|logout` print a deprecation warning and forward to `listener chatgpt` (a new SIWC sign-in, never the old Codex login); other `listener codex` subcommands are refused.
+- CLI: `listener chatgpt login|logout|status|models|accounts|use <id>`. `listener codex login|status|logout` print a deprecation warning and forward to `listener chatgpt` (a new SIWC sign-in, never the old Codex login); other `listener codex` subcommands are refused. Like the old command, `listener codex login` selects `aiProvider=chatgpt`, but only after a sign-in that granted plan usage; a failed, cancelled, or identity-only sign-in leaves the selection unchanged. `listener chatgpt login` never changes `aiProvider`.
 
 ## 8. Privacy
 

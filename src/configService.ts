@@ -529,6 +529,22 @@ export class ConfigService {
     return !!this.getGeminiApiKey();
   }
 
+  // What blocks chunked live captions, or null when they can run. Snippets
+  // transcribe on the batch STT backend (ChatGPT carries no audio), so that is
+  // always required; the text provider only when the snippets are translated.
+  getChunkedLiveCaptionsBlocker(translate: boolean): 'transcription' | 'ai' | null {
+    if (!this.hasTranscriptionAuth()) return 'transcription';
+    if (translate && !this.hasAiAuth()) return 'ai';
+    return null;
+  }
+
+  // Why batch transcription cannot run as configured (see hasTranscriptionAuth).
+  describeMissingTranscriptionAuth(): string {
+    const resolution = this.getTranscriptionResolution();
+    if (!resolution.provider) return resolution.message;
+    return `Add the ${credentialLabelFor(resolution.provider)} for transcription.`;
+  }
+
   getNotionApiKey(): string | undefined {
     return this.read('notionApiKey');
   }

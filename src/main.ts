@@ -35,7 +35,7 @@ import { registerAllIpc } from './ipc/register';
 import { pathKeys } from './transcriptionJobs';
 import { DisplayDetectorService } from './displayDetectorService';
 import { GeminiService, TranscriptionError, type TranscriptionErrorPayload } from './geminiService';
-import { LiveSessionService } from './liveSessionService';
+import { LiveChunkedCaptionsUnavailableError, LiveSessionService } from './liveSessionService';
 import type { LiveSttProviderConfig } from './liveSttProvider';
 import { MeetingDetectorService } from './meetingDetectorService';
 import { MenuBarManager } from './menuBarManager';
@@ -357,8 +357,10 @@ function trackFinalize(work: Promise<void>): void {
   pendingFinalize = pendingFinalize.then(() => work).catch(() => {});
 }
 
-function createGeminiService(): GeminiService | null {
-  if (!configService.hasAiAuth()) return null;
+function createGeminiService(opts: { transcriptionOnly?: boolean } = {}): GeminiService | null {
+  if (opts.transcriptionOnly ? !configService.hasTranscriptionAuth() : !configService.hasAiAuth()) {
+    return null;
+  }
   // An unresolvable transcription selection (ChatGPT + auto, retired codex)
   // still builds the service: summary, report regeneration and the agent
   // work, and transcription refuses with the resolution's message.
@@ -376,6 +378,7 @@ function createGeminiService(): GeminiService | null {
     proModel: configService.getGeminiModel(),
     flashModel: configService.getGeminiFlashModel(),
     thinkingLevel: configService.getGeminiThinkingLevel(),
+    transcriptionOnly: opts.transcriptionOnly,
     dataPath: app.getPath('userData'),
   });
 }
@@ -389,6 +392,31 @@ function ensureGeminiService(): GeminiService | null {
   if (geminiService) return geminiService;
   geminiService = createGeminiService();
   return geminiService;
+}
+
+// Chunked live-caption snippets need only the batch STT backend, so with no
+// text-provider credentials (signed-out ChatGPT plus an explicit OpenAI or
+// Soniox backend, say) a transcription-only service still serves them. It
+// holds no ChatGPT binding and refuses every text task.
+let liveTranscriptionService: GeminiService | null = null;
+function ensureLiveTranscriptionService(): GeminiService | null {
+  const service = ensureGeminiService();
+  if (service) return service;
+  liveTranscriptionService ??= createGeminiService({ transcriptionOnly: true });
+  return liveTranscriptionService;
+}
+
+// Why chunked live captions cannot run as configured (null when they can).
+function chunkedLiveCaptionsIssue(translate: boolean): string | null {
+  syncChatGPTStatusForNewWork();
+  switch (configService.getChunkedLiveCaptionsBlocker(translate)) {
+    case 'transcription':
+      return configService.describeMissingTranscriptionAuth();
+    case 'ai':
+      return `${formatAiCredentialsError()} Turn off translation to show captions without it.`;
+    default:
+      return null;
+  }
 }
 
 async function resolveOpenAiRealtimeBearer(
@@ -413,6 +441,10 @@ async function createOpenAiRealtimeClientConfigForLive(config: LiveSttProviderCo
 const liveSessionService = new LiveSessionService({
   getDataPath: () => app.getPath('userData'),
   ensureGeminiService,
+  ensureTranscriptionService: ensureLiveTranscriptionService,
+  // Snippets only: once a session is running, an untranslatable caption is
+  // kept with a per-segment translation error rather than ending captions.
+  getChunkedCaptionsIssue: () => chunkedLiveCaptionsIssue(false),
   getAgentService,
   formatAiCredentialsError,
   getLiveSttConfig: () => ({
@@ -1304,6 +1336,7 @@ function applyConfigSideEffects(changed: Partial<AppConfig>): void {
     changed.sonioxApiKey !== undefined
   ) {
     geminiService = createGeminiService();
+    liveTranscriptionService = null;
     agentService = null;
   }
   if (changed.globalShortcut !== undefined) {
@@ -1997,29 +2030,28 @@ ipcMain.handle('system-audio-stop', async () => {
 
 ipcMain.handle('live-session-start', async (_, opts?: { title?: string; translate?: boolean }) => {
   try {
-    // The chunked fallback transcribes snippets on the batch STT backend, so
-    // it needs that backend too (ChatGPT itself carries no audio).
-    if (
-      !configService.hasStreamingLiveSttAuth() &&
-      !(configService.hasAiAuth() && configService.hasTranscriptionAuth())
-    ) {
-      const reason = !configService.hasAiAuth()
-        ? formatAiCredentialsError()
-        : (configService.getTranscriptionResolution().message ??
-          `Add the ${configService.getMissingConfigs().join(', ')} credentials.`);
+    const translate = opts?.translate !== false;
+    // Without streaming credentials the session is chunked captions: snippets
+    // on the batch STT backend (ChatGPT itself carries no audio), plus the
+    // text provider only to translate them. The issue check also refreshes
+    // the ChatGPT status, so a CLI sign-in or sign-out counts.
+    const chunkedIssue = chunkedLiveCaptionsIssue(translate);
+    if (!configService.hasStreamingLiveSttAuth() && chunkedIssue) {
       return {
         success: false,
-        error: `Live transcription auth is not configured, and fallback is unavailable: ${reason}`,
+        error: `Live transcription auth is not configured, and fallback is unavailable: ${chunkedIssue}`,
       };
     }
     const session = await liveSessionService.start({
       title: typeof opts?.title === 'string' ? opts.title : undefined,
-      translate: opts?.translate !== false,
+      translate,
     });
     return { success: true, session };
   } catch (error) {
     console.error('live-session-start failed:', error);
-    reportError(error, { operation: 'liveSession.start', severity: 'error' });
+    if (!(error instanceof LiveChunkedCaptionsUnavailableError)) {
+      reportError(error, { operation: 'liveSession.start', severity: 'error' });
+    }
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -2036,7 +2068,9 @@ ipcMain.handle(
       return { success: true, session };
     } catch (error) {
       console.error('live-session-realtime-failed failed:', error);
-      reportError(error, { operation: 'liveSession.realtimeFallback', severity: 'warning' });
+      if (!(error instanceof LiveChunkedCaptionsUnavailableError)) {
+        reportError(error, { operation: 'liveSession.realtimeFallback', severity: 'warning' });
+      }
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
