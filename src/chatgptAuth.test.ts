@@ -359,6 +359,16 @@ async function assertAuthError(promise: Promise<unknown>, code: string): Promise
   assert.fail(`expected ChatGPTAuthError(${code})`);
 }
 
+// Revocation after a failed sign-in is best effort and not awaited, so wait
+// for the expected count (or briefly, when none is expected).
+async function settledRevokes(fake: FakeOpenAI, expected: number) {
+  const revokes = () => fake.requests.filter((r) => r.path === '/api/accounts/oauth/revoke');
+  for (let i = 0; i < 50 && revokes().length < Math.max(expected, 1); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return revokes();
+}
+
 describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
   const fake = new FakeOpenAI();
   let dataDir: string;
@@ -594,6 +604,27 @@ describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
         !fs.existsSync(path.join(dataDir, 'chatgpt', 'credentials')) ||
           fs.readdirSync(path.join(dataDir, 'chatgpt', 'credentials')).length === 0,
       );
+      // Nothing was saved, so the brand-new grant is revoked best effort.
+      const revokes = await settledRevokes(fake, 1);
+      assert.equal(revokes.length, 1);
+      assert.equal(revokes[0].form!.get('client_id'), 'oaiapp_test1');
+    });
+
+    it('never revokes a reauthorization grant whose ID token fails verification', async () => {
+      const auth = new ChatGPTAuth(dataDir, fake.deps());
+      const alice = await auth.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser });
+      const before = fs.readFileSync(credentialFile(dataDir, alice.profileId!), 'utf8');
+      fake.idTokenClaims = (c) => ({ ...c, nonce: 'other-nonce' });
+      await assertAuthError(
+        auth.signIn({
+          openBrowser: (await browser(fake, ALICE)).openBrowser,
+          profileId: alice.profileId,
+        }),
+        'invalid_id_token',
+      );
+      assert.equal(fs.readFileSync(credentialFile(dataDir, alice.profileId!), 'utf8'), before);
+      assert.equal((await settledRevokes(fake, 0)).length, 0);
+      assert.ok(await auth.getAccessToken(), 'the earlier grant still works');
     });
 
     for (const [name, mutate] of [
@@ -1039,7 +1070,7 @@ describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
       assert.equal(inferenceRequests(), 0);
 
       // Nothing to revoke: sign-out clears locally and ends the pinned session.
-      assert.deepEqual(await auth.signOut(), { revoked: false, signedIn: false });
+      assert.deepEqual(await auth.signOut(), { revoked: false, signedIn: false, removed: true });
       assert.equal(fake.requests.filter((r) => r.path === '/api/accounts/oauth/revoke').length, 0);
       assert.equal((await auth.getStatus()).connected, false);
       await assertAuthError(session.getAccessToken(), 'session_ended');
@@ -1064,7 +1095,11 @@ describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
           await assertAuthError(auth.listModels(), 'plan_grant_incomplete');
           assert.equal(inferenceRequests(), 0, omit.join());
           // An access token without a refresh token is not revocable here.
-          assert.deepEqual(await auth.signOut(), { revoked: false, signedIn: false });
+          assert.deepEqual(await auth.signOut(), {
+            revoked: false,
+            signedIn: false,
+            removed: true,
+          });
         } finally {
           rmDir(dir);
         }
@@ -1077,6 +1112,61 @@ describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
       const { openBrowser } = await browser(fake, ALICE);
       await assertAuthError(auth.signIn({ openBrowser }), 'invalid_token_response');
       assert.deepEqual(await auth.listProfiles(), []);
+      // The refresh token it did carry is revoked so the grant does not linger.
+      const revokes = await settledRevokes(fake, 1);
+      assert.equal(revokes.length, 1);
+      assert.equal(revokes[0].form!.get('token_type_hint'), 'refresh_token');
+      assert.equal(revokes[0].form!.get('client_id'), 'oaiapp_test1');
+    });
+
+    it('revokes the grant of a pending-registration retry that fails before saving', async () => {
+      const auth = new ChatGPTAuth(dataDir, fake.deps());
+      fake.exchangeOmit = ['id_token'];
+      await assertAuthError(
+        auth.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser }),
+        'invalid_token_response',
+      );
+      assert.equal((await settledRevokes(fake, 1)).length, 1);
+      const index = readJson(path.join(dataDir, 'chatgpt', 'profiles.json'));
+      assert.equal(index.registrations[0].pending, true);
+
+      // The retry reuses the pending client; each failed attempt revokes its own grant.
+      await assertAuthError(
+        auth.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser }),
+        'invalid_token_response',
+      );
+      assert.equal((await settledRevokes(fake, 2)).length, 2);
+      fake.exchangeOmit = [];
+      fake.idTokenClaims = (c) => ({ ...c, nonce: 'other-nonce' });
+      await assertAuthError(
+        auth.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser }),
+        'invalid_id_token',
+      );
+      const revokes = await settledRevokes(fake, 3);
+      assert.equal(revokes.length, 3);
+      assert.ok(revokes.every((r) => r.form!.get('client_id') === 'oaiapp_test1'));
+      assert.equal(fake.grants('authorization_code').length, 3);
+      assert.ok(
+        fake.grants('authorization_code').every((g) => g.form!.get('client_id') === 'oaiapp_test1'),
+      );
+      assert.deepEqual(await auth.listProfiles(), []);
+    });
+
+    it('keeps the earlier grant when a reauthorization response has no ID token', async () => {
+      const auth = new ChatGPTAuth(dataDir, fake.deps());
+      const alice = await auth.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser });
+      const before = fs.readFileSync(credentialFile(dataDir, alice.profileId!), 'utf8');
+      fake.exchangeOmit = ['id_token'];
+      await assertAuthError(
+        auth.signIn({
+          openBrowser: (await browser(fake, ALICE)).openBrowser,
+          profileId: alice.profileId,
+        }),
+        'invalid_token_response',
+      );
+      assert.equal(fs.readFileSync(credentialFile(dataDir, alice.profileId!), 'utf8'), before);
+      assert.equal((await settledRevokes(fake, 0)).length, 0);
+      assert.ok(await auth.getAccessToken(), 'the earlier grant still works');
     });
 
     it('enables plan usage through an explicit consent request on the same registration', async () => {
@@ -1330,6 +1420,7 @@ describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
         assert.deepEqual(result, {
           revoked: false,
           signedIn: true,
+          removed: true,
           revocationError: 'temporarily_unavailable',
         });
         assert.equal(fs.existsSync(credentialFile(dataDir, status.profileId!)), false);
@@ -1554,7 +1645,7 @@ describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
       assert.equal(fs.existsSync(credentialFile(dataDir, alice.profileId!)), false);
 
       gated.release();
-      assert.deepEqual(await signingOut, { revoked: true, signedIn: true });
+      assert.deepEqual(await signingOut, { revoked: true, signedIn: true, removed: true });
     });
 
     it('keeps the local sign-out and reports it unconfirmed when a delayed revocation fails', async () => {
@@ -1596,7 +1687,7 @@ describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
 
     it('reports nothing to revoke when no session exists', async () => {
       const auth = new ChatGPTAuth(dataDir, fake.deps());
-      assert.deepEqual(await auth.signOut(), { revoked: false, signedIn: false });
+      assert.deepEqual(await auth.signOut(), { revoked: false, signedIn: false, removed: false });
     });
   });
 

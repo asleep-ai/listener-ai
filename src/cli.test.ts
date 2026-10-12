@@ -1170,6 +1170,9 @@ ChatGPTAuth.prototype.signIn = async () => {
   return { connected: true, planEnabled: mode === 'plan', profileId: 'p1', email: 'user@example.com' };
 };
 ChatGPTAuth.prototype.listModels = async () => [{ slug: 'gpt-stub', display_name: 'Stub' }];
+if (process.env.STUB_CHATGPT_SIGNOUT) {
+  ChatGPTAuth.prototype.signOut = async () => JSON.parse(process.env.STUB_CHATGPT_SIGNOUT);
+}
 `,
     );
   });
@@ -1180,6 +1183,7 @@ ChatGPTAuth.prototype.listModels = async () => [{ slug: 'gpt-stub', display_name
     args: string[],
     dataDir: string,
     mode: 'plan' | 'identity' | 'fail',
+    signOutResult?: object,
   ): Promise<{ stdout: string; stderr: string; code: number | null }> {
     return new Promise((resolve) => {
       const { spawn } = require('child_process') as typeof import('child_process');
@@ -1190,6 +1194,7 @@ ChatGPTAuth.prototype.listModels = async () => [{ slug: 'gpt-stub', display_name
           LISTENER_AI_PROVIDER: '',
           LISTENER_DATA_PATH: dataDir,
           STUB_CHATGPT_SIGNIN: mode,
+          STUB_CHATGPT_SIGNOUT: signOutResult ? JSON.stringify(signOutResult) : '',
         },
       });
       let stdout = '';
@@ -1232,6 +1237,30 @@ ChatGPTAuth.prototype.listModels = async () => [{ slug: 'gpt-stub', display_name
     const result = await aiProviderAfter(['codex', 'login'], 'identity');
     assert.equal(result.code, 0, result.stderr);
     assert.equal(result.provider, 'gemini');
+  });
+
+  it('reports an identity-only sign-out as signed out, not as nothing to remove', async () => {
+    const dataDir = fs.mkdtempSync(path.join(aliasDir, 'data-'));
+    const result = await runCli(['chatgpt', 'logout'], dataDir, 'identity', {
+      revoked: false,
+      signedIn: false,
+      removed: true,
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /^Signed out of ChatGPT\.$/m);
+    assert.doesNotMatch(result.stderr, /No ChatGPT sign-in to remove/);
+    assert.doesNotMatch(result.stderr, /did not confirm the revocation/);
+  });
+
+  it('reports nothing to remove when no sign-in was stored', async () => {
+    const dataDir = fs.mkdtempSync(path.join(aliasDir, 'data-'));
+    const result = await runCli(['chatgpt', 'logout'], dataDir, 'identity', {
+      revoked: false,
+      signedIn: false,
+      removed: false,
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /No ChatGPT sign-in to remove/);
   });
 
   it('never selects a provider from `listener chatgpt login` itself', async () => {

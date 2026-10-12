@@ -154,8 +154,10 @@ export type ChatGPTSignOutResult = {
   revoked: boolean;
   // Whether a revocable grant (refresh token) existed. An identity-only
   // sign-in has nothing to revoke: signOut clears it locally and reports
-  // { revoked: false, signedIn: false }.
+  // { revoked: false, signedIn: false, removed: true }.
   signedIn: boolean;
+  // Whether a local sign-in (any stored credentials) was cleared.
+  removed: boolean;
   // Sanitized reason when a revocation was attempted and not confirmed.
   revocationError?: string;
 };
@@ -515,19 +517,11 @@ export class ChatGPTAuth {
       }
       throw error;
     }
-    // The ID token is the only mandatory part: a user who declines plan usage
-    // can receive a verified identity with no access or refresh token.
-    if (!tokens.idToken) {
-      throw new ChatGPTAuthError(
-        'invalid_token_response',
-        'ChatGPT returned an incomplete sign-in response.',
-      );
-    }
-    // Best effort, not awaited: a brand-new registration has no earlier grant
-    // this could affect. A reauthorization grant is left alone.
-    const revokeIfCancelledNew = (error: unknown) => {
-      const cancelled = error instanceof ChatGPTAuthError && error.code === 'cancelled';
-      if (cancelled && target.mode === 'new' && tokens.refreshToken) {
+    // Best effort, not awaited: a brand-new or still-pending registration has
+    // no completed earlier grant this could affect. A reauthorization grant is
+    // left alone.
+    const revokeNewGrant = () => {
+      if (target.mode !== 'reauth' && tokens.refreshToken) {
         void this.revoke(
           discovery,
           tokens.refreshToken,
@@ -536,6 +530,18 @@ export class ChatGPTAuth {
         ).catch(() => {});
       }
     };
+    const revokeIfCancelledNew = (error: unknown) => {
+      if (error instanceof ChatGPTAuthError && error.code === 'cancelled') revokeNewGrant();
+    };
+    // The ID token is the only mandatory part: a user who declines plan usage
+    // can receive a verified identity with no access or refresh token.
+    if (!tokens.idToken) {
+      revokeNewGrant();
+      throw new ChatGPTAuthError(
+        'invalid_token_response',
+        'ChatGPT returned an incomplete sign-in response.',
+      );
+    }
     let claims: { sub: string; email?: string };
     try {
       claims = await this.verifyIdToken(
@@ -547,7 +553,9 @@ export class ChatGPTAuth {
         signal,
       );
     } catch (error) {
-      revokeIfCancelledNew(error);
+      // Nothing is saved without a verified identity, so a new grant would
+      // only linger as a connected app.
+      revokeNewGrant();
       throw error;
     }
 
@@ -1013,7 +1021,7 @@ export class ChatGPTAuth {
     if (!registration) {
       if (profileId)
         throw new ChatGPTAuthError('profile_not_found', 'That ChatGPT account is not saved.');
-      return { revoked: false, signedIn: false };
+      return { revoked: false, signedIn: false, removed: false };
     }
     // Order matters:
     //   1. Stop this account's in-flight sign-ins in this process (an Enable
@@ -1029,13 +1037,16 @@ export class ChatGPTAuth {
     //      usable as a credential; revocation writes nothing, so it cannot
     //      clobber a sign-in that lands meanwhile.
     for (const attempt of this.signIns.get(registration.id) ?? []) attempt.abort();
+    let removed = false;
     const refreshToken = await this.guardStore(() =>
       this.store.withProfileLock(registration.id, () => {
         let record: ChatGPTCredentialRecord | undefined;
         try {
           record = this.store.readCredentials(registration.id);
+          removed = record !== undefined;
         } catch {
           record = undefined;
+          removed = true;
         }
         // Tokens (including the retained ID token) are cleared whether or not
         // revocation is confirmed; the registration and host ID are kept so
@@ -1047,7 +1058,11 @@ export class ChatGPTAuth {
           : undefined;
       }),
     );
-    const result: ChatGPTSignOutResult = { revoked: false, signedIn: Boolean(refreshToken) };
+    const result: ChatGPTSignOutResult = {
+      revoked: false,
+      signedIn: Boolean(refreshToken),
+      removed,
+    };
     if (refreshToken) {
       try {
         const deadline = AbortSignal.timeout(this.deps.lockedNetworkBudgetMs);

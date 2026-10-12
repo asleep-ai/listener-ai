@@ -441,8 +441,11 @@ async function handleChatGPT(
   if (sub === 'logout') {
     const result = await auth.signOut(profileFlag).catch(chatGPTFailure);
     config.clearLegacyCodexSignIn();
-    if (!result.signedIn) {
+    if (!result.removed) {
       process.stderr.write('No ChatGPT sign-in to remove.\n');
+    } else if (!result.signedIn) {
+      // Identity-only sign-in: cleared locally, with no grant to revoke.
+      process.stderr.write('Signed out of ChatGPT.\n');
     } else if (result.revoked) {
       process.stderr.write('Signed out of ChatGPT and revoked the sign-in.\n');
     } else {
