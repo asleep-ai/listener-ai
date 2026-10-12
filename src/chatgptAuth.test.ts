@@ -2057,6 +2057,39 @@ describe('ChatGPTBinding session watch during an in-flight Responses stream', ()
     assert.equal(await job, 'full summary');
   });
 
+  it('keeps the session when a non-401 response mentions 401 or invalid_user', async () => {
+    const auth = new ChatGPTAuth(dataDir, fake.deps());
+    await auth.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser });
+    const binding = new ChatGPTBinding({ auth, sessionPollMs: POLL_MS });
+    const cases: Array<{ status: number; body: unknown; code: string }> = [
+      // The text classifier reads a standalone 401 as unauthorized.
+      { status: 500, body: { error: { message: 'upstream returned 401' } }, code: 'unauthorized' },
+      {
+        status: 403,
+        body: { error: { message: 'no', code: 'subscription_sharing_invalid_user' } },
+        code: 'invalid_user',
+      },
+    ];
+    for (const { status, body, code } of cases) {
+      await assert.rejects(
+        summarize(binding, rejecting(status, body).fetchImpl),
+        (error: unknown) => {
+          assert.ok(error instanceof ChatGPTInferenceError, String(error));
+          assert.equal(error.code, code);
+          assert.equal(error.status, status);
+          return true;
+        },
+      );
+      const after = auth.getStatusSync();
+      assert.equal(after.connected && after.planEnabled, true, `HTTP ${status} kept the sign-in`);
+    }
+    const stream = heldStream();
+    const job = summarize(binding, stream.fetchImpl);
+    await stream.startedPromise;
+    stream.finish();
+    assert.equal(await job, 'full summary');
+  });
+
   it('does not end a newer sign-in when the old session gets a late 401', async () => {
     const app = new ChatGPTAuth(dataDir, fake.deps());
     const alice = await app.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser });

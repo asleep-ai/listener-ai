@@ -109,7 +109,9 @@ function mapBoundAuthError(error: unknown): unknown {
 }
 
 // Responses API failures that reject the bearer itself: the user is told to
-// sign in again, so the rejected session must actually end.
+// sign in again, so the rejected session must actually end. Only an actual
+// HTTP 401 qualifies (see `run`): the text classifier also matches a "401"
+// inside another status's body, and a non-401 must never clear credentials.
 const REAUTH_INFERENCE_CODES = new Set<ChatGPTInferenceErrorCode>(['unauthorized', 'invalid_user']);
 
 /** How often an in-flight call re-checks that its sign-in is still current. */
@@ -235,7 +237,11 @@ export class ChatGPTBinding {
       return result;
     } catch (error) {
       if (error instanceof ChatGPTBindingError) throw error;
-      if (error instanceof ChatGPTInferenceError && REAUTH_INFERENCE_CODES.has(error.code)) {
+      if (
+        error instanceof ChatGPTInferenceError &&
+        error.status === 401 &&
+        REAUTH_INFERENCE_CODES.has(error.code)
+      ) {
         // End the session that sent the rejected bearer, so status and
         // Settings stop treating it as signed in. A session that already
         // ended another way (sign-out, a newer sign-in) is left to the
