@@ -84,7 +84,9 @@ provider call was made and no message was sent.
 
 The original implementation was authored by Claude. The following local
 corrections and regressions were authored by Codex after explicit user routing
-authorization; no independent review or native execution is claimed here.
+authorization. Claude then reviewed them against the source, together with a
+separate read-only Codex review, and kept them unchanged. No native execution is
+claimed here.
 
 - A joining automatic request promotes the existing job's observable origin and
   preserves the first automatic recording title. A main-owned finalization gate
@@ -99,12 +101,13 @@ authorization; no independent review or native execution is claimed here.
 | Follow-up check | Result |
 | --- | --- |
 | Baseline regressions before product edits | 8 FAIL / 18 PASS across the IPC and modal suites: early and post-commit auto promotion; stale failure, cancellation, rejection, ffmpeg failure/recovery; current-session cancellation |
-| Latest `pnpm test` | 1056/1056 PASS |
-| `pnpm run build`, `build:check-renderer`, `lint`, `format:check`, `git diff --check` | PASS |
+| `pnpm test` before rebasing onto main | 1056/1056 PASS |
+| `pnpm test` after rebasing onto main (adds the settings reorganization tests) | 1073/1073 PASS |
+| `pnpm run build`, `build:check-renderer`, `lint`, `format:check`, `git diff --check` after rebasing | PASS |
 | New hidden Electron cases in `e2e/transcription-reload.spec.ts` | 7 authored, NOT-RUN pending separate executor |
-| Playwright discovery (`--list`) | 22 cases discovered, including all 7 new cases; no Electron launched |
+| Playwright discovery (`--list`) | 22 cases in `e2e/transcription-reload.spec.ts`, including all 7 new cases; no Electron launched |
 | Optional standalone strict E2E type check | Blocked by two existing diagnostics in `e2e/support/launch.ts` and the pre-existing saved-source fixture; no new-case diagnostics |
-| Independent review, signed commit, push, CI, squash merge | Pending coordinator |
+| Push, CI, squash merge | Pending coordinator |
 
 New native acceptance covers manual-first automatic joins before provider
 completion and after commit, alias repeats, reload restoration, exactly-once
