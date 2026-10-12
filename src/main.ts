@@ -25,6 +25,7 @@ import { loginCodexOAuth } from './codexOAuth';
 import { getDataPath } from './dataPath';
 import { maybeAutoSync, refreshGoogleSyncTimer } from './ipc/googleDrive';
 import { registerAllIpc } from './ipc/register';
+import { pathKeys } from './transcriptionJobs';
 import { DisplayDetectorService } from './displayDetectorService';
 import { GeminiService, TranscriptionError, type TranscriptionErrorPayload } from './geminiService';
 import { LiveSessionService } from './liveSessionService';
@@ -1058,6 +1059,7 @@ registerAllIpc({
   broadcastConfigChanged,
   getNotionService,
   getSlackService,
+  openExternal: (url) => void shell.openExternal(url),
 });
 
 // Audio capture runs in the renderer via MediaRecorder; chunks stream over IPC as
@@ -1730,6 +1732,9 @@ ipcMain.handle('get-recordings', async () => {
       size: number;
       createdAt: Date;
       modifiedAt: Date;
+      // Same keys the transcription job registry matches on, so the renderer
+      // can tie this row to a job started through another path spelling.
+      aliases: string[];
     }> = [];
     for (const file of files) {
       if (isTranscriptionTempFile(file)) continue;
@@ -1758,6 +1763,7 @@ ipcMain.handle('get-recordings', async () => {
         size: stats.size,
         createdAt: stats.birthtime,
         modifiedAt: stats.mtime,
+        aliases: pathKeys(filePath),
       });
     }
 

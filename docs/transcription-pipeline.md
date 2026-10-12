@@ -28,6 +28,72 @@ All file entrypoints (auto-record, modal, regenerate, drag-drop, IPC, CLI,
 merge) converge on `GeminiService.transcribeAudio` → `transcribeWithTwoSteps`
 (`src/geminiService.ts`).
 
+In the app, each `transcribe-audio` or `merge-recordings` call runs as a job
+in the main-owned registry (`src/transcriptionJobs.ts`). The job keeps its
+progress, cancellation and result in the main process, so it survives a
+renderer reload or a recording-list refresh, and the renderer rebuilds its
+row progress, Cancel button, auto-mode status and merge modal from a
+`get-transcription-jobs` snapshot plus `transcription-job-changed` events.
+Every job change carries a registry-wide revision. A late snapshot therefore
+cannot make a finished job look like it is running again. The renderer keeps
+at most 20 finished jobs and ignores late events for the ones it dropped.
+It keeps every dropped id until its one load snapshot has been applied, so a
+late snapshot cannot revive a job that finished meanwhile. A running job that
+the snapshot lists is still accepted, however old its revision. A row that
+showed a job's progress through a path the job no longer answers to returns
+to its own state. A
+row whose recording has a running job is drawn without reading its saved
+note, because the job may hold that note's lock while it saves. The list is
+rebuilt from disk whenever a job ends.
+
+- A request for a recording that is already transcribing joins that job. It
+  never aborts and restarts the job. The requested, resolved and real
+  (symlink-free) paths and the renamed path all identify the job. Snapshots
+  list these keys as `aliases`, and `get-recordings` lists the same keys for
+  each row, so the renderer matches rows to jobs on the keys main uses.
+  Identity is never inferred beyond what the filesystem reports.
+- A path belongs to one running job only. A name that already holds a file,
+  or that another running job answers to or has reserved, is refused without
+  touching the filesystem. Before renaming an untitled recording, the job
+  reserves the new name privately, before any file is touched. The
+  reservation stops other jobs from claiming the name, but it is not listed
+  in snapshots or events, and nothing joins or cancels through it. A request
+  or cancel for that name waits until the move settles, so it never reads a
+  half-created copy and never reaches a job that only tried to take the name.
+  Once the file is ours (the hard link exists, or the exclusive copy has
+  finished), the name becomes one of the job's paths. If the move fails, the
+  reservation is dropped. For a file that does not exist yet, the job's keys
+  include the real parent directory plus the name, so a symlinked spelling
+  and the canonical one match. The rename
+  and its rollback on cancel never replace another file: they claim the
+  destination with a hard link (an exclusive copy where hard links are not
+  supported), and only then remove the old name. If the suggested name is
+  taken, or another running job owns that path, the recording keeps its
+  original name. If the original name was taken during a cancelled run, the
+  audio stays at the renamed path and the response carries `newFilePath`.
+- Cancel aborts the job only until the note is saved. After that commit
+  point, `cancel-transcription` returns `{ success: false, reason:
+  'committed' }` and the job finishes normally. A request that arrives while
+  a cancel is still rolling back, through any of the job's paths, joins that
+  job and gets the same cancelled result. Nothing restarts automatically. A
+  new run starts only after the job has ended (the row offers Transcribe
+  again then). To restart deliberately, cancel the job and start it again
+  once it has ended, or regenerate it after it finishes.
+- Auto mode passes `{ autoExport: true }`. Once the note is saved, the job
+  itself runs the configured Notion upload and Slack send through the same
+  guarded functions as the export IPC (`uploadNoteToNotion` /
+  `sendNoteToSlack` in `src/ipc/noteExports.ts`), then opens the Notion page.
+  A Notion failure is still passed to Slack. Each destination's outcome is
+  recorded on the job and in the response's `exports` field. An export
+  failure never marks the saved transcription as failed.
+- Merge stays single-flight: while a merge job runs, another merge returns
+  `merge-busy`. A merge's source recordings are not aliases of the merge job,
+  so they can still be transcribed separately.
+
+The registry is in memory. Jobs keep running across renderer reloads, but not
+across an app quit, and the app does not resume them on the next launch.
+Finished jobs stay listed for up to 15 minutes (at most 20 of them).
+
 ### 1. Segmentation (duration > `maxSegmentSeconds`, or file > `maxBytes`)
 
 Both thresholds are properties of the selected batch backend

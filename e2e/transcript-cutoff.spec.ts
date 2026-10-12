@@ -1,24 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { type ElectronApplication, type Page, _electron as electron } from 'playwright';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-
-// An unpackaged launch also opens a DevTools window, which can be the first
-// window Playwright sees, so wait for the page that loaded the app itself.
-async function appWindow(electronApp: ElectronApplication): Promise<Page> {
-  let page: Page | undefined;
-  await expect
-    .poll(
-      () => {
-        page = electronApp.windows().find((w) => w.url().endsWith('/renderer/index.html'));
-        return page;
-      },
-      { timeout: 30_000, message: 'The application window did not open' },
-    )
-    .toBeTruthy();
-  return page!;
-}
+import { appWindow, launchApp } from './support/launch';
 
 test('dragging in the saved transcript previews a reversible tail cutoff', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'listener-cutoff-e2e-'));
@@ -66,11 +50,10 @@ test('dragging in the saved transcript previews a reversible tail cutoff', async
   const originalMeta = readFileSync(metaPath, 'utf8');
   const originalTranscript = readFileSync(transcriptPath, 'utf8');
 
-  const electronApp = await electron.launch({
-    executablePath: require('electron') as string,
-    args: ['.', '--disable-gpu', '--no-sandbox'],
-    cwd: process.cwd(),
-    env: { ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: dataDir },
+  const electronApp = await launchApp({
+    ...process.env,
+    NODE_ENV: 'test',
+    LISTENER_DATA_PATH: dataDir,
   });
   try {
     const window = await appWindow(electronApp);
@@ -152,11 +135,10 @@ test('reopened cut report uses its new title and does not revive old sidecar fie
     }),
   );
 
-  const electronApp = await electron.launch({
-    executablePath: require('electron') as string,
-    args: ['.', '--disable-gpu', '--no-sandbox'],
-    cwd: process.cwd(),
-    env: { ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: dataDir },
+  const electronApp = await launchApp({
+    ...process.env,
+    NODE_ENV: 'test',
+    LISTENER_DATA_PATH: dataDir,
   });
   try {
     const window = await appWindow(electronApp);

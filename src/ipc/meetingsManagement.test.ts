@@ -77,6 +77,7 @@ describe('meetingsManagement.register', () => {
       broadcastConfigChanged: () => {},
       getNotionService: () => null,
       getSlackService: () => null,
+      openExternal: () => {},
     });
     assert.deepEqual([...handlers.keys()].sort(), [
       'delete-meeting',

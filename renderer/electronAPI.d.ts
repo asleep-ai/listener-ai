@@ -24,6 +24,9 @@ export type {
   TranscriptCutoffApiResult,
   TranscriptCutoffNotePayload,
   TranscriptionErrorPayload,
+  TranscriptionJobExports,
+  TranscriptionJobSnapshot,
+  TranscriptionJobsList,
 } from '../src/electronApiTypes';
 
 declare global {
