@@ -82,11 +82,11 @@ provider call was made and no message was sent.
 
 ## Review follow-ups: automatic joins and modal isolation
 
-The original implementation was authored by Claude. The following local
+The original implementation was authored by Claude. The following
 corrections and regressions were authored by Codex after explicit user routing
 authorization. Claude then reviewed them against the source, together with a
-separate read-only Codex review, and kept them unchanged. No native execution is
-claimed here.
+separate read-only Codex review, and kept them unchanged. The branch was then
+rebased onto main at `c1d2f83` (#220) without conflicts.
 
 - A joining automatic request promotes the existing job's observable origin and
   preserves the first automatic recording title. A main-owned finalization gate
@@ -95,8 +95,15 @@ claimed here.
   with its no-export decision.
 - Every modal terminal outcome and rejection checks session ownership.
   Cancellation is silent, stale success still refreshes the list, button cleanup
-  remains unconditional, and ffmpeg recovery/retry checks ownership at each
-  asynchronous boundary.
+  remains unconditional, and ffmpeg recovery/retry checks ownership before the
+  download dialog opens and before the retry request.
+
+The separate review also asked for the ffmpeg download dialog to close itself
+when its session goes stale and the download then fails. Claude declined: the
+dialog is modal, so the page behind it is inert, and it reports the app-wide
+ffmpeg download rather than this note's transcript. Hiding it would hide a real
+download failure. The stale transcription result is still dropped after the
+user closes the dialog.
 
 | Follow-up check | Result |
 | --- | --- |
@@ -104,17 +111,36 @@ claimed here.
 | `pnpm test` before rebasing onto main | 1056/1056 PASS |
 | `pnpm test` after rebasing onto main (adds the settings reorganization tests) | 1073/1073 PASS |
 | `pnpm run build`, `build:check-renderer`, `lint`, `format:check`, `git diff --check` after rebasing | PASS |
-| New hidden Electron cases in `e2e/transcription-reload.spec.ts` | 7 authored, NOT-RUN pending separate executor |
-| Playwright discovery (`--list`) | 22 cases in `e2e/transcription-reload.spec.ts`, including all 7 new cases; no Electron launched |
-| Optional standalone strict E2E type check | Blocked by two existing diagnostics in `e2e/support/launch.ts` and the pre-existing saved-source fixture; no new-case diagnostics |
-| Push, CI, squash merge | Pending coordinator |
+| Hidden Electron acceptance on macOS, rebased build | 37/37 PASS (detail below) |
+| Scripted-dialog launcher follow-up | 3/3 PASS (detail below) |
+| Optional standalone strict E2E type check | Four existing diagnostics only (`e2e/support/launch.ts` env type, two saved-note fixtures without `emoji`, `getSelection` on a shadowed `window`); none in new code |
 
-New native acceptance covers manual-first automatic joins before provider
-completion and after commit, alias repeats, reload restoration, exactly-once
-Notion/Slack export, and stale modal failure/cancellation/IPC rejection/ffmpeg
-recovery. Run `pnpm exec playwright test e2e/transcription-reload.spec.ts` after
-building, using the existing hidden launcher and scripted dialogs. The earlier
-30-case acceptance remains historical until the separate executor reruns it.
+### Hidden Electron acceptance on the rebased build: 37/37 PASS
+
+| Group | Result |
+| --- | --- |
+| `e2e/hidden-launch.spec.ts` | 1/1 |
+| `e2e/transcription-reload.spec.ts`, including the 7 new cases below | 22/22 |
+| `e2e/transcript-cutoff.spec.ts` | 2/2 |
+| External lifecycle boundaries (same seven as above) | 7/7 |
+| Renderer crash and reconnect; saved-source merge provenance | 2/2 |
+| Native rename reservation (same three as above) | 3/3 |
+
+The new cases cover manual-first automatic joins before provider completion
+and after commit (same job, origin promotion, reload restoration, one provider
+call, one saved note, exactly one Notion and one Slack call, first automatic
+title kept, joins during export start no second chain, cancel after commit
+refused) and an imported fallback whose saved note B stays shown after a stale
+failure, cancellation, IPC rejection, ffmpeg-missing result or recovery success.
+To select note B while the recovery overlay is open, that case calls the
+button's click handler directly; it is not a pointer click through the inert
+page.
+
+In that run the hidden-launch and both cutoff launches did not yet install the
+scripted dialogs. A test-only follow-up added `scriptDialogs` to those three
+launches, with an empty prompt log and hidden windows asserted at close. Only
+those three cases were rerun afterwards (3/3 PASS); the other 34 were not
+rerun, and no product code changed between the two runs.
 
 ## Not run and known limits
 
@@ -132,3 +158,6 @@ Known and deferred:
 - When a transcription started through the modal fallback (an import whose
   row is not listed) fails, the user sees both the error dialog and a
   "Failed to transcribe" toast. This is cosmetic and left for a follow-up.
+- When the current modal fallback transcription is cancelled, the modal keeps
+  its progress and loading placeholders until the user closes it (it used to
+  show an "unknown error" dialog over the same state). Left for a follow-up.

@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ROOT, appWindow, launchApp } from './support/launch';
+import { scriptDialogs, scriptedDialogs, visibleWindows } from './support/dialogs';
 
 // Proves the TEST-ONLY hidden launch (e2e/support/hidden-electron.cjs) takes
 // effect from the first window on: the preload ran before the app's main
@@ -35,6 +36,7 @@ test('E2E launches keep the app hidden from creation while the page stays usable
     });
     const page = await appWindow(app);
     await page.waitForLoadState('domcontentloaded');
+    await scriptDialogs(app, page);
 
     const state = await app.evaluate(({ app: electronApp, BrowserWindow }) => {
       const windows = BrowserWindow.getAllWindows();
@@ -75,7 +77,11 @@ test('E2E launches keep the app hidden from creation while the page stays usable
     await expect(page.locator('#recordButton')).toBeVisible();
     await page.locator('#searchInput').fill('hidden launch');
     await expect(page.locator('#searchInput')).toHaveValue('hidden launch');
+    expect(await scriptedDialogs(page)).toEqual([]);
   } finally {
+    // Soft, so a failure earlier in the test keeps its own error.
+    const visible = await visibleWindows(app).catch(() => []);
+    expect.soft(visible, 'app windows stayed hidden').toEqual([]);
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
