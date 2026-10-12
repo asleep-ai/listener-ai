@@ -460,6 +460,11 @@ export class ChatGPTAuth {
       progress('Waiting for ChatGPT sign-in in your browser...');
       await options.openBrowser(url.toString());
       callback = await loopback.wait(signal, this.deps.callbackTimeoutMs);
+    } catch (error) {
+      if (target.mode === 'pending' && isClientRejected(error)) {
+        await this.discardPendingRegistration(target.registration);
+      }
+      throw error;
     } finally {
       await loopback.close();
     }
@@ -485,14 +490,22 @@ export class ChatGPTAuth {
     }
 
     progress('Completing ChatGPT sign-in...');
-    const tokens = await this.exchangeCode(
-      discovery,
-      registration.clientId,
-      callback.code,
-      verifier,
-      redirectUri,
-      signal,
-    );
+    let tokens: TokenResponse;
+    try {
+      tokens = await this.exchangeCode(
+        discovery,
+        registration.clientId,
+        callback.code,
+        verifier,
+        redirectUri,
+        signal,
+      );
+    } catch (error) {
+      if (target.mode !== 'reauth' && isClientRejected(error)) {
+        await this.discardPendingRegistration(registration);
+      }
+      throw error;
+    }
     // The ID token is the only mandatory part: a user who declines plan usage
     // can receive a verified identity with no access or refresh token.
     if (!tokens.idToken) {
@@ -501,12 +514,33 @@ export class ChatGPTAuth {
         'ChatGPT returned an incomplete sign-in response.',
       );
     }
-    const claims = await this.verifyIdToken(
-      discovery,
-      tokens.idToken,
-      registration.clientId,
-      nonce,
-    );
+    // Best effort, not awaited: a brand-new registration has no earlier grant
+    // this could affect. A reauthorization grant is left alone.
+    const revokeIfCancelledNew = (error: unknown) => {
+      const cancelled = error instanceof ChatGPTAuthError && error.code === 'cancelled';
+      if (cancelled && target.mode === 'new' && tokens.refreshToken) {
+        void this.revoke(
+          discovery,
+          tokens.refreshToken,
+          registration.clientId,
+          AbortSignal.timeout(this.deps.lockedNetworkBudgetMs),
+        ).catch(() => {});
+      }
+    };
+    let claims: { sub: string; email?: string };
+    try {
+      claims = await this.verifyIdToken(
+        discovery,
+        tokens.idToken,
+        registration.clientId,
+        nonce,
+        undefined,
+        signal,
+      );
+    } catch (error) {
+      revokeIfCancelledNew(error);
+      throw error;
+    }
 
     if (target.mode === 'reauth' && claims.sub !== registration.subject) {
       // Never let one account's grant replace another's. The stray grant is
@@ -611,17 +645,7 @@ export class ChatGPTAuth {
         ),
       );
     } catch (error) {
-      const cancelled = error instanceof ChatGPTAuthError && error.code === 'cancelled';
-      if (cancelled && target.mode === 'new' && tokens.refreshToken) {
-        // Best effort, not awaited: a brand-new registration has no earlier
-        // grant this could affect. A reauthorization grant is left alone.
-        void this.revoke(
-          discovery,
-          tokens.refreshToken,
-          registration.clientId,
-          AbortSignal.timeout(this.deps.lockedNetworkBudgetMs),
-        ).catch(() => {});
-      }
+      revokeIfCancelledNew(error);
       throw error;
     }
     this.refreshes.delete(registration.id);
@@ -674,6 +698,26 @@ export class ChatGPTAuth {
         return registration;
       }, signal),
     );
+  }
+
+  // A pending registration whose issued client was rejected outright
+  // (`invalid_client`) can never complete, and every later sign-in would pick
+  // it up again, so it is dropped and the next sign-in registers anew. Only a
+  // registration that is still pending with the same client is removed; a
+  // transient failure keeps it for reuse. Best effort: the sign-in already
+  // failed with its own error.
+  private async discardPendingRegistration(registration: ChatGPTRegistration): Promise<void> {
+    await this.guardStore(() =>
+      this.store.withIndexLock(() => {
+        const index = this.store.readIndex();
+        const at = index.registrations.findIndex(
+          (r) => r.id === registration.id && r.clientId === registration.clientId && r.pending,
+        );
+        if (at < 0) return;
+        index.registrations.splice(at, 1);
+        this.store.writeIndex(index);
+      }),
+    ).catch(() => {});
   }
 
   private async ensureHostId(signal?: AbortSignal): Promise<string> {
@@ -1084,6 +1128,7 @@ export class ChatGPTAuth {
     clientId: string,
     nonce?: string,
     deadline?: AbortSignal,
+    signal?: AbortSignal,
   ): Promise<{ sub: string; email?: string }> {
     const jose = await importEsm<Jose>('jose');
     const verifyWith = async (forceReload: boolean) => {
@@ -1093,7 +1138,10 @@ export class ChatGPTAuth {
           throw error;
         });
       }
-      return jose.jwtVerify(idToken, await this.jwks, {
+      // The JWKS load is shared like discovery: a caller stops waiting on its
+      // own cancel without failing the load for other waiters.
+      const jwks = await untilAborted(this.jwks, signal, deadline);
+      return jose.jwtVerify(idToken, jwks, {
         issuer: discovery.issuer,
         audience: clientId,
         algorithms: ID_TOKEN_ALGORITHMS,
@@ -1698,6 +1746,10 @@ function networkErrorCode(error: unknown): string | undefined {
   const candidate = (error as { cause?: { code?: unknown }; code?: unknown } | undefined) ?? {};
   const code = candidate.cause?.code ?? candidate.code;
   return typeof code === 'string' ? safeCode(code) : undefined;
+}
+
+function isClientRejected(error: unknown): boolean {
+  return error instanceof ChatGPTAuthError && error.providerCode === 'invalid_client';
 }
 
 function throwIfCancelled(signal?: AbortSignal): void {

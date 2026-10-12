@@ -484,6 +484,76 @@ describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
       assert.equal(status.connected, true);
       assert.equal(status.profileId, index.registrations[0].id);
     });
+    it('discards a pending registration whose client is rejected at the code exchange and registers anew', async () => {
+      const auth = new ChatGPTAuth(dataDir, fake.deps());
+      fake.exchangeFailure = { status: 401, body: { error: 'invalid_client' } };
+      const first = await browser(fake, ALICE);
+      const error = await assertAuthError(
+        auth.signIn({ openBrowser: first.openBrowser }),
+        'token_exchange_failed',
+      );
+      assert.equal(error.providerCode, 'invalid_client');
+      const index = readJson(path.join(dataDir, 'chatgpt', 'profiles.json'));
+      assert.deepEqual(index.registrations, []);
+
+      fake.exchangeFailure = undefined;
+      const second = await browser(fake, ALICE);
+      const status = await auth.signIn({ openBrowser: second.openBrowser });
+      const p = second.seen[0].searchParams;
+      assert.equal(p.get('client_id'), 'dynamic_agent_client');
+      assert.equal(p.get('agent_name_hint'), 'Listener.AI');
+      assert.equal(status.connected, true);
+      const after = readJson(path.join(dataDir, 'chatgpt', 'profiles.json'));
+      assert.deepEqual(
+        after.registrations.map((r: { clientId: string }) => r.clientId),
+        ['oaiapp_test2'],
+      );
+    });
+
+    it('discards a reused pending registration that the authorize step rejects, so Add account registers anew', async () => {
+      const auth = new ChatGPTAuth(dataDir, fake.deps());
+      const alice = await auth.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser });
+      // A transient exchange failure leaves the issued client pending for reuse.
+      fake.exchangeFailure = { status: 400, body: { error: 'invalid_grant' } };
+      await assertAuthError(
+        auth.signIn({ openBrowser: (await browser(fake, BOB)).openBrowser, newProfile: true }),
+        'invalid_grant',
+      );
+      fake.exchangeFailure = undefined;
+      const rejected = await browser(fake, BOB, { error: 'invalid_client' });
+      const error = await assertAuthError(
+        auth.signIn({ openBrowser: rejected.openBrowser, newProfile: true }),
+        'callback_error',
+      );
+      assert.equal(rejected.seen[0].searchParams.get('client_id'), 'oaiapp_test2');
+      assert.equal(error.providerCode, 'invalid_client');
+      const index = readJson(path.join(dataDir, 'chatgpt', 'profiles.json'));
+      assert.deepEqual(
+        index.registrations.map((r: { clientId: string }) => r.clientId),
+        ['oaiapp_test1'],
+      );
+
+      const retry = await browser(fake, BOB);
+      const bob = await auth.signIn({ openBrowser: retry.openBrowser, newProfile: true });
+      assert.equal(retry.seen[0].searchParams.get('client_id'), 'dynamic_agent_client');
+      assert.equal(bob.email, BOB.email);
+      assert.notEqual(bob.profileId, alice.profileId);
+      assert.equal((await auth.listProfiles()).length, 2);
+    });
+
+    it('keeps a completed registration when its reauthorization exchange reports invalid_client', async () => {
+      const auth = new ChatGPTAuth(dataDir, fake.deps());
+      const alice = await auth.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser });
+      fake.exchangeFailure = { status: 401, body: { error: 'invalid_client' } };
+      await assertAuthError(
+        auth.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser }),
+        'token_exchange_failed',
+      );
+      const status = await auth.getStatus();
+      assert.equal(status.connected, true);
+      assert.equal(status.profileId, alice.profileId);
+      assert.equal((await auth.listProfiles()).length, 1);
+    });
   });
 
   describe('callback validation', () => {
@@ -551,6 +621,32 @@ describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
       const error = await assertAuthError(auth.signIn({ openBrowser }), 'invalid_id_token');
       // A validation failure is a real failure and stays reportable.
       assert.equal(isExpectedSignInOutcome(error), false);
+    });
+
+    it('cancels promptly while the signing keys are still loading, and a later sign-in still completes', async () => {
+      // A fresh instance with no cached JWKS: the keys request stalls.
+      const gated = gatedFetch('/.well-known/jwks.json');
+      const auth = new ChatGPTAuth(dataDir, fake.deps({ fetch: gated.fetchImpl }));
+      const controller = new AbortController();
+      const signIn = auth.signIn({
+        signal: controller.signal,
+        openBrowser: (await browser(fake, ALICE)).openBrowser,
+      });
+      await gated.reached;
+      controller.abort();
+      const outcome = await Promise.race([
+        assertAuthError(signIn, 'cancelled').then(() => 'cancelled'),
+        new Promise((resolve) => setTimeout(() => resolve('still waiting'), 1000)),
+      ]);
+      gated.release();
+      assert.equal(outcome, 'cancelled');
+      await signIn.catch(() => {});
+      assert.equal((await auth.getStatus()).connected, false);
+
+      // The shared key load was not failed by the cancel.
+      const status = await auth.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser });
+      assert.equal(status.connected, true);
+      assert.equal(fake.requests.filter((r) => r.path === '/.well-known/jwks.json').length, 1);
     });
 
     it('cancels while waiting for the browser and closes the loopback server', async () => {
