@@ -3,19 +3,24 @@
 // option that reveals a free-form input for advanced users who want to type
 // a model id we haven't curated yet.
 
-export type ModelField =
-  | 'geminiModel'
-  | 'geminiFlashModel'
-  | 'codexModel'
-  | 'codexTranscriptionModel';
+export type ModelField = 'geminiModel' | 'geminiFlashModel' | 'openaiTranscriptionModel';
 
 export const CUSTOM_MODEL_SENTINEL = '__custom__';
 
 export const CURATED_MODELS: Record<ModelField, readonly string[]> = {
   geminiModel: ['gemini-3.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash'],
   geminiFlashModel: ['gemini-2.5-flash', 'gemini-3.5-flash'],
-  codexModel: ['gpt-5.5', 'gpt-5'],
-  codexTranscriptionModel: ['gpt-4o-transcribe-diarize', 'gpt-4o-transcribe'],
+  // Diarize first: it is the only one that labels speakers. The others accept
+  // a Known Words prompt instead. Only models with a MODEL_PRICING entry
+  // (src/services/usageTracker.ts) are curated, so usage never records them
+  // as $0; others (e.g. gpt-transcribe) stay usable through Custom... The
+  // ChatGPT model list is not curated here; it comes from the signed-in
+  // account (listChatGPTModels).
+  openaiTranscriptionModel: [
+    'gpt-4o-transcribe-diarize',
+    'gpt-4o-transcribe',
+    'gpt-4o-mini-transcribe',
+  ],
 } as const;
 
 // Mirrors DEFAULT_*_MODEL in src/aiProvider.ts. Surfaced as the "Default (X)"
@@ -24,8 +29,7 @@ export const CURATED_MODELS: Record<ModelField, readonly string[]> = {
 export const BACKEND_DEFAULTS: Record<ModelField, string> = {
   geminiModel: 'gemini-3.5-flash',
   geminiFlashModel: 'gemini-2.5-flash',
-  codexModel: 'gpt-5.5',
-  codexTranscriptionModel: 'gpt-4o-transcribe-diarize',
+  openaiTranscriptionModel: 'gpt-4o-transcribe-diarize',
 } as const;
 
 export type SelectChoice = { kind: 'curated'; value: string } | { kind: 'custom'; value: string };

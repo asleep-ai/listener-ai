@@ -139,11 +139,34 @@ describe('listener CLI basics', () => {
   });
 
   it('config set + get round-trips aiProvider', async () => {
-    const set = await runCli(['config', 'set', 'aiProvider', 'codex']);
+    const set = await runCli(['config', 'set', 'aiProvider', 'chatgpt']);
     assert.equal(set.code, 0);
     const get = await runCli(['config', 'get', 'aiProvider']);
     assert.equal(get.code, 0);
-    assert.equal(get.stdout.trim(), 'codex');
+    assert.equal(get.stdout.trim(), 'chatgpt');
+  });
+
+  it('config set aiProvider codex migrates to chatgpt with a warning', async () => {
+    const set = await runCli(['config', 'set', 'aiProvider', 'codex']);
+    assert.equal(set.code, 0);
+    assert.match(set.stderr, /replaced by "chatgpt"/);
+    assert.match(set.stderr, /listener chatgpt login/);
+    const get = await runCli(['config', 'get', 'aiProvider']);
+    assert.equal(get.stdout.trim(), 'chatgpt');
+  });
+
+  it('config refuses the retired Codex keys with their replacement', async () => {
+    const { stderr, code } = await runCli(['config', 'set', 'codexModel', 'gpt-5.5']);
+    assert.equal(code, 1);
+    assert.match(stderr, /codexModel was removed/);
+    assert.match(stderr, /chatgptModel/);
+  });
+
+  it('listener codex is a deprecated redirect that never runs the old flow', async () => {
+    const { stderr, code } = await runCli(['codex', 'refresh']);
+    assert.equal(code, 1);
+    assert.match(stderr, /deprecated/);
+    assert.match(stderr, /listener chatgpt/);
   });
 
   it('config set + get round-trips liveSttProvider', async () => {
@@ -189,7 +212,7 @@ describe('listener CLI basics', () => {
   it('config set rejects invalid aiProvider', async () => {
     const { stderr, code } = await runCli(['config', 'set', 'aiProvider', 'openai']);
     assert.equal(code, 1);
-    assert.match(stderr, /aiProvider must be "gemini" or "codex"/);
+    assert.match(stderr, /aiProvider must be "gemini" or "chatgpt"/);
   });
 
   it('config unset clears the stored value', async () => {
@@ -677,6 +700,7 @@ describe('listener transcript (CLI integration)', () => {
 
   function runCli(
     args: string[],
+    extraEnv: Record<string, string> = {},
   ): Promise<{ stdout: string; stderr: string; code: number | null }> {
     return new Promise((resolve) => {
       const { spawn } = require('child_process') as typeof import('child_process');
@@ -688,9 +712,11 @@ describe('listener transcript (CLI integration)', () => {
           LISTENER_DATA_PATH: transcriptDataPath,
           LISTENER_TEST_MODE: '1',
           GEMINI_API_KEY: 'test-mode-key',
-          // A developer's real key must not decide whether the Soniox
-          // credential gate below fires.
+          // A developer's real keys must not decide whether the Soniox or
+          // OpenAI credential gates below fire.
           SONIOX_API_KEY: '',
+          OPENAI_API_KEY: '',
+          ...extraEnv,
         },
       });
       let stdout = '';
@@ -777,14 +803,31 @@ describe('listener transcript (CLI integration)', () => {
     assert.match(stderr, /Output directory does not exist/);
   });
 
-  it('names Codex, not Gemini, when transcriptionProvider is codex without sign-in', async () => {
-    await runCli(['config', 'set', 'transcriptionProvider', 'codex']);
+  it('refuses the retired transcriptionProvider=codex with the explicit OpenAI path', async () => {
+    const set = await runCli(['config', 'set', 'transcriptionProvider', 'codex']);
+    assert.equal(set.code, 1);
+    assert.match(set.stderr, /Codex transcription was removed/);
+    assert.match(set.stderr, /transcriptionProvider openai/);
+  });
+
+  it('ChatGPT without a sign-in stops before any transcription, ignoring the Gemini key', async () => {
+    const audio = makeAudio('needs-chatgpt.mp3');
+    const { stderr, stdout, code } = await runCli(['transcript', audio], {
+      LISTENER_AI_PROVIDER: 'chatgpt',
+    });
+    assert.equal(code, 1);
+    assert.match(stderr, /Not signed in with ChatGPT/);
+    assert.doesNotMatch(stdout + stderr, /Stubbed/);
+  });
+
+  it('names OpenAI, not Gemini, when transcriptionProvider is openai without a key', async () => {
+    await runCli(['config', 'set', 'transcriptionProvider', 'openai']);
     try {
-      const audio = makeAudio('needs-codex.mp3');
+      const audio = makeAudio('needs-openai.mp3');
       const { stderr, code } = await runCli(['transcript', audio]);
       assert.equal(code, 1);
-      assert.match(stderr, /transcriptionProvider is codex/);
-      assert.match(stderr, /listener codex login/);
+      assert.match(stderr, /transcriptionProvider is openai/);
+      assert.match(stderr, /openaiApiKey/);
       assert.doesNotMatch(stderr, /Gemini API key not found/);
     } finally {
       await runCli(['config', 'set', 'transcriptionProvider', 'auto']);
@@ -1108,3 +1151,122 @@ describe(
     });
   },
 );
+
+// The browser sign-in is replaced in the CLI subprocess by a preload that
+// patches the auth prototype; nothing reaches OpenAI or opens a browser.
+describe('listener codex login (deprecated alias) provider selection', () => {
+  let aliasDir: string;
+  let preloadPath: string;
+
+  before(() => {
+    aliasDir = makeTempDir('cli-codex-alias');
+    preloadPath = path.join(aliasDir, 'stub-chatgpt-signin.js');
+    fs.writeFileSync(
+      preloadPath,
+      `const { ChatGPTAuth } = require(${JSON.stringify(path.join(__dirname, 'chatgptAuth.js'))});
+const mode = process.env.STUB_CHATGPT_SIGNIN;
+ChatGPTAuth.prototype.signIn = async () => {
+  if (mode === 'fail') throw new Error('stub sign-in failed');
+  return { connected: true, planEnabled: mode === 'plan', profileId: 'p1', email: 'user@example.com' };
+};
+ChatGPTAuth.prototype.listModels = async () => [{ slug: 'gpt-stub', display_name: 'Stub' }];
+if (process.env.STUB_CHATGPT_SIGNOUT) {
+  ChatGPTAuth.prototype.signOut = async () => JSON.parse(process.env.STUB_CHATGPT_SIGNOUT);
+}
+`,
+    );
+  });
+
+  after(() => rmDir(aliasDir));
+
+  function runCli(
+    args: string[],
+    dataDir: string,
+    mode: 'plan' | 'identity' | 'fail',
+    signOutResult?: object,
+  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    return new Promise((resolve) => {
+      const { spawn } = require('child_process') as typeof import('child_process');
+      const child = spawn('node', ['--require', preloadPath, cliPath, ...args], {
+        env: {
+          ...process.env,
+          NODE_ENV: 'test',
+          LISTENER_AI_PROVIDER: '',
+          LISTENER_DATA_PATH: dataDir,
+          STUB_CHATGPT_SIGNIN: mode,
+          STUB_CHATGPT_SIGNOUT: signOutResult ? JSON.stringify(signOutResult) : '',
+        },
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d: Buffer) => {
+        stdout += d.toString();
+      });
+      child.stderr.on('data', (d: Buffer) => {
+        stderr += d.toString();
+      });
+      child.on('close', (code: number | null) => resolve({ stdout, stderr, code }));
+    });
+  }
+
+  async function aiProviderAfter(
+    args: string[],
+    mode: 'plan' | 'identity' | 'fail',
+  ): Promise<{ provider: string; code: number | null; stderr: string }> {
+    const dataDir = fs.mkdtempSync(path.join(aliasDir, 'data-'));
+    const login = await runCli(args, dataDir, mode);
+    const get = await runCli(['config', 'get', 'aiProvider'], dataDir, mode);
+    return { provider: get.stdout.trim(), code: login.code, stderr: login.stderr };
+  }
+
+  it('selects ChatGPT after a sign-in that granted plan usage, as the old command did', async () => {
+    const result = await aiProviderAfter(['codex', 'login'], 'plan');
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /deprecated/);
+    assert.match(result.stderr, /Set aiProvider=chatgpt/);
+    assert.equal(result.provider, 'chatgpt');
+  });
+
+  it('leaves the selection unchanged after a failed sign-in', async () => {
+    const result = await aiProviderAfter(['codex', 'login'], 'fail');
+    assert.equal(result.code, 1);
+    assert.equal(result.provider, 'gemini');
+  });
+
+  it('leaves the selection unchanged after an identity-only sign-in', async () => {
+    const result = await aiProviderAfter(['codex', 'login'], 'identity');
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.provider, 'gemini');
+  });
+
+  it('reports an identity-only sign-out as signed out, not as nothing to remove', async () => {
+    const dataDir = fs.mkdtempSync(path.join(aliasDir, 'data-'));
+    const result = await runCli(['chatgpt', 'logout'], dataDir, 'identity', {
+      revoked: false,
+      signedIn: false,
+      removed: true,
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /^Signed out of ChatGPT\.$/m);
+    assert.doesNotMatch(result.stderr, /No ChatGPT sign-in to remove/);
+    assert.doesNotMatch(result.stderr, /did not confirm the revocation/);
+  });
+
+  it('reports nothing to remove when no sign-in was stored', async () => {
+    const dataDir = fs.mkdtempSync(path.join(aliasDir, 'data-'));
+    const result = await runCli(['chatgpt', 'logout'], dataDir, 'identity', {
+      revoked: false,
+      signedIn: false,
+      removed: false,
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /No ChatGPT sign-in to remove/);
+  });
+
+  it('never selects a provider from `listener chatgpt login` itself', async () => {
+    const result = await aiProviderAfter(['chatgpt', 'login'], 'plan');
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /listener config set aiProvider chatgpt/);
+    assert.equal(result.provider, 'gemini');
+  });
+});

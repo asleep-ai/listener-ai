@@ -23,58 +23,79 @@ const allChoices: ProviderChoices[] = AI_PROVIDERS.flatMap((aiProvider) =>
   ),
 );
 
+const batchOf = (choices: ProviderChoices) =>
+  resolveBatchSttProvider(choices.transcriptionProvider, choices.aiProvider).provider;
+
 describe('credentialUsage', () => {
   it('always lists the summary provider and the resolved transcription backend', () => {
     for (const choices of allChoices) {
       const usage = credentialUsage(choices);
-      const batch = resolveBatchSttProvider(choices.transcriptionProvider, choices.aiProvider);
+      const batch = batchOf(choices);
       assert.ok(usage[choices.aiProvider].includes('summaries'), JSON.stringify(choices));
-      assert.ok(usage[batch].includes('transcription'), JSON.stringify(choices));
+      if (batch) {
+        assert.ok(usage[batch].includes('transcription'), JSON.stringify(choices));
+      } else {
+        // Auto under ChatGPT transcribes nothing, so no credential claims it.
+        for (const uses of Object.values(usage)) {
+          assert.ok(!uses.includes('transcription'), JSON.stringify(choices));
+        }
+      }
     }
   });
 
   it('keeps the Gemini key reachable whenever any feature can use Gemini', () => {
     for (const choices of allChoices) {
-      const batch = resolveBatchSttProvider(choices.transcriptionProvider, choices.aiProvider);
       const usesGemini =
         choices.aiProvider === 'gemini' ||
-        batch === 'gemini' ||
+        batchOf(choices) === 'gemini' ||
         choices.liveSttProvider !== 'chunked';
       assert.equal(visibleProviderSections(choices).gemini, usesGemini, JSON.stringify(choices));
     }
   });
 
-  it('keeps Codex sign-in reachable whenever summaries or transcription use Codex', () => {
+  it('keeps ChatGPT sign-in reachable exactly when summaries use it', () => {
     for (const choices of allChoices) {
-      const batch = resolveBatchSttProvider(choices.transcriptionProvider, choices.aiProvider);
-      const usesCodex = choices.aiProvider === 'codex' || batch === 'codex';
-      assert.equal(visibleProviderSections(choices).codex, usesCodex, JSON.stringify(choices));
+      assert.equal(
+        visibleProviderSections(choices).chatgpt,
+        choices.aiProvider === 'chatgpt',
+        JSON.stringify(choices),
+      );
     }
   });
 
-  it('shows Gemini when Codex runs summaries but Gemini transcribes', () => {
+  it('never routes audio through the ChatGPT sign-in', () => {
+    for (const choices of allChoices) {
+      assert.deepEqual(
+        credentialUsage(choices).chatgpt,
+        choices.aiProvider === 'chatgpt' ? ['summaries'] : [],
+        JSON.stringify(choices),
+      );
+    }
+  });
+
+  it('shows Gemini when ChatGPT runs summaries but Gemini transcribes', () => {
     const choices: ProviderChoices = {
-      aiProvider: 'codex',
+      aiProvider: 'chatgpt',
       transcriptionProvider: 'gemini',
       liveSttProvider: 'chunked',
     };
-    assert.deepEqual(visibleProviderSections(choices), { gemini: true, codex: true });
+    assert.deepEqual(visibleProviderSections(choices), { gemini: true, chatgpt: true });
     assert.deepEqual(credentialUsage(choices).gemini, ['transcription', 'live captions']);
   });
 
-  it('shows Codex when Gemini runs summaries but Codex transcribes', () => {
+  it('lists the OpenAI API key when it transcribes under ChatGPT summaries', () => {
     const choices: ProviderChoices = {
-      aiProvider: 'gemini',
-      transcriptionProvider: 'codex',
+      aiProvider: 'chatgpt',
+      transcriptionProvider: 'openai',
       liveSttProvider: 'chunked',
     };
-    assert.deepEqual(visibleProviderSections(choices), { gemini: true, codex: true });
-    assert.deepEqual(credentialUsage(choices).codex, ['transcription', 'live captions']);
+    assert.deepEqual(visibleProviderSections(choices), { gemini: false, chatgpt: true });
+    assert.deepEqual(credentialUsage(choices).openai, ['transcription', 'live captions']);
   });
 
-  it('shows Gemini for Gemini Live under Codex summaries', () => {
+  it('shows Gemini for Gemini Live under ChatGPT summaries', () => {
     const choices: ProviderChoices = {
-      aiProvider: 'codex',
+      aiProvider: 'chatgpt',
       transcriptionProvider: 'auto',
       liveSttProvider: 'gemini',
     };
@@ -84,11 +105,11 @@ describe('credentialUsage', () => {
   it('hides the unused section when every feature uses one provider', () => {
     assert.deepEqual(
       visibleProviderSections({
-        aiProvider: 'codex',
+        aiProvider: 'chatgpt',
         transcriptionProvider: 'auto',
         liveSttProvider: 'chunked',
       }),
-      { gemini: false, codex: true },
+      { gemini: false, chatgpt: true },
     );
     assert.deepEqual(
       visibleProviderSections({
@@ -96,13 +117,13 @@ describe('credentialUsage', () => {
         transcriptionProvider: 'soniox',
         liveSttProvider: 'chunked',
       }),
-      { gemini: true, codex: false },
+      { gemini: true, chatgpt: false },
     );
   });
 
   it('routes explicit OpenAI and Soniox live providers to their keys with a Gemini fallback', () => {
     const openai = credentialUsage({
-      aiProvider: 'codex',
+      aiProvider: 'chatgpt',
       transcriptionProvider: 'auto',
       liveSttProvider: 'openai',
     });
@@ -115,27 +136,45 @@ describe('credentialUsage', () => {
     });
     assert.deepEqual(soniox.soniox, ['transcription', 'live captions']);
   });
+
+  it('lists no transcription credential for a retired Codex transcription value', () => {
+    const usage = credentialUsage({
+      aiProvider: 'gemini',
+      transcriptionProvider: 'codex',
+      liveSttProvider: 'chunked',
+    });
+    assert.deepEqual(usage, { gemini: ['summaries'], chatgpt: [], openai: [], soniox: [] });
+  });
 });
 
 describe('chunked live captions', () => {
   it('use the resolved batch backend, not the summary provider', () => {
     const usage = credentialUsage({
-      aiProvider: 'codex',
+      aiProvider: 'chatgpt',
       transcriptionProvider: 'soniox',
       liveSttProvider: 'chunked',
     });
     assert.deepEqual(usage.soniox, ['transcription', 'live captions']);
-    assert.deepEqual(usage.codex, ['summaries']);
+    assert.deepEqual(usage.chatgpt, ['summaries']);
     assert.deepEqual(usage.gemini, []);
   });
 
-  it('follow the summary provider when transcription is set to follow it', () => {
+  it('follow the summary provider when transcription is set to follow Gemini', () => {
     const usage = credentialUsage({
-      aiProvider: 'codex',
+      aiProvider: 'gemini',
       transcriptionProvider: 'auto',
       liveSttProvider: 'chunked',
     });
-    assert.deepEqual(usage.codex, ['summaries', 'transcription', 'live captions']);
+    assert.deepEqual(usage.gemini, ['summaries', 'transcription', 'live captions']);
+  });
+
+  it('list no caption credential when Auto under ChatGPT transcribes nothing', () => {
+    const usage = credentialUsage({
+      aiProvider: 'chatgpt',
+      transcriptionProvider: 'auto',
+      liveSttProvider: 'chunked',
+    });
+    assert.deepEqual(usage, { gemini: [], chatgpt: ['summaries'], openai: [], soniox: [] });
   });
 
   it('never list OpenAI as a Soniox fallback', () => {
@@ -155,13 +194,14 @@ describe('auto live captions', () => {
       assert.ok(usage.openai.includes('live captions'), JSON.stringify(choices));
       assert.ok(usage.gemini.includes('live captions'), JSON.stringify(choices));
       assert.ok(!usage.soniox.includes('live captions'), JSON.stringify(choices));
-      assert.ok(!usage.codex.includes('live captions'), JSON.stringify(choices));
+      assert.ok(!usage.chatgpt.includes('live captions'), JSON.stringify(choices));
     }
   });
 
   it('name the batch backend that takes over as 12s chunks without a streaming key', () => {
     for (const choices of allChoices.filter((c) => c.liveSttProvider === 'auto')) {
-      const batch = resolveBatchSttProvider(choices.transcriptionProvider, choices.aiProvider);
+      const batch = batchOf(choices);
+      if (!batch) continue;
       const uses = credentialUsage(choices)[batch];
       assert.ok(
         uses.includes('live captions') || uses.includes('live fallback'),
@@ -170,14 +210,14 @@ describe('auto live captions', () => {
     }
   });
 
-  it('describe a Soniox backend as the caption fallback under Codex summaries', () => {
+  it('describe a Soniox backend as the caption fallback under ChatGPT summaries', () => {
     const usage = credentialUsage({
-      aiProvider: 'codex',
+      aiProvider: 'chatgpt',
       transcriptionProvider: 'soniox',
       liveSttProvider: 'auto',
     });
     assert.deepEqual(usage.soniox, ['transcription', 'live fallback']);
-    assert.deepEqual(usage.codex, ['summaries']);
+    assert.deepEqual(usage.chatgpt, ['summaries']);
     assert.equal(
       describeCredentialUse(usage.soniox),
       'Used for transcribing recordings and live captions when the chosen live provider is unavailable.',
@@ -186,12 +226,12 @@ describe('auto live captions', () => {
 
   it('do not list a Gemini backend twice, since Gemini Live already covers captions', () => {
     const usage = credentialUsage({
-      aiProvider: 'codex',
+      aiProvider: 'chatgpt',
       transcriptionProvider: 'gemini',
       liveSttProvider: 'auto',
     });
     assert.deepEqual(usage.gemini, ['transcription', 'live captions']);
-    assert.deepEqual(usage.codex, ['summaries']);
+    assert.deepEqual(usage.chatgpt, ['summaries']);
   });
 });
 

@@ -1,6 +1,7 @@
 // Recording session orchestration: start/stop, MediaRecorder wiring, timer,
 // auto-mode post-processing. Owns the click handler on the record button.
 
+import { autoModeSkipMessage } from '../../src/aiProvider';
 import { getDom, state } from '../state';
 import { hideLiveNotesPanel, showLiveNotesPanel } from '../ui/live-notes';
 import {
@@ -282,12 +283,7 @@ export async function processAutoMode(
   // nothing on screen naming the setting that has to change.
   const configCheck = await window.electronAPI.checkConfig();
   if (!configCheck.hasAiAuth || !configCheck.hasTranscriptionAuth) {
-    const reason = !configCheck.hasAiAuth
-      ? 'configure your AI provider in Settings'
-      : configCheck.transcriptionProvider === 'soniox'
-        ? 'transcription is set to Soniox but no Soniox API key is saved'
-        : 'the selected transcription backend has no credentials saved';
-    const message = `Auto mode: Skipped -- ${reason}. The recording was saved.`;
+    const message = autoModeSkipMessage(configCheck);
     console.warn(message);
     statusText.textContent = message;
     showNotification(message, 'error');

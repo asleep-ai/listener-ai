@@ -11,6 +11,8 @@
 // (tracked via activeChatMessagesEl).
 
 import type { AgentChatMessage, AgentScope } from '../electronAPI';
+import { createManageUsageButton, isChatGPTUsageLimitCode } from '../services/chatgpt-usage';
+import { requireAiSetup } from './config-modal';
 
 let activeChatMessagesEl: HTMLElement | null = null;
 let currentModalScope: AgentScope | null = null; // { kind: 'single', folderName } once a transcript is open
@@ -41,6 +43,7 @@ function createChatController({
 }: ChatControllerOptions): ChatController {
   let history: AgentChatMessage[] = [];
   let busy = false;
+  let resetGeneration = 0;
 
   function appendMessage(
     role: ChatRole,
@@ -88,6 +91,18 @@ function createChatController({
     if (!question || busy) return;
     busy = true;
     sendBtn.disabled = true;
+    const generation = resetGeneration;
+
+    // Ask Listener runs on the AI provider only. When it is not set up, open
+    // Settings and keep the question in the input instead of failing in main.
+    // A failed check falls through: main's own credential check still answers.
+    const ready = await requireAiSetup({ transcription: false }).catch(() => true);
+    // Switching transcripts during the setup check changes the chat context.
+    if (!ready || generation !== resetGeneration) {
+      busy = false;
+      sendBtn.disabled = false;
+      return;
+    }
 
     appendMessage('user', question);
     input.value = '';
@@ -114,7 +129,12 @@ function createChatController({
           }
         }
       } else {
-        appendMessage('error', result?.error || 'Agent failed.');
+        const errorEl = appendMessage('error', result?.error || 'Agent failed.');
+        // A ChatGPT plan usage limit gets an actionable Manage usage button
+        // in the bubble itself, not just the message text.
+        if (result?.errorType === 'chatgpt' && isChatGPTUsageLimitCode(result.errorCode)) {
+          errorEl.append(' ', createManageUsageButton('link-button'));
+        }
       }
     } catch (err) {
       pending.remove();
@@ -134,6 +154,7 @@ function createChatController({
   });
 
   function reset(): void {
+    resetGeneration += 1;
     history = [];
     messagesEl.innerHTML = '';
     if (emptyEl) messagesEl.appendChild(emptyEl);

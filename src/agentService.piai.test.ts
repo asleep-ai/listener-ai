@@ -245,3 +245,220 @@ describe('AgentService (pi-ai integration via faux provider)', () => {
     assert.equal(result.appliedActions.length, 0);
   });
 });
+
+// The ChatGPT plan provider runs the same tool loop on the job-bound profile.
+// The wire format (namespace tools, response.completed) is pinned against the
+// real transport in chatgptResponses.test.ts; this covers the loop itself.
+describe('AgentService on the ChatGPT provider (faux transport)', () => {
+  type ChatGPTAuthLike = import('./chatgptBinding').ChatGPTAuthLike;
+
+  function fakeAuth(
+    tokens: Array<string | Error>,
+  ): ChatGPTAuthLike & { tokenCalls: number; active: boolean } {
+    const auth = {
+      tokenCalls: 0,
+      // Mirrors the stored sign-in: a sign-out flips it (isActive()).
+      active: true,
+      getStatus: async () => ({ connected: true, planEnabled: true, profileId: 'profile-1' }),
+      openSession: async (profileId?: string) => {
+        assert.equal(profileId, 'profile-1');
+        return {
+          profileId: 'profile-1',
+          getAccessToken: async () => {
+            const next = tokens[Math.min(auth.tokenCalls, tokens.length - 1)];
+            auth.tokenCalls++;
+            if (next instanceof Error) throw next;
+            return next;
+          },
+          listModels: async () => [{ slug: 'gpt-plan-test', display_name: 'Plan Test' }],
+          isActive: () => auth.active,
+          endRejectedSession: async () => false,
+        };
+      },
+    };
+    return auth;
+  }
+
+  async function setupFauxAsChatGPT() {
+    const pi = await loadPiAi();
+    registration = pi.fauxProvider({
+      api: 'openai-responses',
+      provider: 'chatgpt',
+      models: [{ id: 'gpt-plan-test' }],
+    });
+    restoreProviders = await swapProviderForTest(registration.provider);
+    return pi;
+  }
+
+  // The ChatGPT route only accepts a turn that ended in response.completed.
+  function completedTurn<T extends object>(message: T): T {
+    return { ...message, rawStopReason: 'completed' };
+  }
+
+  it('runs the tool loop on the bound profile and token', async () => {
+    const pi = await setupFauxAsChatGPT();
+    const apiKeys: unknown[] = [];
+    registration!.setResponses([
+      (_ctx, options) => {
+        apiKeys.push((options as { apiKey?: string }).apiKey);
+        return completedTurn(
+          pi.fauxAssistantMessage([pi.fauxToolCall('get_config', { key: 'autoMode' })], {
+            stopReason: 'toolUse',
+          }),
+        );
+      },
+      (_ctx, options) => {
+        apiKeys.push((options as { apiKey?: string }).apiKey);
+        return completedTurn(pi.fauxAssistantMessage('autoMode is off.'));
+      },
+    ]);
+    const { ChatGPTBinding } = await import('./chatgptBinding');
+    const auth = fakeAuth(['tok-1', 'tok-2']);
+    const config = new ConfigService(configDir);
+    config.setAutoMode(false);
+    const agent = new AgentService({
+      provider: 'chatgpt',
+      dataPath: workDir,
+      configService: config,
+      chatgptBinding: new ChatGPTBinding({ auth }),
+    });
+
+    const result = await agent.run({ question: 'autoMode?', scope: { kind: 'all' } });
+
+    assert.equal(result.answer, 'autoMode is off.');
+    assert.equal(registration!.state.callCount, 2);
+    assert.deepEqual(apiKeys, ['tok-1', 'tok-2']);
+  });
+
+  it('stops the loop when the bound profile signs out mid-run', async () => {
+    const pi = await setupFauxAsChatGPT();
+    registration!.setResponses([
+      completedTurn(
+        pi.fauxAssistantMessage([pi.fauxToolCall('get_config', { key: 'autoMode' })], {
+          stopReason: 'toolUse',
+        }),
+      ),
+      completedTurn(pi.fauxAssistantMessage('should never be reached')),
+    ]);
+    const { ChatGPTBinding, ChatGPTBindingError } = await import('./chatgptBinding');
+    const { ChatGPTAuthError } = await import('./chatgptAuth');
+    const auth = fakeAuth([
+      'tok-1',
+      new ChatGPTAuthError('session_ended', 'The ChatGPT session used by this job has ended.'),
+    ]);
+    const agent = new AgentService({
+      provider: 'chatgpt',
+      dataPath: workDir,
+      configService: new ConfigService(configDir),
+      chatgptBinding: new ChatGPTBinding({ auth }),
+    });
+
+    await assert.rejects(
+      agent.run({ question: 'autoMode?', scope: { kind: 'all' } }),
+      (error: unknown) =>
+        error instanceof ChatGPTBindingError && error.code === 'signed_out_during_job',
+    );
+    assert.equal(registration!.state.callCount, 1, 'no request after the sign-out');
+  });
+
+  it('does not run another turn when the sign-out lands while a tool is pending', async () => {
+    const pi = await setupFauxAsChatGPT();
+    const { ChatGPTBinding, ChatGPTBindingError } = await import('./chatgptBinding');
+    const auth = fakeAuth(['tok-1', 'tok-2']);
+    registration!.setResponses([
+      completedTurn(
+        pi.fauxAssistantMessage(
+          [pi.fauxToolCall('set_config', { key: 'autoMode', value: 'true', reason: 'asked' })],
+          { stopReason: 'toolUse' },
+        ),
+      ),
+      completedTurn(pi.fauxAssistantMessage('should never be reached')),
+    ]);
+    const agent = new AgentService({
+      provider: 'chatgpt',
+      dataPath: workDir,
+      configService: new ConfigService(configDir),
+      chatgptBinding: new ChatGPTBinding({ auth }),
+    });
+
+    await assert.rejects(
+      agent.run({
+        question: 'enable autoMode',
+        scope: { kind: 'all' },
+        // The user signs out while the confirmation dialog is open.
+        confirm: async () => {
+          auth.active = false;
+          return false;
+        },
+      }),
+      (error: unknown) =>
+        error instanceof ChatGPTBindingError && error.code === 'signed_out_during_job',
+    );
+    assert.equal(registration!.state.callCount, 1, 'no turn on the ended session');
+  });
+
+  it('does not apply an approved set_config when the sign-out landed during confirmation', async () => {
+    const pi = await setupFauxAsChatGPT();
+    const { ChatGPTBinding, ChatGPTBindingError } = await import('./chatgptBinding');
+    const auth = fakeAuth(['tok-1', 'tok-2']);
+    registration!.setResponses([
+      completedTurn(
+        pi.fauxAssistantMessage(
+          [pi.fauxToolCall('set_config', { key: 'autoMode', value: 'true', reason: 'asked' })],
+          { stopReason: 'toolUse' },
+        ),
+      ),
+      completedTurn(pi.fauxAssistantMessage('should never be reached')),
+    ]);
+    const config = new ConfigService(configDir);
+    config.setAutoMode(false);
+    const agent = new AgentService({
+      provider: 'chatgpt',
+      dataPath: workDir,
+      configService: config,
+      chatgptBinding: new ChatGPTBinding({ auth }),
+    });
+
+    await assert.rejects(
+      agent.run({
+        question: 'enable autoMode',
+        scope: { kind: 'all' },
+        // The user signs out while the dialog is open, then approves it.
+        confirm: async () => {
+          auth.active = false;
+          return true;
+        },
+      }),
+      (error: unknown) =>
+        error instanceof ChatGPTBindingError && error.code === 'signed_out_during_job',
+    );
+    assert.equal(new ConfigService(configDir).getAllConfig().autoMode, false, 'config unchanged');
+    assert.equal(registration!.state.callCount, 1, 'no turn on the ended session');
+  });
+
+  it('discards a turn that completed after the bound profile signed out', async () => {
+    const pi = await setupFauxAsChatGPT();
+    const { ChatGPTBinding, ChatGPTBindingError } = await import('./chatgptBinding');
+    const auth = fakeAuth(['tok-1']);
+    registration!.setResponses([
+      () => {
+        // Sign-out lands while this turn is streaming; the stream still
+        // reaches response.completed.
+        auth.active = false;
+        return completedTurn(pi.fauxAssistantMessage('a complete answer that must not be used'));
+      },
+    ]);
+    const agent = new AgentService({
+      provider: 'chatgpt',
+      dataPath: workDir,
+      configService: new ConfigService(configDir),
+      chatgptBinding: new ChatGPTBinding({ auth }),
+    });
+
+    await assert.rejects(
+      agent.run({ question: 'autoMode?', scope: { kind: 'all' } }),
+      (error: unknown) =>
+        error instanceof ChatGPTBindingError && error.code === 'signed_out_during_job',
+    );
+  });
+});

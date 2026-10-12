@@ -1734,7 +1734,7 @@ h1 {
   text-decoration: none;
 }
 
-.codex-oauth-row {
+.oauth-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -3346,4 +3346,92 @@ h1 {
 
 .transcription-error-actions .primary-button:hover {
   background: #2980b9;
+}
+
+/* ChatGPT connection card (Settings -> AI Provider) */
+.chatgpt-card {
+  margin-bottom: 14px;
+}
+
+.chatgpt-status {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.chatgpt-plan-badge {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.chatgpt-plan-badge.is-enabled {
+  color: #065f46;
+}
+
+.chatgpt-plan-badge.is-disabled {
+  color: #92400e;
+}
+
+.chatgpt-actions {
+  margin-bottom: 10px;
+}
+
+.chatgpt-primary-button {
+  background: #0f172a;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chatgpt-primary-button:hover {
+  background: #1e293b;
+}
+
+.chatgpt-primary-button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.chatgpt-primary-button:focus-visible,
+.link-button:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.chatgpt-profile-group select,
+#chatgptModelSelect {
+  flex: 1;
+  min-width: 0;
+}
+
+.chatgpt-using-plan {
+  font-size: 12px;
+  color: #065f46;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: #2563eb;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+#chatgptNoticeActions {
+  margin-top: 8px;
+}
+
+.chatgpt-plan-body {
+  color: #34495e;
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0 0 16px;
 }

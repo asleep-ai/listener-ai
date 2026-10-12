@@ -1,32 +1,41 @@
-// Minimal wrapper around OpenAI's `/v1/audio/transcriptions` endpoint.
+// Batch transcription through OpenAI's public `/v1/audio/transcriptions`
+// endpoint, authenticated with a standard OpenAI API key (`openaiApiKey`).
 //
-// We keep this here (rather than going through pi-ai) because pi-ai is a
-// chat/tool-call unified API -- it has no audio transcription surface. The
-// Codex transcription flow needs only a multipart POST, so a thin direct
-// fetch is simpler than wedging audio into pi-ai's chat model.
+// This replaces the old Codex path (`codexTranscription.ts`), which sent a
+// borrowed Codex CLI OAuth bearer to the same endpoint. Sign in with ChatGPT
+// cannot take over that job: its preview limitations state "Audio/video
+// input, the Files upload API, and the transcription API are not supported
+// by this flow" (developers.openai.com/siwc/token-sharing-open-source/
+// preview-limitations). Transcription is therefore billed separately to the
+// user's OpenAI API account, and a ChatGPT sign-in token must never reach
+// this module.
 //
-// Two output shapes, branched on model id:
+// We keep this out of pi-ai because pi-ai has no audio surface; the endpoint
+// needs only a multipart POST.
+//
+// Request shape per model, from the official speech-to-text guide
+// (developers.openai.com/api/docs/guides/speech-to-text):
 //   - `gpt-4o-transcribe-diarize` (default) returns `diarized_json` with
-//     speaker-labeled segments. We re-label "Speaker 0/1/..." onto the
-//     same `참가자N` convention the Gemini path uses so downstream code
-//     (summarization, transcript.md, Notion) doesn't have to care which
-//     transcription engine produced the text. This model rejects `prompt`,
-//     so user-supplied glossaries (`knownWords`) are dropped on this path.
-//   - `gpt-4o-transcribe` (and `whisper-1`) return `{text}` and accept
-//     `prompt` for vocabulary biasing, but produce no speaker labels.
+//     speaker-labeled segments, which we re-label onto the `참가자N`
+//     convention the Gemini path uses. The guide says it "doesn't support
+//     prompts" and that audio "longer than 30 seconds" needs
+//     `chunking_strategy`, so `knownWords` and temperature are omitted.
+//   - `gpt-transcribe` accepts `prompt` and takes `languages[]` instead of
+//     the singular `language` ("Don't send both fields"). Temperature is not
+//     documented for it, so it is not sent. No speaker labels.
+//   - `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` and `whisper-1` accept
+//     `prompt`, `language` and `temperature` and return `{text}`. No speaker
+//     labels.
 //
-// Format support: OpenAI accepts mp3, mp4, mpeg, mpga, m4a, wav, webm. Inputs
-// outside that set are remuxed upstream in geminiService.ts via ffmpeg before
-// reaching this helper.
+// Format support: OpenAI accepts mp3, mp4, mpeg, mpga, m4a, wav, webm, with a
+// 25 MB file limit. Other inputs are remuxed upstream via ffmpeg, and larger
+// ones are segmented upstream, before they reach this helper.
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { mimeTypeForExtension } from './audioFormats';
 import { EmptyTranscriptionError, TranscriptionApiError } from './transcriptionErrors';
 
-// The transcription error types are provider-neutral and live in
-// `transcriptionErrors.ts` so a non-Codex backend can throw them without
-// importing this client. Re-exported here for existing importers.
 export {
   EmptyTranscriptionError,
   TranscriptionApiError,
@@ -35,6 +44,9 @@ export {
 
 const OPENAI_API_BASE_URL = 'https://api.openai.com/v1';
 const DIARIZE_MODEL_ID = 'gpt-4o-transcribe-diarize';
+const GPT_TRANSCRIBE_MODEL_ID = 'gpt-transcribe';
+
+export const DEFAULT_OPENAI_TRANSCRIPTION_MODEL = DIARIZE_MODEL_ID;
 
 export const OPENAI_TRANSCRIPTION_EXTENSIONS = new Set([
   '.mp3',
@@ -46,8 +58,6 @@ export const OPENAI_TRANSCRIPTION_EXTENSIONS = new Set([
   '.webm',
 ]);
 
-export type CodexTokenProvider = () => Promise<string>;
-
 export interface DiarizedSegment {
   speaker?: string;
   text?: string;
@@ -55,19 +65,19 @@ export interface DiarizedSegment {
   end?: number;
 }
 
-export interface TranscribeCodexAudioParams {
-  getToken: CodexTokenProvider;
+export interface TranscribeOpenAiAudioParams {
+  /** Standard OpenAI API key. Never a ChatGPT sign-in token. */
+  apiKey: string;
   audioFilePath: string;
   model: string;
-  /** Vocabulary/style hint. Ignored when model is `gpt-4o-transcribe-diarize`. */
+  /** Vocabulary/style hint (`knownWords`). Ignored by the diarize model. */
   prompt?: string;
   /** ISO 639-1 language code (e.g. "ko"). Improves accuracy when set. */
   language?: string;
+  /** Sent only to models that document it (not diarize, not gpt-transcribe). */
   temperature?: number;
-  /** Cancellation signal. Forwarded into the fetch so the in-flight upload
-   *  aborts immediately. Two callers fire this: the user-driven cancel button
-   *  in the renderer, and the segment-loop's sibling controller that fails
-   *  fast when one segment hits a 4xx (no point burning quota on the rest). */
+  /** Cancellation signal, forwarded into the fetch so the in-flight upload
+   *  aborts immediately (user cancel, or a sibling segment's 4xx). */
   signal?: AbortSignal;
 }
 
@@ -75,30 +85,43 @@ export function isDiarizeModel(model: string): boolean {
   return model.trim() === DIARIZE_MODEL_ID;
 }
 
-export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): Promise<string> {
+/** Whether the model accepts `prompt`, the only channel for `knownWords`. */
+export function supportsTranscriptionPrompt(model: string): boolean {
+  return !isDiarizeModel(model);
+}
+
+/** Whether the model accepts `temperature`; the request drops it otherwise. */
+export function supportsTemperature(model: string): boolean {
+  const id = model.trim();
+  return id !== DIARIZE_MODEL_ID && id !== GPT_TRANSCRIBE_MODEL_ID;
+}
+
+export async function transcribeOpenAiAudio(params: TranscribeOpenAiAudioParams): Promise<string> {
+  const apiKey = params.apiKey.trim();
+  if (!apiKey) {
+    throw new Error('OpenAI API key is not configured for transcription');
+  }
   const audioData = await fs.promises.readFile(params.audioFilePath);
   const ext = path.extname(params.audioFilePath);
   const model = params.model.trim();
   const diarize = isDiarizeModel(model);
+  const prompt = supportsTranscriptionPrompt(model) ? params.prompt?.trim() : undefined;
+  const temperature = supportsTemperature(model) ? params.temperature : undefined;
 
   const form = new FormData();
   form.append('model', model);
   if (params.language) {
-    form.append('language', params.language);
+    form.append(model === GPT_TRANSCRIBE_MODEL_ID ? 'languages[]' : 'language', params.language);
   }
   if (diarize) {
-    // The diarize model has a restricted parameter surface -- omit temperature.
-    // Required for the diarize model. `chunking_strategy=auto` lets OpenAI
-    // split long audio internally while keeping speaker identity coherent
-    // across chunks -- so we can hand it a whole 50-minute meeting (subject
-    // to the 25MB file-size limit upstream).
     form.append('response_format', 'diarized_json');
     form.append('chunking_strategy', 'auto');
-  } else if (params.prompt?.trim()) {
-    form.append('prompt', params.prompt.trim());
   }
-  if (!diarize && params.temperature !== undefined) {
-    form.append('temperature', String(params.temperature));
+  if (prompt) {
+    form.append('prompt', prompt);
+  }
+  if (temperature !== undefined) {
+    form.append('temperature', String(temperature));
   }
   form.append(
     'file',
@@ -109,22 +132,21 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
   const sizeMB = (audioData.byteLength / (1024 * 1024)).toFixed(2);
   const startedAt = Date.now();
   console.log(
-    `[codex-transcribe] -> ${path.basename(params.audioFilePath)} ${sizeMB}MB model=${model}${
-      diarize ? ' diarize=true' : params.prompt ? ` prompt=${params.prompt.length}chars` : ''
+    `[openai-transcribe] -> ${path.basename(params.audioFilePath)} ${sizeMB}MB model=${model}${
+      diarize ? ' diarize=true' : prompt ? ` prompt=${prompt.length}chars` : ''
     }${params.language ? ` lang=${params.language}` : ''}${
-      params.temperature !== undefined ? ` temp=${params.temperature}` : ''
+      temperature !== undefined ? ` temp=${temperature}` : ''
     }`,
   );
 
   const response = await fetch(`${OPENAI_API_BASE_URL}/audio/transcriptions`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${await params.getToken()}` },
+    headers: { Authorization: `Bearer ${apiKey}` },
     body: form,
     signal: params.signal,
   });
-  const elapsed = Date.now() - startedAt;
   console.log(
-    `[codex-transcribe] <- ${elapsed}ms status=${response.status} ${response.statusText}`,
+    `[openai-transcribe] <- ${Date.now() - startedAt}ms status=${response.status} ${response.statusText}`,
   );
 
   if (!response.ok) {
@@ -133,24 +155,20 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
     try {
       parsed = JSON.parse(body);
     } catch {
-      // body wasn't JSON -- fall through and treat as opaque text
+      // body wasn't JSON -- treat as opaque text
     }
-    const apiMessage = parsed?.error?.message;
-    const err = new TranscriptionApiError(
-      apiMessage || `OpenAI transcription failed (${response.status} ${response.statusText})`,
+    throw new TranscriptionApiError(
+      parsed?.error?.message ||
+        `OpenAI transcription failed (${response.status} ${response.statusText})`,
       {
         status: response.status,
         statusText: response.statusText,
         requestId: response.headers.get('x-request-id') ?? undefined,
         errorType: parsed?.error?.type,
         errorCode: parsed?.error?.code,
-        // Cap at 1500 chars so a verbose upstream response doesn't bloat logs,
-        // but keep enough that a parsed JSON error is readable when the user
-        // opens "Show details".
         rawBody: body.length > 1500 ? `${body.slice(0, 1500)}...` : body,
       },
     );
-    throw err;
   }
 
   if (diarize) {
@@ -163,19 +181,15 @@ export async function transcribeCodexAudio(params: TranscribeCodexAudioParams): 
     throw new Error('OpenAI transcription response missing text');
   }
   if (payload.text.trim().length === 0) {
-    // Well-formed response with no speech content -- silence/noise input,
-    // not a broken API. Typed so callers can decide per context.
     throw new EmptyTranscriptionError('OpenAI transcription returned no speech');
   }
   return payload.text;
 }
 
-// Re-label OpenAI's raw speaker ids ("Speaker 0", "Speaker 1", or the names
-// supplied via `known_speaker_names[]` if used) onto our `참가자N` convention,
-// matching the format Gemini emits when prompted for speaker labels. Empty
-// segments are dropped; consecutive segments from the same speaker are merged
-// onto a single line so downstream consumers don't see one speaker split into
-// 30+ "참가자1: ..." stubs.
+// Re-label OpenAI's raw speaker ids (capital letters by default, or the names
+// supplied via `known_speaker_names[]`) onto our `참가자N` convention in
+// first-seen order. Empty segments are dropped; consecutive segments from the
+// same speaker merge onto one line.
 export function formatDiarizedSegments(segments?: DiarizedSegment[]): string {
   if (!segments) {
     throw new Error('OpenAI diarized transcription response missing segments');

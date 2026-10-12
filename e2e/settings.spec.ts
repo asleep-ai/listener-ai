@@ -3,9 +3,12 @@ import { type ElectronApplication, type Page, _electron as electron } from 'play
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { assertBackgroundDevBuild } from './background-test';
 
 // Drives the Settings window against an isolated data dir and HOME, so neither
-// the developer's config.json nor a local Codex CLI sign-in leaks in. Set
+// the developer's config.json nor a saved ChatGPT sign-in leaks in. Runs in
+// background-test mode (see AGENTS.md, Background Testing): hidden, unfocused
+// windows with no global shortcut, tray, notifications or native dialogs. Set
 // LISTENER_E2E_SHOTS=<dir> to also save a screenshot of every Settings tab.
 
 async function appWindow(electronApp: ElectronApplication): Promise<Page> {
@@ -23,8 +26,8 @@ async function appWindow(electronApp: ElectronApplication): Promise<Page> {
 }
 
 // Every provider/auth override the app reads from the environment. An empty
-// value reads as unset, so a developer shell's real keys, Codex CLI auth path
-// or forced provider cannot change what these tests see.
+// value reads as unset, so a developer shell's real keys, retired Codex
+// variables or forced provider cannot change what these tests see.
 const CLEARED_ENV = Object.fromEntries(
   [
     'LISTENER_AI_PROVIDER',
@@ -60,6 +63,8 @@ async function withSettings(
   const dataDir = mkdtempSync(join(tmpdir(), 'listener-settings-e2e-'));
   const configPath = join(dataDir, 'config.json');
   writeFileSync(configPath, JSON.stringify(config));
+  // Refuse to launch a dev build that lacks background-test support.
+  assertBackgroundDevBuild();
   const electronApp = await electron.launch({
     executablePath: require('electron') as string,
     // Background launch: transparent, unfocused window (see support file).
@@ -74,6 +79,7 @@ async function withSettings(
     env: {
       ...process.env,
       NODE_ENV: 'test',
+      LISTENER_BACKGROUND_TEST: '1',
       LISTENER_DATA_PATH: dataDir,
       HOME: dataDir,
       ...CLEARED_ENV,
@@ -94,7 +100,8 @@ async function withSettings(
     for (const state of windows) {
       expect(state).toEqual({ focused: false, devTools: false, transparent: true });
     }
-    // Dismisses the startup "configure now?" confirm and any alert.
+    // Background-test mode records alert/confirm in the page instead of
+    // showing them; this is a fallback should a native dialog still appear.
     // A dialog can close with the app mid-dismiss; that is not a test failure.
     window.on('dialog', (dialog) => void dialog.dismiss().catch(() => {}));
     await window.waitForLoadState('domcontentloaded');
@@ -120,7 +127,7 @@ const dialog = (window: Page) => window.locator('#configModal');
 test('credential sections follow every provider that uses them', async () => {
   await withSettings(
     {
-      aiProvider: 'codex',
+      aiProvider: 'chatgpt',
       transcriptionProvider: 'gemini',
       liveSttProvider: 'chunked',
       geminiApiKey: 'gemini-e2e',
@@ -128,11 +135,13 @@ test('credential sections follow every provider that uses them', async () => {
     async ({ window }) => {
       await openSettings(window);
       const gemini = dialog(window).locator('fieldset[data-provider="gemini"]');
-      const codex = dialog(window).locator('fieldset[data-provider="codex"]');
-      // Summaries on Codex, transcription on Gemini: both sections are needed,
-      // and 12s chunked captions also go through the transcription service.
+      const chatgpt = dialog(window).locator('fieldset[data-provider="chatgpt"]');
+      // Summaries on the ChatGPT plan, transcription on Gemini: both sections
+      // are needed, and 12s chunked captions also go through the
+      // transcription service.
       await expect(gemini).toBeVisible();
-      await expect(codex).toBeVisible();
+      await expect(chatgpt).toBeVisible();
+      await expect(window.locator('#chatgptUsage')).toHaveText('Used for summaries and Ask Listener.');
       await expect(window.locator('#geminiUsage')).toHaveText(
         'Used for transcribing recordings and live captions.',
       );
@@ -140,24 +149,31 @@ test('credential sections follow every provider that uses them', async () => {
 
       await window.getByRole('tab', { name: 'Transcription and summary' }).click();
       await window.locator('#transcriptionProvider').selectOption('auto');
+      // Auto under ChatGPT transcribes nothing, so Gemini is no longer used.
+      await expect(window.locator('#transcriptionProviderNotice')).toContainText(
+        'ChatGPT sign-in cannot transcribe audio',
+      );
       await window.getByRole('tab', { name: /AI connection/ }).click();
       await expect(gemini).toBeHidden();
 
-      // Gemini Live brings the Gemini key back under Codex summaries.
+      // Gemini Live brings the Gemini key back under ChatGPT summaries.
       await window.getByRole('tab', { name: 'Transcription and summary' }).click();
       await window.locator('#liveSttProvider').selectOption('gemini');
       await window.getByRole('tab', { name: /AI connection/ }).click();
       await expect(gemini).toBeVisible();
       await expect(window.locator('#geminiUsage')).toHaveText('Used for live captions.');
 
-      // Gemini summaries with Codex transcription keep Codex sign-in reachable.
+      // Gemini summaries with OpenAI API transcription: ChatGPT sign-in never
+      // carries audio, so its section goes away and the OpenAI key is named.
       await window.locator('#aiProvider').selectOption('gemini');
       await window.getByRole('tab', { name: 'Transcription and summary' }).click();
-      await window.locator('#transcriptionProvider').selectOption('codex');
+      await window.locator('#transcriptionProvider').selectOption('openai');
       await window.getByRole('tab', { name: /AI connection/ }).click();
-      await expect(codex).toBeVisible();
-      await expect(window.locator('#codexUsage')).toHaveText('Used for transcribing recordings.');
-      await expect(window.locator('#loginCodexOAuth')).toBeVisible();
+      await expect(chatgpt).toBeHidden();
+      await expect(window.locator('#openaiUsage')).toHaveText('Used for transcribing recordings.');
+      await expect(window.locator('#geminiUsage')).toHaveText(
+        'Used for summaries and Ask Listener and live captions.',
+      );
       // The OpenAI and Soniox keys are never hidden.
       await expect(window.locator('#openaiApiKey')).toBeVisible();
       await expect(window.locator('#sonioxApiKey')).toBeVisible();
@@ -347,7 +363,7 @@ test('captures every Settings tab for visual review', async () => {
   test.skip(!shotsDir, 'LISTENER_E2E_SHOTS is not set');
   await withSettings(
     {
-      aiProvider: 'codex',
+      aiProvider: 'chatgpt',
       transcriptionProvider: 'gemini',
       liveSttProvider: 'soniox',
       knownWords: ['Listener', 'Orca'],

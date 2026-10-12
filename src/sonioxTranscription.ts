@@ -1,12 +1,12 @@
 // Minimal client for Soniox's async (batch) transcription REST API.
 //
-// Same reasoning as `codexTranscription.ts`: pi-ai is a chat/tool-call
+// Same reasoning as `openaiTranscription.ts`: pi-ai is a chat/tool-call
 // surface with no audio endpoint, so a thin direct `fetch` is simpler than
-// wedging audio into it. The shape is deliberately parallel to the Codex
+// wedging audio into it. The shape is deliberately parallel to the OpenAI
 // client -- multipart upload, JSON error envelope, `참가자N` speaker lines --
 // so a reader who knows one knows both.
 //
-// Unlike the single-request Codex path, Soniox is a three-step job:
+// Unlike the single-request OpenAI path, Soniox is a three-step job:
 //
 //   POST /v1/files            -> { id }            (multipart upload)
 //   POST /v1/transcriptions   -> { id, status }    (job creation)
@@ -128,7 +128,7 @@ const RETRY_BASE_DELAY_MS = 2_000;
 // own deadline or a cancel while offline stalls on two hanging DELETEs.
 const CLEANUP_TIMEOUT_MS = 5_000;
 
-// Same cap as the Codex client: enough for a parsed JSON error to stay
+// Same cap as the OpenAI client: enough for a parsed JSON error to stay
 // readable under "Show details" without bloating logs.
 const RAW_BODY_CAP = 1500;
 
@@ -367,7 +367,7 @@ function failureFromJobStatus(status: SonioxTranscriptionStatus): TranscriptionA
 
 /**
  * Render Soniox tokens as `참가자N` turns, the same convention the Gemini
- * prompt and the Codex diarize reshape produce, so downstream consumers
+ * prompt and the OpenAI diarize reshape produce, so downstream consumers
  * (summary, transcript.md, Notion) never learn which engine ran.
  *
  * Speaker ids are renumbered in order of first appearance -- Soniox returns

@@ -15,7 +15,7 @@ import {
 import { annotateTranscriptionError } from './geminiService';
 
 describe('annotateTranscriptionError - TranscriptionApiError path', () => {
-  it('maps insufficient_quota to a Codex-specific quota message', () => {
+  it('maps insufficient_quota to an OpenAI API billing message', () => {
     const upstream = new TranscriptionApiError('You exceeded your current quota.', {
       status: 429,
       statusText: 'Too Many Requests',
@@ -24,8 +24,9 @@ describe('annotateTranscriptionError - TranscriptionApiError path', () => {
       errorCode: 'insufficient_quota',
       rawBody: '{"error":{"code":"insufficient_quota"}}',
     });
-    const annotated = annotateTranscriptionError(upstream, 'codex');
-    assert.match(annotated.userMessage, /ChatGPT\/Codex usage limit/);
+    const annotated = annotateTranscriptionError(upstream, 'openai');
+    assert.match(annotated.userMessage, /OpenAI API quota or billing limit/);
+    assert.match(annotated.userMessage, /separate from a ChatGPT plan/);
     assert.equal(annotated.status, 429);
     assert.equal(annotated.requestId, 'req_abc123');
     assert.equal(annotated.errorCode, 'insufficient_quota');
@@ -33,13 +34,13 @@ describe('annotateTranscriptionError - TranscriptionApiError path', () => {
     assert.equal(annotated.rawBody, '{"error":{"code":"insufficient_quota"}}');
   });
 
-  it('maps 401 to a sign-in-again message for codex', () => {
+  it('maps 401 to an invalid-API-key message for openai', () => {
     const upstream = new TranscriptionApiError('Unauthorized', {
       status: 401,
       statusText: 'Unauthorized',
     });
-    const annotated = annotateTranscriptionError(upstream, 'codex');
-    assert.match(annotated.userMessage, /Sign out and sign in again/);
+    const annotated = annotateTranscriptionError(upstream, 'openai');
+    assert.match(annotated.userMessage, /Invalid OpenAI API key/);
     assert.equal(annotated.status, 401);
   });
 
@@ -49,7 +50,7 @@ describe('annotateTranscriptionError - TranscriptionApiError path', () => {
       statusText: 'Too Many Requests',
       errorCode: 'rate_limit_exceeded',
     });
-    const annotated = annotateTranscriptionError(upstream, 'codex');
+    const annotated = annotateTranscriptionError(upstream, 'openai');
     assert.match(annotated.userMessage, /Rate limit/);
   });
 
@@ -58,7 +59,7 @@ describe('annotateTranscriptionError - TranscriptionApiError path', () => {
       status: 403,
       statusText: 'Forbidden',
     });
-    const annotated = annotateTranscriptionError(upstream, 'codex');
+    const annotated = annotateTranscriptionError(upstream, 'openai');
     assert.match(annotated.userMessage, /403/);
     assert.equal(annotated.status, 403);
   });
@@ -168,7 +169,7 @@ describe('annotateTranscriptionError - legacy fallback path', () => {
   it('still maps a generic "quota" error message when no structured fields exist', () => {
     const annotated = annotateTranscriptionError(
       new Error('You exceeded your quota for the day'),
-      'codex',
+      'openai',
     );
     assert.match(annotated.userMessage, /quota/i);
     // No structured fields available - status/code stay undefined, but
@@ -179,13 +180,13 @@ describe('annotateTranscriptionError - legacy fallback path', () => {
   });
 
   it('falls through to "Failed to transcribe" for unrecognized errors', () => {
-    const annotated = annotateTranscriptionError(new Error('something weird'), 'codex');
+    const annotated = annotateTranscriptionError(new Error('something weird'), 'openai');
     assert.match(annotated.userMessage, /Failed to transcribe/);
     assert.equal(annotated.rawMessage, 'something weird');
   });
 
   it('handles non-Error throwables', () => {
-    const annotated = annotateTranscriptionError('plain string thrown', 'codex');
+    const annotated = annotateTranscriptionError('plain string thrown', 'openai');
     assert.match(annotated.userMessage, /plain string thrown/);
     assert.equal(annotated.rawMessage, 'plain string thrown');
   });
@@ -234,7 +235,7 @@ describe('TranscriptionError.toPayload', () => {
       errorCode: 'insufficient_quota',
       rawBody: '{"error":{"code":"insufficient_quota"}}',
     });
-    const annotated = annotateTranscriptionError(upstream, 'codex');
+    const annotated = annotateTranscriptionError(upstream, 'openai');
     const payload = annotated.toPayload();
     assert.equal(payload.status, 429);
     assert.equal(payload.statusText, 'Too Many Requests');

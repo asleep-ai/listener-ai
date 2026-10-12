@@ -10,10 +10,10 @@ When prices drift, update the date in the cell and re-cite from the provider's o
 |---|---|---|---|---|
 | Transcription (Gemini) | `geminiFlashModel` | gemini-2.5-flash | $1.00/M audio-input tokens, $2.50/M output | Audio input only at this rate; text/image input is $0.30/M. Speaker diarization works via prompt instructions. |
 | Summary (Gemini) | `geminiModel` | gemini-3.5-flash | $1.50/M input, $9.00/M output | Native thinking on (`thinking_level` configurable via `geminiThinkingLevel`: low/medium/high, default medium). Output billing includes thought tokens. |
-| Transcription (Codex) | `codexTranscriptionModel` | gpt-4o-transcribe | $0.006/min ($2.50/M audio in, $10.00/M text out) | No speaker diarization. `prompt` param is vocabulary/style hint only. |
-| Summary + agent (Codex) | `codexModel` | gpt-5.5 (via ChatGPT Codex Responses) | $5.00/M input, $30.00/M output (API price; ChatGPT subscription absorbs cost) | Rejects `temperature`/sampling params (reasoning model). Cached input $0.50/M. |
+| Transcription (OpenAI API, explicit) | `transcriptionProvider=openai`, `openaiApiKey`, `openaiTranscriptionModel` | gpt-4o-transcribe-diarize (default) | $0.006/min, billed to the user's OpenAI API account | Native speaker labels; rejects `prompt`, so `knownWords` is dropped. Switch to `gpt-4o-transcribe` for glossary support without speaker labels; `gpt-transcribe` also takes a glossary but is Custom-only and unpriced (usage records $0, unknown model). |
+| Summary + agent (ChatGPT plan) | `aiProvider=chatgpt`, `chatgptModel` | account-specific list from `GET /v1/models` | Counted against the user's ChatGPT Plus/Pro plan usage limits; no per-token charge to an API account | Sign in with ChatGPT. No `temperature`, `max_output_tokens`, or other unsupported Responses fields. Cannot process audio. |
 | Live transcription (streaming) | `liveSttProvider`, `openaiLiveTranscriptionModel` | gpt-realtime-whisper or gemini-3.1-flash-live-preview | OpenAI: $0.017/min. Gemini: ~$0.005/min input audio | Auto mode tries OpenAI Realtime with a direct OpenAI API key, then Gemini Live, then chunked fallback. |
-| Live translation (streaming captions) | `liveSttProvider`, `openaiLiveTranslationModel`, `liveTranslationLanguage` | gpt-realtime-translate or gemini-3.5-live-translate-preview | OpenAI: $0.034/min. Gemini: $0.0053/min input audio + $0.0315/min output audio | OpenAI Realtime live translation requires a standard OpenAI API key; Codex OAuth is not treated as live translation auth. |
+| Live translation (streaming captions) | `liveSttProvider`, `openaiLiveTranslationModel`, `liveTranslationLanguage` | gpt-realtime-translate or gemini-3.5-live-translate-preview | OpenAI: $0.034/min. Gemini: $0.0053/min input audio + $0.0315/min output audio | OpenAI Realtime live translation requires a standard OpenAI API key; ChatGPT sign-in does not cover it. |
 | Transcription (Soniox, opt-in) | `transcriptionProvider=soniox`, `sonioxApiKey` | stt-async-v5 | $0.10/hr ($0.00167/min) | Diarization, language identification, formatting and translation bundled at that price. Whole file in one job up to 300 min, so speaker ids stay consistent. |
 | Live transcription (Soniox, opt-in) | `liveSttProvider=soniox`, `sonioxApiKey` | stt-rt-v5 | $0.12/hr ($0.002/min) | Explicit opt-in only, never chosen by `auto`. Diarization off in realtime by decision D5. |
 
@@ -21,11 +21,11 @@ When prices drift, update the date in the cell and re-cite from the provider's o
 
 **Google Gemini** — API key via Google AI Studio or Vertex AI. Free tier exists for AI Studio but is rate-limited and not for production. No announced end-of-life for 2.5 Flash or 2.5 Pro as of May 2026.
 
-**OpenAI Codex (ChatGPT subscription)** — OAuth via the `@earendil-works/pi-ai` OpenAI Codex provider. Codex GUI usage on Plus/Pro plans is metered against shared 5-hour message-window allowances. Business/Enterprise plans switched to per-token credits aligned with API rates on 2026-04-02. The same models are also accessible directly via API key at the per-token prices below.
+**ChatGPT plan (Sign in with ChatGPT)** — official OAuth sign-in for open-source and locally run apps (<https://developers.openai.com/siwc>). Plan usage is available to ChatGPT Plus and Pro; Plus has a five-hour usage limit shared across all apps, Pro does not. Text only: the SIWC preview limitations exclude audio input, the Files API, and the transcription API. The earlier Codex OAuth provider (Codex CLI client via pi-ai, `chatgpt.com/backend-api`) was removed; see `docs/chatgpt-integration.md`.
 
-**OpenAI Transcription** — API key. Metered separately from the ChatGPT subscription. Listener.AI's OAuth flow currently passes the ChatGPT access token as the Bearer for `/v1/audio/transcriptions`, which OpenAI accepts. End-of-life: `whisper-1` is still available at the same per-minute rate as `gpt-4o-transcribe`.
+**OpenAI Transcription** — standard API key (`openaiApiKey`), metered separately from any ChatGPT plan. A ChatGPT sign-in token is never used for `/v1/audio/transcriptions`. End-of-life: OpenAI's deprecations page (2026-08-26 entry) schedules `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, and `gpt-4o-transcribe-diarize` for removal on 2027-02-26, naming `gpt-transcribe` or `gpt-live-transcribe` as replacements.
 
-**Soniox (opt-in)** — separate account and API key at <https://console.soniox.com>, funded by the user; no free credits since 2025-10-27. Enabling it breaks the "ChatGPT subscription only" promise for Codex users, which is why both the batch and live paths are explicit opt-in and never reached by `auto`. Billed by audio duration with diarization and language identification included; see `docs/soniox-adoption-plan.md` for the evaluation gate and risks.
+**Soniox (opt-in)** — separate account and API key at <https://console.soniox.com>, funded by the user; no free credits since 2025-10-27. It is billed separately from any ChatGPT plan, which is why both the batch and live paths are explicit opt-in and never reached by `auto`. Billed by audio duration with diarization and language identification included; see `docs/soniox-adoption-plan.md` for the evaluation gate and risks.
 
 ## Full pricing tables
 
@@ -93,16 +93,16 @@ All verified 2026-05-13.
 
 ## Speaker diarization options
 
-The Gemini path natively returns "참가자1: ... / 참가자2: ..." because `gemini-2.5-flash` is a multimodal LLM and follows the system prompt. The Codex path through `/v1/audio/transcriptions` does not — `prompt` is documented as a vocabulary/style hint only. Three viable paths if speaker labels are needed on the Codex side:
+The Gemini path natively returns "참가자1: ... / 참가자2: ..." because `gemini-2.5-flash` is a multimodal LLM and follows the system prompt. The OpenAI path through `/v1/audio/transcriptions` does not — `prompt` is documented as a vocabulary/style hint only. Three viable paths if speaker labels are needed on the OpenAI side:
 
 1. **`gpt-4o-transcribe-diarize`** (default since this PR) — same endpoint, same price, native diarization. Loses the `prompt` parameter, so user glossaries (`knownWords`) can't be passed. Output is `{segments: [{speaker, start, end, text}]}` which we remap onto our `참가자N` convention.
-2. **Post-process via Codex chat** — transcribe with `gpt-4o-transcribe` as today, then send the plain transcript to `gpt-5.5` with a "label by speaker" instruction. Adds one round-trip; quality drops for 3+ speakers since the model can only infer from conversational cues, not voice.
-3. **Third-party API** (AssemblyAI / Deepgram / Speechmatics) — requires a separate API key and breaks the "ChatGPT subscription only" promise. Highest accuracy but worst UX for Codex users.
+2. **Post-process via the chat provider** — transcribe with `gpt-4o-transcribe` as today, then send the plain transcript to `gpt-5.5` with a "label by speaker" instruction. Adds one round-trip; quality drops for 3+ speakers since the model can only infer from conversational cues, not voice.
+3. **Third-party API** (AssemblyAI / Deepgram / Speechmatics) — requires a separate API key and is billed separately. Highest accuracy but adds another account to manage.
 
 ### Known limitations of the diarize default
 
 - **Cross-segment speaker incoherence.** We intentionally split long audio into 5-minute chunks and upload them in parallel — this is much faster than a single long upload for both Gemini and OpenAI. The diarize model re-numbers speakers per request, so "참가자1" in segment 1 is not guaranteed to be the same physical person as "참가자1" in segment 2. Each chunk is internally consistent. To merge speakers across chunks you would need to seed `known_speaker_references` from the first chunk and re-upload — not implemented today.
-- **`knownWords` glossary is dropped.** The diarize model rejects the `prompt` parameter. Users who depend on vocabulary biasing should run `listener config set codexTranscriptionModel gpt-4o-transcribe` to go back to the pre-diarize path (no speaker labels).
+- **`knownWords` glossary is dropped.** The diarize model rejects the `prompt` parameter. Users who depend on vocabulary biasing should run `listener config set openaiTranscriptionModel gpt-4o-transcribe` to go back to the pre-diarize path (no speaker labels).
 - **Word skipping + speaker count hallucination.** Reported by the OpenAI community at launch (Oct 2025). Language-agnostic, no Korean-specific benchmark.
 - **No forced `language` hint.** We let Whisper's auto-detection (first ~30s) decide. Forcing `language: 'ko'` slightly improves accuracy for purely Korean audio but degrades English/code-switched sections (acronyms transcribed phonetically, e.g. "API" → "에이피아이"). Most meetings here are bilingual, so auto-detect wins on average.
 
@@ -114,7 +114,9 @@ For Korean meetings the data points are thin. AssemblyAI Universal-2 has confirm
 - [OpenAI API Pricing](https://developers.openai.com/api/docs/pricing)
 - [OpenAI Realtime transcription](https://developers.openai.com/api/docs/guides/realtime-transcription)
 - [OpenAI Realtime translation](https://developers.openai.com/api/docs/guides/realtime-translation)
-- [OpenAI Codex Pricing](https://developers.openai.com/codex/pricing)
+- [Sign in with ChatGPT](https://developers.openai.com/siwc)
+- [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text)
+- [OpenAI deprecations](https://developers.openai.com/api/docs/deprecations)
 - [OpenAI Transcription pricing aggregator](https://costgoat.com/pricing/openai-transcription)
 - [gpt-4o-transcribe-diarize model card](https://platform.openai.com/docs/models/gpt-4o-transcribe-diarize)
 - [AssemblyAI Pricing](https://www.assemblyai.com/pricing/)

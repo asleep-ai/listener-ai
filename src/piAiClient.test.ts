@@ -7,8 +7,8 @@
 
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
-import { DEFAULT_CODEX_MODEL } from './aiProvider';
-import { complete, completeSimple, getModel, swapProviderForTest } from './piAiClient';
+import { DEFAULT_GEMINI_MODEL } from './aiProvider';
+import { completeSimple, getModel, swapProviderForTest } from './piAiClient';
 import { importEsm } from './esmImport';
 
 type PiAiModule = typeof import('@earendil-works/pi-ai');
@@ -66,7 +66,7 @@ describe('piAiClient.completeSimple', () => {
   });
 
   it('preserves arbitrary options on Gemini provider', async () => {
-    // adjustOptionsForModel spreads everything for non-Codex providers; this
+    // adjustOptionsForModel spreads everything for non-ChatGPT providers; this
     // guards against a future change accidentally narrowing the passthrough.
     const { pi, faux } = await installFaux({
       api: 'google-generative-ai',
@@ -95,35 +95,6 @@ describe('piAiClient.completeSimple', () => {
   });
 });
 
-describe('piAiClient.complete', () => {
-  it('strips temperature on Codex but forwards other options', async () => {
-    // pi-ai's openai-codex-responses provider rejects sampling params; the
-    // wrapper has to drop them. This pins that contract.
-    const { pi, faux } = await installFaux({
-      api: 'openai-codex-responses',
-      provider: 'openai-codex',
-    });
-
-    let captured: Record<string, unknown> | undefined;
-    faux.setResponses([
-      (_ctx, options) => {
-        captured = options as Record<string, unknown>;
-        return pi.fauxAssistantMessage('ok');
-      },
-    ]);
-
-    const model = faux.getModel();
-    await complete(
-      model,
-      { messages: [{ role: 'user', content: 'hi', timestamp: Date.now() }] },
-      { apiKey: 'unused-for-faux', temperature: 0.5, reasoningEffort: 'xhigh' },
-    );
-
-    assert.equal(captured?.temperature, undefined, 'temperature must be stripped for Codex');
-    assert.equal(captured?.reasoningEffort, 'xhigh');
-  });
-});
-
 describe('piAiClient.getModel', () => {
   it('returns the bundled gemini-3.5-flash model', async () => {
     const model = await getModel('gemini', 'gemini-3.5-flash');
@@ -138,9 +109,15 @@ describe('piAiClient.getModel', () => {
     // A stale configured id must not brick every summary/agent call: getModel
     // degrades to the provider default -- a real registry entry, so the
     // token/scope plumbing stays intact -- and warns.
-    const model = await getModel('codex', 'gpt-vaporware-9.9');
+    const model = await getModel('gemini', 'gemini-vaporware-9.9');
 
-    assert.equal(model.id, DEFAULT_CODEX_MODEL);
-    assert.equal((model as { provider: string }).provider, 'openai-codex');
+    assert.equal(model.id, DEFAULT_GEMINI_MODEL);
+    assert.equal((model as { provider: string }).provider, 'google');
+  });
+
+  it('refuses ChatGPT models: they are account-discovered, never substituted', async () => {
+    // The ChatGPT option-stripping and wire contract live in
+    // chatgptResponses.test.ts, against the real transport.
+    await assert.rejects(getModel('chatgpt', 'gpt-anything'), /signed-in account/);
   });
 });

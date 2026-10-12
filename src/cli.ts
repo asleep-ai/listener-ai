@@ -2,7 +2,6 @@
 
 import { randomUUID } from 'crypto';
 import * as fs from 'fs';
-import * as readline from 'readline';
 import * as path from 'path';
 import { type AgentScope, AgentService, type ConfigProposal } from './agentService';
 import { extensionForMimeType, mimeTypeForFile } from './audioFormats';
@@ -13,7 +12,11 @@ import {
   KNOWN_CONFIG_KEYS,
 } from './configKeys';
 import { type AppConfig, ConfigService } from './configService';
-import { loginCodexOAuth } from './codexOAuth';
+import { openInBrowser } from './browserLauncher';
+import { ChatGPTBinding } from './chatgptBinding';
+import { ChatGPTAuthError, getChatGPTAuth, redactAuthorizeUrl } from './chatgptAuth';
+import { CHATGPT_MANAGE_USAGE_URL } from './chatgptResponses';
+import { LEGACY_CODEX_TRANSCRIPTION_MESSAGE } from './aiProvider';
 import { getDataPath } from './dataPath';
 import { GeminiService } from './geminiService';
 import { loginGoogleOAuth, resolveGoogleAccessToken } from './googleOAuth';
@@ -64,6 +67,7 @@ const SUPPORTED_EXTENSIONS = new Set([
 const MEETING_READER_COMMANDS = new Set(['list', 'show', 'export', 'search', 'merge', 'ask']);
 const COMMANDS_WITHOUT_MIGRATION = new Set([
   'config',
+  'chatgpt',
   'codex',
   'migrate', // Its own handler must see v1 folders, including --dry-run.
   'transcript',
@@ -108,7 +112,9 @@ const USAGE_TEXT =
   '                                           re-transcribe end-to-end, and save as a new note\n' +
   '       listener ask <question> [--ref <ref>]\n' +
   '                                           Ask the AI agent about saved meetings or settings\n' +
-  '       listener codex login|logout|status  Manage OpenAI Codex OAuth sign-in\n' +
+  '       listener chatgpt login [--new] [--enable-plan] | logout | status | models | accounts | use <id>\n' +
+  '                                           Sign in with ChatGPT (plan usage for summaries and ask)\n' +
+  '       listener codex login|logout|status  Deprecated alias of `listener chatgpt` (Codex sign-in was replaced)\n' +
   '       listener google login|logout|status Manage Google Drive OAuth sign-in\n' +
   '       listener google upload <ref>        Upload a meeting folder to Google Drive\n' +
   '       listener google sync                Sync all meetings to Google Drive (upload changes only)\n' +
@@ -233,34 +239,48 @@ function applyConfigSet(config: ConfigService, key: ConfigKey, value: string): v
 }
 
 function formatAiCredentialsError(config: ConfigService): string {
-  if (config.getAiProvider() === 'codex') {
+  if (config.getAiProvider() === 'chatgpt') {
+    const status = config.getChatGPTStatus();
+    const legacy = config.hasLegacyCodexSignIn()
+      ? 'Codex sign-in was replaced by Sign in with ChatGPT; the old Codex login is not reused.\n'
+      : '';
+    if (status.connected && !status.planEnabled) {
+      return (
+        'Error: ChatGPT plan usage was not granted for this sign-in.\n' +
+        'Run `listener chatgpt login` again and allow plan usage, or set aiProvider back to gemini.\n'
+      );
+    }
     return (
-      'Error: Codex OAuth is not configured.\n' +
-      'Run `listener codex login` or set aiProvider back to gemini with a Gemini API key.\n'
+      `Error: Not signed in with ChatGPT.\n${legacy}` +
+      'Run `listener chatgpt login`, or set aiProvider back to gemini with a Gemini API key.\n'
     );
   }
   return (
     'Error: Gemini API key not found.\n' +
-    'Set GEMINI_API_KEY env var, run `listener config set geminiApiKey <key>`, or run `listener codex login`.\n'
+    'Set GEMINI_API_KEY env var, run `listener config set geminiApiKey <key>`, ' +
+    'or run `listener chatgpt login` and `listener config set aiProvider chatgpt`.\n'
   );
 }
 
 // Credentials for the resolved transcription backend, which `transcriptionProvider`
 // can point at a different vendor than `aiProvider`. Keyed on the backend, not
-// on `aiProvider`, so `transcriptionProvider=codex` on a Gemini install is told
-// to sign in to Codex rather than to add a Gemini key.
+// on `aiProvider`, so `transcriptionProvider=openai` on a Gemini install is told
+// to add an OpenAI API key rather than a Gemini key.
 function formatTranscriptionCredentialsError(config: ConfigService): string {
-  switch (config.resolveTranscriptionProvider()) {
+  const resolution = config.getTranscriptionResolution();
+  if (!resolution.provider) return `Error: ${resolution.message}\n`;
+  switch (resolution.provider) {
     case 'soniox':
       return (
         'Error: Soniox API key not found.\n' +
         'Set SONIOX_API_KEY env var, run `listener config set sonioxApiKey <key>`, ' +
         'or run `listener config set transcriptionProvider auto`.\n'
       );
-    case 'codex':
+    case 'openai':
       return (
-        'Error: transcriptionProvider is codex, but Codex OAuth is not configured.\n' +
-        'Run `listener codex login` or run `listener config set transcriptionProvider auto`.\n'
+        'Error: transcriptionProvider is openai, but no OpenAI API key was found.\n' +
+        'Set OPENAI_API_KEY env var or run `listener config set openaiApiKey <key>` ' +
+        '(billed to your OpenAI API account, not a ChatGPT plan).\n'
       );
     default:
       return (
@@ -275,7 +295,8 @@ function formatTranscriptionCredentialsError(config: ConfigService): string {
 // (see `transcriptionProvider`), so a transcribing command needs both gates:
 // `aiProvider` credentials, which the summary AND the per-segment quality judge
 // both call, plus the transcription backend's own credentials.
-function requireTranscriptionCredentials(config: ConfigService): void {
+async function requireTranscriptionCredentials(config: ConfigService): Promise<void> {
+  await primeChatGPTStatus(config);
   if (!config.hasAiAuth()) {
     process.stderr.write(formatAiCredentialsError(config));
     process.exit(1);
@@ -285,27 +306,43 @@ function requireTranscriptionCredentials(config: ConfigService): void {
   process.exit(1);
 }
 
+// The CLI is one job per process, so the ChatGPT profile is pinned to the one
+// active when the command started (primeChatGPTStatus) for every request.
+function chatGPTBindingFor(config: ConfigService): ChatGPTBinding | undefined {
+  if (config.getAiProvider() !== 'chatgpt') return undefined;
+  return new ChatGPTBinding({
+    model: config.getChatGPTModel(),
+    profileId: config.getChatGPTStatus().profileId,
+  });
+}
+
+// Read the ChatGPT sign-in status into the config's synchronous gates. Only
+// touches the auth store when ChatGPT is the selected provider.
+async function primeChatGPTStatus(config: ConfigService): Promise<void> {
+  if (config.getAiProvider() !== 'chatgpt') return;
+  try {
+    config.setChatGPTStatus(await getChatGPTAuth().getStatus());
+  } catch (error) {
+    process.stderr.write(
+      `Warning: could not read ChatGPT sign-in status: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
 function createTranscriptionService(config: ConfigService, dataPath: string): GeminiService {
   return new GeminiService({
     provider: config.getAiProvider(),
     transcriptionProvider: config.resolveTranscriptionProvider(),
     apiKey: config.getGeminiApiKey(),
     sonioxApiKey: config.getSonioxApiKey(),
-    codexOAuth: config.getCodexOAuth(),
-    // Persist refreshed tokens only when credentials are stored in config.json.
-    // Env-only credentials must stay ephemeral; persisting them silently writes
-    // env-provided OAuth tokens to disk on every refresh.
-    onCodexOAuthUpdate:
-      config.getCodexOAuthSource()?.source === 'config'
-        ? (credentials) => config.setCodexOAuth(credentials)
-        : undefined,
+    openaiApiKey: config.getOpenAiApiKey(),
+    openaiTranscriptionModel: config.getOpenAiTranscriptionModel(),
+    chatgptBinding: chatGPTBindingFor(config),
     dataPath,
     knownWords: config.getKnownWords(),
     proModel: config.getGeminiModel(),
     flashModel: config.getGeminiFlashModel(),
     thinkingLevel: config.getGeminiThinkingLevel(),
-    codexModel: config.getCodexModel(),
-    codexTranscriptionModel: config.getCodexTranscriptionModel(),
   });
 }
 
@@ -313,77 +350,230 @@ function createAgentService(config: ConfigService, dataPath: string): AgentServi
   return new AgentService({
     provider: config.getAiProvider(),
     apiKey: config.getGeminiApiKey(),
-    codexOAuth: config.getCodexOAuth(),
-    // See note in createTranscriptionService(): persist only for stored creds.
-    onCodexOAuthUpdate:
-      config.getCodexOAuthSource()?.source === 'config'
-        ? (credentials) => config.setCodexOAuth(credentials)
-        : undefined,
+    chatgptBinding: chatGPTBindingFor(config),
     dataPath,
     configService: config,
-    codexModel: config.getCodexModel(),
   });
 }
 
-function promptLine(message: string, signal?: AbortSignal): Promise<string> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-  return new Promise((resolve, reject) => {
-    // Close the interface on abort -- pi-ai races this manual-code prompt
-    // against the browser loopback, and a pending stdin read would otherwise
-    // keep the process alive after a successful browser login.
-    const onAbort = () => {
-      rl.close();
-      reject(new Error('Prompt cancelled.'));
-    };
-    if (signal?.aborted) {
-      onAbort();
-      return;
-    }
-    signal?.addEventListener('abort', onAbort, { once: true });
-    rl.question(`${message} `, (answer) => {
-      signal?.removeEventListener('abort', onAbort);
-      rl.close();
-      resolve(answer);
-    });
-  });
-}
-
+// DEPRECATED: `listener codex` predates Sign in with ChatGPT. It no longer
+// runs the old Codex OAuth flow; login/status/logout redirect to `listener
+// chatgpt` and everything else is refused. `codex login` used to select its
+// provider, so the aliased login still selects ChatGPT once plan usage is
+// granted (`chatgpt login` itself never changes the selection).
 async function handleCodex(args: string[]): Promise<void> {
+  const sub = args[0];
+  process.stderr.write(
+    'Warning: `listener codex` is deprecated. Codex sign-in was replaced by Sign in with ChatGPT; ' +
+      'the old Codex login is not reused. Use `listener chatgpt ' +
+      (sub ?? 'login') +
+      '`.\n',
+  );
+  if (sub !== 'login' && sub !== 'status' && sub !== 'logout') {
+    process.stderr.write('Error: Usage: listener chatgpt login|logout|status\n');
+    process.exit(1);
+  }
+  await handleChatGPT([sub], { selectProviderOnLogin: sub === 'login' });
+}
+
+function readFlag(args: string[], flag: string): string | undefined {
+  const index = args.indexOf(flag);
+  if (index < 0) return undefined;
+  const value = args[index + 1];
+  if (!value || value.startsWith('--')) {
+    process.stderr.write(`Error: ${flag} requires a value\n`);
+    process.exit(1);
+  }
+  return value;
+}
+
+function chatGPTFailure(error: unknown): never {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = error instanceof ChatGPTAuthError ? ` (${error.code})` : '';
+  process.stderr.write(`Error: ${message}${code}\n`);
+  process.exit(1);
+}
+
+function printableAuthorizeUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    url.searchParams.delete('id_token_hint');
+    return url.toString();
+  } catch {
+    return redactAuthorizeUrl(raw);
+  }
+}
+
+async function handleChatGPT(
+  args: string[],
+  opts: { selectProviderOnLogin?: boolean } = {},
+): Promise<void> {
   const sub = args[0];
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
+  const auth = getChatGPTAuth();
+  const profileFlag = readFlag(args, '--profile');
 
   if (sub === 'status') {
+    const status = await auth.getStatus().catch(chatGPTFailure);
+    config.setChatGPTStatus(status);
+    const stt = config.getTranscriptionResolution();
     process.stdout.write(`aiProvider=${config.getAiProvider()}\n`);
-    process.stdout.write(`codexOAuthConfigured=${config.hasCodexOAuth()}\n`);
-    process.stdout.write(`codexModel=${config.getCodexModel()}\n`);
-    process.stdout.write(`codexTranscriptionModel=${config.getCodexTranscriptionModel()}\n`);
+    process.stdout.write(`chatgptConnected=${status.connected}\n`);
+    process.stdout.write(`chatgptPlanEnabled=${status.planEnabled}\n`);
+    if (status.planState) process.stdout.write(`chatgptPlanState=${status.planState}\n`);
+    if (status.profileId) process.stdout.write(`chatgptProfileId=${status.profileId}\n`);
+    if (status.email) process.stdout.write(`chatgptEmail=${status.email}\n`);
+    process.stdout.write(`chatgptModel=${config.getChatGPTModel() ?? ''}\n`);
+    // Summary auth and transcription auth are independent gates.
+    process.stdout.write(`summaryAuth=${config.hasAiAuth()}\n`);
+    process.stdout.write(`transcriptionProvider=${stt.provider ?? ''}\n`);
+    process.stdout.write(`transcriptionAuth=${config.hasTranscriptionAuth()}\n`);
+    if (stt.provider === 'openai') {
+      process.stdout.write('transcriptionBilling=openai-api-key\n');
+    }
+    if (stt.message) process.stdout.write(`transcriptionProviderIssue=${stt.message}\n`);
+    process.stdout.write(`legacyCodexConfigured=${config.hasLegacyCodexConfig()}\n`);
+    process.stdout.write(`manageUsage=${CHATGPT_MANAGE_USAGE_URL}\n`);
     return;
   }
 
   if (sub === 'logout') {
-    config.clearCodexOAuth();
-    process.stderr.write('Signed out of Codex OAuth.\n');
+    const result = await auth.signOut(profileFlag).catch(chatGPTFailure);
+    config.clearLegacyCodexSignIn();
+    if (!result.removed) {
+      process.stderr.write('No ChatGPT sign-in to remove.\n');
+    } else if (!result.signedIn) {
+      // Identity-only sign-in: cleared locally, with no grant to revoke.
+      process.stderr.write('Signed out of ChatGPT.\n');
+    } else if (result.revoked) {
+      process.stderr.write('Signed out of ChatGPT and revoked the sign-in.\n');
+    } else {
+      process.stderr.write(
+        'Signed out of ChatGPT locally, but OpenAI did not confirm the revocation' +
+          (result.revocationError ? ` (${result.revocationError})` : '') +
+          '. You can disconnect Listener.AI in ChatGPT Settings.\n',
+      );
+    }
+    return;
+  }
+
+  if (sub === 'models') {
+    const models = await auth.listModels(profileFlag).catch(chatGPTFailure);
+    const selected = config.getChatGPTModel();
+    for (const model of models) {
+      const marker = model.slug === selected ? '*' : ' ';
+      process.stdout.write(`${marker} ${model.slug}\t${model.display_name}\n`);
+    }
+    if (!selected && models.length > 0) {
+      process.stderr.write(
+        `No chatgptModel set; using the first listed (${models[0].slug}). ` +
+          'Pick one with `listener config set chatgptModel <slug>`.\n',
+      );
+    }
+    return;
+  }
+
+  if (sub === 'accounts') {
+    const profiles = await auth.listProfiles().catch(chatGPTFailure);
+    for (const profile of profiles) {
+      process.stdout.write(
+        `${profile.active ? '*' : ' '} ${profile.id}\t${profile.email ?? ''}\t` +
+          `connected=${profile.connected} planEnabled=${profile.planEnabled}\n`,
+      );
+    }
+    return;
+  }
+
+  if (sub === 'use') {
+    const id = args[1];
+    if (!id || id.startsWith('--')) {
+      process.stderr.write('Error: Usage: listener chatgpt use <account-id>\n');
+      process.exit(1);
+    }
+    const status = await auth.selectProfile(id).catch(chatGPTFailure);
+    process.stderr.write(
+      `Now using ChatGPT account ${status.email ?? status.profileId ?? id} for new work.\n`,
+    );
     return;
   }
 
   if (sub !== 'login') {
     process.stderr.write(
-      'Error: Unknown codex command. Usage: listener codex login|logout|status\n',
+      'Error: Unknown chatgpt command. Usage: listener chatgpt login|logout|status|models|accounts|use <id>\n',
     );
     process.exit(1);
   }
 
-  const credentials = await loginCodexOAuth({
-    openUrl: (url) => {
-      process.stderr.write(`Open this URL in your browser:\n${url}\n`);
-    },
-    onPrompt: async (prompt) => await promptLine(prompt.message, prompt.signal),
-    onProgress: (message) => process.stderr.write(`${message}\n`),
-  });
-  config.setCodexOAuth(credentials);
-  config.setAiProvider('codex');
-  process.stderr.write('Signed in with Codex OAuth and set aiProvider=codex.\n');
+  // Ctrl+C cancels the pending browser sign-in and frees the loopback port.
+  const controller = new AbortController();
+  const onSigint = () => controller.abort();
+  process.once('SIGINT', onSigint);
+  try {
+    const status = await auth.signIn({
+      openBrowser: async (url) => {
+        const opened = await openInBrowser(url);
+        // Never print `id_token_hint`: it is optional for reauthorization,
+        // so the printed URL drops it and still works.
+        process.stderr.write(
+          opened
+            ? `Opened your browser to sign in with ChatGPT.\nIf it did not open, visit:\n${printableAuthorizeUrl(url)}\n`
+            : `Open this URL in your browser to sign in with ChatGPT:\n${printableAuthorizeUrl(url)}\n`,
+        );
+      },
+      onProgress: (message) => process.stderr.write(`${message}\n`),
+      signal: controller.signal,
+      newProfile: args.includes('--new'),
+      profileId: profileFlag,
+      requestPlanConsent: args.includes('--enable-plan'),
+    });
+    process.stderr.write(
+      `Signed in with ChatGPT${status.email ? ` as ${status.email}` : ''}.\n` +
+        (status.planEnabled
+          ? 'You are using your ChatGPT plan for summaries and `listener ask`. Manage usage: ' +
+            `${CHATGPT_MANAGE_USAGE_URL}\n`
+          : 'Plan usage was not granted, so ChatGPT cannot run summaries. Sign in again and allow it.\n'),
+    );
+    if (status.planEnabled && !config.getChatGPTModel()) {
+      // Pick the model explicitly and visibly rather than leaving it implicit.
+      try {
+        const models = await auth.listModels(status.profileId);
+        if (models.length > 0) {
+          config.setChatGPTModel(models[0].slug);
+          process.stderr.write(
+            `Using ChatGPT model ${models[0].slug} (first listed for this account). ` +
+              'Change it with `listener chatgpt models` and `listener config set chatgptModel <slug>`.\n',
+          );
+        }
+      } catch (error) {
+        process.stderr.write(
+          `Warning: could not list ChatGPT models: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
+    }
+    // Only a sign-in that can run summaries is selected; an identity-only
+    // sign-in would leave no working text provider.
+    if (opts.selectProviderOnLogin && status.planEnabled && config.getAiProvider() !== 'chatgpt') {
+      config.setAiProvider('chatgpt');
+      process.stderr.write(
+        'Set aiProvider=chatgpt, as `listener codex login` did. ' +
+          'Transcription needs its own provider: run `listener config set transcriptionProvider gemini|openai|soniox`.\n',
+      );
+    } else if (config.getAiProvider() !== 'chatgpt') {
+      process.stderr.write(
+        'To use it, run `listener config set aiProvider chatgpt` ' +
+          '(transcription then needs its own provider: gemini, openai, or soniox).\n',
+      );
+    }
+  } catch (error) {
+    if (controller.signal.aborted) {
+      process.stderr.write('Sign-in cancelled.\n');
+      process.exit(130);
+    }
+    chatGPTFailure(error);
+  } finally {
+    process.removeListener('SIGINT', onSigint);
+  }
 }
 
 async function handleGoogle(args: string[]): Promise<void> {
@@ -580,6 +770,13 @@ function handleConfig(subArgs: string[]): void {
     return;
   }
 
+  // Retired Codex keys: say what replaced them instead of "Unknown key".
+  const legacyKey = subArgs[1] ? LEGACY_CONFIG_KEYS[subArgs[1]] : undefined;
+  if ((sub === 'get' || sub === 'set' || sub === 'unset') && legacyKey) {
+    process.stderr.write(`Error: ${subArgs[1]} was removed. ${legacyKey}\n`);
+    process.exit(1);
+  }
+
   if (sub === 'list') {
     const all = config.getAllConfig();
     for (const key of KNOWN_CONFIG_KEYS) {
@@ -624,6 +821,19 @@ function handleConfig(subArgs: string[]): void {
       process.stderr.write(`Known keys: ${KNOWN_CONFIG_KEYS.join(', ')}\n`);
       process.exit(1);
     }
+    if (key === 'aiProvider' && value.trim().toLowerCase() === 'codex') {
+      // Kept as an intent alias; the old Codex tokens are never reused.
+      config.updateConfig({ aiProvider: 'chatgpt' });
+      process.stderr.write(
+        'Warning: aiProvider "codex" was replaced by "chatgpt" (Sign in with ChatGPT). ' +
+          'Set aiProvider=chatgpt; run `listener chatgpt login` to sign in.\n',
+      );
+      return;
+    }
+    if (key === 'transcriptionProvider' && value.trim().toLowerCase() === 'codex') {
+      process.stderr.write(`Error: ${LEGACY_CODEX_TRANSCRIPTION_MESSAGE}\n`);
+      process.exit(1);
+    }
     applyConfigSet(config, key, value);
     process.stderr.write(`Set ${key}\n`);
     return;
@@ -648,6 +858,14 @@ function handleConfig(subArgs: string[]): void {
   process.stderr.write(`Error: Unknown config command: ${sub}\n`);
   usageError();
 }
+
+const LEGACY_CONFIG_KEYS: Record<string, string> = {
+  codexModel:
+    'ChatGPT models now come from your account: see `listener chatgpt models` and set `chatgptModel`.',
+  codexTranscriptionModel:
+    'OpenAI transcription now uses your OpenAI API key: set `openaiTranscriptionModel` ' +
+    '(with transcriptionProvider=openai and openaiApiKey).',
+};
 
 async function resolveRef(ref: string, dataPath: string): Promise<string> {
   if (/^\d+$/.test(ref)) {
@@ -985,7 +1203,7 @@ async function handleMerge(args: string[]): Promise<void> {
 
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
-  requireTranscriptionCredentials(config);
+  await requireTranscriptionCredentials(config);
 
   // Resolve every ref to a folder + audio path before doing any expensive work
   // so an early failure (missing audio) doesn't waste a partial concat.
@@ -1087,6 +1305,7 @@ async function handleAsk(args: string[]): Promise<void> {
 
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
+  await primeChatGPTStatus(config);
   if (!config.hasAiAuth()) {
     process.stderr.write(formatAiCredentialsError(config));
     process.exit(1);
@@ -1254,7 +1473,7 @@ async function handleUsage(args: string[]): Promise<void> {
   process.stdout.write('\n');
   for (const row of summary.byModel) {
     process.stdout.write(
-      `  ${row.modelId.padEnd(28)} ${row.kind.padEnd(14)} ${String(row.count).padStart(4)}  ${formatUsd(row.usd)}\n`,
+      `  ${row.modelId.padEnd(28)} ${row.kind.padEnd(14)} ${String(row.count).padStart(4)}  ${row.billing === 'chatgpt-plan' ? 'ChatGPT plan' : formatUsd(row.usd)}\n`,
     );
   }
   if (summary.modelUnknownCount > 0) {
@@ -1316,12 +1535,12 @@ async function handleTranscript(args: string[]): Promise<void> {
 
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
-  requireTranscriptionCredentials(config);
+  await requireTranscriptionCredentials(config);
 
   // Soniox takes vocabulary out of band (`context.terms`) and has no prompt
   // surface at all, so a --prompt on that backend is silently dropped. Say so
   // once instead of letting the user wonder why the instruction had no effect.
-  if (promptText && config.resolveTranscriptionProvider() === 'soniox') {
+  if (promptText && config.getTranscriptionResolution().provider === 'soniox') {
     process.stderr.write(
       'Warning: --prompt is ignored by the Soniox backend (it has no prompt parameter). ' +
         'Known words are still applied.\n',
@@ -1396,7 +1615,7 @@ async function main(): Promise<void> {
 
   // One-shot v1 -> v2 migration is the runtime's responsibility on every
   // entry point. Skip for commands that don't touch the transcriptions dir
-  // (`config`, `codex`, `usage`, `transcript`, `google login/logout/status`) so we don't pay the
+  // (`config`, `chatgpt`, `codex`, `usage`, `transcript`, `google login/logout/status`) so we don't pay the
   // dir-scan when it's irrelevant. Also skip when `LISTENER_SKIP_AUTO_MIGRATE`
   // is set -- the migrate-command tests use this to drive the explicit
   // `listener migrate` flow on un-migrated fixtures.
@@ -1431,6 +1650,11 @@ async function main(): Promise<void> {
 
   if (args[0] === 'config') {
     handleConfig(args.slice(1));
+    return;
+  }
+
+  if (args[0] === 'chatgpt') {
+    await handleChatGPT(args.slice(1));
     return;
   }
 
@@ -1531,7 +1755,7 @@ async function main(): Promise<void> {
 
   const dataPath = getDataPath();
   const config = new ConfigService(dataPath);
-  requireTranscriptionCredentials(config);
+  await requireTranscriptionCredentials(config);
 
   const gemini = createTranscriptionService(config, dataPath);
 

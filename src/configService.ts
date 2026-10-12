@@ -5,9 +5,11 @@ import {
   DEFAULT_LIVE_STT_PROVIDER,
   type AiProvider,
   type BatchSttProvider,
+  type BatchSttResolution,
   type GeminiThinkingLevel,
   type LiveSttProvider,
   type TranscriptionProvider,
+  isLegacyCodexProvider,
   isTranscriptionProvider,
   normalizeAiProvider,
   normalizeGeminiThinkingLevel,
@@ -15,12 +17,6 @@ import {
   normalizeTranscriptionProvider,
   resolveBatchSttProvider,
 } from './aiProvider';
-import {
-  type CodexOAuthCredentialSource,
-  type CodexOAuthCredentials,
-  getCodexOAuthCliCredentials,
-  getCodexOAuthEnvCredentials,
-} from './codexOAuth';
 import {
   CONFIG_KEY_BY_NAME,
   CONFIG_KEY_DEFINITIONS,
@@ -36,12 +32,56 @@ import {
   hasGoogleOAuthEnvCredentials,
 } from './googleOAuth';
 
-// Keys that are not scalar registry rows: the two OAuth credential blobs, the
+/** Sanitized ChatGPT sign-in status for the renderer (never a token). */
+export interface ChatGPTStatusPayload {
+  connected: boolean;
+  planEnabled: boolean;
+  /** Set when connected: plan granted, not granted, or granted but incomplete. */
+  planState?: 'enabled' | 'not_granted' | 'incomplete';
+  profileId?: string;
+  email?: string;
+  /** Opaque tag of the current sign-in grant; changes on every (re)sign-in. */
+  sessionRevision?: string;
+}
+
+/**
+ * True when NEW ChatGPT work must bind again: the sign-in state, the plan
+ * grant, the active profile or the grant itself (a reauthorization of the same
+ * profile) changed. In-flight jobs keep their own binding either way.
+ */
+export function chatGPTBindingChanged(
+  before: ChatGPTStatusPayload,
+  after: ChatGPTStatusPayload,
+): boolean {
+  return (
+    before.connected !== after.connected ||
+    before.planEnabled !== after.planEnabled ||
+    before.profileId !== after.profileId ||
+    before.sessionRevision !== after.sessionRevision
+  );
+}
+
+// Keys that are not scalar registry rows: the OAuth credential blobs, the
 // read-only fields `getAllConfig()` derives, and the migration markers.
 interface AppConfigExtras {
-  codexOAuth?: CodexOAuthCredentials;
-  codexOAuthConfigured?: boolean;
-  codexOAuthSource?: CodexOAuthCredentialSource['source'];
+  // OBSOLETE. Tokens from the retired Codex OAuth path. Kept so old configs
+  // still load and an older binary keeps working after a downgrade, but no
+  // code path reads them for authentication: ChatGPT sign-in has its own
+  // store and always needs a fresh login.
+  codexOAuth?: unknown;
+  // OBSOLETE model keys of the retired Codex provider. Tolerated on disk only.
+  codexModel?: string;
+  codexTranscriptionModel?: string;
+  // Read-only renderer payload fields, derived; never persisted.
+  chatgptStatus?: ChatGPTStatusPayload;
+  /**
+   * True when this install still carries retired Codex settings (aiProvider
+   * or transcriptionProvider `codex`, Codex tokens or model keys), so the UI
+   * can explain the ChatGPT sign-in migration.
+   */
+  legacyCodexConfigured?: boolean;
+  /** Why batch transcription cannot run as configured, when it cannot. */
+  transcriptionProviderIssue?: { issue: string; message: string };
   googleOAuth?: GoogleOAuthCredentials;
   googleOAuthConfigured?: boolean;
   // Read-only renderer payload field. It is never persisted by updateConfig.
@@ -60,18 +100,28 @@ type AppConfigShape = ConfigValues & AppConfigExtras;
 // `keyof AppConfig`, both of which depend on that.
 export type AppConfig = { [K in keyof AppConfigShape]?: AppConfigShape[K] };
 
-// What the user has to go configure, named per provider. Keyed by
-// `BatchSttProvider` (a superset of `AiProvider`) so both credential gates
-// share one vocabulary and a new backend fails to compile until it says what
+// What the user has to go configure, named per provider. Keyed by both
+// provider vocabularies so a new backend fails to compile until it says what
 // its credential is called.
-const CREDENTIAL_LABELS: Record<BatchSttProvider, string> = {
+const CREDENTIAL_LABELS: Record<BatchSttProvider | AiProvider, string> = {
   gemini: 'Gemini API Key',
-  codex: 'Codex OAuth sign-in',
+  chatgpt: 'Sign in with ChatGPT',
+  openai: 'OpenAI API key',
   soniox: 'Soniox API key',
 };
 
-function credentialLabelFor(provider: BatchSttProvider): string {
+function credentialLabelFor(provider: BatchSttProvider | AiProvider): string {
   return CREDENTIAL_LABELS[provider];
+}
+
+/** Batch transcription cannot run as configured (see resolveBatchSttProvider). */
+export class TranscriptionProviderSelectionError extends Error {
+  readonly issue: string;
+  constructor(issue: string, message: string) {
+    super(message);
+    this.name = 'TranscriptionProviderSelectionError';
+    this.issue = issue;
+  }
 }
 
 const LEGACY_DEFAULT_SUMMARY_PROMPT = `Based on this meeting transcript, provide:
@@ -144,6 +194,12 @@ export class ConfigService {
   // same config.json during OAuth refresh, etc.) cannot clobber unrelated keys.
   private dirtyKeys = new Set<keyof AppConfig>();
   private envProviderWarned = false;
+  // Last known ChatGPT sign-in status. The auth store is async and lives
+  // outside config.json, while the credential gates below are synchronous, so
+  // the app/CLI refresh this cache (setChatGPTStatus) at startup and after
+  // every sign-in, sign-out or profile switch. Requests never trust it: each
+  // ChatGPT call re-checks the store for its pinned profile.
+  private chatgptStatus: ChatGPTStatusPayload = { connected: false, planEnabled: false };
 
   getConfigPath(): string {
     return this.configPath;
@@ -171,7 +227,7 @@ export class ConfigService {
   // touched -- so the next default change can't reach existing installs.
   // Today's case: `codexTranscriptionModel: 'gpt-4o-transcribe'` was the
   // legacy default before gpt-4o-transcribe-diarize shipped; clearing it
-  // here lets `getCodexTranscriptionModel()` return the current default
+  // here let the retired getter return the then-current default
   // (diarize) without forcing every user to manually unset it.
   //
   // The marker semantics are "we've considered migrating this user" --
@@ -312,89 +368,115 @@ export class ConfigService {
       return envProvider;
     }
 
+    // A stored legacy `codex` normalizes to `chatgpt` (a fresh sign-in is
+    // still required; the old tokens are never reused).
     const configured = normalizeAiProvider(this.config.aiProvider);
     if (configured) return configured;
 
-    if (!this.getGeminiApiKey() && this.hasCodexOAuth()) return 'codex';
+    // Unset provider on an install that only ever signed in with Codex: keep
+    // its ChatGPT-plan intent instead of silently switching to Gemini.
+    if (!this.getGeminiApiKey() && this.hasLegacyCodexSignIn()) return 'chatgpt';
     return 'gemini';
+  }
+
+  /** Retired Codex OAuth tokens are on disk. Detection only, never auth. */
+  hasLegacyCodexSignIn(): boolean {
+    const legacy = this.config.codexOAuth;
+    return typeof legacy === 'object' && legacy !== null;
+  }
+
+  /** Any retired Codex setting is still stored (see `legacyCodexConfigured`). */
+  hasLegacyCodexConfig(): boolean {
+    return (
+      this.isLegacyCodexProviderConfigured() ||
+      this.isLegacyCodexTranscriptionConfigured() ||
+      this.hasLegacyCodexSignIn() ||
+      typeof this.config.codexModel === 'string' ||
+      typeof this.config.codexTranscriptionModel === 'string'
+    );
+  }
+
+  /** True when the stored provider still says the retired `codex`. */
+  isLegacyCodexProviderConfigured(): boolean {
+    return isLegacyCodexProvider(this.config.aiProvider);
+  }
+
+  setChatGPTStatus(status: ChatGPTStatusPayload): void {
+    this.chatgptStatus = {
+      connected: !!status.connected,
+      planEnabled: !!status.planEnabled,
+      ...(status.planState ? { planState: status.planState } : {}),
+      profileId: status.profileId,
+      email: status.email,
+      ...(status.sessionRevision ? { sessionRevision: status.sessionRevision } : {}),
+    };
+  }
+
+  getChatGPTStatus(): ChatGPTStatusPayload {
+    return { ...this.chatgptStatus };
+  }
+
+  /** Signed in with ChatGPT and plan usage granted (cached; see setChatGPTStatus). */
+  hasChatGPTPlan(): boolean {
+    return this.chatgptStatus.connected && this.chatgptStatus.planEnabled;
+  }
+
+  getChatGPTModel(): string | undefined {
+    return this.read('chatgptModel')?.trim() || undefined;
+  }
+
+  setChatGPTModel(model: string): void {
+    this.write('chatgptModel', model.trim() || undefined);
+  }
+
+  getOpenAiTranscriptionModel(): string {
+    return this.read('openaiTranscriptionModel');
   }
 
   setAiProvider(provider: AiProvider): void {
     this.write('aiProvider', provider);
   }
 
+  // The retired `codex` value displays as `auto` here; it never RESOLVES as
+  // auto (see resolveTranscriptionProvider), and `transcriptionProviderIssue`
+  // in getAllConfig tells the user what to choose.
   getTranscriptionProvider(): TranscriptionProvider {
     return normalizeTranscriptionProvider(this.config.transcriptionProvider);
+  }
+
+  /** True when the stored transcription selection is the retired `codex`. */
+  isLegacyCodexTranscriptionConfigured(): boolean {
+    return isLegacyCodexProvider(this.config.transcriptionProvider);
   }
 
   setTranscriptionProvider(provider: TranscriptionProvider): void {
     this.write('transcriptionProvider', provider);
   }
 
-  // The backend a transcription actually runs on. `auto` follows the chat
-  // provider so existing installs keep their behavior; everything else is an
-  // explicit opt-in that leaves summary/judge/agent on `aiProvider`.
+  // The backend a transcription actually runs on, or why there is none. `auto`
+  // follows Gemini only; with ChatGPT (no audio on that route) and with the
+  // retired `codex` value it refuses rather than picking a vendor or billing
+  // path the user never chose.
+  getTranscriptionResolution(): BatchSttResolution {
+    return resolveBatchSttProvider(this.config.transcriptionProvider, this.getAiProvider());
+  }
+
+  // Throws TranscriptionProviderSelectionError with an actionable message
+  // when the selection cannot run (see getTranscriptionResolution).
   resolveTranscriptionProvider(): BatchSttProvider {
-    return resolveBatchSttProvider(this.getTranscriptionProvider(), this.getAiProvider());
+    const resolution = this.getTranscriptionResolution();
+    if (resolution.provider) return resolution.provider;
+    throw new TranscriptionProviderSelectionError(resolution.issue, resolution.message);
   }
 
-  // Returns the active OAuth credentials whether they came from config, env, or
-  // the Codex CLI auth file. Preference is:
-  //   1. Fresh config credentials (app sign-in)
-  //   2. Fresh env credentials (ephemeral automation)
-  //   3. Fresh Codex CLI credentials (~/.codex/auth.json, read-only fallback)
-  //   4. Any stale source in the same order, so the refresh helper can still try
-  //
-  // The source distinction matters: only config-sourced refreshes may be
-  // persisted back into config.json.
-  getCodexOAuthSource(): CodexOAuthCredentialSource | undefined {
-    const candidates: CodexOAuthCredentialSource[] = [];
-    const config = this.config.codexOAuth;
-    if (config?.access && config.refresh && Number.isFinite(config.expires)) {
-      candidates.push({ source: 'config', credentials: config });
-    }
-    const env = getCodexOAuthEnvCredentials();
-    if (env) candidates.push({ source: 'env', credentials: env });
-    const cli = getCodexOAuthCliCredentials();
-    if (cli) candidates.push({ source: 'codexCli', credentials: cli });
-    if (candidates.length === 0) return undefined;
-    return (
-      candidates.find((candidate) => candidate.credentials.expires > Date.now()) ?? candidates[0]
-    );
-  }
-
-  // Returns the active OAuth credentials whether they came from config, env, or
-  // the Codex CLI auth file.
-  // Callers that intend to PERSIST refreshed credentials must additionally check
-  // `getCodexOAuthSource()?.source === 'config'` and skip the persistence
-  // callback for env/CLI sources. Otherwise a normal token refresh writes
-  // external credentials to plaintext app config.
-  getCodexOAuth(): CodexOAuthCredentials | undefined {
-    return this.getCodexOAuthSource()?.credentials;
-  }
-
-  // True only when credentials are stored in config.json. Env-only credentials
-  // return false here. Use this to gate `onCodexOAuthUpdate` persistence callbacks.
-  hasStoredCodexOAuth(): boolean {
-    const c = this.config.codexOAuth;
-    return !!(c?.access && c.refresh && Number.isFinite(c.expires));
-  }
-
-  setCodexOAuth(credentials: CodexOAuthCredentials): void {
-    this.setKey('codexOAuth', credentials);
-    this.saveConfig();
-  }
-
-  clearCodexOAuth(): void {
+  /** Forget the retired Codex OAuth tokens (sign-out of the legacy path). */
+  clearLegacyCodexSignIn(): void {
+    if (!this.hasLegacyCodexSignIn()) return;
     this.setKey('codexOAuth', undefined);
     this.saveConfig();
   }
 
-  hasCodexOAuth(): boolean {
-    return !!this.getCodexOAuthSource();
-  }
-
-  // Mirrors the Codex OAuth surface. The stored-vs-env distinction matters
+  // Google OAuth. The stored-vs-env distinction matters
   // for the same reason: if credentials came from env, persisting refreshed
   // tokens would silently leak ephemeral env values into config.json. Callers
   // that handle refresh callbacks must gate persistence on hasStoredGoogleOAuth().
@@ -433,17 +515,34 @@ export class ConfigService {
   // those calls always run on `aiProvider`.
   hasAiAuth(): boolean {
     const provider = this.getAiProvider();
-    if (provider === 'codex') return this.hasCodexOAuth();
+    if (provider === 'chatgpt') return this.hasChatGPTPlan();
     return !!this.getGeminiApiKey();
   }
 
-  // Credentials for the resolved batch transcription backend. Only diverges
-  // from `hasAiAuth()` when `transcriptionProvider` points somewhere else.
+  // Credentials for the resolved batch transcription backend. False when the
+  // selection itself cannot run (ChatGPT + auto, retired codex).
   hasTranscriptionAuth(): boolean {
-    const provider = this.resolveTranscriptionProvider();
+    const { provider } = this.getTranscriptionResolution();
+    if (!provider) return false;
     if (provider === 'soniox') return !!this.getSonioxApiKey();
-    if (provider === 'codex') return this.hasCodexOAuth();
+    if (provider === 'openai') return !!this.getOpenAiApiKey();
     return !!this.getGeminiApiKey();
+  }
+
+  // What blocks chunked live captions, or null when they can run. Snippets
+  // transcribe on the batch STT backend (ChatGPT carries no audio), so that is
+  // always required; the text provider only when the snippets are translated.
+  getChunkedLiveCaptionsBlocker(translate: boolean): 'transcription' | 'ai' | null {
+    if (!this.hasTranscriptionAuth()) return 'transcription';
+    if (translate && !this.hasAiAuth()) return 'ai';
+    return null;
+  }
+
+  // Why batch transcription cannot run as configured (see hasTranscriptionAuth).
+  describeMissingTranscriptionAuth(): string {
+    const resolution = this.getTranscriptionResolution();
+    if (!resolution.provider) return resolution.message;
+    return `Add the ${credentialLabelFor(resolution.provider)} for transcription.`;
   }
 
   getNotionApiKey(): string | undefined {
@@ -484,7 +583,10 @@ export class ConfigService {
       // Deduped rather than suppressed: when both gates resolve to the same
       // provider one entry says it all, but a diverging backend has to be
       // named or the user fixes the chat key and hits the same wall.
-      const label = credentialLabelFor(this.resolveTranscriptionProvider());
+      const resolution = this.getTranscriptionResolution();
+      const label = resolution.provider
+        ? credentialLabelFor(resolution.provider)
+        : 'Transcription provider (choose Gemini, OpenAI, or Soniox)';
       if (!missing.includes(label)) missing.push(label);
     }
     if (!this.getNotionApiKey()) missing.push('Notion Integration Token');
@@ -555,22 +657,6 @@ export class ConfigService {
 
   setGeminiThinkingLevel(level: GeminiThinkingLevel): void {
     this.write('geminiThinkingLevel', level);
-  }
-
-  getCodexModel(): string {
-    return this.read('codexModel');
-  }
-
-  setCodexModel(model: string): void {
-    this.write('codexModel', model);
-  }
-
-  getCodexTranscriptionModel(): string {
-    return this.read('codexTranscriptionModel');
-  }
-
-  setCodexTranscriptionModel(model: string): void {
-    this.write('codexTranscriptionModel', model);
   }
 
   getLiveSttProvider(): LiveSttProvider {
@@ -717,9 +803,16 @@ export class ConfigService {
       // persist and only get caught on read. The getter falls back to the
       // default, but the on-disk state would still be misleading.
       if (key === 'aiProvider') {
+        // A legacy `codex` write stores `chatgpt` (needs a fresh sign-in).
         const provider = normalizeAiProvider(value);
         if (!provider) continue;
         this.setKey('aiProvider', provider);
+        continue;
+      }
+      if (key === 'chatgptPlanNoticeAcknowledged') {
+        // UI-only dismissal flag: a real boolean or nothing.
+        if (typeof value !== 'boolean') continue;
+        this.setKey('chatgptPlanNoticeAcknowledged', value);
         continue;
       }
       if (key === 'geminiThinkingLevel') {
@@ -743,7 +836,18 @@ export class ConfigService {
         this.setKey('transcriptionProvider', candidate);
         continue;
       }
-      if (key === 'defaultSummaryPrompt') continue;
+      if (
+        key === 'defaultSummaryPrompt' ||
+        key === 'chatgptStatus' ||
+        key === 'legacyCodexConfigured' ||
+        key === 'transcriptionProviderIssue' ||
+        // Obsolete Codex fields are never written back by a settings save.
+        key === 'codexOAuth' ||
+        key === 'codexModel' ||
+        key === 'codexTranscriptionModel'
+      ) {
+        continue;
+      }
       if (key === 'summaryPrompt') {
         const prompt = typeof value === 'string' ? value.trim() : '';
         this.setKey(
@@ -788,8 +892,12 @@ export class ConfigService {
     all.liveTranslationLanguage = this.getLiveTranslationLanguage();
     all.summaryPrompt = this.getSummaryPrompt();
     // Derived read-only fields: never persisted, so they have no registry row.
-    all.codexOAuthConfigured = this.hasCodexOAuth();
-    all.codexOAuthSource = this.getCodexOAuthSource()?.source;
+    all.chatgptStatus = this.getChatGPTStatus();
+    all.legacyCodexConfigured = this.hasLegacyCodexConfig();
+    const resolution = this.getTranscriptionResolution();
+    if (!resolution.provider) {
+      all.transcriptionProviderIssue = { issue: resolution.issue, message: resolution.message };
+    }
     all.googleOAuthConfigured = this.hasGoogleOAuth();
     all.defaultSummaryPrompt = DEFAULT_SUMMARY_PROMPT;
     return all as AppConfig;

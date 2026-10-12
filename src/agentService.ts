@@ -1,7 +1,7 @@
 import * as path from 'path';
-import { DEFAULT_CODEX_MODEL, type AiProvider } from './aiProvider';
-import { type CodexOAuthCredentials } from './codexOAuth';
-import { CodexOAuthHolder } from './codexOAuthHolder';
+import { type AiProvider } from './aiProvider';
+import { CHATGPT_PI_PROVIDER } from './chatgptResponses';
+import { ChatGPTBinding, ChatGPTBindingError } from './chatgptBinding';
 import {
   AGENT_READABLE_CONFIG_KEYS,
   AGENT_WRITABLE_CONFIG_KEYS,
@@ -318,12 +318,12 @@ function buildLivePrimer(scope: Extract<AgentScope, { kind: 'live' }>): string {
 // transformations inside pi-ai, but plain-text replay carries no thinking or
 // tool-call content for pi-ai to massage -- the values just need to parse.
 function synthAssistantText(text: string, provider: AiProvider): AssistantMessage {
-  const isCodex = provider === 'codex';
+  const isChatGPT = provider === 'chatgpt';
   return {
     role: 'assistant',
     content: [{ type: 'text', text }],
-    api: isCodex ? 'openai-codex-responses' : 'google-generative-ai',
-    provider: isCodex ? 'openai-codex' : 'google',
+    api: isChatGPT ? 'openai-responses' : 'google-generative-ai',
+    provider: isChatGPT ? CHATGPT_PI_PROVIDER : 'google',
     model: '',
   } as AssistantMessage;
 }
@@ -351,19 +351,20 @@ function extractToolCalls(message: AssistantMessage): ToolCall[] {
 export interface AgentServiceOptions {
   provider?: AiProvider;
   apiKey?: string;
-  codexOAuth?: CodexOAuthCredentials;
-  onCodexOAuthUpdate?: (credentials: CodexOAuthCredentials) => void | Promise<void>;
   dataPath: string;
   configService: ConfigService;
-  /** Default model for agent reasoning. Falls back to configService.getGeminiFlashModel(). */
+  /** Default Gemini model for agent reasoning. Falls back to configService.getGeminiFlashModel(). */
   defaultModel?: string;
-  codexModel?: string;
+  /** Configured ChatGPT model slug (unset = first account-listed model). */
+  chatgptModel?: string;
+  /** ChatGPT job binding; built from `chatgptModel` when absent. */
+  chatgptBinding?: ChatGPTBinding;
 }
 
 export class AgentService {
   private provider: AiProvider;
   private geminiApiKey?: string;
-  private codexAuth?: CodexOAuthHolder;
+  private chatgpt?: ChatGPTBinding;
   private dataPath: string;
   private configService: ConfigService;
   private defaultModel: string;
@@ -376,24 +377,37 @@ export class AgentService {
       }
       this.geminiApiKey = opts.apiKey;
     } else {
-      this.codexAuth = new CodexOAuthHolder({
-        credentials: opts.codexOAuth,
-        onUpdate: opts.onCodexOAuthUpdate,
-      });
+      this.chatgpt = opts.chatgptBinding ?? new ChatGPTBinding({ model: opts.chatgptModel });
     }
     this.dataPath = opts.dataPath;
     this.configService = opts.configService;
-    this.defaultModel =
-      opts.defaultModel ??
-      (this.provider === 'codex'
-        ? opts.codexModel || DEFAULT_CODEX_MODEL
-        : opts.configService.getGeminiFlashModel());
+    this.defaultModel = opts.defaultModel ?? opts.configService.getGeminiFlashModel();
   }
 
-  // For Codex we mint a fresh access token per request (the holder rotates
-  // it transparently). For Gemini we already have the static key in hand.
-  private async resolveApiKey(): Promise<string> {
-    if (this.codexAuth) return await this.codexAuth.getToken();
+  // One model turn. ChatGPT: a fresh token for the pinned profile per turn,
+  // under the binding's session watch, so a sign-out mid-turn aborts the
+  // stream and ends the loop with no answer. Gemini: the static key.
+  private async completeTurn(model: PiAiModel, context: Context): Promise<AssistantMessage> {
+    const binding = this.chatgpt;
+    if (binding) {
+      return await binding.run(undefined, async (signal) =>
+        complete(
+          model,
+          context,
+          { apiKey: await binding.accessToken(signal), temperature: 0.3, signal },
+          { kind: 'agent' },
+        ),
+      );
+    }
+    return await complete(
+      model,
+      context,
+      { apiKey: this.resolveGeminiApiKey(), temperature: 0.3 },
+      { kind: 'agent' },
+    );
+  }
+
+  private resolveGeminiApiKey(): string {
     if (!this.geminiApiKey) {
       throw new Error('Gemini API key is not configured.');
     }
@@ -438,19 +452,17 @@ export class AgentService {
     context.messages.push({ role: 'user', content: opts.question, timestamp: Date.now() });
     history.push({ role: 'user', text: opts.question });
 
-    const model: PiAiModel = await getModel(this.provider, modelId);
+    // ChatGPT: the account-discovered model of this service's pinned session.
+    // A per-run Gemini model id (`opts.model`) does not apply to it.
+    const model: PiAiModel = this.chatgpt
+      ? await this.chatgpt.model()
+      : await getModel(this.provider, modelId);
     const turnsStart = context.messages.length;
     const applied: AppliedAction[] = [];
     let finalAnswer = '';
 
     for (let step = 0; step < maxSteps; step++) {
-      const apiKey = await this.resolveApiKey();
-      const response = await complete(
-        model,
-        context,
-        { apiKey, temperature: 0.3 },
-        { kind: 'agent' },
-      );
+      const response = await this.completeTurn(model, context);
       context.messages.push(response);
 
       const toolCalls = extractToolCalls(response);
@@ -458,6 +470,10 @@ export class AgentService {
         finalAnswer = extractFinalText(response);
         break;
       }
+
+      // A sign-out between the turn and its tools ends the run: no tool
+      // (including a set_config proposal) acts on a stale ChatGPT session.
+      await this.chatgpt?.assertActive();
 
       // Read-only tools (search/list/get) run in parallel; set_config awaits a
       // user click but that still happens concurrently with the reads rather
@@ -480,6 +496,8 @@ export class AgentService {
     if (!finalAnswer) {
       finalAnswer = '(no answer produced within step limit)';
     }
+    // Last guard before the answer leaves the agent.
+    await this.chatgpt?.assertActive();
 
     const piaiMessages = context.messages.slice(turnsStart);
     history.push({ role: 'model', text: finalAnswer, piaiMessages });
@@ -574,6 +592,9 @@ export class AgentService {
           if (!approved) {
             return { approved: false, note: 'User declined the change.' };
           }
+          // The user may have signed out while the dialog was open: recheck
+          // the bound session after the approval and before any write.
+          await this.chatgpt?.assertActive();
           this.configService.updateConfig({ [key]: coerced.value });
           applied.push({ type: 'setConfig', key, value: coerced.value, previousValue });
           return { approved: true, key, value: coerced.value };
@@ -582,6 +603,8 @@ export class AgentService {
           return { error: `unknown tool: ${call.name}` };
       }
     } catch (err) {
+      // An ended ChatGPT session ends the run; it is not a tool result.
+      if (err instanceof ChatGPTBindingError) throw err;
       return { error: err instanceof Error ? err.message : String(err) };
     }
   }

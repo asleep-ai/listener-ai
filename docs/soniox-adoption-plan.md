@@ -241,7 +241,7 @@ Extend `cli.test.ts` for `config set transcriptionProvider soniox` validation.
 - Ship behind explicit opt-in (`liveSttProvider: soniox`, `transcriptionProvider: soniox`); no
   change for existing configs.
 - Docs: `docs/model-pricing.md` (add the Soniox row and the eval result), `docs/transcription-pipeline.md`
-  (provider routing section, the 300-min segmentation rule), `CLAUDE.md` (config table, provider
+  (provider routing section, the 300-min segmentation rule), `AGENTS.md` (config table, provider
   stack, `files` whitelist prose, live captions section).
 - Monitoring: Sentry `operation` tags `transcription.soniox.*` and `live.soniox.*`; log the model id
   the server reports so an auto-routed retirement is visible.

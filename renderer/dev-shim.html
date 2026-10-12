@@ -26,7 +26,7 @@
         if (prop === 'searchTranscriptions' || prop === 'listReleases') return asyncList;
         // Both credential gates, mirroring the real `check-config` payload:
         // the transcribe flows require hasAiAuth AND hasTranscriptionAuth.
-        if (prop === 'checkConfig') return async () => ({ hasConfig: true, hasAiAuth: true, hasTranscriptionAuth: true, aiProvider: 'gemini', transcriptionProvider: 'gemini', codexOAuthConfigured: false, missing: [] });
+        if (prop === 'checkConfig') return async () => ({ hasConfig: true, hasAiAuth: true, hasTranscriptionAuth: true, aiProvider: 'gemini', transcriptionProvider: 'gemini', missing: [] });
         if (prop === 'getConfig') return async () => ({
           aiProvider: 'gemini',
           globalShortcut: 'CommandOrControl+Shift+R',
