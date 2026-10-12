@@ -3144,6 +3144,7 @@ describe('GeminiService ChatGPT summary: sign-out during the call', () => {
         getAccessToken: async () => 'tok',
         listModels: async () => [{ slug: 'gpt-plan-test', display_name: 'Plan Test' }],
         isActive: () => state.active,
+        endRejectedSession: async () => false,
       }),
     };
     const service = new GeminiService({
@@ -3249,6 +3250,7 @@ describe('GeminiService ChatGPT text call: caller cancellation during setup', ()
           return models.promise;
         },
         isActive: () => true,
+        endRejectedSession: async () => false,
       }),
     });
     const controller = new AbortController();
@@ -3282,6 +3284,7 @@ describe('GeminiService ChatGPT text call: caller cancellation during setup', ()
           getAccessToken: async () => 'tok',
           listModels: async () => [{ slug: 'gpt-plan-test', display_name: 'Plan Test' }],
           isActive: () => true,
+          endRejectedSession: async () => false,
         };
       },
     });
@@ -3322,6 +3325,7 @@ describe('GeminiService ChatGPT text call: caller cancellation during setup', ()
         },
         listModels: async () => [{ slug: 'gpt-plan-test', display_name: 'Plan Test' }],
         isActive: () => true,
+        endRejectedSession: async () => false,
       }),
     });
     const controller = new AbortController();
@@ -3354,6 +3358,7 @@ describe('GeminiService ChatGPT text call: caller cancellation during setup', ()
           return [{ slug: 'gpt-plan-test', display_name: 'Plan Test' }];
         },
         isActive: () => true,
+        endRejectedSession: async () => false,
       }),
     });
     const controller = new AbortController();
@@ -3421,6 +3426,7 @@ describe('GeminiService ChatGPT text-only install', () => {
         getAccessToken: async () => 'tok',
         listModels: async () => [{ slug: 'gpt-plan-test', display_name: 'Plan Test' }],
         isActive: () => true,
+        endRejectedSession: async () => false,
       }),
     };
     // Mirrors main.ts createGeminiService().

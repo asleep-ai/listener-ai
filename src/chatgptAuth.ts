@@ -176,6 +176,15 @@ export type ChatGPTSession = {
    * end it.
    */
   isActive(): boolean;
+  /**
+   * End this sign-in after the API rejected `accessToken` as unauthorized
+   * (HTTP 401), so the status stops reporting it connected and Settings
+   * offers Continue with ChatGPT again. Only clears the session when the
+   * stored record still holds this exact session AND token: a token another
+   * caller has since refreshed, a newer sign-in of the profile and every
+   * other profile are left alone. Resolves true when it cleared the session.
+   */
+  endRejectedSession(accessToken: string): Promise<boolean>;
 };
 
 export type ChatGPTAuthErrorCode =
@@ -765,7 +774,35 @@ export class ChatGPTAuth {
           return false;
         }
       },
+      endRejectedSession: (accessToken) => this.endRejectedSession(id, accessToken, sessionId),
     };
+  }
+
+  // The API answered 401 to this bearer. Keep the registration and the
+  // retained ID token (for id_token_hint), like a terminal refresh error, but
+  // drop the rejected session so the next step is a fresh OAuth instead of a
+  // job reusing the same token.
+  private endRejectedSession(
+    profileId: string,
+    accessToken: string,
+    sessionId?: string,
+  ): Promise<boolean> {
+    const registration = this.requireRegistration(profileId);
+    return this.guardStore(() =>
+      this.store.withProfileLock(registration.id, () => {
+        const current = this.store.readCredentials(registration.id);
+        if (
+          !current ||
+          !isSignedIn(current, registration) ||
+          (sessionId !== undefined && current.sessionId !== sessionId) ||
+          current.accessToken !== accessToken
+        ) {
+          return false;
+        }
+        this.store.writeCredentials(clearSession(current, this.deps.now()));
+        return true;
+      }),
+    );
   }
 
   private async tokenFor(
@@ -924,12 +961,20 @@ export class ChatGPTAuth {
     sessionId?: string,
     signal?: AbortSignal,
   ): Promise<ChatGPTModel[]> {
-    const token = await this.tokenFor(profileId, sessionId, signal);
+    const id = this.requireRegistration(profileId).id;
+    const token = await this.tokenFor(id, sessionId, signal);
     const response = await this.request(
       `${this.deps.apiBaseUrl}/models`,
       { method: 'GET', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } },
       { signal, retry: 'any-or-5xx' },
     );
+    if (response.status === 401 && (await this.endRejectedSession(id, token, sessionId))) {
+      throw new ChatGPTAuthError(
+        'reauth_required',
+        'Your ChatGPT session has ended. Sign in with ChatGPT again.',
+        { status: response.status, requestId: response.requestId },
+      );
+    }
     if (response.status !== 200) throw httpError('Listing ChatGPT models', response);
     let body: unknown;
     try {

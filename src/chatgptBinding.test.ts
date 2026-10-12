@@ -17,6 +17,7 @@ function fakeAuth(state: { active: boolean; reads?: number }): ChatGPTAuthLike {
         state.reads = (state.reads ?? 0) + 1;
         return state.active;
       },
+      endRejectedSession: async () => false,
     }),
   };
 }

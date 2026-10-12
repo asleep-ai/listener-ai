@@ -20,7 +20,7 @@ import {
 } from './chatgptAuth';
 import { ChatGPTBinding, ChatGPTBindingError } from './chatgptBinding';
 import { ChatGPTCredentialStore } from './chatgptCredentialStore';
-import { buildChatGPTModel } from './chatgptResponses';
+import { buildChatGPTModel, ChatGPTInferenceError } from './chatgptResponses';
 import { complete, extractFinalText } from './piAiClient';
 
 type Jose = typeof import('jose');
@@ -1620,11 +1620,82 @@ describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
       assert.equal(error.requestId, 'req_test_1');
       assert.ok(!error.message.includes(cred.accessToken));
       assert.ok(!JSON.stringify(error).includes(cred.accessToken));
+      // A non-401 failure keeps the sign-in.
+      assert.equal(auth.getStatusSync().connected, true);
+      assert.equal(auth.getStatusSync().planEnabled, true);
 
       fake.modelsStatus = { status: 401, body: { detail: `bad token ${cred.accessToken}` } };
-      const detail = await assertAuthError(auth.listModels(), 'http_error');
+      const detail = await assertAuthError(auth.listModels(), 'reauth_required');
       assert.equal(detail.providerCode, undefined);
       assert.ok(!detail.message.includes(cred.accessToken));
+      assert.ok(!JSON.stringify(detail).includes(cred.accessToken));
+    });
+
+    it('ends only the rejected session when the API answers 401', async () => {
+      const auth = new ChatGPTAuth(dataDir, fake.deps());
+      const bob = await auth.signIn({ openBrowser: (await browser(fake, BOB)).openBrowser });
+      const alice = await auth.signIn({
+        openBrowser: (await browser(fake, ALICE)).openBrowser,
+        newProfile: true,
+      });
+      assert.equal(auth.getStatusSync().profileId, alice.profileId);
+      const session = await auth.openSession(alice.profileId);
+      const before = readJson(credentialFile(dataDir, alice.profileId!));
+
+      fake.modelsStatus = { status: 401, body: { error: { code: 'invalid_token' } } };
+      await assertAuthError(session.listModels(), 'reauth_required');
+
+      // The status no longer reports a connected, plan-enabled sign-in, so
+      // Settings offers Continue with ChatGPT; jobs bound to it stop.
+      const status = auth.getStatusSync();
+      assert.equal(status.profileId, alice.profileId);
+      assert.equal(status.connected, false);
+      assert.equal(status.planEnabled, false);
+      assert.equal(session.isActive(), false);
+      await assertAuthError(session.getAccessToken(), 'session_ended');
+      await assertAuthError(auth.openSession(alice.profileId), 'not_signed_in');
+      // The registration and retained ID token survive for the next sign-in.
+      const after = readJson(credentialFile(dataDir, alice.profileId!));
+      assert.equal(after.accessToken, undefined);
+      assert.equal(after.refreshToken, undefined);
+      assert.equal(after.sessionId, undefined);
+      assert.equal(after.idToken, before.idToken);
+      assert.equal(after.clientId, before.clientId);
+      assert.ok((await auth.listProfiles()).some((p) => p.id === alice.profileId));
+      // Another profile is untouched.
+      fake.modelsStatus = undefined;
+      assert.ok(await auth.getAccessToken(bob.profileId));
+      assert.ok((await auth.listProfiles()).find((p) => p.id === bob.profileId)?.connected);
+
+      // Reauthorizing the same profile works again.
+      await auth.signIn({
+        openBrowser: (await browser(fake, ALICE)).openBrowser,
+        profileId: alice.profileId,
+      });
+      assert.equal(auth.getStatusSync().connected, true);
+    });
+
+    it('does not end a newer session or a refreshed token after a 401 for an old token', async () => {
+      const auth = new ChatGPTAuth(dataDir, fake.deps());
+      const alice = await auth.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser });
+      const old = await auth.openSession(alice.profileId);
+      const oldToken = await old.getAccessToken();
+
+      // A token that is no longer the stored one (rotated by a refresh, or a
+      // stale copy) never clears the current session.
+      assert.equal(await old.endRejectedSession('not-the-stored-token'), false);
+      assert.equal(old.isActive(), true);
+
+      // Reauthorize: the old session's late 401 must not end the new grant.
+      await auth.signIn({
+        openBrowser: (await browser(fake, ALICE)).openBrowser,
+        profileId: alice.profileId,
+      });
+      const fresh = await auth.openSession(alice.profileId);
+      assert.equal(await old.endRejectedSession(oldToken), false);
+      assert.equal(fresh.isActive(), true);
+      assert.equal(auth.getStatusSync().connected, true);
+      assert.ok(await fresh.getAccessToken());
     });
 
     it('never surfaces tokens through status, profiles, progress or console output', async () => {
@@ -1916,6 +1987,94 @@ describe('ChatGPTBinding session watch during an in-flight Responses stream', ()
     stream.finish();
     await assertSignedOutDuringJob(job);
     assert.equal(stream.state.finished, true);
+  });
+
+  function rejecting(status: number, body: unknown, beforeReply?: () => Promise<void>) {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      await beforeReply?.();
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    return { fetchImpl, calls: () => calls };
+  }
+
+  it('ends the bound session when the Responses API answers 401', async () => {
+    const auth = new ChatGPTAuth(dataDir, fake.deps());
+    const bob = await auth.signIn({ openBrowser: (await browser(fake, BOB)).openBrowser });
+    const alice = await auth.signIn({
+      openBrowser: (await browser(fake, ALICE)).openBrowser,
+      newProfile: true,
+    });
+    const binding = new ChatGPTBinding({ auth, sessionPollMs: POLL_MS });
+    const rejected = rejecting(401, { error: { message: 'invalid token', code: 'invalid_token' } });
+
+    await assert.rejects(summarize(binding, rejected.fetchImpl), (error: unknown) => {
+      assert.ok(error instanceof ChatGPTInferenceError, String(error));
+      assert.equal(error.code, 'unauthorized');
+      assert.match(error.userMessage, /Sign in with ChatGPT again/);
+      return true;
+    });
+    assert.equal(rejected.calls(), 1);
+    // No longer connected: Settings shows Continue with ChatGPT and no job
+    // reuses the rejected token.
+    const status = auth.getStatusSync();
+    assert.equal(status.profileId, alice.profileId);
+    assert.equal(status.connected, false);
+    assert.equal(status.planEnabled, false);
+    await assertSignedOutDuringJob(summarize(binding, rejected.fetchImpl));
+    await assert.rejects(
+      summarize(new ChatGPTBinding({ auth }), rejected.fetchImpl),
+      (error: unknown) => error instanceof ChatGPTBindingError && error.code === 'not_signed_in',
+    );
+    assert.equal(rejected.calls(), 1, 'the rejected token was never sent again');
+    // The other saved account keeps its sign-in.
+    assert.ok((await auth.listProfiles()).find((p) => p.id === bob.profileId)?.connected);
+    assert.ok(await auth.getAccessToken(bob.profileId));
+  });
+
+  it('keeps the session on a non-401 Responses failure', async () => {
+    const auth = new ChatGPTAuth(dataDir, fake.deps());
+    await auth.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser });
+    const binding = new ChatGPTBinding({ auth, sessionPollMs: POLL_MS });
+    const limited = rejecting(429, {
+      error: { message: 'limit', code: 'subscription_sharing_usage_limit_exceeded' },
+    });
+    await assert.rejects(summarize(binding, limited.fetchImpl), (error: unknown) => {
+      assert.ok(error instanceof ChatGPTInferenceError, String(error));
+      assert.equal(error.code, 'usage_limit_exceeded');
+      return true;
+    });
+    const status = auth.getStatusSync();
+    assert.equal(status.connected && status.planEnabled, true);
+    const stream = heldStream();
+    const job = summarize(binding, stream.fetchImpl);
+    await stream.startedPromise;
+    stream.finish();
+    assert.equal(await job, 'full summary');
+  });
+
+  it('does not end a newer sign-in when the old session gets a late 401', async () => {
+    const app = new ChatGPTAuth(dataDir, fake.deps());
+    const alice = await app.signIn({ openBrowser: (await browser(fake, ALICE)).openBrowser });
+    // Only the post-call check runs, so the late 401 reaches the binding.
+    const binding = new ChatGPTBinding({ auth: app, sessionPollMs: 60_000 });
+    const cli = new ChatGPTAuth(dataDir, fake.deps());
+    const rejected = rejecting(401, { error: { message: 'invalid token' } }, async () => {
+      await cli.signIn({
+        openBrowser: (await browser(fake, ALICE)).openBrowser,
+        profileId: alice.profileId,
+      });
+    });
+    await assertSignedOutDuringJob(summarize(binding, rejected.fetchImpl));
+    const status = app.getStatusSync();
+    assert.equal(status.connected && status.planEnabled, true);
+    const fresh = await app.openSession(alice.profileId);
+    assert.equal(fresh.isActive(), true);
+    assert.ok(await fresh.getAccessToken());
   });
 
   it('lets the job finish on its own grant when the active account is switched', async () => {

@@ -272,6 +272,7 @@ describe('AgentService on the ChatGPT provider (faux transport)', () => {
           },
           listModels: async () => [{ slug: 'gpt-plan-test', display_name: 'Plan Test' }],
           isActive: () => auth.active,
+          endRejectedSession: async () => false,
         };
       },
     };

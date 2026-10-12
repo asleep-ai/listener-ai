@@ -15,7 +15,11 @@ import {
   type ChatGPTStatus,
   getChatGPTAuth,
 } from './chatgptAuth';
-import { buildChatGPTModel } from './chatgptResponses';
+import {
+  buildChatGPTModel,
+  ChatGPTInferenceError,
+  type ChatGPTInferenceErrorCode,
+} from './chatgptResponses';
 import type { PiAiModel } from './piAiClient';
 
 /** The slice of the ChatGPT auth API inference needs (injectable for tests). */
@@ -104,6 +108,10 @@ function mapBoundAuthError(error: unknown): unknown {
   }
 }
 
+// Responses API failures that reject the bearer itself: the user is told to
+// sign in again, so the rejected session must actually end.
+const REAUTH_INFERENCE_CODES = new Set<ChatGPTInferenceErrorCode>(['unauthorized', 'invalid_user']);
+
 /** How often an in-flight call re-checks that its sign-in is still current. */
 export const CHATGPT_SESSION_POLL_MS = 500;
 
@@ -124,6 +132,9 @@ export class ChatGPTBinding {
   private readonly sessionPollMs: number;
   private bound?: Promise<ChatGPTAuthSession>;
   private resolvedModel?: Promise<PiAiModel>;
+  // The bearer each in-flight `run()` last fetched, keyed by the signal that
+  // run hands its call, so a 401 ends the session that sent that exact token.
+  private readonly runTokens = new WeakMap<AbortSignal, string | undefined>();
 
   constructor(options: ChatGPTBindingOptions = {}) {
     this.configuredModel = options.model?.trim() || undefined;
@@ -207,6 +218,7 @@ export class ChatGPTBinding {
     signal?.throwIfAborted();
 
     const controller = new AbortController();
+    this.runTokens.set(controller.signal, undefined);
     let ended = false;
     const onCallerAbort = () => controller.abort(signal?.reason);
     signal?.addEventListener('abort', onCallerAbort, { once: true });
@@ -223,6 +235,18 @@ export class ChatGPTBinding {
       return result;
     } catch (error) {
       if (error instanceof ChatGPTBindingError) throw error;
+      if (error instanceof ChatGPTInferenceError && REAUTH_INFERENCE_CODES.has(error.code)) {
+        // End the session that sent the rejected bearer, so status and
+        // Settings stop treating it as signed in. A session that already
+        // ended another way (sign-out, a newer sign-in) is left to the
+        // signed-out path below. Best effort: a store failure still surfaces
+        // the sign-in-again error.
+        const rejected = this.runTokens.get(controller.signal);
+        const endedHere = rejected
+          ? await session.endRejectedSession(rejected).catch(() => false)
+          : false;
+        if (endedHere) throw error;
+      }
       if (ended || (!signal?.aborted && !session.isActive())) throw signedOut(error);
       // The auth store reports a cancelled wait as its own `cancelled` error;
       // the caller sees its own abort instead.
@@ -255,7 +279,9 @@ export class ChatGPTBinding {
   async accessToken(signal?: AbortSignal): Promise<string> {
     const session = await untilAborted(this.session(), signal);
     try {
-      return await session.getAccessToken(signal);
+      const token = await session.getAccessToken(signal);
+      if (signal && this.runTokens.has(signal)) this.runTokens.set(signal, token);
+      return token;
     } catch (error) {
       throw mapBoundAuthError(error);
     }
