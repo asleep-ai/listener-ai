@@ -169,7 +169,18 @@ export function register(ctx: IpcContext): void {
           filePath,
           ...(options.recordingTitle ? { title: options.recordingTitle } : {}),
         },
-        (handle) => runTranscription(ctx, filePath, liveNotesRaw, options, handle),
+        (handle) => runTranscription(ctx, filePath, liveNotesRaw, handle),
+        (result, handle) => {
+          if (!result.success || !('data' in result) || !result.data || handle.origin !== 'auto')
+            return result;
+          return runAutoExports(ctx, handle, {
+            recordingTitle: handle.requestedTitle,
+            result: result.data,
+            audioFilePath: result.newFilePath ?? filePath,
+            transcriptionPath: result.transcriptionPath,
+            generationId: result.generationId,
+          }).then((exports) => ({ ...result, exports }));
+        },
       );
       if (joined) console.log('Joining the transcription already running for:', filePath);
       const result = await promise;
@@ -205,7 +216,6 @@ async function runTranscription(
   ctx: IpcContext,
   filePath: string,
   liveNotesRaw: unknown,
-  options: TranscribeOptions,
   handle: TranscriptionJobHandle,
 ) {
   const signal = handle.signal;
@@ -437,16 +447,6 @@ async function runTranscription(
     if (renameTitle) {
       handle.update({ newFilePath: audioFilePath });
     }
-    // The note is saved; export outcomes never turn this into a failure.
-    const exports = options.autoExport
-      ? await runAutoExports(ctx, handle, {
-          recordingTitle: options.recordingTitle,
-          result,
-          audioFilePath,
-          transcriptionPath,
-          generationId,
-        })
-      : undefined;
 
     if (renameTitle) {
       return {
@@ -455,7 +455,6 @@ async function runTranscription(
         newFilePath: audioFilePath,
         transcriptionPath,
         generationId,
-        ...(exports ? { exports } : {}),
       };
     }
 
@@ -464,7 +463,6 @@ async function runTranscription(
       data: result,
       transcriptionPath,
       generationId,
-      ...(exports ? { exports } : {}),
     };
   } catch (error) {
     // Cancellation is a normal outcome -- skip the failure notification and

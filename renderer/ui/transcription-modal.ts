@@ -312,12 +312,15 @@ export async function requireAiAuth(): Promise<boolean> {
 // result so callers don't need to know about the recovery path.
 export async function transcribeWithFfmpegRetry(
   filePath: string,
+  ownsSession: () => boolean = () => true,
 ): Promise<Awaited<ReturnType<typeof window.electronAPI.transcribeAudio>>> {
   let result = await window.electronAPI.transcribeAudio(filePath);
   if (!result.success && (result as { code?: string }).code === 'ffmpeg-missing') {
+    if (!ownsSession()) return result;
     const { showFFmpegDownloadDialog } = await import('./ffmpeg-dialog');
+    if (!ownsSession()) return result;
     const dlResult = await showFFmpegDownloadDialog();
-    if (dlResult.success) {
+    if (dlResult.success && ownsSession()) {
       result = await window.electronAPI.transcribeAudio(filePath);
     }
   }
@@ -342,6 +345,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
     return;
   }
   const session = modalSession;
+  const ownsSession = () => session === modalSession;
 
   const button = document.querySelector(
     `[data-filepath="${filePath}"]`,
@@ -352,12 +356,15 @@ export async function handleTranscribe(filePath: string, title: string): Promise
   }
 
   try {
-    const result = await transcribeWithFfmpegRetry(filePath);
+    const result = await transcribeWithFfmpegRetry(filePath, ownsSession);
 
-    if (result.success && session !== modalSession) {
-      // The modal shows something else now; keep it, just surface the new note.
-      await refreshRecordingsList();
-    } else if (result.success) {
+    if (!ownsSession()) {
+      // The modal shows something else now; keep it, just surface a new note.
+      if (result.success) await refreshRecordingsList();
+      return;
+    }
+    if (result.cancelled) return;
+    if (result.success) {
       // Hide progress bar
       const { progressContainer } = getDom();
       if (progressContainer) {
@@ -399,6 +406,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       await refreshRecordingsList();
 
       const cfg = await window.electronAPI.getConfig();
+      if (!ownsSession()) return;
       if (uploadToNotionBtn) {
         uploadToNotionBtn.style.display =
           cfg.notionApiKey && cfg.notionDatabaseId ? 'flex' : 'none';
@@ -413,6 +421,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       );
     }
   } catch (error) {
+    if (!ownsSession()) return;
     const message = error instanceof Error ? error.message : String(error);
     await showTranscriptionErrorDialog(undefined, `Error transcribing audio: ${message}`);
   } finally {

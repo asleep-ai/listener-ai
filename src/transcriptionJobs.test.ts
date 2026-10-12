@@ -92,6 +92,28 @@ describe('TranscriptionJobRegistry', () => {
     assert.deepEqual(registry.cancel(audio), { success: false, reason: 'not-running' });
   });
 
+  it('settles a synchronous final decision before admitting another request', async () => {
+    const registry = new TranscriptionJobRegistry();
+    let late!: ReturnType<typeof registry.start>;
+    const first = registry.start(
+      { kind: 'transcribe', filePath: audio },
+      async () => ({ success: true }),
+      (result) => {
+        queueMicrotask(() => {
+          late = registry.start(
+            { kind: 'transcribe', filePath: audio, origin: 'auto' },
+            async () => ({ success: true }),
+          );
+        });
+        return result;
+      },
+    );
+    await first.promise;
+    assert.equal(late.joined, false);
+    assert.notEqual(late.job.id, first.job.id);
+    await late.promise;
+  });
+
   it('matches a symlinked directory spelling of the same recording', async () => {
     const link = path.join(makeTempDir('transcription-jobs-link'), 'recordings');
     fs.symlinkSync(dir, link);

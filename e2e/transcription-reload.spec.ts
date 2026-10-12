@@ -1094,3 +1094,199 @@ test('declining the import confirmation keeps the imported row and starts no tra
     await close(fx, dataDir);
   }
 });
+
+for (const afterCommit of [false, true]) {
+  test(`manual-first auto join exports once ${afterCommit ? 'after commit' : 'before provider completion'} and restores auto status on reload`, async () => {
+    const dataDir = seed({
+      notionApiKey: 'secret_fixture',
+      notionDatabaseId: 'fixture-database',
+      slackWebhookUrl: SLACK_WEBHOOK,
+      slackAutoShare: true,
+    });
+    const audio = seedRecording(dataDir, 'Promoted_Manual');
+    const alias = join(dataDir, 'recordings', `Promoted_Alias_${TS}.wav`);
+    symlinkSync(audio, alias);
+    let fx: Fixture | undefined;
+    try {
+      fx = await launch(dataDir);
+      const { app, page } = fx;
+      if (afterCommit) {
+        await app.evaluate((_e, path) => {
+          (globalThis as any).__jobFixture.holdSave = { path, reached: false, release: () => {} };
+        }, audio);
+      }
+      await page.evaluate((file) => {
+        void window.electronAPI.transcribeAudio(file);
+      }, audio);
+      await expect.poll(async () => (await stats(app)).calls.length).toBe(1);
+      const initial = (await jobsFromMain(page)).jobs[0];
+      if (afterCommit) {
+        await resolveCall(app, 0, 'Promoted Note');
+        await expect
+          .poll(() => app.evaluate(() => (globalThis as any).__jobFixture.holdSave.reached))
+          .toBe(true);
+        expect((await jobsFromMain(page)).jobs[0].cancellable).toBe(false);
+        expect(
+          await page.evaluate((file) => window.electronAPI.cancelTranscription(file), audio),
+        ).toEqual({ success: false, reason: 'committed' });
+      }
+      await page.evaluate(
+        ({ audio, alias }) => {
+          void window.electronAPI.transcribeAudio(alias, undefined, {
+            autoExport: true,
+            recordingTitle: 'Promoted Auto Title',
+          });
+          void window.electronAPI.transcribeAudio(audio, undefined, {
+            autoExport: true,
+            recordingTitle: 'Repeated Title',
+          });
+        },
+        { audio, alias },
+      );
+      await expect.poll(async () => (await jobsFromMain(page)).jobs[0].origin).toBe('auto');
+      const promoted = (await jobsFromMain(page)).jobs[0];
+      expect(promoted.id).toBe(initial.id);
+      expect(promoted.revision).toBeGreaterThan(initial.revision);
+      await page.reload();
+      await page.waitForLoadState('domcontentloaded');
+      await expect(page.locator('#statusText')).toHaveText('Auto mode: Processing recording...');
+      await expect(page.locator('#recordButton')).toBeDisabled();
+      if (afterCommit)
+        await app.evaluate(() => (globalThis as any).__jobFixture.holdSave.release());
+      else await resolveCall(app, 0, 'Promoted Note');
+      await expect.poll(async () => (await stats(app)).notion.length).toBe(1);
+      await page.reload();
+      await page.waitForLoadState('domcontentloaded');
+      await expect(page.locator('#statusText')).toHaveText('Auto mode: Sending to Notion/Slack...');
+      // Additional joins during export cannot duplicate the chain or change its title.
+      await page.evaluate((file) => {
+        void window.electronAPI.transcribeAudio(file, undefined, {
+          autoExport: true,
+          recordingTitle: 'Too Late Title',
+        });
+      }, alias);
+      await app.evaluate(() =>
+        (globalThis as any).__jobFixture.notion[0].resolve({
+          success: true,
+          url: 'https://notion.invalid/promoted',
+        }),
+      );
+      await expect.poll(async () => (await stats(app)).slack.length).toBe(1);
+      await app.evaluate(() =>
+        (globalThis as any).__jobFixture.slack[0].resolve({
+          success: true,
+          sentAt: '2026-10-12T05:10:00.000Z',
+        }),
+      );
+      await expect(page.locator('#statusText')).toHaveText('Auto mode: Sent to Notion and Slack.');
+      await expect(page.locator('#recordButton')).toBeEnabled();
+      expect((await stats(app)).calls).toHaveLength(1);
+      expect((await stats(app)).notion).toEqual(['Promoted Auto Title by L.AI']);
+      expect((await stats(app)).slack).toHaveLength(1);
+      expect(noteMetas(dataDir)).toHaveLength(1);
+      const done = (await jobsFromMain(page)).jobs[0];
+      expect(done.id).toBe(initial.id);
+      expect(done.exports).toEqual({
+        notion: { status: 'succeeded', url: 'https://notion.invalid/promoted' },
+        slack: { status: 'succeeded' },
+      });
+    } finally {
+      await close(fx, dataDir);
+    }
+  });
+}
+
+// Hold the real import fallback's IPC response independently of provider/job
+// events, to exercise every renderer terminal outcome through the preload bridge.
+async function holdModalResponse(app: ElectronApplication): Promise<void> {
+  await app.evaluate(({ ipcMain }) => {
+    const fx = (globalThis as any).__jobFixture;
+    fx.modalRequests = 0;
+    ipcMain.removeHandler('transcribe-audio');
+    ipcMain.handle('transcribe-audio', () => {
+      fx.modalRequests++;
+      return new Promise((resolve, reject) => {
+        fx.modalResolve = resolve;
+        fx.modalReject = reject;
+      });
+    });
+    ipcMain.removeHandler('download-ffmpeg');
+    ipcMain.handle(
+      'download-ffmpeg',
+      () =>
+        new Promise((resolve) => {
+          fx.downloadResolve = resolve;
+        }),
+    );
+  });
+}
+
+for (const outcome of [
+  'failure',
+  'cancelled',
+  'rejection',
+  'ffmpeg-missing',
+  'recovery',
+] as const) {
+  test(`import fallback ignores stale ${outcome} after selecting a saved note`, async () => {
+    const dataDir = seed();
+    seedSavedNote(dataDir, 'Saved_Note', 'Saved note summary only.');
+    const source = join(dataDir, 'Imported_Fallback.wav');
+    writeFileSync(source, Buffer.alloc(44));
+    let fx: Fixture | undefined;
+    try {
+      fx = await launch(dataDir);
+      const { app, page } = fx;
+      await expect(
+        page.getByRole('button', { name: 'Open transcript for Saved_Note' }),
+      ).toBeVisible();
+      await importWithoutRow(app, source);
+      await holdModalResponse(app);
+      await answerConfirm(page, true);
+      await page.locator('#dragDropZone').click();
+      await expect
+        .poll(() => app.evaluate(() => (globalThis as any).__jobFixture.modalRequests))
+        .toBe(1);
+      await expect(page.locator('#transcriptionModal')).toBeVisible();
+      if (outcome === 'recovery') {
+        await app.evaluate(() =>
+          (globalThis as any).__jobFixture.modalResolve({ success: false, code: 'ffmpeg-missing' }),
+        );
+        await expect(page.locator('#ffmpegDownloadOverlay')).toBeVisible();
+      } else {
+        await page.locator('#transcriptionModal .close').click();
+      }
+      // During recovery the download overlay traps pointer input; select the
+      // saved note through the same DOM button's handler while recovery waits.
+      await page
+        .getByRole('button', { name: 'Open transcript for Saved_Note' })
+        .evaluate((button: HTMLButtonElement) => button.click());
+      await expectSavedNoteShown(page);
+      await app.evaluate(({ BrowserWindow }, outcome) => {
+        const fx = (globalThis as any).__jobFixture;
+        if (outcome === 'recovery') {
+          fx.downloadResolve({ success: true });
+          for (const win of BrowserWindow.getAllWindows())
+            win.webContents.send('ffmpeg-download-progress', { status: 'complete' });
+        } else if (outcome === 'rejection') fx.modalReject(new Error('Old IPC rejection'));
+        else
+          fx.modalResolve({
+            success: false,
+            error: 'Old provider failure',
+            cancelled: outcome === 'cancelled',
+            code: outcome === 'ffmpeg-missing' ? outcome : undefined,
+          });
+      }, outcome);
+      if (outcome === 'recovery') await expect(page.locator('#ffmpegDownloadOverlay')).toBeHidden();
+      // Allow terminal handler and finally cleanup to run; no foreground/native dialog.
+      await page.waitForTimeout(250);
+      await expectSavedNoteShown(page);
+      await expect(page.locator('#transcriptionErrorDialog')).toBeHidden();
+      await expect(page.locator('#ffmpegDownloadOverlay')).toBeHidden();
+      expect((await scriptedDialogs(page)).filter((dialog) => dialog.type === 'alert')).toEqual([]);
+      expect(await app.evaluate(() => (globalThis as any).__jobFixture.modalRequests)).toBe(1);
+    } finally {
+      await close(fx, dataDir);
+    }
+  });
+}

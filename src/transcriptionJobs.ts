@@ -93,6 +93,9 @@ export type TranscriptionJobUpdate = Partial<
 export interface TranscriptionJobHandle {
   readonly id: string;
   readonly signal: AbortSignal;
+  // Admission intent can be promoted by an automatic caller joining a manual job.
+  readonly origin: TranscriptionJobOrigin;
+  readonly requestedTitle: string | undefined;
   progress(percent: number, message: string): void;
   // Registers another path (the renamed audio) that identifies this job.
   // Returns false, and registers nothing, when another running job already
@@ -161,6 +164,7 @@ interface JobRecord {
   reserved: Map<string, Reservation>;
   controller: AbortController;
   committed: boolean;
+  requestedTitle?: string;
   promise: Promise<unknown>;
 }
 
@@ -213,10 +217,16 @@ export class TranscriptionJobRegistry {
   start<R extends TranscriptionJobResultLike>(
     options: StartJobOptions,
     runner: (handle: TranscriptionJobHandle) => Promise<R>,
+    finalize?: (result: R, handle: TranscriptionJobHandle) => R | Promise<R>,
   ): StartedJob<R> {
     if (options.kind === 'transcribe' && options.filePath) {
       const existing = this.findActiveRecord(options.filePath, 'transcribe');
       if (existing) {
+        if (options.origin === 'auto' && existing.snapshot.origin !== 'auto') {
+          existing.snapshot.origin = 'auto';
+          existing.requestedTitle = options.title;
+          this.emit(existing);
+        }
         return {
           job: clone(existing.snapshot),
           joined: true,
@@ -250,6 +260,7 @@ export class TranscriptionJobRegistry {
       reserved: new Map(),
       controller,
       committed: false,
+      requestedTitle: options.title,
       promise: Promise.resolve(),
     };
     this.jobs.set(record.snapshot.id, record);
@@ -257,6 +268,12 @@ export class TranscriptionJobRegistry {
     const handle: TranscriptionJobHandle = {
       id: record.snapshot.id,
       signal: controller.signal,
+      get origin() {
+        return record.snapshot.origin;
+      },
+      get requestedTitle() {
+        return record.requestedTitle;
+      },
       progress: (percent, message) => {
         if (record.snapshot.status !== 'running') return;
         record.snapshot.percent = percent;
@@ -324,7 +341,14 @@ export class TranscriptionJobRegistry {
     this.emit(record);
     const promise = (async () => {
       try {
-        const result = await runner(handle);
+        let result = await runner(handle);
+        if (finalize) {
+          // A synchronous no-follow-up decision and settlement share one turn.
+          // Do not await that result: a join in the extra microtask could otherwise
+          // promote a still-running job after its export decision was made.
+          const final = finalize(result, handle);
+          result = final instanceof Promise ? await final : final;
+        }
         this.settle(record, result);
         return result;
       } catch (error) {

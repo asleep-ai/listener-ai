@@ -53,8 +53,9 @@ this.
 
 ## Verification
 
-All of the following ran on this change's source, tests and build output. Only
-this report and one code comment were edited afterwards.
+The following results describe the original PR219 implementation before the
+review follow-ups below. They are historical evidence, not a rerun of the latest
+local corrections.
 
 | Check | Result |
 | --- | --- |
@@ -78,6 +79,39 @@ this report and one code comment were edited afterwards.
 Every case used deferred fixtures for the provider, Notion, Slack,
 ffmpeg/concat and `shell.openExternal`, and blocked renderer HTTP(S). No live
 provider call was made and no message was sent.
+
+## Review follow-ups: automatic joins and modal isolation
+
+The original implementation was authored by Claude. The following local
+corrections and regressions were authored by Codex after explicit user routing
+authorization; no independent review or native execution is claimed here.
+
+- A joining automatic request promotes the existing job's observable origin and
+  preserves the first automatic recording title. A main-owned finalization gate
+  consumes that intent after persistence, including post-commit metadata waits,
+  and runs one configured export chain. Manual-only completion settles together
+  with its no-export decision.
+- Every modal terminal outcome and rejection checks session ownership.
+  Cancellation is silent, stale success still refreshes the list, button cleanup
+  remains unconditional, and ffmpeg recovery/retry checks ownership at each
+  asynchronous boundary.
+
+| Follow-up check | Result |
+| --- | --- |
+| Baseline regressions before product edits | 8 FAIL / 18 PASS across the IPC and modal suites: early and post-commit auto promotion; stale failure, cancellation, rejection, ffmpeg failure/recovery; current-session cancellation |
+| Latest `pnpm test` | 1056/1056 PASS |
+| `pnpm run build`, `build:check-renderer`, `lint`, `format:check`, `git diff --check` | PASS |
+| New hidden Electron cases in `e2e/transcription-reload.spec.ts` | 7 authored, NOT-RUN pending separate executor |
+| Playwright discovery (`--list`) | 22 cases discovered, including all 7 new cases; no Electron launched |
+| Optional standalone strict E2E type check | Blocked by two existing diagnostics in `e2e/support/launch.ts` and the pre-existing saved-source fixture; no new-case diagnostics |
+| Independent review, signed commit, push, CI, squash merge | Pending coordinator |
+
+New native acceptance covers manual-first automatic joins before provider
+completion and after commit, alias repeats, reload restoration, exactly-once
+Notion/Slack export, and stale modal failure/cancellation/IPC rejection/ffmpeg
+recovery. Run `pnpm exec playwright test e2e/transcription-reload.spec.ts` after
+building, using the existing hidden launcher and scripted dialogs. The earlier
+30-case acceptance remains historical until the separate executor reruns it.
 
 ## Not run and known limits
 

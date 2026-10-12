@@ -5,6 +5,13 @@ repetition/hallucination ("repeat curse") guard sits. It covers the issue #182
 batch path from finished recording to saved note. When code and this document
 disagree, fix one of them.
 
+Modal fallback results belong to the session that requested them. Stale success
+still refreshes the recordings list; stale failure, cancellation, and IPC
+rejection leave a newer selected note alone. Cancellation is silent. The ffmpeg
+recovery helper checks the same ownership before opening its dialog and before
+retrying, while callers without an ownership predicate keep the existing retry
+behavior. Originating-button cleanup always runs.
+
 ## Batch pipeline
 
 ```
@@ -47,7 +54,13 @@ note, because the job may hold that note's lock while it saves. The list is
 rebuilt from disk whenever a job ends.
 
 - A request for a recording that is already transcribing joins that job. It
-  never aborts and restarts the job. The requested, resolved and real
+  never aborts and restarts the job. An automatic caller joining a manual job
+  promotes its origin with a revisioned event and latches the first automatic
+  title. Once persistence finishes, one finalization gate runs the configured
+  Notion/Slack chain for all callers, including joins after the save boundary
+  while metadata is pending. A manual-only completion settles synchronously
+  with its no-export decision, so no accepted join can miss the chain.
+  The requested, resolved and real
   (symlink-free) paths and the renamed path all identify the job. Snapshots
   list these keys as `aliases`, and `get-recordings` lists the same keys for
   each row, so the renderer matches rows to jobs on the keys main uses.

@@ -784,6 +784,66 @@ describe('transcription jobs (reload-safe ownership)', () => {
     assert.deepEqual(done.exports, result.exports);
   });
 
+  for (const joinAfterCommit of [false, true]) {
+    it(`promotes a manual job to auto exports ${joinAfterCommit ? 'after commit' : 'before provider completion'}`, async () => {
+      notionConfigured = true;
+      slackConfigured = true;
+      notionGate = deferred();
+      const audio = recording('Untitled_Meeting');
+      const metadata = require('../services/metadataService').metadataService;
+      const save = metadata.saveMetadata.bind(metadata);
+      const saveGate = deferred();
+      let saving = false;
+      if (joinAfterCommit) {
+        metadata.saveMetadata = async (...args: unknown[]) => {
+          saving = true;
+          await saveGate.promise;
+          return save(...args);
+        };
+      }
+      const manual = invoke('transcribe-audio', audio);
+      await waitFor(() => calls.length === 1, 'manual provider');
+      const initial = (await jobs()).jobs[0];
+      if (joinAfterCommit) {
+        calls[0].resolve(resultFor('Promoted'));
+        await waitFor(() => saving, 'post-commit metadata');
+        assert.equal((await jobs()).jobs[0].cancellable, false);
+      }
+      const alias = (await jobs()).jobs[0].paths.at(-1);
+      const auto = invoke('transcribe-audio', alias, undefined, {
+        autoExport: true,
+        recordingTitle: 'Auto title',
+      });
+      const repeated = invoke('transcribe-audio', audio, undefined, {
+        autoExport: true,
+        recordingTitle: 'Ignored repeated title',
+      });
+      const promoted = (await jobs()).jobs[0];
+      // Finish the pending work even on the unfixed baseline.
+      saveGate.resolve();
+      if (!joinAfterCommit) calls[0].resolve(resultFor('Promoted'));
+      notionGate.resolve();
+      const results = await Promise.all([manual, auto, repeated]);
+      assert.equal(promoted.origin, 'auto');
+      assert.ok(promoted.revision > initial.revision);
+      assert.ok(jobEvents().some((job) => job.id === initial.id && job.origin === 'auto'));
+      assert.equal(calls.length, 1);
+      assert.equal(noteFolders().length, 1);
+      assert.equal(notionCalls.length, 1);
+      assert.equal(slackCalls.length, 1);
+      assert.equal(notionCalls[0].title, 'Auto title by L.AI');
+      for (const result of results) {
+        assert.equal(result.jobId, initial.id);
+        assert.deepEqual(result.exports, {
+          notion: { status: 'succeeded', url: 'https://notion.so/page-1' },
+          slack: { status: 'succeeded' },
+        });
+      }
+      assert.equal(results[1].joined, true);
+      assert.equal(results[2].joined, true);
+    });
+  }
+
   it('keeps the saved note and passes a Notion failure on to Slack', async () => {
     notionConfigured = true;
     slackConfigured = true;
