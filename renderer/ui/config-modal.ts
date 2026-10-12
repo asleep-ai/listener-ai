@@ -10,11 +10,14 @@ import {
   type ModelField,
   chooseInitial,
 } from '../services/model-options';
-import type { ConfigPayload, GoogleSyncProgress } from '../electronAPI';
+import type { ConfigPayload, ElectronAPI, GoogleSyncProgress } from '../electronAPI';
 import {
+  LEGACY_CODEX_PROVIDER,
   type LiveSttProvider,
   type TranscriptionProvider,
+  chatgptPlaceholderModel,
   normalizeTranscriptionProvider,
+  showLegacyCodexNotice,
 } from '../../src/aiProvider';
 import { applySettingsFields, parseLiveSttProvider, readSettingsFields } from './settings-fields';
 import { diffConfigPayload } from '../../src/configDiff';
@@ -25,6 +28,11 @@ import {
   describeCredentialUse,
 } from '../../src/settingsVisibility';
 import { formatUsd } from '../../src/usageFormat';
+import {
+  createManageUsageButton,
+  isChatGPTUsageLimitCode,
+  openChatGPTUsage,
+} from '../services/chatgpt-usage';
 
 let configModal: HTMLDialogElement | null = null;
 let saveConfigBtn: HTMLButtonElement | null = null;
@@ -37,9 +45,23 @@ let transcriptionProviderNotice: HTMLElement | null = null;
 let openaiApiKeyInput: HTMLInputElement | null = null;
 let sonioxApiKeyInput: HTMLInputElement | null = null;
 let liveProviderNotice: HTMLElement | null = null;
-let loginCodexOAuthBtn: HTMLButtonElement | null = null;
-let clearCodexOAuthBtn: HTMLButtonElement | null = null;
-let codexOAuthStatus: HTMLElement | null = null;
+let legacyCodexNotice: HTMLElement | null = null;
+let chatgptCard: HTMLElement | null = null;
+let chatgptStatusEl: HTMLElement | null = null;
+let chatgptPlanBadge: HTMLElement | null = null;
+let chatgptLoginBtn: HTMLButtonElement | null = null;
+let chatgptCancelLoginBtn: HTMLButtonElement | null = null;
+let chatgptLogoutBtn: HTMLButtonElement | null = null;
+let chatgptProfileGroup: HTMLElement | null = null;
+let chatgptProfileSelect: HTMLSelectElement | null = null;
+let chatgptAddProfileBtn: HTMLButtonElement | null = null;
+let chatgptNotice: HTMLElement | null = null;
+let chatgptNoticeText: HTMLElement | null = null;
+let chatgptNoticeActions: HTMLElement | null = null;
+let chatgptUsingPlan: HTMLElement | null = null;
+let chatgptModelSelect: HTMLSelectElement | null = null;
+let chatgptRefreshModelsBtn: HTMLButtonElement | null = null;
+let chatgptPlanDialog: HTMLDialogElement | null = null;
 let loginGoogleOAuthBtn: HTMLButtonElement | null = null;
 let clearGoogleOAuthBtn: HTMLButtonElement | null = null;
 let googleOAuthStatus: HTMLElement | null = null;
@@ -62,27 +84,64 @@ let settingsBaseline: ConfigPayload = {};
 const resetSettingsKeys = new Set<keyof ConfigPayload>();
 let aiPane: HTMLElement | null = null;
 let aiRequiredBadge: HTMLElement | null = null;
-let codexOAuthConfigured = false;
-let codexOAuthSource: 'config' | 'env' | 'codexCli' | null = null;
 
-// Each Codex sign-in click bumps this; the in-flight click checks its captured
+// Shapes come from the preload bridge so this module tracks the main-process
+// contract. Tokens never cross into the renderer: the status carries only
+// connection, plan-usage and account display fields.
+type ChatGPTStatus = Awaited<ReturnType<ElectronAPI['getChatGPTStatus']>>['status'];
+type ChatGPTModels = Extract<
+  Awaited<ReturnType<ElectronAPI['listChatGPTModels']>>,
+  { success: true }
+>['models'];
+type ChatGPTProfiles = Extract<
+  Awaited<ReturnType<ElectronAPI['listChatGPTProfiles']>>,
+  { success: true }
+>['profiles'];
+
+const CHATGPT_DISCONNECTED: ChatGPTStatus = { connected: false, planEnabled: false };
+let chatgptStatus: ChatGPTStatus = CHATGPT_DISCONNECTED;
+// The saved `chatgptModel`. Kept separately from the <select> because the
+// select is rebuilt from the account's model list, which may not contain it.
+let chatgptSavedModel = '';
+let chatgptPlanNoticeAcknowledged = false;
+let chatgptLoginInFlight = false;
+// A stored retired `transcriptionProvider=codex` shows as a disabled
+// placeholder option in the select; this keeps the removal explained until
+// the user picks a backend.
+let legacyTranscriptionMessage = '';
+// Retired Codex values are still stored. The notice stays until a ChatGPT
+// sign-in exists, since the stored values are kept for migration.
+let legacyCodexConfigured = false;
+
+// Each sign-in click bumps this; the in-flight click checks its captured
 // token against the current one after `await`, discarding stale results from
-// prior attempts that were aborted by a newer click.
-let codexLoginToken = 0;
+// prior attempts that were aborted by a newer click or a cancel.
+let chatgptLoginToken = 0;
 let googleLoginToken = 0;
+// Bumped on every account switch or reload so a slow model list for the
+// previous account cannot overwrite the current one.
+let chatgptModelsToken = 0;
+// Same guard for the saved-account list.
+let chatgptProfilesToken = 0;
+// Saved ChatGPT registrations, listed whether or not the active one is
+// signed in, so signing out of one account never hides the others.
+let chatgptProfiles: ChatGPTProfiles = [];
+
+// Value of the placeholder option shown while the stored transcription
+// provider is the retired `codex`. Disabled, so the user cannot pick it; Save
+// omits the field while it is selected, keeping the stored value untouched.
+const LEGACY_TRANSCRIPTION_OPTION = 'legacy-codex';
 
 const MODEL_FIELDS: readonly ModelField[] = [
   'geminiModel',
   'geminiFlashModel',
-  'codexModel',
-  'codexTranscriptionModel',
+  'openaiTranscriptionModel',
 ];
 
 const RESET_BUTTON_IDS: Record<ModelField, string> = {
   geminiModel: 'resetGeminiModel',
   geminiFlashModel: 'resetGeminiFlashModel',
-  codexModel: 'resetCodexModel',
-  codexTranscriptionModel: 'resetCodexTranscriptionModel',
+  openaiTranscriptionModel: 'resetOpenaiTranscriptionModel',
 };
 
 function getModelEls(
@@ -150,8 +209,8 @@ function readOtherSettings(): ConfigPayload {
   return {
     geminiModel: readModelValue('geminiModel'),
     geminiFlashModel: readModelValue('geminiFlashModel'),
-    codexModel: readModelValue('codexModel'),
-    codexTranscriptionModel: readModelValue('codexTranscriptionModel'),
+    openaiTranscriptionModel: readModelValue('openaiTranscriptionModel'),
+    chatgptModel: readChatGPTModel(),
     knownWords: [...knownWordsValues],
     summaryPrompt: summaryPrompt === defaultSummaryPrompt ? '' : summaryPrompt,
     globalShortcut: globalShortcut === DEFAULT_GLOBAL_SHORTCUT ? '' : globalShortcut,
@@ -180,8 +239,8 @@ function setupModelControls(): void {
 }
 
 // Apply the project's status-pill styling to a target element. Reused by the
-// Codex sign-in, Google sign-in, and Google sync status indicators -- all
-// three pills share the same CSS surface, only the target element differs.
+// Google sign-in and Google sync status indicators -- both pills share the
+// same CSS surface, only the target element differs.
 function setStatusEl(
   el: HTMLElement | null,
   text: string,
@@ -192,10 +251,6 @@ function setStatusEl(
   el.className = `slack-webhook-status${state === 'idle' ? '' : ` is-${state}`}`;
 }
 
-function setCodexOAuthStatus(text: string, state: 'idle' | 'success' | 'error' = 'idle'): void {
-  setStatusEl(codexOAuthStatus, text, state);
-}
-
 function setGoogleOAuthStatus(text: string, state: 'idle' | 'success' | 'error' = 'idle'): void {
   setStatusEl(googleOAuthStatus, text, state);
 }
@@ -204,23 +259,327 @@ function setGoogleSyncStatus(text: string, state: 'idle' | 'success' | 'error' =
   setStatusEl(googleDriveSyncStatusEl, text, state);
 }
 
-function codexOAuthStatusLabel(source: typeof codexOAuthSource): string {
-  if (source === 'codexCli') return 'Signed in via Codex CLI';
-  if (source === 'env') return 'Signed in via env';
-  return 'Signed in';
+// --- ChatGPT connection card -------------------------------------------------
+
+function chatgptPlanUsable(): boolean {
+  return chatgptStatus.connected && chatgptStatus.planEnabled;
 }
 
-function applyCodexOAuthState(config: {
-  codexOAuthConfigured?: unknown;
-  codexOAuthSource?: unknown;
-}): void {
-  codexOAuthConfigured = !!config.codexOAuthConfigured;
-  codexOAuthSource =
-    config.codexOAuthSource === 'config' ||
-    config.codexOAuthSource === 'env' ||
-    config.codexOAuthSource === 'codexCli'
-      ? config.codexOAuthSource
-      : null;
+function readChatGPTModel(): string {
+  // A disabled select (signed out, identity only, loading, list failed) still
+  // carries the kept value (the saved model, or the user's unsaved pick) as
+  // its only option, so reading it never drops a choice the user made.
+  return chatgptModelSelect?.value ?? chatgptSavedModel;
+}
+
+function hideChatGPTNotice(): void {
+  if (!chatgptNotice) return;
+  chatgptNotice.hidden = true;
+  chatgptNotice.className = 'config-notice';
+  if (chatgptNoticeText) chatgptNoticeText.textContent = '';
+  if (chatgptNoticeActions) chatgptNoticeActions.hidden = true;
+}
+
+function showChatGPTNotice(
+  text: string,
+  state: 'info' | 'success' | 'warning' | 'error',
+  opts: { manageUsage?: boolean } = {},
+): void {
+  if (!chatgptNotice || !chatgptNoticeText) return;
+  chatgptNoticeText.textContent = text;
+  chatgptNotice.className = `config-notice is-${state}`;
+  chatgptNotice.hidden = false;
+  if (chatgptNoticeActions) chatgptNoticeActions.hidden = !opts.manageUsage;
+}
+
+// Error codes main attaches to a failed ChatGPT call. A usage-limit error makes
+// Manage usage the primary action (SIWC UI guidelines); nothing falls back to
+// another provider or billing path.
+const CHATGPT_USAGE_GUIDANCE: Record<string, string> = {
+  usage_limit_exceeded:
+    "Your ChatGPT plan's usage limit was reached. Check Manage usage, wait for the limit to reset, or choose another AI provider.",
+  usage_unavailable:
+    'ChatGPT plan usage is unavailable right now. Check Manage usage, try again later, or choose another AI provider.',
+  not_eligible:
+    'This ChatGPT account is not eligible for plan usage in Listener.AI (ChatGPT Plus or Pro is required). Check Manage usage or choose another AI provider.',
+};
+
+function showChatGPTError(error: string, code?: string): void {
+  if (isChatGPTUsageLimitCode(code)) {
+    const guidance =
+      CHATGPT_USAGE_GUIDANCE[code ?? ''] ?? CHATGPT_USAGE_GUIDANCE.usage_limit_exceeded;
+    showChatGPTNotice(`${error} ${guidance}`, 'error', { manageUsage: true });
+    return;
+  }
+  showChatGPTNotice(error, 'error');
+}
+
+function setChatGPTBusy(busy: boolean, label?: string): void {
+  chatgptLoginInFlight = busy;
+  if (chatgptCard) chatgptCard.setAttribute('aria-busy', busy ? 'true' : 'false');
+  if (chatgptLoginBtn) chatgptLoginBtn.disabled = busy;
+  if (chatgptAddProfileBtn) chatgptAddProfileBtn.disabled = busy;
+  if (chatgptProfileSelect) chatgptProfileSelect.disabled = busy;
+  if (chatgptCancelLoginBtn) chatgptCancelLoginBtn.hidden = !busy;
+  if (busy && label && chatgptStatusEl) chatgptStatusEl.textContent = label;
+}
+
+// Display name of a saved registration. Two registrations can share an email
+// (one per workspace), so when the auth store gives no label, a duplicate or
+// missing email gets a suffix from the registration's immutable id. That
+// keeps names distinct and stable across reloads, sign-outs and switches,
+// without inventing a workspace name.
+function chatgptProfileLabel(profile: ChatGPTProfiles[number]): string {
+  const label = (profile as { label?: string }).label?.trim();
+  const email = profile.email?.trim();
+  if (label) return email && email !== label ? `${email} · ${label}` : label;
+  const shared =
+    !email || chatgptProfiles.some((p) => p.id !== profile.id && p.email?.trim() === email);
+  const base = email || 'ChatGPT account';
+  return shared ? `${base} · registration ${profile.id.slice(0, 8)}` : base;
+}
+
+function activeChatGPTLabel(): string | undefined {
+  const { profileId } = chatgptStatus;
+  const profile = profileId ? chatgptProfiles.find((p) => p.id === profileId) : undefined;
+  if (profile) return chatgptProfileLabel(profile);
+  return chatgptStatus.email;
+}
+
+function renderLegacyCodexNotice(): void {
+  if (!legacyCodexNotice) return;
+  legacyCodexNotice.hidden = !showLegacyCodexNotice({
+    legacyCodexConfigured,
+    selectedAiProvider: aiProviderSelect?.value,
+    chatgptConnected: chatgptStatus.connected,
+  });
+}
+
+function renderChatGPTCard(): void {
+  const { connected, planEnabled, profileId } = chatgptStatus;
+  const name = activeChatGPTLabel();
+  renderLegacyCodexNotice();
+  if (chatgptStatusEl && !chatgptLoginInFlight) {
+    chatgptStatusEl.textContent = connected
+      ? `Connected as ${name || 'your ChatGPT account'}`
+      : profileId && name
+        ? `Signed out of ${name}. Sign in again, or choose or add another account.`
+        : 'Not connected';
+  }
+  if (chatgptPlanBadge) {
+    chatgptPlanBadge.hidden = !connected;
+    if (planEnabled) {
+      chatgptPlanBadge.textContent = 'Plan usage enabled. Listener.AI uses your ChatGPT plan.';
+      chatgptPlanBadge.className = 'chatgpt-plan-badge is-enabled';
+    } else if ((chatgptStatus as { planState?: string }).planState === 'incomplete') {
+      // Plan scope granted but no renewable token pair: consent must be redone.
+      chatgptPlanBadge.textContent =
+        'Plan usage needs to be enabled again before Listener.AI can use your ChatGPT plan. Select Enable ChatGPT plan, or choose another AI provider above.';
+      chatgptPlanBadge.className = 'chatgpt-plan-badge is-disabled';
+    } else {
+      chatgptPlanBadge.textContent =
+        'Signed in for identity only. Plan usage is not enabled, so Listener.AI will not use your ChatGPT plan. Select Enable ChatGPT plan to allow it, or choose another AI provider above.';
+      chatgptPlanBadge.className = 'chatgpt-plan-badge is-disabled';
+    }
+  }
+  if (chatgptLoginBtn) {
+    // Hidden once plan usage works. After an identity-only consent it becomes
+    // the explicit Enable ChatGPT plan action (errors-and-recovery guidance).
+    chatgptLoginBtn.hidden = connected && planEnabled;
+    chatgptLoginBtn.textContent =
+      connected && !planEnabled ? 'Enable ChatGPT plan' : 'Continue with ChatGPT';
+  }
+  if (chatgptLogoutBtn) chatgptLogoutBtn.hidden = !connected;
+  // Shown whenever an account is saved, signed in or not, so the user can
+  // switch to another saved account or add one after signing out.
+  if (chatgptProfileGroup) chatgptProfileGroup.hidden = !connected && chatgptProfiles.length === 0;
+  if (chatgptUsingPlan) chatgptUsingPlan.hidden = !chatgptPlanUsable();
+  if (chatgptRefreshModelsBtn) chatgptRefreshModelsBtn.disabled = !chatgptPlanUsable();
+}
+
+// Placeholder state for the model select when no account list is available.
+// Keeps one choice as the only option so Save never rewrites it: the saved
+// model when Settings opens, otherwise (`keepCurrent`) the current pick, which
+// survives loading, a failed refresh and an account switch even though the
+// placeholder before it disabled the select.
+function renderChatGPTModelPlaceholder(reason: string, keepCurrent = false): void {
+  if (!chatgptModelSelect) return;
+  const value = chatgptPlaceholderModel(chatgptModelSelect, chatgptSavedModel, keepCurrent);
+  chatgptModelSelect.innerHTML = '';
+  const opt = document.createElement('option');
+  opt.value = value;
+  opt.textContent = value ? `${value} (${reason})` : `Default (${reason})`;
+  chatgptModelSelect.appendChild(opt);
+  chatgptModelSelect.value = value;
+  chatgptModelSelect.disabled = true;
+}
+
+function renderChatGPTModels(models: ChatGPTModels): void {
+  if (!chatgptModelSelect) return;
+  const previous = chatgptModelSelect.value;
+  chatgptModelSelect.innerHTML = '';
+  const first = models[0];
+  const defaultOpt = document.createElement('option');
+  defaultOpt.value = '';
+  defaultOpt.textContent = first ? `Default (${first.display_name || first.slug})` : 'Default';
+  chatgptModelSelect.appendChild(defaultOpt);
+  for (const model of models) {
+    const opt = document.createElement('option');
+    opt.value = model.slug;
+    opt.textContent =
+      model.display_name && model.display_name !== model.slug
+        ? `${model.display_name} (${model.slug})`
+        : model.slug;
+    chatgptModelSelect.appendChild(opt);
+  }
+  // A saved model this account does not list stays selected and labeled, so
+  // switching accounts never silently substitutes another model.
+  if (previous && !models.some((m) => m.slug === previous)) {
+    const opt = document.createElement('option');
+    opt.value = previous;
+    opt.textContent = `${previous} (not available for this account)`;
+    chatgptModelSelect.appendChild(opt);
+    showChatGPTNotice(
+      `The saved model ${previous} is not in this account's model list. Choose another model or Default.`,
+      'warning',
+    );
+  }
+  chatgptModelSelect.value = previous;
+  chatgptModelSelect.disabled = false;
+}
+
+async function loadChatGPTModels(): Promise<void> {
+  const myToken = ++chatgptModelsToken;
+  if (!chatgptStatus.connected) {
+    renderChatGPTModelPlaceholder('sign in to load models', true);
+    return;
+  }
+  if (!chatgptStatus.planEnabled) {
+    renderChatGPTModelPlaceholder('plan usage not enabled', true);
+    return;
+  }
+  renderChatGPTModelPlaceholder('loading...', true);
+  try {
+    const result = await window.electronAPI.listChatGPTModels();
+    if (myToken !== chatgptModelsToken) return;
+    if (result.success) {
+      renderChatGPTModels(result.models);
+    } else {
+      renderChatGPTModelPlaceholder('model list unavailable', true);
+      showChatGPTError(result.error, result.code);
+    }
+  } catch (e) {
+    if (myToken !== chatgptModelsToken) return;
+    renderChatGPTModelPlaceholder('model list unavailable', true);
+    showChatGPTError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+function renderChatGPTProfiles(profiles: ChatGPTProfiles): void {
+  chatgptProfiles = profiles;
+  if (chatgptProfileSelect) {
+    chatgptProfileSelect.innerHTML = '';
+    for (const profile of profiles) {
+      const opt = document.createElement('option');
+      opt.value = profile.id;
+      const state = !profile.connected
+        ? ' (signed out, sign in again to use)'
+        : profile.planEnabled
+          ? ''
+          : ' (identity only)';
+      opt.textContent = `${chatgptProfileLabel(profile)}${state}`;
+      chatgptProfileSelect.appendChild(opt);
+    }
+    const active = chatgptStatus.profileId ?? profiles.find((p) => p.active)?.id;
+    if (active) chatgptProfileSelect.value = active;
+  }
+  // Labels feed the status line and group visibility.
+  renderChatGPTCard();
+}
+
+// Lists saved registrations independently of whether the active one is
+// signed in. Listing never runs inference or reads tokens in the renderer.
+async function loadChatGPTProfiles(): Promise<void> {
+  const myToken = ++chatgptProfilesToken;
+  try {
+    const result = await window.electronAPI.listChatGPTProfiles();
+    if (myToken !== chatgptProfilesToken) return;
+    if (result.success) renderChatGPTProfiles(result.profiles);
+    else showChatGPTError(result.error, result.code);
+  } catch (e) {
+    if (myToken !== chatgptProfilesToken) return;
+    showChatGPTError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+async function applyChatGPTStatus(status: ChatGPTStatus): Promise<void> {
+  chatgptStatus = status;
+  renderChatGPTCard();
+  updateAiRequiredBadge();
+  updateTranscriptionProviderNotice();
+  updateLiveProviderNotice();
+  await Promise.all([loadChatGPTProfiles(), loadChatGPTModels()]);
+}
+
+async function refreshChatGPTState(): Promise<void> {
+  hideChatGPTNotice();
+  try {
+    const result = await window.electronAPI.getChatGPTStatus();
+    await applyChatGPTStatus(result.status);
+  } catch (e) {
+    await applyChatGPTStatus(CHATGPT_DISCONNECTED);
+    showChatGPTError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+// One-time "You're using your ChatGPT plan" explanation. Persisted the moment
+// the user acknowledges it, independent of the Settings Save button.
+function maybeShowChatGPTPlanDialog(): void {
+  if (chatgptPlanNoticeAcknowledged || !chatgptPlanUsable() || !chatgptPlanDialog) return;
+  if (!chatgptPlanDialog.open) chatgptPlanDialog.showModal();
+}
+
+// `requestPlanConsent` asks main to re-prompt for plan consent; sent only from
+// the deliberate Enable ChatGPT plan action, never on an ordinary sign-in.
+type ChatGPTLoginOptions = Parameters<ElectronAPI['loginChatGPT']>[0];
+
+async function runChatGPTLogin(opts?: ChatGPTLoginOptions): Promise<void> {
+  // Reentrant: each click aborts any prior in-flight attempt on main; the
+  // token guard drops the aborted attempt's stale result.
+  const myToken = ++chatgptLoginToken;
+  hideChatGPTNotice();
+  setChatGPTBusy(true, 'Opening your browser to sign in...');
+  let result: Awaited<ReturnType<ElectronAPI['loginChatGPT']>>;
+  try {
+    result = await window.electronAPI.loginChatGPT(opts);
+  } catch (e) {
+    if (myToken !== chatgptLoginToken) return;
+    setChatGPTBusy(false);
+    renderChatGPTCard();
+    showChatGPTError(e instanceof Error ? e.message : String(e));
+    return;
+  }
+  if (myToken !== chatgptLoginToken) return;
+  setChatGPTBusy(false);
+  if (result.success) {
+    if (aiProviderSelect) aiProviderSelect.value = 'chatgpt';
+    applyCredentialVisibility();
+    await applyChatGPTStatus(result.status);
+    if (!result.status.planEnabled) {
+      showChatGPTNotice(
+        'Signed in, but plan usage was not allowed. Listener.AI will not use your ChatGPT plan until you select Enable ChatGPT plan and allow it.',
+        'warning',
+      );
+    }
+    maybeShowChatGPTPlanDialog();
+  } else if (result.cancelled) {
+    renderChatGPTCard();
+    if (chatgptStatusEl && !chatgptStatus.connected)
+      chatgptStatusEl.textContent = 'Sign-in cancelled';
+  } else {
+    renderChatGPTCard();
+    showChatGPTError(result.error, result.code);
+  }
 }
 
 function readLiveProvider(): LiveSttProvider {
@@ -262,15 +621,72 @@ function setLiveProviderNotice(
   liveProviderNotice.className = `config-notice is-${state}`;
 }
 
+// Shows (or removes) the disabled placeholder for a stored retired `codex`
+// transcription provider. Nothing is written until the user picks a real
+// backend: opening Settings, switching AI provider, signing in, or saving an
+// unrelated setting leaves the stored value, and audio stays off, as before.
+function setLegacyTranscriptionOption(show: boolean): void {
+  if (!transcriptionProviderSelect) return;
+  transcriptionProviderSelect
+    .querySelector(`option[value="${LEGACY_TRANSCRIPTION_OPTION}"]`)
+    ?.remove();
+  if (!show) return;
+  const opt = document.createElement('option');
+  opt.value = LEGACY_TRANSCRIPTION_OPTION;
+  opt.textContent = 'Codex (removed): choose a provider';
+  opt.disabled = true;
+  transcriptionProviderSelect.prepend(opt);
+  transcriptionProviderSelect.value = LEGACY_TRANSCRIPTION_OPTION;
+}
+
+function isLegacyTranscriptionSelected(): boolean {
+  return transcriptionProviderSelect?.value === LEGACY_TRANSCRIPTION_OPTION;
+}
+
+// Everything Save compares against the baseline. While the retired-provider
+// placeholder is selected the field is left out on both sides, so the save
+// delta never carries it; any explicit choice, Follow summary provider included,
+// then differs from the (absent) baseline and is written.
+function readModalSettings(fields: ConfigPayload = readSettingsFields()): ConfigPayload {
+  const next = { ...fields, ...readOtherSettings() };
+  if (isLegacyTranscriptionSelected()) delete next.transcriptionProvider;
+  return next;
+}
+
+// Why the current Transcription choice cannot run, or '' when it can.
+function transcriptionProviderProblem(): string {
+  if (legacyTranscriptionMessage) return legacyTranscriptionMessage;
+  const provider = readTranscriptionProvider();
+  if (provider === 'auto' && aiProviderSelect?.value === 'chatgpt') {
+    // Never redirected silently: Auto under ChatGPT refuses audio work at run
+    // time, so the user picks who receives and bills the audio. Saving a
+    // text-only ChatGPT setup is still allowed.
+    return 'Recording transcription is off: ChatGPT sign-in cannot transcribe audio. Summaries, report regeneration, and Ask Listener still work on existing transcripts. To transcribe recordings, choose Gemini, OpenAI API, or Soniox.';
+  }
+  if (provider === 'openai' && (openaiApiKeyInput?.value.trim() ?? '').length === 0) {
+    return 'OpenAI transcription needs an OpenAI API key, saved under AI connection and billed to your OpenAI API account, not your ChatGPT plan. Add one or choose another service.';
+  }
+  if (provider === 'soniox' && (sonioxApiKeyInput?.value.trim() ?? '').length === 0) {
+    return 'Soniox transcription needs a Soniox API key, saved under AI connection. Add one or choose another service.';
+  }
+  return '';
+}
+
+// The credential the transcription notice names, if it names one. The ChatGPT
+// and retired-Codex notices ask for a different choice, not a key.
+function transcriptionProviderLink(): NoticeLink | undefined {
+  if (legacyTranscriptionMessage) return undefined;
+  const provider = readTranscriptionProvider();
+  if (provider === 'openai') return OPENAI_KEY_LINK;
+  if (provider === 'soniox') return SONIOX_KEY_LINK;
+  return undefined;
+}
+
 function updateTranscriptionProviderNotice(): void {
   if (!transcriptionProviderNotice) return;
-  const provider = readTranscriptionProvider();
-  const hasSonioxKey = (sonioxApiKeyInput?.value.trim() ?? '').length > 0;
-  const warn = provider === 'soniox' && !hasSonioxKey;
-  const text = warn
-    ? 'Soniox transcription needs a Soniox API key, saved under AI connection. Add one or choose another service.'
-    : '';
-  renderNotice(transcriptionProviderNotice, text, SONIOX_KEY_LINK);
+  const text = transcriptionProviderProblem();
+  const warn = text.length > 0;
+  renderNotice(transcriptionProviderNotice, text, transcriptionProviderLink());
   // Only carry the warning state while there is a warning: a hidden element
   // that keeps `is-warning` shows up as one in a11y tooling and in any future
   // styling that reads the class rather than `hidden`.
@@ -335,7 +751,7 @@ function updateLiveProviderNotice(): void {
       );
     } else {
       setLiveProviderNotice(
-        'OpenAI Realtime live translation needs an OpenAI API key. Codex sign-in is not enough for this live translation call.',
+        'OpenAI Realtime live translation needs an OpenAI API key. ChatGPT sign-in does not cover live captions.',
         'warning',
         OPENAI_KEY_LINK,
       );
@@ -345,15 +761,13 @@ function updateLiveProviderNotice(): void {
 
   if (hasGeminiKey) {
     setLiveProviderNotice(
-      codexOAuthConfigured
-        ? 'Codex sign-in is available for Codex features, but OpenAI live translation needs an OpenAI API key. Auto will use Gemini Live.'
-        : 'Auto will use Gemini Live unless you add an OpenAI API key for OpenAI Realtime.',
+      'Auto will use Gemini Live unless you add an OpenAI API key for OpenAI Realtime.',
       'info',
     );
   } else {
     setLiveProviderNotice(
-      codexOAuthConfigured
-        ? 'Codex sign-in is available for Codex features, but live streaming needs an OpenAI API key or Gemini API key.'
+      chatgptStatus.connected
+        ? 'ChatGPT sign-in does not cover live captions. Live streaming needs an OpenAI API key or Gemini API key; otherwise use 12s fallback.'
         : 'Auto needs an OpenAI API key or Gemini API key for streaming live translation; otherwise use 12s fallback.',
       'warning',
       { target: 'openaiApiKey', label: 'Open AI connection' },
@@ -381,19 +795,47 @@ function formatLastSynced(iso: string | null | undefined): string {
   return `Synced ${Math.floor(hrs / 24)}d ago`;
 }
 
-// Function to check and prompt for API keys
-export async function checkAndPromptForConfig(): Promise<void> {
-  const configCheck = (await window.electronAPI.checkConfig()) as {
-    hasAiAuth?: boolean;
-  };
-
-  // Only prompt when the AI provider isn't set up. Notion / Slack are optional
-  // integrations and shouldn't trigger a startup nag.
-  if (!configCheck.hasAiAuth) {
-    if (confirm('Listener.AI needs an AI provider configured. Open settings now?')) {
-      showConfigModal();
-    }
+// Gate a deliberate AI action on the credentials it needs: the AI provider
+// (summary, report regeneration, Ask Listener) and, for audio work, the
+// selected transcription backend, which can be a different vendor with its
+// own key. Returns true when the caller can proceed; false when Settings has
+// been opened on the missing setting instead. Startup never calls this, so the
+// app opens without a setup prompt. Nothing here signs in or switches vendor.
+export async function requireAiSetup({
+  transcription,
+}: {
+  transcription: boolean;
+}): Promise<boolean> {
+  const configCheck = await window.electronAPI.checkConfig();
+  if (configCheck.hasAiAuth && (!transcription || configCheck.hasTranscriptionAuth)) return true;
+  const message = !configCheck.hasAiAuth
+    ? 'Please configure your AI provider first'
+    : !configCheck.transcriptionProvider && configCheck.transcriptionProviderIssue
+      ? configCheck.transcriptionProviderIssue
+      : configCheck.transcriptionProvider === 'soniox'
+        ? 'Transcription is set to Soniox, but no Soniox API key is saved. Add the key in Settings > AI connection, or choose another service under Transcription and summary.'
+        : 'The selected transcription service has no credentials saved. Add them in Settings > AI connection, or choose another service under Transcription and summary.';
+  // Open Settings on the exact setting that is missing.
+  const focus = !configCheck.hasAiAuth
+    ? configCheck.aiProvider === 'chatgpt'
+      ? 'chatgptLogin'
+      : 'geminiApiKey'
+    : configCheck.transcriptionProvider === 'soniox'
+      ? 'sonioxApiKey'
+      : configCheck.transcriptionProvider === 'openai'
+        ? 'openaiApiKey'
+        : configCheck.transcriptionProvider === 'gemini'
+          ? 'geminiApiKey'
+          : 'transcriptionProvider';
+  if (document.getElementById('configModal')) {
+    // The provider case is self-evident once Settings opens; a missing backend
+    // key is not, so name it before the modal appears.
+    if (configCheck.hasAiAuth) alert(message);
+    void showConfigModal({ focus });
+  } else {
+    alert(message);
   }
+  return false;
 }
 
 export type ConfigModalOptions = {
@@ -410,9 +852,9 @@ export async function showConfigModal(options: ConfigModalOptions = {}): Promise
   // Load current config. ConfigPayload doubles as the load shape -- main
   // returns the same field set it accepts -- plus the read-only OAuth flags.
   const config = (await window.electronAPI.getConfig()) as ConfigPayload & {
-    codexOAuthConfigured?: boolean;
-    codexOAuthSource?: 'config' | 'env' | 'codexCli';
     googleOAuthConfigured?: boolean;
+    legacyCodexConfigured?: boolean;
+    transcriptionProviderIssue?: { issue?: string; message?: string };
   };
 
   // Pre-fill the form if values exist
@@ -420,13 +862,17 @@ export async function showConfigModal(options: ConfigModalOptions = {}): Promise
   applySettingsFields(config);
   applyModelValue('geminiModel', config.geminiModel);
   applyModelValue('geminiFlashModel', config.geminiFlashModel);
-  applyModelValue('codexModel', config.codexModel);
-  applyModelValue('codexTranscriptionModel', config.codexTranscriptionModel);
-  applyCodexOAuthState(config);
-  setCodexOAuthStatus(
-    codexOAuthConfigured ? codexOAuthStatusLabel(codexOAuthSource) : 'Not signed in',
-    codexOAuthConfigured ? 'success' : 'idle',
-  );
+  applyModelValue('openaiTranscriptionModel', config.openaiTranscriptionModel);
+  chatgptSavedModel = (config.chatgptModel ?? '').trim();
+  chatgptPlanNoticeAcknowledged = config.chatgptPlanNoticeAcknowledged === true;
+  // A pre-ChatGPT install that used Codex keeps its old values on disk for
+  // migration, but they are never reused: the user signs in again.
+  legacyCodexConfigured = config.legacyCodexConfigured === true;
+  chatgptStatus = CHATGPT_DISCONNECTED;
+  chatgptProfiles = [];
+  hideChatGPTNotice();
+  renderChatGPTCard();
+  renderChatGPTModelPlaceholder('loading...');
   setGoogleOAuthStatus(
     config.googleOAuthConfigured ? 'Signed in' : 'Not signed in',
     config.googleOAuthConfigured ? 'success' : 'idle',
@@ -472,7 +918,17 @@ export async function showConfigModal(options: ConfigModalOptions = {}): Promise
     };
   }
 
-  settingsBaseline = { ...readSettingsFields(), ...readOtherSettings() };
+  legacyTranscriptionMessage = '';
+  setLegacyTranscriptionOption(config.transcriptionProviderIssue?.issue === 'legacy-codex');
+  settingsBaseline = readModalSettings();
+  if (isLegacyTranscriptionSelected()) {
+    legacyTranscriptionMessage =
+      'Codex transcription was removed, so recordings are not transcribed. Choose a transcription service and save: Gemini, OpenAI API (billed to your OpenAI API key), Soniox, or Follow summary provider.';
+  }
+
+  // Status and the account's model list load after the baseline is taken; the
+  // model select keeps the saved value throughout, so the diff stays clean.
+  void refreshChatGPTState();
 
   clearFieldError(geminiApiKeyInput, 'geminiApiKeyError');
   clearFieldError(globalShortcutInput, 'globalShortcutError');
@@ -517,16 +973,30 @@ async function refreshUsageSummaryCard(): Promise<void> {
       listEl.appendChild(li);
       return;
     }
+    let planRows = 0;
     for (const row of res.summary.byModel) {
+      // ChatGPT plan calls are not priced per token: showing $0.00 would read
+      // as free. Rows without a billing field are historical API rows.
+      const onPlan = (row as { billing?: string }).billing === 'chatgpt-plan';
+      if (onPlan) planRows++;
       const li = document.createElement('li');
       const label = document.createElement('span');
       label.className = 'usage-summary-model';
       label.textContent = `${row.modelId} · ${row.kind} (${row.count})`;
       const amount = document.createElement('span');
       amount.className = 'usage-summary-amount';
-      amount.textContent = formatUsd(row.usd, 'long');
+      amount.textContent = onPlan ? 'ChatGPT plan' : formatUsd(row.usd, 'long');
       li.append(label, amount);
       listEl.appendChild(li);
+    }
+    if (planRows > 0) {
+      const note = document.createElement('li');
+      note.className = 'usage-summary-empty';
+      note.append(
+        'ChatGPT plan calls count toward your plan’s usage limits and any credits you authorized; they are not included in the dollar total. ',
+        createManageUsageButton('link-button'),
+      );
+      listEl.appendChild(note);
     }
     if (res.summary.modelUnknownCount > 0) {
       const note = document.createElement('li');
@@ -598,21 +1068,24 @@ function removeKnownWord(value: string): void {
 
 // A credential section stays visible while any feature still routes through
 // it, not just the summary provider: a Gemini key can power Gemini Live or
-// file transcription while summaries run on Codex.
+// file transcription while summaries run on the ChatGPT plan.
 function applyCredentialVisibility(): void {
   if (!aiPane || !aiProviderSelect) return;
   const usage = credentialUsage({
-    aiProvider: aiProviderSelect.value === 'codex' ? 'codex' : 'gemini',
-    transcriptionProvider: readTranscriptionProvider(),
+    aiProvider: aiProviderSelect.value === 'chatgpt' ? 'chatgpt' : 'gemini',
+    // The retired-provider placeholder transcribes nothing until replaced.
+    transcriptionProvider: isLegacyTranscriptionSelected()
+      ? LEGACY_CODEX_PROVIDER
+      : readTranscriptionProvider(),
     liveSttProvider: readLiveProvider(),
   });
   aiPane.querySelectorAll<HTMLElement>('.config-subgroup[data-provider]').forEach((sg) => {
-    const provider = sg.dataset.provider === 'codex' ? 'codex' : 'gemini';
+    const provider = sg.dataset.provider === 'chatgpt' ? 'chatgpt' : 'gemini';
     sg.hidden = usage[provider].length === 0;
   });
   const usageLines: Record<string, CredentialUse[]> = {
     geminiUsage: usage.gemini,
-    codexUsage: usage.codex,
+    chatgptUsage: usage.chatgpt,
     openaiUsage: usage.openai,
     sonioxUsage: usage.soniox,
   };
@@ -620,6 +1093,8 @@ function applyCredentialVisibility(): void {
     const el = document.getElementById(id);
     if (el) el.textContent = describeCredentialUse(uses);
   }
+  updateTranscriptionProviderNotice();
+  renderLegacyCodexNotice();
 }
 
 // Mirrors hasAiAuth() against the unsaved form so the badge clears as soon as
@@ -627,8 +1102,8 @@ function applyCredentialVisibility(): void {
 function updateAiRequiredBadge(): void {
   if (!aiRequiredBadge) return;
   const hasAuth =
-    aiProviderSelect?.value === 'codex'
-      ? codexOAuthConfigured
+    aiProviderSelect?.value === 'chatgpt'
+      ? chatgptPlanUsable()
       : (geminiApiKeyInput?.value.trim() ?? '').length > 0;
   aiRequiredBadge.hidden = hasAuth;
 }
@@ -745,9 +1220,25 @@ export function setupConfigModal(): void {
   sonioxApiKeyInput = document.getElementById('sonioxApiKey') as HTMLInputElement | null;
   liveProviderNotice = document.getElementById('liveProviderNotice');
   setupModelControls();
-  loginCodexOAuthBtn = document.getElementById('loginCodexOAuth') as HTMLButtonElement | null;
-  clearCodexOAuthBtn = document.getElementById('clearCodexOAuth') as HTMLButtonElement | null;
-  codexOAuthStatus = document.getElementById('codexOAuthStatus');
+  legacyCodexNotice = document.getElementById('legacyCodexNotice');
+  chatgptCard = document.getElementById('chatgptCard');
+  chatgptStatusEl = document.getElementById('chatgptStatus');
+  chatgptPlanBadge = document.getElementById('chatgptPlanBadge');
+  chatgptLoginBtn = document.getElementById('chatgptLogin') as HTMLButtonElement | null;
+  chatgptCancelLoginBtn = document.getElementById('chatgptCancelLogin') as HTMLButtonElement | null;
+  chatgptLogoutBtn = document.getElementById('chatgptLogout') as HTMLButtonElement | null;
+  chatgptProfileGroup = document.getElementById('chatgptProfileGroup');
+  chatgptProfileSelect = document.getElementById('chatgptProfile') as HTMLSelectElement | null;
+  chatgptAddProfileBtn = document.getElementById('chatgptAddProfile') as HTMLButtonElement | null;
+  chatgptNotice = document.getElementById('chatgptNotice');
+  chatgptNoticeText = document.getElementById('chatgptNoticeText');
+  chatgptNoticeActions = document.getElementById('chatgptNoticeActions');
+  chatgptUsingPlan = document.getElementById('chatgptUsingPlan');
+  chatgptModelSelect = document.getElementById('chatgptModelSelect') as HTMLSelectElement | null;
+  chatgptRefreshModelsBtn = document.getElementById(
+    'chatgptRefreshModels',
+  ) as HTMLButtonElement | null;
+  chatgptPlanDialog = document.getElementById('chatgptPlanDialog') as HTMLDialogElement | null;
   loginGoogleOAuthBtn = document.getElementById('loginGoogleOAuth') as HTMLButtonElement | null;
   clearGoogleOAuthBtn = document.getElementById('clearGoogleOAuth') as HTMLButtonElement | null;
   googleOAuthStatus = document.getElementById('googleOAuthStatus');
@@ -823,10 +1314,12 @@ export function setupConfigModal(): void {
   openaiApiKeyInput?.addEventListener('input', updateLiveProviderNotice);
   sonioxApiKeyInput?.addEventListener('input', updateLiveProviderNotice);
   transcriptionProviderSelect?.addEventListener('change', () => {
+    legacyTranscriptionMessage = '';
     applyCredentialVisibility();
     updateTranscriptionProviderNotice();
   });
   sonioxApiKeyInput?.addEventListener('input', updateTranscriptionProviderNotice);
+  openaiApiKeyInput?.addEventListener('input', updateTranscriptionProviderNotice);
   geminiApiKeyInput?.addEventListener('input', () => {
     clearFieldError(geminiApiKeyInput, 'geminiApiKeyError');
     updateAiRequiredBadge();
@@ -869,63 +1362,105 @@ export function setupConfigModal(): void {
     });
   }
 
-  window.electronAPI.onCodexOAuthProgress((status) => {
-    if (status.phase === 'browser-opened') {
-      setCodexOAuthStatus('Waiting for browser sign-in — click Sign in again to retry.');
-    } else if (status.phase === 'progress' && status.message) {
-      setCodexOAuthStatus(status.message);
+  window.electronAPI.onChatGPTProgress((event) => {
+    if (!chatgptLoginInFlight || !chatgptStatusEl) return;
+    if (event.phase === 'browser-opened') {
+      chatgptStatusEl.textContent =
+        'Waiting for you to finish signing in in your browser. Use Cancel sign-in to stop.';
+    } else if (event.phase === 'progress' && event.message) {
+      chatgptStatusEl.textContent = event.message;
     }
   });
 
-  if (loginCodexOAuthBtn) {
-    loginCodexOAuthBtn.addEventListener('click', async () => {
-      // Reentrant: each click aborts any prior in-flight attempt on main;
-      // the token guard drops the aborted attempt's stale result.
-      const myToken = ++codexLoginToken;
-      setCodexOAuthStatus('Opening browser sign-in...');
-      const result = await window.electronAPI.loginCodexOAuth();
-      if (myToken !== codexLoginToken) return;
+  chatgptLoginBtn?.addEventListener('click', () => {
+    const { connected, planEnabled, profileId } = chatgptStatus;
+    // A signed-out saved account signs in again under its own registration
+    // (its issued client ID) instead of registering a duplicate.
+    void runChatGPTLogin(
+      connected && !planEnabled
+        ? { requestPlanConsent: true, profileId }
+        : !connected && profileId
+          ? { profileId }
+          : undefined,
+    );
+  });
+  chatgptAddProfileBtn?.addEventListener('click', () => {
+    void runChatGPTLogin({ newProfile: true });
+  });
+
+  chatgptCancelLoginBtn?.addEventListener('click', () => {
+    chatgptLoginToken++;
+    setChatGPTBusy(false);
+    renderChatGPTCard();
+    if (chatgptStatusEl && !chatgptStatus.connected)
+      chatgptStatusEl.textContent = 'Sign-in cancelled';
+    window.electronAPI.cancelChatGPTLogin().catch(() => {});
+    chatgptLoginBtn?.focus();
+  });
+
+  chatgptLogoutBtn?.addEventListener('click', async () => {
+    chatgptLogoutBtn!.disabled = true;
+    hideChatGPTNotice();
+    try {
+      // Signs out the active account; other accounts stay signed in.
+      const result = await window.electronAPI.logoutChatGPT(chatgptStatus.profileId);
       if (result.success) {
-        applyCodexOAuthState(result.config);
-        if (aiProviderSelect) aiProviderSelect.value = 'codex';
-        // Sign-in already persisted this, so switching back to another
-        // provider before Save must still count as an edit.
-        settingsBaseline = { ...settingsBaseline, aiProvider: 'codex' };
-        applyCredentialVisibility();
-        updateAiRequiredBadge();
-        updateLiveProviderNotice();
-        setCodexOAuthStatus(codexOAuthStatusLabel(codexOAuthSource), 'success');
-      } else if (result.cancelled) {
-        return;
-      } else {
-        setCodexOAuthStatus(result.error, 'error');
-      }
-    });
-  }
-
-  if (clearCodexOAuthBtn) {
-    clearCodexOAuthBtn.addEventListener('click', async () => {
-      clearCodexOAuthBtn!.disabled = true;
-      try {
-        const result = await window.electronAPI.clearCodexOAuth();
-        if (result.success) {
-          applyCodexOAuthState(result.config);
-          updateAiRequiredBadge();
-          updateLiveProviderNotice();
-          setCodexOAuthStatus(
-            codexOAuthConfigured ? codexOAuthStatusLabel(codexOAuthSource) : 'Not signed in',
-            codexOAuthConfigured ? 'success' : 'idle',
+        await refreshChatGPTState();
+        if (result.signedIn && !result.revoked) {
+          showChatGPTNotice(
+            'Signed out on this device, but OpenAI did not confirm that the sign-in was revoked. You can also disconnect Listener.AI from your ChatGPT settings.',
+            'warning',
           );
-        } else {
-          setCodexOAuthStatus(result.error, 'error');
         }
-      } finally {
-        clearCodexOAuthBtn!.disabled = false;
+        (chatgptStatus.connected ? chatgptLogoutBtn : chatgptLoginBtn)?.focus();
+      } else {
+        showChatGPTError(result.error);
       }
-    });
-  }
+    } catch (e) {
+      showChatGPTError(e instanceof Error ? e.message : String(e));
+    } finally {
+      chatgptLogoutBtn!.disabled = false;
+    }
+  });
 
-  // Google Drive OAuth + sync wiring. Same patterns as the Codex block above.
+  chatgptProfileSelect?.addEventListener('change', async () => {
+    const id = chatgptProfileSelect!.value;
+    if (!id || id === chatgptStatus.profileId) return;
+    hideChatGPTNotice();
+    chatgptProfileSelect!.disabled = true;
+    try {
+      const result = await window.electronAPI.selectChatGPTProfile(id);
+      if (result.success) {
+        await applyChatGPTStatus(result.status);
+      } else {
+        if (chatgptStatus.profileId) chatgptProfileSelect!.value = chatgptStatus.profileId;
+        showChatGPTError(result.error);
+      }
+    } catch (e) {
+      if (chatgptStatus.profileId) chatgptProfileSelect!.value = chatgptStatus.profileId;
+      showChatGPTError(e instanceof Error ? e.message : String(e));
+    } finally {
+      chatgptProfileSelect!.disabled = false;
+    }
+  });
+
+  chatgptRefreshModelsBtn?.addEventListener('click', () => {
+    hideChatGPTNotice();
+    void loadChatGPTModels();
+  });
+
+  document.getElementById('chatgptManageUsage')?.addEventListener('click', openChatGPTUsage);
+  document.getElementById('chatgptNoticeManageUsage')?.addEventListener('click', openChatGPTUsage);
+  document.getElementById('chatgptPlanManageUsage')?.addEventListener('click', openChatGPTUsage);
+  document.getElementById('chatgptPlanGotIt')?.addEventListener('click', () => {
+    chatgptPlanDialog?.close();
+    chatgptPlanNoticeAcknowledged = true;
+    // Persist right away so the explanation never repeats, even if the user
+    // then cancels Settings. Not part of the form diff.
+    window.electronAPI.saveConfig({ chatgptPlanNoticeAcknowledged: true }).catch(() => {});
+  });
+
+  // Google Drive OAuth + sync wiring. Same patterns as the ChatGPT block above.
   window.electronAPI.onGoogleOAuthProgress((status) => {
     if (status.phase === 'browser-opened') {
       setGoogleOAuthStatus('Waiting for browser sign-in — click Sign in again to retry.');
@@ -1013,19 +1548,20 @@ export function setupConfigModal(): void {
 
   const hideConfig = () => {
     configModal?.close();
-    // Bumping the token drops any stale result from an in-flight Codex login
+    // Bumping the tokens drops any stale result from an in-flight login
     // promise that resolves after the modal is gone.
-    codexLoginToken++;
+    chatgptLoginToken++;
+    chatgptModelsToken++;
     googleLoginToken++;
-    // Free port 1455 if a Codex sign-in is still pending so the next attempt
-    // can bind a fresh loopback. Same for the Google loopback (dynamic port).
-    window.electronAPI.cancelCodexOAuth().catch(() => {});
+    if (chatgptLoginInFlight) setChatGPTBusy(false);
+    // Close a pending sign-in's loopback so the next attempt binds cleanly.
+    window.electronAPI.cancelChatGPTLogin().catch(() => {});
     window.electronAPI.cancelGoogleOAuth().catch(() => {});
   };
 
   // Native <dialog> emits `close` for any dismissal -- click on the X button,
   // Cancel/Save button, AND the ESC key. Route ESC through hideConfig so it
-  // also drops in-flight Codex login state, instead of the browser's default
+  // also drops in-flight sign-in state, instead of the browser's default
   // close-only behavior.
   if (configModal) {
     configModal.addEventListener('cancel', (e) => {
@@ -1048,13 +1584,13 @@ export function setupConfigModal(): void {
         showFieldError(
           geminiApiKeyInput,
           'geminiApiKeyError',
-          'Enter a Gemini API key, or choose Codex as the summary provider.',
+          'Enter a Gemini API key, or choose the ChatGPT plan as the summary provider.',
         );
         goToSetting('geminiApiKey');
         return;
       }
 
-      const next = { ...fields, ...readOtherSettings() };
+      const next = readModalSettings(fields);
       const forcedResets = [...resetSettingsKeys].filter((key) => next[key] === '');
       const payload = diffConfigPayload(settingsBaseline, next, forcedResets);
       await window.electronAPI.saveConfig(payload);

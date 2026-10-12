@@ -21,7 +21,7 @@
 
 import type { CostSession } from './services/usageTracker';
 
-export const BATCH_STT_BACKEND_IDS = ['gemini', 'codex', 'soniox'] as const;
+export const BATCH_STT_BACKEND_IDS = ['gemini', 'openai', 'soniox'] as const;
 
 export type BatchSttBackendId = (typeof BATCH_STT_BACKEND_IDS)[number];
 
@@ -33,7 +33,7 @@ export const DEFAULT_MAX_SEGMENT_SECONDS = 300;
 
 // Target size for a size-shrunk segment, kept below `maxBytes` so a segment
 // that encodes slightly larger than predicted still fits. Clamped to
-// `maxBytes` for a backend with a tighter cap than the Codex 24 MB rule.
+// `maxBytes` for a backend with a tighter cap than the OpenAI 24 MB rule.
 const SEGMENT_SIZE_TARGET_BYTES = 20 * 1024 * 1024;
 
 // Shortest segment the size shrink may produce. Below this the per-request

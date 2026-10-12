@@ -8,10 +8,11 @@
 // save, and a payload entry.
 //
 // Controls that carry their own UI state stay hand-written in config-modal.ts:
-// the Codex/Google OAuth buttons and status pills, the Drive sync pill, the
-// known-words chips, the summary prompt (its prefill and its save both depend
-// on the backend default), and the model-id fields (select + custom input +
-// reset button, driven by MODEL_FIELDS).
+// the ChatGPT connection card and account model list, the Google OAuth
+// buttons and status pills, the Drive sync pill, the known-words chips, the
+// summary prompt (its prefill and its save both depend on the backend
+// default), and the model-id fields (select + custom input + reset button,
+// driven by MODEL_FIELDS).
 
 import type { ConfigPayload } from '../electronAPI';
 import {
@@ -168,7 +169,10 @@ function readNumberField(row: NumberFieldRow): number {
 function applySelectField(row: SelectFieldRow, saved: string | undefined): void {
   const el = selectEl(row.id);
   if (!el) return;
-  el.value = saved || row.fallback;
+  // A value with no matching option (e.g. a retired `codex` provider in an old
+  // config) would leave the select blank; show the fallback instead.
+  const value = saved || row.fallback;
+  el.value = [...el.options].some((o) => o.value === value) ? value : row.fallback;
 }
 
 function readSelectField(row: SelectFieldRow): ConfigPayload[SelectKey] {

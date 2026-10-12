@@ -74,6 +74,14 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
 
 export type UsageKind = 'summary' | 'transcription' | 'agent' | 'realtime';
 
+/**
+ * Who pays for a call when it is not the user's own API key. `chatgpt-plan`
+ * calls run on a ChatGPT subscription (Sign in with ChatGPT): their `usd` is
+ * always 0 because there is no per-token API price to apply, which must not
+ * be read as "free". Absent means a per-token/per-minute API-billed call.
+ */
+export type UsageBilling = 'chatgpt-plan';
+
 export interface UsageTokens {
   /** Input tokens (text/image, or audio when kind=transcription). */
   input?: number;
@@ -104,6 +112,8 @@ export interface RecordInput {
    * price table. When set, computeCost is skipped.
    */
   precomputedUsd?: number;
+  /** Non-API billing path (see UsageBilling). Forces `usd` to 0. */
+  billing?: UsageBilling;
   /** Optional ref so the entry can be tied back to a transcription folder. */
   transcriptionRef?: string;
   /** Override the timestamp (defaults to now). Used by tests. */
@@ -117,6 +127,7 @@ export interface UsageEntry {
   usage: UsageTokens;
   usd: number;
   modelUnknown?: boolean;
+  billing?: UsageBilling;
   transcriptionRef?: string;
 }
 
@@ -189,8 +200,9 @@ function usageFilePath(): string | null {
  * models so the caller can still aggregate.
  */
 export function recordUsage(input: RecordInput): CostResult {
-  const cost: CostResult =
-    typeof input.precomputedUsd === 'number'
+  const cost: CostResult = input.billing
+    ? { usd: 0 }
+    : typeof input.precomputedUsd === 'number'
       ? { usd: input.precomputedUsd }
       : computeCost(input.modelId, input.kind, input.usage);
   const entry: UsageEntry = {
@@ -200,6 +212,7 @@ export function recordUsage(input: RecordInput): CostResult {
     usage: input.usage,
     usd: cost.usd,
     modelUnknown: cost.modelUnknown,
+    ...(input.billing ? { billing: input.billing } : {}),
     transcriptionRef: input.transcriptionRef,
   };
   const file = usageFilePath();
@@ -220,6 +233,7 @@ export interface CostBreakdownItem {
   usd: number;
   usage: UsageTokens;
   modelUnknown?: boolean;
+  billing?: UsageBilling;
 }
 
 export interface CostSnapshot {
@@ -251,6 +265,7 @@ export function createCostSession(): CostSession {
         usd: cost.usd,
         usage: input.usage,
         modelUnknown: cost.modelUnknown,
+        ...(input.billing ? { billing: input.billing } : {}),
       });
       return cost;
     },
@@ -272,6 +287,7 @@ export interface SummaryFilter {
 export interface SummaryGroup {
   modelId: string;
   kind: UsageKind;
+  billing?: UsageBilling;
   usd: number;
   count: number;
   tokens: UsageTokens;
@@ -332,7 +348,7 @@ export function summarizeUsage(filter: SummaryFilter = {}): UsageSummaryResult {
   for (const e of filtered) {
     totalUsd += e.usd;
     if (e.modelUnknown) modelUnknownCount += 1;
-    const key = `${e.modelId} ${e.kind}`;
+    const key = `${e.modelId} ${e.kind} ${e.billing ?? 'api'}`;
     const existing = groups.get(key);
     if (existing) {
       existing.usd += e.usd;
@@ -342,6 +358,7 @@ export function summarizeUsage(filter: SummaryFilter = {}): UsageSummaryResult {
       groups.set(key, {
         modelId: e.modelId,
         kind: e.kind,
+        ...(e.billing ? { billing: e.billing } : {}),
         usd: e.usd,
         count: 1,
         tokens: { ...e.usage },

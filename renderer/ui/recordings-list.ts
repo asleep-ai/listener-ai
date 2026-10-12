@@ -10,13 +10,13 @@ import { getDom } from '../state';
 import { formatUsd } from '../../src/usageFormat';
 import { isActiveJob, jobMatchesPath } from '../../src/transcriptionJobView';
 import type { TranscriptionJobSnapshot } from '../electronAPI';
+import { requireAiSetup } from './config-modal';
 import { showToast } from './notifications';
 import {
   _setCurrentTranscription,
   getModalSession,
   populateTranscriptionUI,
   prepareTranscriptionModal,
-  requireAiAuth,
   setModalProgress,
   showSavedTranscript,
   transcribeWithFfmpegRetry,
@@ -664,6 +664,8 @@ async function performMerge(paths: string[], title: string): Promise<void> {
     alert('Failed to merge recordings: Another merge is already running. Wait for it to finish.');
     return;
   }
+  // Merging re-transcribes the joined audio, so it needs both credential sets.
+  if (!(await requireAiSetup({ transcription: true }))) return;
   if (
     !prepareTranscriptionModal(
       `Merging - ${title}`,
@@ -1039,7 +1041,7 @@ async function runInlineTranscription(item: HTMLElement, filePath: string): Prom
   }
   item.dataset.transcribing = 'pending';
 
-  if (!(await requireAiAuth())) {
+  if (!(await requireAiSetup({ transcription: true }))) {
     item.removeAttribute('data-transcribing');
     return;
   }

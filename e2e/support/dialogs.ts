@@ -28,17 +28,22 @@ function installScriptedDialogs(): void {
   const log: ScriptedDialog[] = [];
   w.__e2eDialogs = log;
   w.__e2eConfirmAnswer = false;
-  window.alert = (message?: unknown) => {
+  // Read-only, so the app's own background-test dialog layer (installed by
+  // the preload in no fixed order relative to this init script) cannot
+  // replace these and leave prompts out of the log.
+  const fix = (name: 'alert' | 'confirm' | 'prompt', value: (message?: string) => unknown) =>
+    Object.defineProperty(window, name, { value, writable: false, configurable: true });
+  fix('alert', (message) => {
     log.push({ type: 'alert', message: String(message ?? '') });
-  };
-  window.confirm = (message?: string) => {
+  });
+  fix('confirm', (message) => {
     log.push({ type: 'confirm', message: String(message ?? '') });
     return w.__e2eConfirmAnswer === true;
-  };
-  window.prompt = (message?: string) => {
+  });
+  fix('prompt', (message) => {
     log.push({ type: 'prompt', message: String(message ?? '') });
     return null;
-  };
+  });
 }
 
 // Installs the overrides in the current document and, through the context's

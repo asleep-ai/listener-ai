@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { _electron as electron } from 'playwright';
-import { findLatestBuild, parseElectronApp } from 'electron-playwright-helpers';
+import { backgroundArtifact } from './background-test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,11 +20,7 @@ test('packaged app boots without crashing', async () => {
   // would mask the exact regression this smoke exists to catch. Defaults to
   // 'release' for quick local runs.
   const buildDir = process.env.LISTENER_SMOKE_BUILD_DIR ?? 'release';
-  const buildPath = findLatestBuild(buildDir);
-  if (!buildPath) {
-    throw new Error(`No packaged build found under '${buildDir}'. Run an electron-builder --dir build first.`);
-  }
-  const app = parseElectronApp(buildPath);
+  const app = backgroundArtifact(buildDir);
   // Launch against a throwaway data dir so the smoke never reads/migrates/writes
   // real Listener data — startup runs autoMigrateLegacyOnStartup(getDataPath()).
   // getDataPath() only honors LISTENER_DATA_PATH when NODE_ENV==='test', so both
@@ -33,7 +29,12 @@ test('packaged app boots without crashing', async () => {
   const electronApp = await electron.launch({
     executablePath: app.executable,
     args: ['--no-sandbox'], // required on Linux CI runners
-    env: { ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: dataDir },
+    env: {
+      ...process.env,
+      NODE_ENV: 'test',
+      LISTENER_BACKGROUND_TEST: '1',
+      LISTENER_DATA_PATH: dataDir,
+    },
   });
   try {
     // A missing-module crash throws at require time and never opens a window, so

@@ -4,9 +4,11 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
 import { EmptyTranscriptionError, TranscriptionApiError } from './transcriptionErrors';
+import { type ChatGPTAuthLike, ChatGPTBinding, ChatGPTBindingError } from './chatgptBinding';
 import { type BatchSttBackend, planSegmentation, retryTemperaturesFor } from './batchSttBackend';
 import {
   GeminiService,
+  TranscriptionError,
   type TranscriptionResult,
   computeSegmentPlan,
   segmentOverlapSeconds,
@@ -22,6 +24,17 @@ import {
 import { createCostSession } from './services/usageTracker';
 import { type LostSegment, detectPromptEcho, type SpeakerLabelStats } from './transcriptQuality';
 import { findFfmpegSync, makeOpusWebm, makeTempDir, rmDir } from './test-helpers';
+
+// A ChatGPT auth stub for tests whose model/token are never reached (the
+// text-task method is stubbed). Any real use fails loudly.
+const unusedChatGPTAuth: ChatGPTAuthLike = {
+  getStatus: async () => {
+    throw new Error('ChatGPT auth must not be called in this test');
+  },
+  openSession: async () => {
+    throw new Error('ChatGPT auth must not be called in this test');
+  },
+};
 
 const ffmpegPath = findFfmpegSync();
 
@@ -574,49 +587,66 @@ describe('GeminiService transcribeSingleSegment quality gate', () => {
     assert.equal(result.uncertain, false);
   });
 
-  it('uses one quality re-roll for the Codex diarize model', async () => {
-    const service = new GeminiService({
-      provider: 'codex',
-      codexOAuth: {
-        access: 'x',
-        refresh: 'y',
-        expires: Date.now() + 86_400_000,
-      },
-      dataPath: workDir,
-      proModel: 'm',
-      flashModel: 'm',
-    }) as unknown as SegmentHelpers;
-    let rawCalls = 0;
-    const judgedTexts: string[] = [];
-    service.transcribeSegmentRaw = async () => {
-      rawCalls++;
-      return loopText;
-    };
-    service.judgeTranscriptQuality = async (text) => {
-      judgedTexts.push(text);
-      return { flagged: true, reason: 'repeated line loop' };
-    };
-    service.cleanupTranscriptQuality = async (text) => `${text}x`;
-    const qualityRetryCalls: [number, number][] = [];
+  for (const openaiTranscriptionModel of [undefined, 'gpt-transcribe']) {
+    it(`uses one quality re-roll for the OpenAI ${openaiTranscriptionModel ?? 'diarize'} model, which takes no temperature`, async () => {
+      const service = new GeminiService({
+        provider: 'gemini',
+        apiKey: 'test-key',
+        transcriptionProvider: 'openai',
+        openaiApiKey: 'sk-test',
+        openaiTranscriptionModel,
+        dataPath: workDir,
+        proModel: 'm',
+        flashModel: 'm',
+      }) as unknown as SegmentHelpers;
+      assert.equal(
+        (service as unknown as { sttBackend: { supportsTemperature: boolean } }).sttBackend
+          .supportsTemperature,
+        false,
+      );
+      let rawCalls = 0;
+      const judgedTexts: string[] = [];
+      const temperatures: (number | undefined)[] = [];
+      service.transcribeSegmentRaw = async (
+        _file,
+        _prompt,
+        _seconds,
+        _signal,
+        _session,
+        temperature,
+      ) => {
+        rawCalls++;
+        temperatures.push(temperature);
+        return loopText;
+      };
+      service.judgeTranscriptQuality = async (text) => {
+        judgedTexts.push(text);
+        return { flagged: true, reason: 'repeated line loop' };
+      };
+      service.cleanupTranscriptQuality = async (text) => `${text}x`;
+      const qualityRetryCalls: [number, number][] = [];
 
-    await service.transcribeSingleSegment(
-      '/tmp/seg.webm',
-      0,
-      1,
-      0,
-      300,
-      undefined,
-      undefined,
-      undefined,
-      true,
-      true,
-      (rung, totalRungs) => qualityRetryCalls.push([rung, totalRungs]),
-    );
+      await service.transcribeSingleSegment(
+        '/tmp/seg.webm',
+        0,
+        1,
+        0,
+        300,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        true,
+        (rung, totalRungs) => qualityRetryCalls.push([rung, totalRungs]),
+      );
 
-    assert.equal(rawCalls, 2);
-    assert.deepEqual(judgedTexts, [loopText, loopText]);
-    assert.deepEqual(qualityRetryCalls, [[1, 1]]);
-  });
+      assert.equal(rawCalls, 2);
+      assert.deepEqual(judgedTexts, [loopText, loopText]);
+      assert.deepEqual(qualityRetryCalls, [[1, 1]]);
+      // Neither attempt claims a sampling temperature the request would drop.
+      assert.deepEqual(temperatures, [undefined, undefined]);
+    });
+  }
 
   // Prompt echo (issue #197). A store audit found the app's own transcription
   // prompt saved as a segment result -- glossary block (company, product and
@@ -1144,18 +1174,13 @@ describe('GeminiService transcript quality judge', () => {
     assert.equal(result.body, cleanText);
   });
 
-  it('uses completeTextTask with the configured Codex model', async () => {
+  it('uses completeTextTask on the ChatGPT binding for the judge', async () => {
     const service = new GeminiService({
-      provider: 'codex',
-      codexOAuth: {
-        access: 'x',
-        refresh: 'y',
-        expires: Date.now() + 86_400_000,
-      },
+      provider: 'chatgpt',
+      chatgptBinding: new ChatGPTBinding({ model: 'gpt-test-judge', auth: unusedChatGPTAuth }),
       dataPath: workDir,
       proModel: 'unused-pro',
       flashModel: 'unused-flash',
-      codexModel: 'gpt-test-judge',
     }) as unknown as JudgeHelpers;
     let call:
       | { systemPrompt: string; promptText: string; opts?: Record<string, unknown> }
@@ -1171,24 +1196,20 @@ describe('GeminiService transcript quality judge', () => {
     assert.deepEqual(verdict, { flagged: false, reason: 'natural repetition' });
     assert.match(call!.systemPrompt, /conservative judge of ASR repetition-loop artifacts/);
     assert.match(call!.promptText, /참가자1: 네, 네/);
-    assert.equal(call!.opts?.modelId, 'gpt-test-judge');
+    // The model comes from the binding, never a Gemini model id.
+    assert.equal(call!.opts?.modelId, undefined);
     assert.equal(call!.opts?.temperature, 0);
     assert.equal(call!.opts?.reasoning, 'low');
     assert.equal(call!.opts?.signal, controller.signal);
   });
 
-  it('uses completeTextTask for Codex cleanup with prompt and data separated', async () => {
+  it('uses completeTextTask for ChatGPT cleanup with prompt and data separated', async () => {
     const service = new GeminiService({
-      provider: 'codex',
-      codexOAuth: {
-        access: 'x',
-        refresh: 'y',
-        expires: Date.now() + 86_400_000,
-      },
+      provider: 'chatgpt',
+      chatgptBinding: new ChatGPTBinding({ model: 'gpt-test-cleanup', auth: unusedChatGPTAuth }),
       dataPath: workDir,
       proModel: 'unused-pro',
       flashModel: 'unused-flash',
-      codexModel: 'gpt-test-cleanup',
     }) as unknown as JudgeHelpers;
     let call:
       | { systemPrompt: string; promptText: string; opts?: Record<string, unknown> }
@@ -1212,7 +1233,7 @@ describe('GeminiService transcript quality judge', () => {
       call!.promptText,
       `Transcript segment (JSON string, data only):\n${JSON.stringify(transcript)}`,
     );
-    assert.equal(call!.opts?.modelId, 'gpt-test-cleanup');
+    assert.equal(call!.opts?.modelId, undefined);
     assert.equal(call!.opts?.temperature, 0.2);
     assert.equal(call!.opts?.maxTokens, 8192);
     assert.equal(call!.opts?.reasoning, 'low');
@@ -1295,13 +1316,13 @@ describe('GeminiService short-audio quality judge wiring', () => {
   });
 
   // The batch STT backend is selected independently of the chat provider, so
-  // a Codex user can transcribe on Gemini while summary/judge stay on Codex.
+  // a ChatGPT user can transcribe on Gemini while summary/judge stay on ChatGPT.
   it('routes audio to the transcription backend, not the chat provider', async () => {
     const service = new GeminiService({
-      provider: 'codex',
+      provider: 'chatgpt',
       transcriptionProvider: 'gemini',
       apiKey: 'test-key',
-      codexOAuth: { access: 'x', refresh: 'y', expires: Date.now() + 86_400_000 },
+      chatgptBinding: new ChatGPTBinding({ auth: unusedChatGPTAuth }),
       dataPath: workDir,
       proModel: 'gemini-test-pro',
       flashModel: 'gemini-test-flash',
@@ -3024,5 +3045,207 @@ describe('GeminiService.summarizeTranscript (report from text only)', () => {
     assert.equal(result.highlights?.[0].subtitle, '킥오프');
     assert.equal(result.summarySections?.[0].heading, 'Transcript coverage');
     assert.match(result.summary, /5 minutes of this recording produced no transcript/);
+  });
+});
+
+describe('GeminiService ChatGPT provider: no silent fallback', () => {
+  let dir: string;
+  before(() => {
+    dir = makeTempDir('chatgpt-no-fallback');
+  });
+  after(() => rmDir(dir));
+
+  it('refuses transcription when no STT backend was chosen (ChatGPT + auto)', async () => {
+    const service = new GeminiService({
+      provider: 'chatgpt',
+      // A Gemini key is configured, yet audio must NOT silently go to Gemini.
+      apiKey: 'gemini-key-present',
+      chatgptBinding: new ChatGPTBinding({ auth: unusedChatGPTAuth }),
+      dataPath: dir,
+      proModel: 'p',
+      flashModel: 'f',
+    });
+    const audioPath = path.join(dir, 'meeting.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    const generate = service as unknown as { generateGeminiTranscript: () => Promise<string> };
+    let geminiCalls = 0;
+    generate.generateGeminiTranscript = async () => {
+      geminiCalls++;
+      return 'should never run';
+    };
+    await assert.rejects(service.transcribeAudio(audioPath), (error: unknown) => {
+      assert.ok(error instanceof TranscriptionError);
+      assert.match(error.userMessage, /cannot transcribe audio/);
+      return true;
+    });
+    assert.equal(geminiCalls, 0);
+  });
+
+  it('fails the summary when ChatGPT is not signed in, without using the Gemini key', async () => {
+    const auth: ChatGPTAuthLike = {
+      getStatus: async () => ({ connected: false, planEnabled: false }),
+      openSession: async () => {
+        throw new Error('must not open a session for a signed-out user');
+      },
+    };
+    const service = new GeminiService({
+      provider: 'chatgpt',
+      apiKey: 'gemini-key-present',
+      transcriptionProvider: 'gemini',
+      chatgptBinding: new ChatGPTBinding({ auth }),
+      dataPath: dir,
+      proModel: 'p',
+      flashModel: 'f',
+    }) as unknown as { generateSummary: (p: string, t: string) => Promise<string> };
+    await assert.rejects(service.generateSummary('prompt', 'transcript'), (error: unknown) => {
+      assert.ok(error instanceof ChatGPTBindingError);
+      assert.equal(error.code, 'not_signed_in');
+      return true;
+    });
+  });
+});
+
+describe('GeminiService ChatGPT summary: sign-out during the call', () => {
+  let dir: string;
+  let restore: (() => void) | undefined;
+  before(() => {
+    dir = makeTempDir('chatgpt-summary-signout');
+  });
+  after(() => {
+    restore?.();
+    rmDir(dir);
+  });
+
+  it('never returns a summary whose stream finished after the sign-out', async () => {
+    const { importEsm } = await import('./esmImport');
+    const { swapProviderForTest } = await import('./piAiClient');
+    const pi = await importEsm<typeof import('@earendil-works/pi-ai')>('@earendil-works/pi-ai');
+    const faux = pi.fauxProvider({
+      api: 'openai-responses',
+      provider: 'chatgpt',
+      models: [{ id: 'gpt-plan-test' }],
+    });
+    restore = await swapProviderForTest(faux.provider);
+    const state = { active: true };
+    faux.setResponses([
+      () => {
+        state.active = false; // the user signs out while this summary streams
+        return {
+          ...pi.fauxAssistantMessage('{"summary":"must not be saved"}'),
+          rawStopReason: 'completed',
+        };
+      },
+    ]);
+    const auth: ChatGPTAuthLike = {
+      getStatus: async () => ({ connected: true, planEnabled: true, profileId: 'p1' }),
+      openSession: async () => ({
+        profileId: 'p1',
+        getAccessToken: async () => 'tok',
+        listModels: async () => [{ slug: 'gpt-plan-test', display_name: 'Plan Test' }],
+        isActive: () => state.active,
+      }),
+    };
+    const service = new GeminiService({
+      provider: 'chatgpt',
+      transcriptionProvider: 'gemini',
+      apiKey: 'gemini-key-present',
+      chatgptBinding: new ChatGPTBinding({ auth }),
+      dataPath: dir,
+      proModel: 'p',
+      flashModel: 'f',
+    }) as unknown as { generateSummary: (p: string, t: string) => Promise<string> };
+
+    await assert.rejects(service.generateSummary('prompt', 'transcript'), (error: unknown) => {
+      assert.ok(error instanceof ChatGPTBindingError);
+      assert.equal(error.code, 'signed_out_during_job');
+      return true;
+    });
+    assert.equal(faux.state.callCount, 1);
+  });
+});
+
+// A ChatGPT-only install (no Gemini/OpenAI/Soniox key, transcription `auto`)
+// is a valid text setup: the service builds exactly as main.ts builds it,
+// report regeneration from a stored transcript runs on ChatGPT, and audio
+// is refused with the selection message instead of falling back.
+describe('GeminiService ChatGPT text-only install', () => {
+  let dir: string;
+  let restore: (() => void) | undefined;
+  before(() => {
+    dir = makeTempDir('chatgpt-text-only');
+  });
+  after(() => {
+    restore?.();
+    rmDir(dir);
+  });
+
+  it('regenerates a report and refuses audio without any API key', async () => {
+    const { ConfigService } = await import('./configService');
+    const config = new ConfigService(dir);
+    config.setAiProvider('chatgpt');
+    config.setChatGPTStatus({ connected: true, planEnabled: true, profileId: 'p1' });
+    assert.equal(config.hasAiAuth(), true);
+    assert.equal(config.hasTranscriptionAuth(), false);
+    const stt = config.getTranscriptionResolution();
+    assert.equal(stt.issue, 'chatgpt-auto');
+
+    const { importEsm } = await import('./esmImport');
+    const { swapProviderForTest } = await import('./piAiClient');
+    const pi = await importEsm<typeof import('@earendil-works/pi-ai')>('@earendil-works/pi-ai');
+    const faux = pi.fauxProvider({
+      api: 'openai-responses',
+      provider: 'chatgpt',
+      models: [{ id: 'gpt-plan-test' }],
+    });
+    restore = await swapProviderForTest(faux.provider);
+    const reply = () => ({
+      ...pi.fauxAssistantMessage(
+        JSON.stringify({
+          suggestedTitle: '주간 회의',
+          summarySections: [{ heading: '진행 상황', bullets: ['배포 일정 논의'] }],
+          keyPoints: ['배포는 다음 주'],
+          actionItemGroups: [],
+          emoji: '📝',
+        }),
+      ),
+      rawStopReason: 'completed',
+    });
+    faux.setResponses([reply, reply, reply]);
+    const auth: ChatGPTAuthLike = {
+      getStatus: async () => ({ connected: true, planEnabled: true, profileId: 'p1' }),
+      openSession: async () => ({
+        profileId: 'p1',
+        getAccessToken: async () => 'tok',
+        listModels: async () => [{ slug: 'gpt-plan-test', display_name: 'Plan Test' }],
+        isActive: () => true,
+      }),
+    };
+    // Mirrors main.ts createGeminiService().
+    const service = new GeminiService({
+      provider: config.getAiProvider(),
+      transcriptionProvider: stt.provider,
+      transcriptionUnavailableMessage: stt.message,
+      apiKey: config.getGeminiApiKey(),
+      sonioxApiKey: config.getSonioxApiKey(),
+      openaiApiKey: config.getOpenAiApiKey(),
+      chatgptBinding: new ChatGPTBinding({ auth }),
+      dataPath: dir,
+      proModel: config.getGeminiModel(),
+      flashModel: config.getGeminiFlashModel(),
+    });
+
+    const report = await service.summarizeTranscript('참가자1: 배포는 다음 주에 합니다.');
+    assert.equal(report.summarySections?.[0].heading, '진행 상황');
+    assert.ok(faux.state.callCount >= 1);
+
+    const audioPath = path.join(dir, 'meeting.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(16, 1));
+    const callsBefore = faux.state.callCount;
+    await assert.rejects(service.transcribeAudio(audioPath), (error: unknown) => {
+      assert.ok(error instanceof TranscriptionError);
+      assert.match(error.userMessage, /cannot transcribe audio/);
+      return true;
+    });
+    assert.equal(faux.state.callCount, callsBefore, 'no text call stands in for audio');
   });
 });

@@ -7,7 +7,7 @@ import { setupFileHandler } from './services/file-handler';
 import { setupRendererLogger } from './services/renderer-logger';
 import { getDom, initDom } from './state';
 import { setupAgentConfirmHandler, setupHomeChat, setupModalChat } from './ui/chat-panel';
-import { checkAndPromptForConfig, setupConfigModal, showConfigModal } from './ui/config-modal';
+import { setupConfigModal, showConfigModal } from './ui/config-modal';
 import { setupDragAndDrop, setupPasteListener } from './ui/drag-drop';
 import { setupHomeToggles } from './ui/home-toggles';
 import { setupLiveNotes } from './ui/live-notes';
@@ -142,8 +142,9 @@ window.addEventListener('DOMContentLoaded', async () => {
       });
     }
 
-    // Initial async work: prompt for missing API keys, load recordings list.
-    await checkAndPromptForConfig();
+    // Initial async work: load recordings list. Missing AI setup is surfaced
+    // only when an action that needs it is chosen (requireAiSetup), never on
+    // startup.
     await jobsReady;
     await loadRecordings();
 

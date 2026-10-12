@@ -112,7 +112,7 @@ Finished jobs stay listed for up to 15 minutes (at most 20 of them).
 Both thresholds are properties of the selected batch backend
 (`src/batchSttBackend.ts`), read by the pure `planSegmentation` helper rather
 than branched on the provider name. Gemini declares `maxSegmentSeconds: 300`
-and no byte cap; Codex declares the same 300s plus `maxBytes: 24 MB`, and a
+and no byte cap; OpenAI declares the same 300s plus `maxBytes: 24 MB`, and a
 file above that also shrinks the segment length proportionally (targeting
 20 MB per cut, floored at 30s) so each segment fits one request. A backend
 that keeps speaker identity consistent only within a single request raises
@@ -439,6 +439,22 @@ above.
 
 ## Provider matrix
 
+Backend selection (`resolveBatchSttProvider`, `src/aiProvider.ts`):
+`transcriptionProvider=auto` follows `aiProvider` only for Gemini. With
+`aiProvider=chatgpt` it refuses with an actionable error instead of picking a
+backend, because Sign in with ChatGPT cannot carry audio ("Audio/video input,
+the Files upload API, and the transcription API are not supported by this
+flow", SIWC preview limitations) and nothing may silently move audio to
+another vendor or billing account. A stored retired `codex` value refuses the
+same way, and Settings keeps it (Save omits the field) until the user
+explicitly picks a backend, so an unrelated save never moves audio. `openai` is always an explicit choice and authenticates with
+`openaiApiKey`, never with a ChatGPT sign-in token. OpenAI has announced the
+shutdown of `gpt-4o-transcribe-diarize`, `gpt-4o-transcribe`,
+`gpt-4o-mini-transcribe` and `whisper-1` for 2027-02-26 (OpenAI deprecations
+page, 2026-08-26 entry); the named replacement `gpt-transcribe` is selectable
+but its guide documents no speaker diarization, so the diarize model stays the
+default until a diarizing successor is verified.
+
 Each row below is a property of the `BatchSttBackend` the pipeline holds
 (`src/batchSttBackend.ts`), not a branch inside `geminiService.ts`.
 `acceptedExtensions` (`null` = no pre-conversion) drives the ffmpeg remux.
@@ -449,14 +465,14 @@ vocabulary is handed over as a separate `glossary` field instead.
 `maxBytes` / `maxSegmentSeconds` feed `planSegmentation`. Adding an engine
 means adding a backend, not another provider branch.
 
-| Stage | Gemini (default) | Codex — `gpt-4o-transcribe`, `whisper-1` | Codex — `gpt-4o-transcribe-diarize` (codex default) | Soniox — `stt-async-v5` (opt-in) |
+| Stage | Gemini (default) | OpenAI API — `gpt-transcribe`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `whisper-1` | OpenAI API — `gpt-4o-transcribe-diarize` (openai default) | Soniox — `stt-async-v5` (opt-in) |
 |---|---|---|---|---|
-| Transcription call | `generateContent` on `geminiFlashModel` (inline ≤ 20 MB, files API above) | `POST /v1/audio/transcriptions` | same endpoint, `diarized_json` + `chunking_strategy=auto` | async job: `POST /v1/files` → `POST /v1/transcriptions` → poll → `GET .../transcript`, then `DELETE` both (account quotas) |
-| Per-result quality judge | `gemini-2.5-flash-lite` via text-only `generateContent` | configured `codexModel` via pi-ai | configured `codexModel` via pi-ai | judge follows the chat provider (`aiProvider`), not the backend |
-| Exhaustion cleanup | `gemini-2.5-flash-lite` via text-only `generateContent` | configured `codexModel` via pi-ai | configured `codexModel` via pi-ai | same — cleanup also follows `aiProvider` |
+| Transcription call | `generateContent` on `geminiFlashModel` (inline ≤ 20 MB, files API above) | `POST /v1/audio/transcriptions` with `Authorization: Bearer <openaiApiKey>` (`src/openaiTranscription.ts`); `gpt-transcribe` gets `languages[]` instead of `language` | same endpoint, `diarized_json` + `chunking_strategy=auto` | async job: `POST /v1/files` → `POST /v1/transcriptions` → poll → `GET .../transcript`, then `DELETE` both (account quotas) |
+| Per-result quality judge | `gemini-2.5-flash-lite` via text-only `generateContent` | follows `aiProvider`: Gemini flash-lite, or the ChatGPT plan's `chatgptModel` via pi-ai | same | judge follows the chat provider (`aiProvider`), not the backend |
+| Exhaustion cleanup | `gemini-2.5-flash-lite` via text-only `generateContent` | follows `aiProvider`, like the judge | same | same — cleanup also follows `aiProvider` |
 | Prompt (glossary, instructions, `[NO_SPEECH]`) — `supportsPrompt` | sent | sent | **not sent** — model rejects `prompt`, so the pipeline never assembles one | **not sent** — no prompt surface at all; the glossary goes out of band as `context.terms` |
 | First-attempt temperature | 0.2 | provider default (field omitted) | provider default | no temperature parameter exists |
-| Retry ladder temperatures | 0.4 → 0.8 via `config.temperature` | 0.4 → 0.8 via `temperature` form field | **no temperature knob** — one re-roll relying on provider nondeterminism | **no temperature knob** — one re-roll, same as the diarize model |
+| Retry ladder temperatures | 0.4 → 0.8 via `config.temperature` | 0.4 → 0.8 via `temperature` form field (`gpt-transcribe` documents no temperature, so the field is omitted and its rungs are provider-nondeterministic re-rolls) | **no temperature knob** — one re-roll relying on provider nondeterminism | **no temperature knob** — one re-roll, same as the diarize model |
 | Empty result semantics | `text === ''` → `EmptyTranscriptionError` | empty `text` → `EmptyTranscriptionError`; missing `text` → malformed-response error | zero/all-empty segments → `EmptyTranscriptionError` | no tokens, or only audio-event/whitespace tokens → `EmptyTranscriptionError` |
 | Speaker labels | prompted `참가자N` | none (plain text) | provider speakers re-labeled to `참가자N` | provider speaker ids re-labeled to `참가자N` by first appearance, consistent across the whole file below the 300-minute segmentation threshold; a longer file is segmented and renumbers per segment |
 | Segmentation trigger (`maxSegmentSeconds`, `maxBytes`) | > 300s | > 300s or > 24 MB (size-shrunk segment length) | same | > 18,000s (300 min), no byte cap |

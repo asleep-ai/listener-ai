@@ -3,10 +3,12 @@
 // Pure and renderer-shared (like configDiff.ts): the AI connection tab calls it
 // with the three provider choices so a credential is never hidden while a
 // different feature still depends on it -- e.g. a Gemini key that powers Gemini
-// Live or file transcription while summaries run on Codex. Not shipped to npm.
+// Live or file transcription while summaries run on the ChatGPT plan. Not
+// shipped to npm.
 
 import {
   type AiProvider,
+  type LEGACY_CODEX_PROVIDER,
   type LiveSttProvider,
   type TranscriptionProvider,
   resolveBatchSttProvider,
@@ -16,37 +18,40 @@ export type CredentialUse = 'summaries' | 'transcription' | 'live captions' | 'l
 
 export type ProviderChoices = {
   aiProvider: AiProvider;
-  transcriptionProvider: TranscriptionProvider;
+  /** A stored retired `codex` value transcribes nothing until replaced. */
+  transcriptionProvider: TranscriptionProvider | typeof LEGACY_CODEX_PROVIDER;
   liveSttProvider: LiveSttProvider;
 };
 
 export type CredentialUsage = {
   gemini: CredentialUse[];
-  codex: CredentialUse[];
+  chatgpt: CredentialUse[];
   openai: CredentialUse[];
   soniox: CredentialUse[];
 };
 
 /**
  * Lists, per credential, the features the current choices route through it.
- * Mirrors the runtime: batch `auto` follows `aiProvider`; live `auto` prefers an
- * OpenAI key and then Gemini Live, and with neither falls back to 12s chunks;
- * explicit OpenAI and Soniox live providers fall back to Gemini Live only (the
- * start-failure fallback drops the OpenAI key); 12s chunks go through the
- * resolved batch backend.
+ * Mirrors the runtime: batch `auto` follows `aiProvider` only under Gemini and
+ * transcribes nothing under ChatGPT (sign-in cannot carry audio), as does a
+ * retired `codex` value; live `auto` prefers an OpenAI key and then Gemini
+ * Live, and with neither falls back to 12s chunks; explicit OpenAI and Soniox
+ * live providers fall back to Gemini Live only (the start-failure fallback
+ * drops the OpenAI key); 12s chunks go through the resolved batch backend.
  */
 export function credentialUsage(choices: ProviderChoices): CredentialUsage {
-  const usage: CredentialUsage = { gemini: [], codex: [], openai: [], soniox: [] };
-  const batch = resolveBatchSttProvider(choices.transcriptionProvider, choices.aiProvider);
+  const usage: CredentialUsage = { gemini: [], chatgpt: [], openai: [], soniox: [] };
+  const resolved = resolveBatchSttProvider(choices.transcriptionProvider, choices.aiProvider);
+  const batch = resolved.provider;
   usage[choices.aiProvider].push('summaries');
-  usage[batch].push('transcription');
+  if (batch) usage[batch].push('transcription');
   switch (choices.liveSttProvider) {
     case 'auto':
       usage.openai.push('live captions');
       usage.gemini.push('live captions');
       // Without a streaming key, captions run as 12s chunks on the batch
       // backend. A Gemini backend is already listed for live captions above.
-      if (batch !== 'gemini') usage[batch].push('live fallback');
+      if (batch && batch !== 'gemini') usage[batch].push('live fallback');
       break;
     case 'gemini':
       usage.gemini.push('live captions');
@@ -62,19 +67,19 @@ export function credentialUsage(choices: ProviderChoices): CredentialUsage {
     case 'chunked':
       // Each chunk goes through the batch backend (transcribeLiveSnippet);
       // translation then runs on aiProvider, already listed for summaries.
-      usage[batch].push('live captions');
+      if (batch) usage[batch].push('live captions');
       break;
   }
   return usage;
 }
 
-/** Gemini and Codex sections are shown only while something uses them. */
+/** Gemini and ChatGPT sections are shown only while something uses them. */
 export function visibleProviderSections(choices: ProviderChoices): {
   gemini: boolean;
-  codex: boolean;
+  chatgpt: boolean;
 } {
   const usage = credentialUsage(choices);
-  return { gemini: usage.gemini.length > 0, codex: usage.codex.length > 0 };
+  return { gemini: usage.gemini.length > 0, chatgpt: usage.chatgpt.length > 0 };
 }
 
 /** One sentence for the section's "Used for" line. */

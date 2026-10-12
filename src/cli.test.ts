@@ -139,11 +139,34 @@ describe('listener CLI basics', () => {
   });
 
   it('config set + get round-trips aiProvider', async () => {
-    const set = await runCli(['config', 'set', 'aiProvider', 'codex']);
+    const set = await runCli(['config', 'set', 'aiProvider', 'chatgpt']);
     assert.equal(set.code, 0);
     const get = await runCli(['config', 'get', 'aiProvider']);
     assert.equal(get.code, 0);
-    assert.equal(get.stdout.trim(), 'codex');
+    assert.equal(get.stdout.trim(), 'chatgpt');
+  });
+
+  it('config set aiProvider codex migrates to chatgpt with a warning', async () => {
+    const set = await runCli(['config', 'set', 'aiProvider', 'codex']);
+    assert.equal(set.code, 0);
+    assert.match(set.stderr, /replaced by "chatgpt"/);
+    assert.match(set.stderr, /listener chatgpt login/);
+    const get = await runCli(['config', 'get', 'aiProvider']);
+    assert.equal(get.stdout.trim(), 'chatgpt');
+  });
+
+  it('config refuses the retired Codex keys with their replacement', async () => {
+    const { stderr, code } = await runCli(['config', 'set', 'codexModel', 'gpt-5.5']);
+    assert.equal(code, 1);
+    assert.match(stderr, /codexModel was removed/);
+    assert.match(stderr, /chatgptModel/);
+  });
+
+  it('listener codex is a deprecated redirect that never runs the old flow', async () => {
+    const { stderr, code } = await runCli(['codex', 'refresh']);
+    assert.equal(code, 1);
+    assert.match(stderr, /deprecated/);
+    assert.match(stderr, /listener chatgpt/);
   });
 
   it('config set + get round-trips liveSttProvider', async () => {
@@ -189,7 +212,7 @@ describe('listener CLI basics', () => {
   it('config set rejects invalid aiProvider', async () => {
     const { stderr, code } = await runCli(['config', 'set', 'aiProvider', 'openai']);
     assert.equal(code, 1);
-    assert.match(stderr, /aiProvider must be "gemini" or "codex"/);
+    assert.match(stderr, /aiProvider must be "gemini" or "chatgpt"/);
   });
 
   it('config unset clears the stored value', async () => {
@@ -677,6 +700,7 @@ describe('listener transcript (CLI integration)', () => {
 
   function runCli(
     args: string[],
+    extraEnv: Record<string, string> = {},
   ): Promise<{ stdout: string; stderr: string; code: number | null }> {
     return new Promise((resolve) => {
       const { spawn } = require('child_process') as typeof import('child_process');
@@ -688,9 +712,11 @@ describe('listener transcript (CLI integration)', () => {
           LISTENER_DATA_PATH: transcriptDataPath,
           LISTENER_TEST_MODE: '1',
           GEMINI_API_KEY: 'test-mode-key',
-          // A developer's real key must not decide whether the Soniox
-          // credential gate below fires.
+          // A developer's real keys must not decide whether the Soniox or
+          // OpenAI credential gates below fire.
           SONIOX_API_KEY: '',
+          OPENAI_API_KEY: '',
+          ...extraEnv,
         },
       });
       let stdout = '';
@@ -777,14 +803,31 @@ describe('listener transcript (CLI integration)', () => {
     assert.match(stderr, /Output directory does not exist/);
   });
 
-  it('names Codex, not Gemini, when transcriptionProvider is codex without sign-in', async () => {
-    await runCli(['config', 'set', 'transcriptionProvider', 'codex']);
+  it('refuses the retired transcriptionProvider=codex with the explicit OpenAI path', async () => {
+    const set = await runCli(['config', 'set', 'transcriptionProvider', 'codex']);
+    assert.equal(set.code, 1);
+    assert.match(set.stderr, /Codex transcription was removed/);
+    assert.match(set.stderr, /transcriptionProvider openai/);
+  });
+
+  it('ChatGPT without a sign-in stops before any transcription, ignoring the Gemini key', async () => {
+    const audio = makeAudio('needs-chatgpt.mp3');
+    const { stderr, stdout, code } = await runCli(['transcript', audio], {
+      LISTENER_AI_PROVIDER: 'chatgpt',
+    });
+    assert.equal(code, 1);
+    assert.match(stderr, /Not signed in with ChatGPT/);
+    assert.doesNotMatch(stdout + stderr, /Stubbed/);
+  });
+
+  it('names OpenAI, not Gemini, when transcriptionProvider is openai without a key', async () => {
+    await runCli(['config', 'set', 'transcriptionProvider', 'openai']);
     try {
-      const audio = makeAudio('needs-codex.mp3');
+      const audio = makeAudio('needs-openai.mp3');
       const { stderr, code } = await runCli(['transcript', audio]);
       assert.equal(code, 1);
-      assert.match(stderr, /transcriptionProvider is codex/);
-      assert.match(stderr, /listener codex login/);
+      assert.match(stderr, /transcriptionProvider is openai/);
+      assert.match(stderr, /openaiApiKey/);
       assert.doesNotMatch(stderr, /Gemini API key not found/);
     } finally {
       await runCli(['config', 'set', 'transcriptionProvider', 'auto']);

@@ -5,7 +5,7 @@
 
 import { getDom } from '../state';
 import { resetModalChatFor } from './chat-panel';
-import { showConfigModal } from './config-modal';
+import { requireAiSetup } from './config-modal';
 import { camelToLabel } from '../../src/meetingRecord';
 import {
   includedTranscript,
@@ -271,42 +271,6 @@ export function showSavedTranscript(
   }
 }
 
-// Gate transcription on both credential sets: the AI provider (summary, quality
-// judge, agent) and the selected transcription backend, which can be a
-// different vendor with its own key. Returns true when the caller can proceed;
-// false when the user needs to configure first (and the appropriate UI has
-// already been surfaced). Checking here keeps a missing backend key from
-// failing only after the ffmpeg work. Shared by the modal and the inline-row
-// transcribe flows.
-export async function requireAiAuth(): Promise<boolean> {
-  const configCheck = await window.electronAPI.checkConfig();
-  if (configCheck.hasAiAuth && configCheck.hasTranscriptionAuth) return true;
-  const message = !configCheck.hasAiAuth
-    ? 'Please configure your AI provider first'
-    : configCheck.transcriptionProvider === 'soniox'
-      ? 'Transcription is set to Soniox, but no Soniox API key is saved. Add the key in Settings > AI connection, or set the transcription service back to "Follow summary provider".'
-      : 'The selected transcription service has no credentials saved. Add them in Settings > AI connection, or choose another service under Transcription and summary.';
-  // Open Settings on the exact credential that is missing.
-  const missingProvider = !configCheck.hasAiAuth
-    ? configCheck.aiProvider
-    : configCheck.transcriptionProvider;
-  const focus =
-    missingProvider === 'soniox'
-      ? 'sonioxApiKey'
-      : missingProvider === 'codex'
-        ? 'loginCodexOAuth'
-        : 'geminiApiKey';
-  if (document.getElementById('configModal')) {
-    // The provider case is self-evident once Settings opens; a missing backend
-    // key is not, so name it before the modal appears.
-    if (configCheck.hasAiAuth) alert(message);
-    void showConfigModal({ focus });
-  } else {
-    alert(message);
-  }
-  return false;
-}
-
 // Retry `transcribeAudio` once after the ffmpeg-missing download dialog if the
 // first call surfaced that specific failure. Returns the (possibly retried)
 // result so callers don't need to know about the recovery path.
@@ -332,7 +296,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
 
   // Transcription only needs the AI provider auth; Notion is for the optional
   // upload step and shouldn't gate the recording -> transcript flow.
-  if (!(await requireAiAuth())) return;
+  if (!(await requireAiSetup({ transcription: true }))) return;
 
   if (
     !prepareTranscriptionModal(
@@ -675,6 +639,10 @@ async function applyTranscriptCutoff(offset: number | null): Promise<void> {
   const transcriptionPath = currentTranscriptionPath;
   const generationId = currentGenerationId;
   if (!transcriptionPath || generationId === undefined || cutoffInFlight) return;
+  // Report regeneration re-summarizes stored text: it needs the AI provider,
+  // not a transcription backend.
+  if (!(await requireAiSetup({ transcription: false }))) return;
+  if (currentTranscriptionPath !== transcriptionPath || cutoffInFlight) return;
   if (uploadToNotionBtn?.disabled || sendToSlackBtn?.disabled) {
     showTranscriptCutoffMessage(
       'Wait for the Notion upload or Slack send to finish, then try again.',

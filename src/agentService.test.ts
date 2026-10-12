@@ -60,7 +60,7 @@ describe('coerceConfigValue', () => {
     assert.equal(auto.ok, true);
     assert.equal(bogus.ok, false);
     if (soniox.ok) assert.equal(soniox.value, 'soniox');
-    if (!bogus.ok) assert.match(bogus.error, /auto, gemini, codex, soniox/);
+    if (!bogus.ok) assert.match(bogus.error, /auto, gemini, openai, soniox/);
   });
 
   it('accepts numeric strings and numbers for minute keys, floors them, rejects negatives', () => {

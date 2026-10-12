@@ -1,5 +1,7 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webFrame } from 'electron';
 import type { AiProvider, BatchSttProvider } from './aiProvider';
+import type { ChatGPTModel, ChatGPTProfile, ChatGPTSignOutResult } from './chatgptAuth';
+import type { ChatGPTStatusPayload } from './configService';
 import type {
   AgentChatMessage,
   AgentConfirmRequest,
@@ -24,6 +26,30 @@ import type {
 import type { LiveNote } from './outputService';
 import type { FileInfoResult } from './services/fileInfoTypes';
 import type { SyncProgressEvent } from './services/syncEngine';
+
+// Only the main process's explicit background-test opt-in passes this argument.
+// Install before renderer code so native JavaScript dialogs cannot steal focus.
+if (process.argv.includes('--listener-background-test')) {
+  void webFrame
+    .executeJavaScript(`(() => {
+    const state = { events: [], confirmResult: false, promptResult: null };
+    Object.defineProperty(window, '__listenerBackgroundTestDialogs', { value: state });
+    window.alert = (message) => {
+      state.events.push({ type: 'alert', message: String(message) });
+    };
+    window.confirm = (message) => {
+      state.events.push({ type: 'confirm', message: String(message) });
+      return state.confirmResult;
+    };
+    window.prompt = (message) => {
+      state.events.push({ type: 'prompt', message: String(message) });
+      return state.promptResult;
+    };
+  })()`)
+    .catch((error) => {
+      console.error('Failed to install background-test dialog observer:', error);
+    });
+}
 
 // `ipcRenderer.invoke` resolves to `any`, which would collapse every member
 // below to `Promise<any>` in the derived `ElectronAPI`. Routing through this
@@ -59,26 +85,66 @@ const api = {
     hasAiAuth: boolean;
     hasTranscriptionAuth: boolean;
     aiProvider: AiProvider;
-    transcriptionProvider: BatchSttProvider;
-    codexOAuthConfigured: boolean;
+    /** Null when the selection cannot run (see transcriptionProviderIssue). */
+    transcriptionProvider: BatchSttProvider | null;
+    transcriptionProviderIssue?: string;
+    chatgptStatus: ChatGPTStatusPayload;
     missing: string[];
   }> => invoke('check-config'),
   saveConfig: (config: ConfigPayload): Promise<{ success: boolean; error?: string }> =>
     invoke('save-config', config),
   getConfig: (): Promise<Record<string, unknown>> => invoke('get-config'),
-  loginCodexOAuth: (): Promise<
-    | { success: true; config: Record<string, unknown> }
-    | { success: false; error: string; cancelled?: boolean }
-  > => invoke('codex-oauth-login'),
-  cancelCodexOAuth: (): Promise<{ success: boolean }> => invoke('codex-oauth-cancel'),
-  onCodexOAuthProgress: (
+  // Sign in with ChatGPT (official SIWC). Errors carry the auth store's
+  // `code` when it has one (e.g. 'access_denied', 'plan_disabled').
+  loginChatGPT: (opts?: {
+    newProfile?: boolean;
+    /** Alias of `newProfile`. */
+    addProfile?: boolean;
+    profileId?: string;
+    /** Only for the explicit "Enable ChatGPT plan" action. */
+    requestPlanConsent?: boolean;
+  }): Promise<
+    | { success: true; status: ChatGPTStatusPayload; config: Record<string, unknown> }
+    | { success: false; error: string; code?: string; cancelled?: boolean }
+  > => invoke('chatgpt-oauth-login', opts),
+  cancelChatGPTLogin: (): Promise<{ success: boolean }> => invoke('chatgpt-oauth-cancel'),
+  logoutChatGPT: (
+    profileId?: string,
+  ): Promise<
+    | ({
+        success: true;
+        status: ChatGPTStatusPayload;
+        config: Record<string, unknown>;
+      } & ChatGPTSignOutResult)
+    | { success: false; error: string; code?: string }
+  > => invoke('chatgpt-oauth-clear', profileId),
+  getChatGPTStatus: (): Promise<
+    ChatGPTStatusPayload & {
+      success: true;
+      status: ChatGPTStatusPayload;
+      legacyCodexConfigured: boolean;
+    }
+  > => invoke('chatgpt-oauth-status'),
+  listChatGPTModels: (
+    profileId?: string,
+  ): Promise<
+    { success: true; models: ChatGPTModel[] } | { success: false; error: string; code?: string }
+  > => invoke('chatgpt-list-models', profileId),
+  listChatGPTProfiles: (): Promise<
+    { success: true; profiles: ChatGPTProfile[] } | { success: false; error: string; code?: string }
+  > => invoke('chatgpt-list-profiles'),
+  selectChatGPTProfile: (
+    profileId: string,
+  ): Promise<
+    | { success: true; status: ChatGPTStatusPayload; config: Record<string, unknown> }
+    | { success: false; error: string; code?: string }
+  > => invoke('chatgpt-select-profile', profileId),
+  openChatGPTUsage: (): Promise<{ success: true }> => invoke('chatgpt-manage-usage'),
+  onChatGPTProgress: (
     callback: (status: { phase: 'browser-opened' | 'progress'; message?: string }) => void,
   ) => {
-    ipcRenderer.on('codex-oauth-progress', (_, status) => callback(status));
+    ipcRenderer.on('chatgpt-oauth-progress', (_, status) => callback(status));
   },
-  clearCodexOAuth: (): Promise<
-    { success: true; config: Record<string, unknown> } | { success: false; error: string }
-  > => invoke('codex-oauth-clear'),
   loginGoogleOAuth: (): Promise<
     | { success: true; config: Record<string, unknown> }
     | { success: false; error: string; cancelled?: boolean }
@@ -246,8 +312,17 @@ const api = {
     question: string;
     history?: AgentChatMessage[];
     scope: AgentScope;
-  }): Promise<{ success: true; result: any } | { success: false; error: string }> =>
-    invoke('agent-chat', opts),
+  }): Promise<
+    | { success: true; result: any }
+    | {
+        success: false;
+        error: string;
+        /** Set for ChatGPT plan failures; `errorCode` is the ChatGPT code. */
+        errorType?: 'chatgpt';
+        errorCode?: string;
+        manageUsageUrl?: string;
+      }
+  > => invoke('agent-chat', opts),
   onAgentConfirmRequest: (callback: (req: AgentConfirmRequest) => void) => {
     ipcRenderer.on('agent-confirm-request', (_, req) => callback(req));
   },
@@ -381,6 +456,8 @@ const api = {
           byModel: Array<{
             modelId: string;
             kind: 'summary' | 'transcription' | 'agent';
+            /** `chatgpt-plan`: subscription usage, `usd` is not an API price. */
+            billing?: 'chatgpt-plan';
             usd: number;
             count: number;
             tokens: {

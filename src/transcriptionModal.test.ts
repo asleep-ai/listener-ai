@@ -26,6 +26,8 @@ describe('transcription modal session ownership', () => {
   let refreshes: number;
   let requests: number;
   let recoveries: number;
+  let setupReady: boolean;
+  let setupChecks: unknown[];
 
   before(async () => {
     const { build } = require('vite');
@@ -68,10 +70,15 @@ describe('transcription modal session ownership', () => {
     refreshes = 0;
     requests = 0;
     recoveries = 0;
+    setupReady = true;
+    setupChecks = [];
     const dependencies = {
       getDom: () => ({ progressContainer: elements.progressContainer }),
       resetModalChatFor() {},
-      showConfigModal() {},
+      requireAiSetup: async (options: unknown) => {
+        setupChecks.push(options);
+        return setupReady;
+      },
       titleForSavedReport: (title: string) => title,
       structuredToMarkdown: (data: any, tab: string) => data[tab] ?? '',
       renderMarkdown: (value: string) => value,
@@ -131,6 +138,13 @@ describe('transcription modal session ownership', () => {
     assert.deepEqual(errors, []);
   }
 
+  it('sends nothing when the AI or transcription setup is missing', async () => {
+    setupReady = false;
+    await modal.handleTranscribe('/recording.wav', 'Pending');
+    assert.equal(JSON.stringify(setupChecks), '[{"transcription":true}]');
+    assert.equal(requests, 0);
+    assert.equal(elements.transcriptionModal.open, false);
+  });
   for (const outcome of ['failure', 'cancelled', 'rejection', 'ffmpeg-missing']) {
     it(`ignores stale ${outcome} after selecting a saved note`, async () => {
       const { pending } = await start();

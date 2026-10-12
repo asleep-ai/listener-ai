@@ -224,13 +224,17 @@
         <div class="config-body">
           <section class="config-pane is-active" id="config-pane-ai" data-pane="ai" role="tabpanel" aria-labelledby="config-tab-ai">
             <p class="config-pane-hint">Connect the accounts Listener.AI uses. Keys for services you stop using stay saved, so switching back is safe.</p>
+            <div id="legacyCodexNotice" class="config-notice is-warning" role="status" hidden>
+              Codex sign-in is no longer supported. Your old Codex settings were kept but are not used, and the old sign-in is not reused.
+              To use your ChatGPT plan, select Continue with ChatGPT below. Recording transcription needs its own provider.
+            </div>
             <div class="form-group">
               <label for="aiProvider">Summary provider</label>
               <select id="aiProvider" aria-describedby="aiProviderHelp">
                 <option value="gemini">Gemini API</option>
-                <option value="codex">Codex (ChatGPT Plus/Pro)</option>
+                <option value="chatgpt">ChatGPT plan (Sign in with ChatGPT)</option>
               </select>
-              <small id="aiProviderHelp">Writes summaries, titles, and action items, and answers Ask Listener. Choose how recordings and live captions are transcribed in <button type="button" class="config-link-button" data-goto="transcriptionProvider">Transcription and summary</button>.</small>
+              <small id="aiProviderHelp">Writes summaries, titles, and action items, runs quality checks and report regeneration, and answers Ask Listener. Choose how recordings and live captions are transcribed in <button type="button" class="config-link-button" data-goto="transcriptionProvider">Transcription and summary</button>.</small>
             </div>
             <fieldset class="config-subgroup" data-provider="gemini">
               <legend>Gemini</legend>
@@ -267,33 +271,46 @@
                 <small id="geminiThinkingLevelHelp">Applies to Gemini 3.x summaries only.</small>
               </div>
             </fieldset>
-            <fieldset class="config-subgroup" data-provider="codex">
-              <legend>Codex</legend>
-              <p class="config-usage" id="codexUsage"></p>
-              <div class="form-group">
-                <span class="config-label" id="codexSignInLabel">Sign-in</span>
-                <div class="codex-oauth-row" role="group" aria-labelledby="codexSignInLabel" aria-describedby="codexSignInHelp">
-                  <button type="button" id="loginCodexOAuth" class="reset-prompt-button">Sign in</button>
-                  <button type="button" id="clearCodexOAuth" class="reset-prompt-button">Sign out</button>
-                  <span id="codexOAuthStatus" class="slack-webhook-status" role="status" aria-live="polite"></span>
+            <fieldset class="config-subgroup" data-provider="chatgpt">
+              <legend>ChatGPT</legend>
+              <p class="config-usage" id="chatgptUsage"></p>
+              <div class="chatgpt-card" id="chatgptCard" aria-busy="false">
+                <p id="chatgptStatus" class="chatgpt-status" role="status" aria-live="polite">Not connected</p>
+                <p id="chatgptPlanBadge" class="chatgpt-plan-badge" hidden></p>
+                <div class="oauth-row chatgpt-actions">
+                  <button type="button" id="chatgptLogin" class="chatgpt-primary-button">Continue with ChatGPT</button>
+                  <button type="button" id="chatgptCancelLogin" class="reset-prompt-button" hidden>Cancel sign-in</button>
+                  <button type="button" id="chatgptLogout" class="reset-prompt-button" hidden>Sign out</button>
                 </div>
-                <small id="codexSignInHelp">Uses your ChatGPT Plus/Pro account through browser sign-in, and takes effect right away. If the browser tab closes first, select Sign in again.</small>
+                <div class="form-group chatgpt-profile-group" id="chatgptProfileGroup" hidden>
+                  <label for="chatgptProfile">Account or workspace</label>
+                  <div class="oauth-row">
+                    <select id="chatgptProfile"></select>
+                    <button type="button" id="chatgptAddProfile" class="reset-prompt-button">Add account</button>
+                  </div>
+                  <small>Each account or workspace signs in separately. Switching applies to new jobs only.</small>
+                </div>
+                <div id="chatgptNotice" class="config-notice" role="status" aria-live="polite" hidden>
+                  <span id="chatgptNoticeText"></span>
+                  <div class="oauth-row" id="chatgptNoticeActions" hidden>
+                    <button type="button" id="chatgptNoticeManageUsage" class="chatgpt-primary-button">Manage usage</button>
+                  </div>
+                </div>
+                <small>Opens your browser to sign in to OpenAI. Plan usage works with ChatGPT Plus and Pro and shares your plan's usage limits with your other apps. Listener.AI never sees your password, and your sign-in tokens stay in the app's main process.</small>
               </div>
               <div class="form-group">
                 <div class="prompt-label-row">
-                  <label for="codexModelSelect">Summary model <span class="config-optional">optional</span></label>
-                  <button type="button" id="resetCodexModel" class="reset-prompt-button">Reset to Default</button>
+                  <label for="chatgptModelSelect">Summary model <span class="config-optional">optional</span></label>
+                  <span id="chatgptUsingPlan" class="chatgpt-using-plan" hidden>
+                    Using ChatGPT plan ·
+                    <button type="button" id="chatgptManageUsage" class="link-button">Manage usage</button>
+                  </span>
                 </div>
-                <select id="codexModelSelect"></select>
-                <input type="text" id="codexModel" placeholder="gpt-5.5" aria-label="Custom Codex summary model" hidden>
-              </div>
-              <div class="form-group">
-                <div class="prompt-label-row">
-                  <label for="codexTranscriptionModelSelect">Transcription model <span class="config-optional">optional</span></label>
-                  <button type="button" id="resetCodexTranscriptionModel" class="reset-prompt-button">Reset to Default</button>
+                <div class="oauth-row">
+                  <select id="chatgptModelSelect" aria-describedby="chatgptModelHint"></select>
+                  <button type="button" id="chatgptRefreshModels" class="reset-prompt-button">Refresh list</button>
                 </div>
-                <select id="codexTranscriptionModelSelect"></select>
-                <input type="text" id="codexTranscriptionModel" placeholder="gpt-4o-transcribe-diarize" aria-label="Custom Codex transcription model" hidden>
+                <small id="chatgptModelHint">The list comes from your signed-in account. Default uses the first model your account lists.</small>
               </div>
             </fieldset>
             <fieldset class="config-subgroup">
@@ -302,7 +319,16 @@
                 <label for="openaiApiKey">OpenAI API key <span class="config-optional">optional</span></label>
                 <input type="password" id="openaiApiKey" placeholder="sk-..." aria-describedby="openaiUsage openaiApiKeyHelp">
                 <p class="config-usage" id="openaiUsage"></p>
-                <small id="openaiApiKeyHelp">Needed for OpenAI Realtime live captions and translation. Codex sign-in does not cover this.</small>
+                <small id="openaiApiKeyHelp">A standard OpenAI API key from <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com</a>, billed to your OpenAI API account. ChatGPT sign-in does not cover these calls. Used for OpenAI recording transcription and OpenAI Realtime live captions.</small>
+              </div>
+              <div class="form-group">
+                <div class="prompt-label-row">
+                  <label for="openaiTranscriptionModelSelect">OpenAI transcription model <span class="config-optional">optional</span></label>
+                  <button type="button" id="resetOpenaiTranscriptionModel" class="reset-prompt-button">Reset to Default</button>
+                </div>
+                <select id="openaiTranscriptionModelSelect" aria-describedby="openaiTranscriptionModelHelp"></select>
+                <input type="text" id="openaiTranscriptionModel" placeholder="gpt-4o-transcribe-diarize" aria-label="Custom OpenAI transcription model" hidden>
+                <small id="openaiTranscriptionModelHelp">Default: gpt-4o-transcribe-diarize, which labels speakers. Other models do not label speakers but can use your Known Words.</small>
               </div>
               <div class="form-group">
                 <label for="sonioxApiKey">Soniox API key <span class="config-optional">optional</span></label>
@@ -320,12 +346,12 @@
               <div class="form-group">
                 <label for="transcriptionProvider">Transcription service</label>
                 <select id="transcriptionProvider" aria-describedby="transcriptionProviderHelp transcriptionProviderNotice">
-                  <option value="auto">Follow summary provider</option>
+                  <option value="auto">Follow summary provider (Gemini only)</option>
                   <option value="gemini">Gemini</option>
-                  <option value="codex">Codex (OpenAI transcription)</option>
+                  <option value="openai">OpenAI API (billed to your API key)</option>
                   <option value="soniox">Soniox (stt-async-v5)</option>
                 </select>
-                <small id="transcriptionProviderHelp">Turns finished recordings into transcripts. Summaries always use the summary provider.</small>
+                <small id="transcriptionProviderHelp">Turns finished recordings into transcripts. Summaries always use the summary provider. ChatGPT sign-in cannot transcribe audio, so with the ChatGPT plan choose Gemini, OpenAI API, or Soniox here.</small>
                 <div id="transcriptionProviderNotice" class="config-notice" role="status" aria-live="polite" hidden></div>
               </div>
             </fieldset>
@@ -455,7 +481,7 @@
               <legend>Google Drive</legend>
               <div class="form-group">
                 <span class="config-label" id="googleSignInLabel">Sign-in</span>
-                <div class="codex-oauth-row" role="group" aria-labelledby="googleSignInLabel" aria-describedby="googleSignInHelp">
+                <div class="oauth-row" role="group" aria-labelledby="googleSignInLabel" aria-describedby="googleSignInHelp">
                   <button type="button" id="loginGoogleOAuth" class="reset-prompt-button">Sign in</button>
                   <button type="button" id="clearGoogleOAuth" class="reset-prompt-button">Sign out</button>
                   <span id="googleOAuthStatus" class="slack-webhook-status" role="status" aria-live="polite"></span>
@@ -471,7 +497,7 @@
               </div>
               <div class="form-group">
                 <span class="config-label" id="googleSyncLabel">Sync</span>
-                <div class="codex-oauth-row" role="group" aria-labelledby="googleSyncLabel" aria-describedby="googleSyncHelp">
+                <div class="oauth-row" role="group" aria-labelledby="googleSyncLabel" aria-describedby="googleSyncHelp">
                   <button type="button" id="googleDriveSyncNow" class="reset-prompt-button">Sync now</button>
                   <span id="googleDriveSyncStatus" class="slack-webhook-status" role="status" aria-live="polite"></span>
                 </div>
@@ -659,6 +685,20 @@
     </div>
   </dialog>
 
+  <dialog id="chatgptPlanDialog" class="modal" aria-labelledby="chatgptPlanTitle" aria-describedby="chatgptPlanBody">
+    <div class="transcription-error-card">
+      <h3 id="chatgptPlanTitle">You're using your ChatGPT plan</h3>
+      <div id="chatgptPlanBody" class="chatgpt-plan-body">
+        <p>Summaries, quality checks, report regeneration, and Ask Listener now run on your ChatGPT plan and count toward its usage limits, which are shared with your other apps.</p>
+        <p>Recording transcription is not part of the plan. It uses the transcription service chosen under Transcription and summary (Gemini, OpenAI API, or Soniox) and is billed by that provider.</p>
+      </div>
+      <div class="transcription-error-actions">
+        <button id="chatgptPlanManageUsage" class="reset-prompt-button" type="button">Manage usage</button>
+        <button id="chatgptPlanGotIt" class="primary-button" type="button">Got it</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog id="transcriptionErrorDialog" class="modal">
     <div class="transcription-error-card">
       <h3 id="transcriptionErrorTitle">Transcription failed</h3>
@@ -673,6 +713,7 @@
       </details>
 
       <div class="transcription-error-actions">
+        <button id="transcriptionErrorManageUsageBtn" class="primary-button" type="button" hidden>Manage usage</button>
         <button id="transcriptionErrorOkBtn" class="primary-button" type="button">OK</button>
       </div>
     </div>
