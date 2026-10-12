@@ -494,6 +494,66 @@ describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
       assert.equal(status.connected, true);
       assert.equal(status.profileId, index.registrations[0].id);
     });
+    // Two processes (app and CLI) retry the same pending registration. The
+    // first to commit wins; the later commit must neither replace its account
+    // nor revoke its grant.
+    for (const loser of [BOB, ALICE]) {
+      it(`keeps the first completion of a pending registration when a concurrent ${loser === BOB ? 'different-account' : 'same-account'} sign-in commits later`, async () => {
+        fake.exchangeFailure = { status: 400, body: { error: 'invalid_grant' } };
+        await assertAuthError(
+          new ChatGPTAuth(dataDir, fake.deps()).signIn({
+            openBrowser: (await browser(fake, ALICE)).openBrowser,
+          }),
+          'invalid_grant',
+        );
+        fake.exchangeFailure = undefined;
+        const pendingId = readJson(path.join(dataDir, 'chatgpt', 'profiles.json')).registrations[0]
+          .id;
+
+        // The later process reaches its code exchange first and is held there.
+        const gated = gatedFetch('/api/accounts/oauth/token');
+        const late = new ChatGPTAuth(dataDir, fake.deps({ fetch: gated.fetchImpl }));
+        const lateBrowser = await browser(fake, loser);
+        const losing = late.signIn({ openBrowser: lateBrowser.openBrowser });
+        await gated.reached;
+
+        const first = new ChatGPTAuth(dataDir, fake.deps());
+        const winner = await first.signIn({
+          openBrowser: (await browser(fake, ALICE)).openBrowser,
+        });
+        assert.equal(winner.profileId, pendingId);
+        const winnerRecord = fs.readFileSync(credentialFile(dataDir, pendingId), 'utf8');
+        const winnerIndex = fs.readFileSync(path.join(dataDir, 'chatgpt', 'profiles.json'), 'utf8');
+
+        gated.release();
+        const error = await assertAuthError(losing, 'session_ended');
+        assert.equal(isExpectedSignInOutcome(error), true);
+        assert.equal(lateBrowser.seen[0].searchParams.get('client_id'), 'oaiapp_test1');
+
+        assert.equal(fs.readFileSync(credentialFile(dataDir, pendingId), 'utf8'), winnerRecord);
+        assert.equal(
+          fs.readFileSync(path.join(dataDir, 'chatgpt', 'profiles.json'), 'utf8'),
+          winnerIndex,
+        );
+        const status = await first.getStatus();
+        assert.equal(status.email, ALICE.email);
+        assert.equal(status.connected, true);
+
+        // A different account's stray grant is revoked; a same-account one is
+        // left alone so the revocation cannot reach the winner's grant.
+        const winnerRefresh = JSON.parse(winnerRecord).refreshToken;
+        const revokes = await settledRevokes(fake, loser === BOB ? 1 : 0);
+        assert.equal(revokes.length, loser === BOB ? 1 : 0);
+        assert.ok(revokes.every((r) => r.form!.get('token') !== winnerRefresh));
+
+        // The winner's grant still refreshes.
+        expireAccessToken(dataDir, pendingId);
+        const models = await first.listModels();
+        assert.ok(models.some((m) => m.slug === `gpt-${ALICE.sub}`));
+        assert.equal(fake.grants('refresh_token').length, 1);
+      });
+    }
+
     it('discards a pending registration whose client is rejected at the code exchange and registers anew', async () => {
       const auth = new ChatGPTAuth(dataDir, fake.deps());
       fake.exchangeFailure = { status: 401, body: { error: 'invalid_client' } };

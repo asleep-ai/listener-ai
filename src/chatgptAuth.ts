@@ -517,11 +517,27 @@ export class ChatGPTAuth {
       }
       throw error;
     }
+    // This attempt completes a pending registration only while it is still
+    // pending: another app or CLI process may finish the same registration
+    // first, and the commit must not replace that account (see the fence).
+    const claimedPending = target.mode !== 'reauth' && registration.pending === true;
     // Best effort, not awaited: a brand-new or still-pending registration has
     // no completed earlier grant this could affect. A reauthorization grant is
-    // left alone.
-    const revokeNewGrant = () => {
+    // left alone, and so is a grant on a registration another process has
+    // completed meanwhile, unless it verifiably belongs to a different account
+    // than the one that completed it.
+    const revokeNewGrant = (subject?: string) => {
       if (target.mode !== 'reauth' && tokens.refreshToken) {
+        let winner: ChatGPTRegistration | undefined;
+        try {
+          winner = this.store
+            .readIndex()
+            .registrations.find((r) => r.id === registration.id && !r.pending);
+        } catch {
+          // Unknown winner: skip rather than risk its grant.
+          return;
+        }
+        if (winner && (subject === undefined || winner.subject === subject)) return;
         void this.revoke(
           discovery,
           tokens.refreshToken,
@@ -604,6 +620,7 @@ export class ChatGPTAuth {
     // for either lock leaves the previous credentials and the active profile
     // exactly as they were.
     let completed: ChatGPTRegistration;
+    let superseded = false;
     try {
       throwIfCancelled(signal);
       completed = await this.guardStore(() =>
@@ -640,6 +657,16 @@ export class ChatGPTAuth {
                   'This ChatGPT account was signed out or changed while you were signing in. Nothing was changed; sign in again.',
                 );
               }
+              // Fence: completing a pending registration requires it to be
+              // still pending. If another process completed it first, its
+              // account and credentials stay as they are.
+              if (claimedPending && !current.pending) {
+                superseded = true;
+                throw new ChatGPTAuthError(
+                  'session_ended',
+                  'This ChatGPT sign-in was completed by another Listener.AI window or command. Nothing was changed; sign in again to add another account.',
+                );
+              }
               delete current.pending;
               current.subject = claims.sub;
               current.issuer = discovery.issuer;
@@ -663,6 +690,7 @@ export class ChatGPTAuth {
       );
     } catch (error) {
       revokeIfCancelledNew(error);
+      if (superseded) revokeNewGrant(claims.sub);
       throw error;
     }
     this.refreshes.delete(registration.id);

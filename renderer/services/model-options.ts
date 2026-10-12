@@ -11,11 +11,13 @@ export const CURATED_MODELS: Record<ModelField, readonly string[]> = {
   geminiModel: ['gemini-3.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash'],
   geminiFlashModel: ['gemini-2.5-flash', 'gemini-3.5-flash'],
   // Diarize first: it is the only one that labels speakers. The others accept
-  // a Known Words prompt instead. The ChatGPT model list is not curated here;
-  // it comes from the signed-in account (listChatGPTModels).
+  // a Known Words prompt instead. Only models with a MODEL_PRICING entry
+  // (src/services/usageTracker.ts) are curated, so usage never records them
+  // as $0; others (e.g. gpt-transcribe) stay usable through Custom... The
+  // ChatGPT model list is not curated here; it comes from the signed-in
+  // account (listChatGPTModels).
   openaiTranscriptionModel: [
     'gpt-4o-transcribe-diarize',
-    'gpt-transcribe',
     'gpt-4o-transcribe',
     'gpt-4o-mini-transcribe',
   ],
