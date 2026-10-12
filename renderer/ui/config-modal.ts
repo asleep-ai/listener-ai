@@ -18,6 +18,12 @@ import {
 } from '../../src/aiProvider';
 import { applySettingsFields, parseLiveSttProvider, readSettingsFields } from './settings-fields';
 import { diffConfigPayload } from '../../src/configDiff';
+import { DEFAULT_GLOBAL_SHORTCUT } from '../../src/configKeys';
+import {
+  type CredentialUse,
+  credentialUsage,
+  describeCredentialUse,
+} from '../../src/settingsVisibility';
 import { formatUsd } from '../../src/usageFormat';
 
 let configModal: HTMLDialogElement | null = null;
@@ -55,6 +61,7 @@ let settingsBaseline: ConfigPayload = {};
 // indistinguishable from an unset value. A Reset click must still clear it.
 const resetSettingsKeys = new Set<keyof ConfigPayload>();
 let aiPane: HTMLElement | null = null;
+let aiRequiredBadge: HTMLElement | null = null;
 let codexOAuthConfigured = false;
 let codexOAuthSource: 'config' | 'env' | 'codexCli' | null = null;
 
@@ -136,6 +143,10 @@ function readModelValue(field: ModelField): string {
 function readOtherSettings(): ConfigPayload {
   const summaryPromptInput = document.getElementById('summaryPrompt') as HTMLTextAreaElement | null;
   const summaryPrompt = summaryPromptInput ? summaryPromptInput.value.trim() : '';
+  // Like the summary prompt, the default shortcut reads back as '' (the stored
+  // "use the default" value), so Reset clears a saved shortcut instead of
+  // pinning today's default into config.json.
+  const globalShortcut = globalShortcutInput ? globalShortcutInput.value.trim() : '';
   return {
     geminiModel: readModelValue('geminiModel'),
     geminiFlashModel: readModelValue('geminiFlashModel'),
@@ -143,6 +154,7 @@ function readOtherSettings(): ConfigPayload {
     codexTranscriptionModel: readModelValue('codexTranscriptionModel'),
     knownWords: [...knownWordsValues],
     summaryPrompt: summaryPrompt === defaultSummaryPrompt ? '' : summaryPrompt,
+    globalShortcut: globalShortcut === DEFAULT_GLOBAL_SHORTCUT ? '' : globalShortcut,
   };
 }
 
@@ -219,13 +231,34 @@ function readTranscriptionProvider(): TranscriptionProvider {
   return normalizeTranscriptionProvider(transcriptionProviderSelect?.value);
 }
 
+// A notice that names a missing credential links straight to it: credentials
+// live on the AI connection tab while the choices that need them are here.
+type NoticeLink = { target: string; label: string };
+
+function renderNotice(el: HTMLElement, text: string, link?: NoticeLink): void {
+  el.textContent = text;
+  if (link && text.length > 0) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'config-link-button';
+    button.dataset.goto = link.target;
+    button.textContent = link.label;
+    el.append(' ', button);
+  }
+  el.hidden = text.length === 0;
+}
+
+const GEMINI_KEY_LINK: NoticeLink = { target: 'geminiApiKey', label: 'Add a Gemini API key' };
+const OPENAI_KEY_LINK: NoticeLink = { target: 'openaiApiKey', label: 'Add an OpenAI API key' };
+const SONIOX_KEY_LINK: NoticeLink = { target: 'sonioxApiKey', label: 'Add a Soniox API key' };
+
 function setLiveProviderNotice(
   text: string,
   state: 'info' | 'success' | 'warning' | 'error' = 'info',
+  link?: NoticeLink,
 ): void {
   if (!liveProviderNotice) return;
-  liveProviderNotice.textContent = text;
-  liveProviderNotice.hidden = text.length === 0;
+  renderNotice(liveProviderNotice, text, link);
   liveProviderNotice.className = `config-notice is-${state}`;
 }
 
@@ -235,10 +268,9 @@ function updateTranscriptionProviderNotice(): void {
   const hasSonioxKey = (sonioxApiKeyInput?.value.trim() ?? '').length > 0;
   const warn = provider === 'soniox' && !hasSonioxKey;
   const text = warn
-    ? 'Soniox transcription requires a Soniox API key. Add one below or choose another backend.'
+    ? 'Soniox transcription needs a Soniox API key, saved under AI connection. Add one or choose another service.'
     : '';
-  transcriptionProviderNotice.textContent = text;
-  transcriptionProviderNotice.hidden = text.length === 0;
+  renderNotice(transcriptionProviderNotice, text, SONIOX_KEY_LINK);
   // Only carry the warning state while there is a warning: a hidden element
   // that keeps `is-warning` shows up as one in a11y tooling and in any future
   // styling that reads the class rather than `hidden`.
@@ -255,15 +287,16 @@ function updateLiveProviderNotice(): void {
     setLiveProviderNotice(
       hasSonioxKey
         ? 'Soniox realtime will handle live captions.'
-        : 'Soniox realtime requires a Soniox API key. Add one below or choose another provider.',
+        : 'Soniox realtime needs a Soniox API key, saved under AI connection. Add one or choose another service.',
       hasSonioxKey ? 'success' : 'warning',
+      hasSonioxKey ? undefined : SONIOX_KEY_LINK,
     );
     return;
   }
 
   if (provider === 'chunked') {
     setLiveProviderNotice(
-      'Live captions will use 12-second chunks through the saved AI provider. This is slower but avoids live API credentials.',
+      'Live captions will use 12-second chunks through your transcription service, with any translation by the summary provider. This is slower but needs no live caption credentials.',
       'info',
     );
     return;
@@ -279,6 +312,7 @@ function updateLiveProviderNotice(): void {
       setLiveProviderNotice(
         'Gemini Live needs a Gemini API key. Add one or choose 12s fallback.',
         'warning',
+        GEMINI_KEY_LINK,
       );
     }
     return;
@@ -297,11 +331,13 @@ function updateLiveProviderNotice(): void {
       setLiveProviderNotice(
         'OpenAI Realtime live translation needs an OpenAI API key. Without one, Listener.AI will fall back to Gemini Live.',
         'warning',
+        OPENAI_KEY_LINK,
       );
     } else {
       setLiveProviderNotice(
         'OpenAI Realtime live translation needs an OpenAI API key. Codex sign-in is not enough for this live translation call.',
         'warning',
+        OPENAI_KEY_LINK,
       );
     }
     return;
@@ -320,6 +356,7 @@ function updateLiveProviderNotice(): void {
         ? 'Codex sign-in is available for Codex features, but live streaming needs an OpenAI API key or Gemini API key.'
         : 'Auto needs an OpenAI API key or Gemini API key for streaming live translation; otherwise use 12s fallback.',
       'warning',
+      { target: 'openaiApiKey', label: 'Open AI connection' },
     );
   }
 }
@@ -359,8 +396,13 @@ export async function checkAndPromptForConfig(): Promise<void> {
   }
 }
 
+export type ConfigModalOptions = {
+  /** Element id to reveal and focus once the modal opens; picks its tab. */
+  focus?: string;
+};
+
 // Function to show the config modal
-export async function showConfigModal(): Promise<void> {
+export async function showConfigModal(options: ConfigModalOptions = {}): Promise<void> {
   // Cmd+, while the modal is already open should be a no-op rather than
   // discarding the user's in-progress edits by re-fetching config.
   if (configModal && configModal.open) return;
@@ -432,7 +474,10 @@ export async function showConfigModal(): Promise<void> {
 
   settingsBaseline = { ...readSettingsFields(), ...readOtherSettings() };
 
-  applyAiProviderVisibility();
+  clearFieldError(geminiApiKeyInput, 'geminiApiKeyError');
+  clearFieldError(globalShortcutInput, 'globalShortcutError');
+  applyCredentialVisibility();
+  updateAiRequiredBadge();
   updateLiveProviderNotice();
   updateTranscriptionProviderNotice();
 
@@ -441,10 +486,11 @@ export async function showConfigModal(): Promise<void> {
   // missing data renders as zeros.
   void refreshUsageSummaryCard();
 
-  // AI Provider tab carries the required-credentials state; open there so the
-  // user sees setup status first.
+  // AI connection carries the required-credentials state; open there so the
+  // user sees setup status first, unless the caller names a specific setting.
   activateConfigTab('ai');
   if (configModal && !configModal.open) configModal.showModal();
+  if (options.focus) goToSetting(options.focus);
 }
 
 async function refreshUsageSummaryCard(): Promise<void> {
@@ -550,36 +596,132 @@ function removeKnownWord(value: string): void {
   knownWordsField?.focus();
 }
 
-function applyAiProviderVisibility(): void {
+// A credential section stays visible while any feature still routes through
+// it, not just the summary provider: a Gemini key can power Gemini Live or
+// file transcription while summaries run on Codex.
+function applyCredentialVisibility(): void {
   if (!aiPane || !aiProviderSelect) return;
-  const active = aiProviderSelect.value;
-  aiPane.querySelectorAll<HTMLElement>('.config-subgroup[data-provider]').forEach((sg) => {
-    sg.hidden = sg.dataset.provider !== active;
+  const usage = credentialUsage({
+    aiProvider: aiProviderSelect.value === 'codex' ? 'codex' : 'gemini',
+    transcriptionProvider: readTranscriptionProvider(),
+    liveSttProvider: readLiveProvider(),
   });
+  aiPane.querySelectorAll<HTMLElement>('.config-subgroup[data-provider]').forEach((sg) => {
+    const provider = sg.dataset.provider === 'codex' ? 'codex' : 'gemini';
+    sg.hidden = usage[provider].length === 0;
+  });
+  const usageLines: Record<string, CredentialUse[]> = {
+    geminiUsage: usage.gemini,
+    codexUsage: usage.codex,
+    openaiUsage: usage.openai,
+    sonioxUsage: usage.soniox,
+  };
+  for (const [id, uses] of Object.entries(usageLines)) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = describeCredentialUse(uses);
+  }
+}
+
+// Mirrors hasAiAuth() against the unsaved form so the badge clears as soon as
+// the summary provider has what it needs.
+function updateAiRequiredBadge(): void {
+  if (!aiRequiredBadge) return;
+  const hasAuth =
+    aiProviderSelect?.value === 'codex'
+      ? codexOAuthConfigured
+      : (geminiApiKeyInput?.value.trim() ?? '').length > 0;
+  aiRequiredBadge.hidden = hasAuth;
+}
+
+function showFieldError(input: HTMLInputElement | null, errorId: string, message: string): void {
+  const error = document.getElementById(errorId);
+  if (error) {
+    error.textContent = message;
+    error.hidden = false;
+  }
+  input?.setAttribute('aria-invalid', 'true');
+}
+
+function clearFieldError(input: HTMLInputElement | null, errorId: string): void {
+  const error = document.getElementById(errorId);
+  if (error) {
+    error.textContent = '';
+    error.hidden = true;
+  }
+  input?.removeAttribute('aria-invalid');
+}
+
+function resetGlobalShortcut(): void {
+  if (!globalShortcutInput) return;
+  globalShortcutInput.value = DEFAULT_GLOBAL_SHORTCUT;
+  resetSettingsKeys.add('globalShortcut');
+  clearFieldError(globalShortcutInput, 'globalShortcutError');
+}
+
+function configTabs(): HTMLButtonElement[] {
+  return configModal ? [...configModal.querySelectorAll<HTMLButtonElement>('.config-tab')] : [];
 }
 
 function activateConfigTab(target: string): void {
   if (!configModal) return;
-  const tabs = configModal.querySelectorAll<HTMLButtonElement>('.config-tab');
   const panes = configModal.querySelectorAll<HTMLElement>('.config-pane');
-  tabs.forEach((t) => {
+  configTabs().forEach((t) => {
     const active = t.dataset.tab === target;
     t.classList.toggle('is-active', active);
     t.setAttribute('aria-selected', active ? 'true' : 'false');
+    // Roving tabindex: Tab enters the tablist on the selected tab only, and
+    // the arrow keys move between tabs.
+    t.tabIndex = active ? 0 : -1;
   });
   panes.forEach((p) => {
-    p.classList.toggle('is-active', p.dataset.pane === target);
+    const active = p.dataset.pane === target;
+    p.classList.toggle('is-active', active);
+    p.hidden = !active;
   });
 }
 
+// Opens the tab holding `id`, scrolls it into view, and focuses it. Used by the
+// cross-tab links and by callers that open Settings for one missing setting.
+function goToSetting(id: string): void {
+  const el = document.getElementById(id);
+  const pane = el?.closest<HTMLElement>('.config-pane');
+  if (!el || !pane?.dataset.pane) return;
+  activateConfigTab(pane.dataset.pane);
+  el.scrollIntoView({ block: 'center' });
+  el.focus();
+}
+
 function setupConfigTabs(modal: HTMLElement): void {
-  const tabs = modal.querySelectorAll<HTMLButtonElement>('.config-tab');
+  const tabs = configTabs();
   if (tabs.length === 0) return;
   tabs.forEach((tab) => {
     tab.addEventListener('click', () => {
       const target = tab.dataset.tab;
       if (target) activateConfigTab(target);
     });
+  });
+  // WAI-ARIA tabs pattern with automatic activation: Left/Right wrap, Home and
+  // End jump to the ends.
+  modal.querySelector('[role="tablist"]')?.addEventListener('keydown', (event) => {
+    const e = event as KeyboardEvent;
+    const current = tabs.indexOf(e.target as HTMLButtonElement);
+    if (current < 0) return;
+    let next: number;
+    if (e.key === 'ArrowRight') next = (current + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') next = (current - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = tabs.length - 1;
+    else return;
+    e.preventDefault();
+    const tab = tabs[next]!;
+    if (tab.dataset.tab) activateConfigTab(tab.dataset.tab);
+    tab.focus();
+  });
+  modal.addEventListener('click', (e) => {
+    const link = (e.target as HTMLElement).closest<HTMLElement>('[data-goto]');
+    if (!link?.dataset.goto) return;
+    e.preventDefault();
+    goToSetting(link.dataset.goto);
   });
 }
 
@@ -588,6 +730,7 @@ export function setupConfigModal(): void {
   if (configModal) {
     setupConfigTabs(configModal);
     aiPane = configModal.querySelector<HTMLElement>('.config-pane[data-pane="ai"]');
+    aiRequiredBadge = document.getElementById('configAiRequiredBadge');
   }
   saveConfigBtn = document.getElementById('saveConfig') as HTMLButtonElement | null;
   cancelConfigBtn = document.getElementById('cancelConfig') as HTMLButtonElement | null;
@@ -669,15 +812,26 @@ export function setupConfigModal(): void {
     });
   }
 
-  if (aiProviderSelect) {
-    aiProviderSelect.addEventListener('change', applyAiProviderVisibility);
-  }
-  liveSttProviderSelect?.addEventListener('change', updateLiveProviderNotice);
+  aiProviderSelect?.addEventListener('change', () => {
+    applyCredentialVisibility();
+    updateAiRequiredBadge();
+  });
+  liveSttProviderSelect?.addEventListener('change', () => {
+    applyCredentialVisibility();
+    updateLiveProviderNotice();
+  });
   openaiApiKeyInput?.addEventListener('input', updateLiveProviderNotice);
   sonioxApiKeyInput?.addEventListener('input', updateLiveProviderNotice);
-  transcriptionProviderSelect?.addEventListener('change', updateTranscriptionProviderNotice);
+  transcriptionProviderSelect?.addEventListener('change', () => {
+    applyCredentialVisibility();
+    updateTranscriptionProviderNotice();
+  });
   sonioxApiKeyInput?.addEventListener('input', updateTranscriptionProviderNotice);
-  geminiApiKeyInput?.addEventListener('input', updateLiveProviderNotice);
+  geminiApiKeyInput?.addEventListener('input', () => {
+    clearFieldError(geminiApiKeyInput, 'geminiApiKeyError');
+    updateAiRequiredBadge();
+    updateLiveProviderNotice();
+  });
 
   const openSlackAppCreatorBtn = document.getElementById(
     'openSlackAppCreator',
@@ -737,7 +891,8 @@ export function setupConfigModal(): void {
         // Sign-in already persisted this, so switching back to another
         // provider before Save must still count as an edit.
         settingsBaseline = { ...settingsBaseline, aiProvider: 'codex' };
-        applyAiProviderVisibility();
+        applyCredentialVisibility();
+        updateAiRequiredBadge();
         updateLiveProviderNotice();
         setCodexOAuthStatus(codexOAuthStatusLabel(codexOAuthSource), 'success');
       } else if (result.cancelled) {
@@ -755,6 +910,7 @@ export function setupConfigModal(): void {
         const result = await window.electronAPI.clearCodexOAuth();
         if (result.success) {
           applyCodexOAuthState(result.config);
+          updateAiRequiredBadge();
           updateLiveProviderNotice();
           setCodexOAuthStatus(
             codexOAuthConfigured ? codexOAuthStatusLabel(codexOAuthSource) : 'Not signed in',
@@ -889,7 +1045,12 @@ export function setupConfigModal(): void {
       }
 
       if (fields.aiProvider === 'gemini' && !fields.geminiApiKey) {
-        alert('Please enter at least the Gemini API key');
+        showFieldError(
+          geminiApiKeyInput,
+          'geminiApiKeyError',
+          'Enter a Gemini API key, or choose Codex as the summary provider.',
+        );
+        goToSetting('geminiApiKey');
         return;
       }
 
@@ -912,6 +1073,11 @@ export function setupConfigModal(): void {
     });
 
     globalShortcutInput.addEventListener('keydown', async (e) => {
+      if (e.isComposing) return;
+      const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
+      // Tab / Shift+Tab move focus and Escape closes the dialog, as everywhere
+      // else; capturing them would trap keyboard users in this field.
+      if ((e.key === 'Tab' && plain) || (e.key === 'Escape' && plain && !e.shiftKey)) return;
       e.preventDefault();
 
       const modifiers: string[] = [];
@@ -939,17 +1105,33 @@ export function setupConfigModal(): void {
 
         // Validate the shortcut
         const result = await window.electronAPI.validateShortcut(shortcut);
+        // A newer keypress or Reset may have replaced the value meanwhile.
+        if (globalShortcutInput.value !== shortcut) return;
         if (!result.valid) {
-          globalShortcutInput.style.borderColor = '#ff4444';
-          alert('This shortcut is already in use or invalid. Please try another combination.');
+          showFieldError(
+            globalShortcutInput,
+            'globalShortcutError',
+            `${shortcut} is already in use or not allowed. Try another combination.`,
+          );
         } else {
-          globalShortcutInput.style.borderColor = '';
+          clearFieldError(globalShortcutInput, 'globalShortcutError');
         }
+      } else {
+        showFieldError(
+          globalShortcutInput,
+          'globalShortcutError',
+          'Add a modifier key: Command/Ctrl, Option/Alt, or Shift.',
+        );
       }
     });
 
     globalShortcutInput.addEventListener('blur', () => {
       if (globalShortcutInput) globalShortcutInput.placeholder = 'Press shortcut keys';
+    });
+
+    document.getElementById('resetGlobalShortcut')?.addEventListener('click', () => {
+      resetGlobalShortcut();
+      globalShortcutInput?.focus();
     });
   }
 

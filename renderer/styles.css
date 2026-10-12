@@ -1071,17 +1071,19 @@ h1 {
 .config-tabs {
   display: flex;
   gap: 2px;
-  padding: 0 16px;
+  padding: 0 12px;
   border-bottom: 1px solid #eef2f6;
   background-color: #fafbfc;
   flex: 0 0 auto;
   overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
 
 .config-tab {
   background: none;
   border: none;
-  padding: 12px 14px;
+  padding: 12px 11px;
   font-size: 13px;
   font-weight: 500;
   color: #64748b;
@@ -1128,6 +1130,12 @@ h1 {
 .config-pane.is-active {
   display: block;
   animation: fadeIn 0.2s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .config-pane.is-active {
+    animation: none;
+  }
 }
 
 .config-pane-hint {
@@ -1201,6 +1209,114 @@ h1 {
   border-color: #fecaca;
   background-color: #fef2f2;
   color: #991b1b;
+}
+
+.config-pane[hidden],
+.config-tab-badge[hidden] {
+  display: none;
+}
+
+.config-tab:focus-visible,
+.config-modal button:focus-visible,
+.config-modal input[type="checkbox"]:focus-visible {
+  outline: 2px solid #3498db;
+  outline-offset: 2px;
+}
+
+.config-tab:focus-visible {
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+
+/* "Used for ..." line under a credential: says why the section is shown. */
+.config-usage {
+  margin: 0 0 12px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.form-group .config-usage {
+  margin: 6px 0 0;
+}
+
+/* Help text in Settings needs to stay readable (WCAG AA on white). */
+.config-body .form-group small {
+  color: #64748b;
+}
+
+.config-label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+  font-size: 13px;
+  color: #334155;
+  letter-spacing: -0.005em;
+}
+
+.config-link-button {
+  display: inline;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #2563eb;
+  font: inherit;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.config-link-button:hover {
+  color: #1d4ed8;
+}
+
+.config-field-error {
+  margin: 6px 0 0;
+  color: #b91c1c;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.config-field-error[hidden] {
+  display: none;
+}
+
+.config-body .form-group input[aria-invalid="true"] {
+  border-color: #dc2626;
+}
+
+/* `.form-group label` / `.form-group input` outrank `.inline-label`, which
+   stacked Settings checkboxes above their text at full width. */
+.config-body .form-group .inline-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 0;
+  cursor: pointer;
+}
+
+.config-body .form-group .inline-label input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shortcut-row input {
+  flex: 1 1 auto;
+}
+
+.shortcut-row .reset-prompt-button {
+  flex: 0 0 auto;
 }
 
 .chip-input {

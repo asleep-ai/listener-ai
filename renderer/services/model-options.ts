@@ -1,4 +1,4 @@
-// Curated model lists for the Settings -> AI Provider tab. Each field
+// Curated model lists for the Settings -> AI connection tab. Each field
 // renders one of these arrays as a <select>, followed by a "Custom..."
 // option that reveals a free-form input for advanced users who want to type
 // a model id we haven't curated yet.
