@@ -736,9 +736,10 @@ export class ChatGPTAuth {
     assertPlanGrant(record!);
     if (!this.needsRefresh(record!)) return record!.accessToken!;
     // The shared refresh is not tied to one caller's signal: cancelling one
-    // job must not abort a refresh other callers are waiting on.
+    // job must not abort a refresh other callers are waiting on, but the
+    // cancelled caller stops waiting on it.
     throwIfCancelled(signal);
-    record = await this.refresh(registration);
+    record = await untilAborted(this.refresh(registration), signal);
     this.assertSession(record, registration, sessionId);
     assertPlanGrant(record);
     return record.accessToken!;

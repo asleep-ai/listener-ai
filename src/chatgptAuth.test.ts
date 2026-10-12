@@ -1140,6 +1140,39 @@ describe('ChatGPTAuth (Sign in with ChatGPT)', () => {
       assert.equal(fake.grants('refresh_token').length, 1);
     });
 
+    it('a cancelled job stops waiting on a shared refresh that another job still completes', async () => {
+      const status = await new ChatGPTAuth(dataDir, fake.deps()).signIn({
+        openBrowser: (await browser(fake, ALICE)).openBrowser,
+      });
+      expireAccessToken(dataDir, status.profileId!);
+      const gated = gatedFetch('/api/accounts/oauth/token');
+      const auth = new ChatGPTAuth(dataDir, fake.deps({ fetch: gated.fetchImpl }));
+      const session = await auth.openSession(status.profileId!);
+      const controller = new AbortController();
+      const cancelled = session.getAccessToken(controller.signal);
+      let otherSettled = false;
+      const other = session.getAccessToken().finally(() => {
+        otherSettled = true;
+      });
+      await gated.reached;
+      controller.abort();
+      // Settles while the shared refresh is still held at the token endpoint.
+      const timedOut = new Promise<'pending'>((resolve) => setTimeout(resolve, 500, 'pending'));
+      const outcome = await Promise.race([
+        cancelled.then(
+          () => 'resolved',
+          () => 'rejected',
+        ),
+        timedOut,
+      ]);
+      gated.release();
+      assert.equal(outcome, 'rejected', 'the cancelled caller kept waiting on the refresh');
+      await assertAuthError(cancelled, 'cancelled');
+      assert.equal(otherSettled, false);
+      assert.equal(await other, readJson(credentialFile(dataDir, status.profileId!)).accessToken);
+      assert.equal(fake.grants('refresh_token').length, 1);
+    });
+
     describe('lock timing policy', () => {
       // A fetch that never answers `hangPath` until the request is aborted.
       function hangingFetch(hangPath: string) {

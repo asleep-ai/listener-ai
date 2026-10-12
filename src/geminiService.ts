@@ -1174,9 +1174,8 @@ export class GeminiService {
     }
     if (this.provider === 'chatgpt') {
       const binding = this.requireChatGPTBinding();
-      const model = await binding.model();
       return await binding.run(signal, async (watched) =>
-        call(model, await binding.accessToken(watched), watched),
+        call(await binding.model(watched), await binding.accessToken(watched), watched),
       );
     }
     return await call(

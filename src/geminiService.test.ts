@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import * as path from 'path';
 import { EmptyTranscriptionError, TranscriptionApiError } from './transcriptionErrors';
+import { ChatGPTAuthError } from './chatgptAuth';
 import { type ChatGPTAuthLike, ChatGPTBinding, ChatGPTBindingError } from './chatgptBinding';
 import { type BatchSttBackend, planSegmentation, retryTemperaturesFor } from './batchSttBackend';
 import {
@@ -3161,6 +3162,208 @@ describe('GeminiService ChatGPT summary: sign-out during the call', () => {
       return true;
     });
     assert.equal(faux.state.callCount, 1);
+  });
+});
+
+// A caller's cancel must end its own wait on the binding's shared setup work
+// (session bind, model discovery, token refresh) without cancelling or
+// repeating that work for another caller of the same job binding.
+describe('GeminiService ChatGPT text call: caller cancellation during setup', () => {
+  let dir: string;
+  let restore: (() => void) | undefined;
+  let faux: { state: { callCount: number }; setResponses: (r: unknown[]) => void };
+  let reply: () => unknown;
+  before(async () => {
+    dir = makeTempDir('chatgpt-setup-cancel');
+    const { importEsm } = await import('./esmImport');
+    const { swapProviderForTest } = await import('./piAiClient');
+    const pi = await importEsm<typeof import('@earendil-works/pi-ai')>('@earendil-works/pi-ai');
+    const registration = pi.fauxProvider({
+      api: 'openai-responses',
+      provider: 'chatgpt',
+      models: [{ id: 'gpt-plan-test' }],
+    });
+    faux = registration as unknown as typeof faux;
+    reply = () => ({ ...pi.fauxAssistantMessage('summary text'), rawStopReason: 'completed' });
+    restore = await swapProviderForTest(registration.provider);
+  });
+  after(() => {
+    restore?.();
+    rmDir(dir);
+  });
+
+  type Summarizer = { generateSummary: (p: string, t: string, s?: AbortSignal) => Promise<string> };
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => (resolve = r));
+    return { promise, resolve };
+  }
+
+  function serviceFor(auth: ChatGPTAuthLike): Summarizer {
+    return new GeminiService({
+      provider: 'chatgpt',
+      transcriptionProvider: 'gemini',
+      apiKey: 'gemini-key-present',
+      chatgptBinding: new ChatGPTBinding({ auth }),
+      dataPath: dir,
+      proModel: 'p',
+      flashModel: 'f',
+    }) as unknown as Summarizer;
+  }
+
+  // The settled outcome, or 'pending' when the call is still blocked.
+  async function settledWithin(promise: Promise<unknown>, ms = 200): Promise<unknown> {
+    const pending = Symbol('pending');
+    const outcome = await Promise.race([
+      promise.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      ),
+      new Promise((resolve) => setTimeout(() => resolve(pending), ms)),
+    ]);
+    return outcome === pending ? 'pending' : outcome;
+  }
+
+  function isAbortOutcome(outcome: unknown): boolean {
+    const error = (outcome as { error?: unknown }).error;
+    return error instanceof Error && error.name === 'AbortError';
+  }
+
+  async function until(condition: () => boolean): Promise<void> {
+    while (!condition()) await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  it('settles a cancelled caller blocked on model discovery; another caller shares it', async () => {
+    faux.setResponses([reply]);
+    const callsBefore = faux.state.callCount;
+    const models = deferred<Array<{ slug: string; display_name: string }>>();
+    let listCalls = 0;
+    const service = serviceFor({
+      getStatus: async () => ({ connected: true, planEnabled: true, profileId: 'p1' }),
+      openSession: async () => ({
+        profileId: 'p1',
+        getAccessToken: async () => 'tok',
+        listModels: () => {
+          listCalls++;
+          return models.promise;
+        },
+        isActive: () => true,
+      }),
+    });
+    const controller = new AbortController();
+    const cancelled = service.generateSummary('prompt', 'transcript', controller.signal);
+    const other = service.generateSummary('prompt', 'transcript');
+    await until(() => listCalls > 0);
+    controller.abort();
+
+    const outcome = await settledWithin(cancelled);
+    assert.ok(isAbortOutcome(outcome), `expected an AbortError, got ${String(outcome)}`);
+    assert.equal(faux.state.callCount, callsBefore);
+
+    models.resolve([{ slug: 'gpt-plan-test', display_name: 'Plan Test' }]);
+    assert.equal(await other, 'summary text');
+    assert.equal(listCalls, 1, 'model discovery is shared, not repeated');
+    assert.equal(faux.state.callCount, callsBefore + 1);
+  });
+
+  it('settles a cancelled caller blocked on the session bind; another caller shares it', async () => {
+    faux.setResponses([reply]);
+    const callsBefore = faux.state.callCount;
+    const opened = deferred<void>();
+    let openCalls = 0;
+    const service = serviceFor({
+      getStatus: async () => ({ connected: true, planEnabled: true, profileId: 'p1' }),
+      openSession: async () => {
+        openCalls++;
+        await opened.promise;
+        return {
+          profileId: 'p1',
+          getAccessToken: async () => 'tok',
+          listModels: async () => [{ slug: 'gpt-plan-test', display_name: 'Plan Test' }],
+          isActive: () => true,
+        };
+      },
+    });
+    const controller = new AbortController();
+    const cancelled = service.generateSummary('prompt', 'transcript', controller.signal);
+    const other = service.generateSummary('prompt', 'transcript');
+    await until(() => openCalls > 0);
+    controller.abort();
+
+    const outcome = await settledWithin(cancelled);
+    assert.ok(isAbortOutcome(outcome), `expected an AbortError, got ${String(outcome)}`);
+
+    opened.resolve();
+    assert.equal(await other, 'summary text');
+    assert.equal(openCalls, 1, 'the session bind is shared, not repeated');
+    assert.equal(faux.state.callCount, callsBefore + 1);
+  });
+
+  it('reports a cancel during the shared token refresh as the caller abort', async () => {
+    faux.setResponses([reply]);
+    const callsBefore = faux.state.callCount;
+    const refreshed = deferred<string>();
+    let tokenCalls = 0;
+    const service = serviceFor({
+      getStatus: async () => ({ connected: true, planEnabled: true, profileId: 'p1' }),
+      openSession: async () => ({
+        profileId: 'p1',
+        // Mirrors ChatGPTAuth.tokenFor: a shared refresh, and a cancelled
+        // waiter rejects with the store's own `cancelled` error.
+        getAccessToken: (signal?: AbortSignal) => {
+          tokenCalls++;
+          return new Promise<string>((resolve, reject) => {
+            signal?.addEventListener('abort', () =>
+              reject(new ChatGPTAuthError('cancelled', 'ChatGPT sign-in was cancelled.')),
+            );
+            void refreshed.promise.then(resolve);
+          });
+        },
+        listModels: async () => [{ slug: 'gpt-plan-test', display_name: 'Plan Test' }],
+        isActive: () => true,
+      }),
+    });
+    const controller = new AbortController();
+    const cancelled = service.generateSummary('prompt', 'transcript', controller.signal);
+    const other = service.generateSummary('prompt', 'transcript');
+    await until(() => tokenCalls === 2);
+    controller.abort();
+
+    const outcome = await settledWithin(cancelled);
+    assert.ok(isAbortOutcome(outcome), `expected an AbortError, got ${String(outcome)}`);
+
+    refreshed.resolve('tok');
+    assert.equal(await other, 'summary text');
+    assert.equal(faux.state.callCount, callsBefore + 1);
+  });
+
+  it('makes no model, token or text request for an already-aborted caller', async () => {
+    const callsBefore = faux.state.callCount;
+    let requests = 0;
+    const service = serviceFor({
+      getStatus: async () => ({ connected: true, planEnabled: true, profileId: 'p1' }),
+      openSession: async () => ({
+        profileId: 'p1',
+        getAccessToken: async () => {
+          requests++;
+          return 'tok';
+        },
+        listModels: async () => {
+          requests++;
+          return [{ slug: 'gpt-plan-test', display_name: 'Plan Test' }];
+        },
+        isActive: () => true,
+      }),
+    });
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(
+      service.generateSummary('prompt', 'transcript', controller.signal),
+      (error: unknown) => (error as Error).name === 'AbortError',
+    );
+    assert.equal(requests, 0);
+    assert.equal(faux.state.callCount, callsBefore);
   });
 });
 

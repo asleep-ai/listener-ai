@@ -55,6 +55,33 @@ function isAbort(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('Aborted', 'AbortError');
+}
+
+// Wait for a promise this binding shares across calls (the session bind, the
+// model discovery) on one caller's terms: that caller's abort rejects its own
+// wait with the signal's reason, while the shared work keeps running for the
+// other callers and stays cached.
+function untilAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortReason(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 // Auth-store failures after the binding exists. Everything that means "this
 // profile/grant is gone" becomes one actionable error; transient HTTP
 // failures keep the store's own message.
@@ -162,14 +189,16 @@ export class ChatGPTBinding {
    * In all three cases the result is `ChatGPTBindingError('signed_out_during_job')`
    * and the caller never sees any (partial or complete) text. Switching the
    * active account does not end the session: the job finishes on the grant
-   * it started with. A caller abort (`signal`) is passed through unchanged.
+   * it started with. A caller abort (`signal`) rejects with the signal's
+   * reason, including while the call still waits on the shared session bind,
+   * model discovery or token refresh.
    */
   async run<T>(
     signal: AbortSignal | undefined,
     call: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     signal?.throwIfAborted();
-    const session = await this.session();
+    const session = await untilAborted(this.session(), signal);
     const signedOut = (cause?: unknown) =>
       new ChatGPTBindingError('signed_out_during_job', SIGNED_OUT_DURING_JOB_MESSAGE, { cause });
     if (!session.isActive()) throw signedOut();
@@ -195,6 +224,9 @@ export class ChatGPTBinding {
     } catch (error) {
       if (error instanceof ChatGPTBindingError) throw error;
       if (ended || (!signal?.aborted && !session.isActive())) throw signedOut(error);
+      // The auth store reports a cancelled wait as its own `cancelled` error;
+      // the caller sees its own abort instead.
+      if (signal?.aborted) throw abortReason(signal);
       throw mapBoundAuthError(error);
     } finally {
       clearInterval(timer);
@@ -221,7 +253,7 @@ export class ChatGPTBinding {
 
   /** A bearer for the bound profile and grant. Fails once it signs out. */
   async accessToken(signal?: AbortSignal): Promise<string> {
-    const session = await this.session();
+    const session = await untilAborted(this.session(), signal);
     try {
       return await session.getAccessToken(signal);
     } catch (error) {
@@ -231,7 +263,7 @@ export class ChatGPTBinding {
 
   /** The account's listed models, in server order. */
   async listModels(signal?: AbortSignal): Promise<ChatGPTModel[]> {
-    const session = await this.session();
+    const session = await untilAborted(this.session(), signal);
     try {
       return await session.listModels(signal);
     } catch (error) {
@@ -241,9 +273,12 @@ export class ChatGPTBinding {
 
   /**
    * The account-discovered model, resolved once per binding. A configured
-   * slug the account does not list is an error, never a substitution.
+   * slug the account does not list is an error, never a substitution. The
+   * discovery is shared and runs under no caller's signal; `signal` only
+   * ends this caller's wait.
    */
-  model(): Promise<PiAiModel> {
+  model(signal?: AbortSignal): Promise<PiAiModel> {
+    if (signal?.aborted) return Promise.reject(abortReason(signal));
     if (!this.resolvedModel) {
       const resolving = (async () => {
         const listed = await this.listModels();
@@ -270,6 +305,6 @@ export class ChatGPTBinding {
       });
       this.resolvedModel = resolving;
     }
-    return this.resolvedModel;
+    return untilAborted(this.resolvedModel, signal);
   }
 }
