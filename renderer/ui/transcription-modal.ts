@@ -244,13 +244,23 @@ export async function requireAiAuth(): Promise<boolean> {
   const message = !configCheck.hasAiAuth
     ? 'Please configure your AI provider first'
     : configCheck.transcriptionProvider === 'soniox'
-      ? 'Transcription is set to Soniox, but no Soniox API key is saved. Add the key in Settings, or set Transcription back to "Follow AI provider".'
-      : 'The selected transcription backend has no credentials saved. Check the Transcription setting in Settings.';
+      ? 'Transcription is set to Soniox, but no Soniox API key is saved. Add the key in Settings > AI connection, or set the transcription service back to "Follow summary provider".'
+      : 'The selected transcription service has no credentials saved. Add them in Settings > AI connection, or choose another service under Transcription and summary.';
+  // Open Settings on the exact credential that is missing.
+  const missingProvider = !configCheck.hasAiAuth
+    ? configCheck.aiProvider
+    : configCheck.transcriptionProvider;
+  const focus =
+    missingProvider === 'soniox'
+      ? 'sonioxApiKey'
+      : missingProvider === 'codex'
+        ? 'loginCodexOAuth'
+        : 'geminiApiKey';
   if (document.getElementById('configModal')) {
     // The provider case is self-evident once Settings opens; a missing backend
     // key is not, so name it before the modal appears.
     if (configCheck.hasAiAuth) alert(message);
-    void showConfigModal();
+    void showConfigModal({ focus });
   } else {
     alert(message);
   }
