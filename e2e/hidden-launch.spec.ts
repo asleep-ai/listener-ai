@@ -1,9 +1,10 @@
 import { test, expect } from '@playwright/test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import type { ElectronApplication } from 'playwright';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, appWindow, launchApp } from './support/launch';
+import { ROOT } from './support/launch';
 import { scriptDialogs, scriptedDialogs, visibleWindows } from './support/dialogs';
+import { ReusableApp } from './support/reusable-app';
 
 // Proves the TEST-ONLY hidden launch (e2e/support/hidden-electron.cjs) takes
 // effect from the first window on: the preload ran before the app's main
@@ -12,20 +13,18 @@ import { scriptDialogs, scriptedDialogs, visibleWindows } from './support/dialog
 // closed, and (macOS) the test app left the Dock. The page still works.
 
 test('E2E launches keep the app hidden from creation while the page stays usable', async () => {
-  test.skip(process.env.LISTENER_E2E_SHOW === '1', 'hidden launch is turned off');
-  const dataDir = mkdtempSync(join(tmpdir(), 'listener-hidden-e2e-'));
-  const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version as string;
-  writeFileSync(
-    join(dataDir, 'config.json'),
-    JSON.stringify({
+  const owned = new ReusableApp('hidden-startup', { fresh: true });
+  let application: ElectronApplication | undefined;
+  try {
+    const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version as string;
+    owned.seed({
       aiProvider: 'gemini',
       geminiApiKey: 'e2e-unused',
       lastSeenVersion: version,
       googleDriveEnabled: false,
-    }),
-  );
-  const app = await launchApp({ ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: dataDir });
-  try {
+    });
+    const { app, page } = await owned.start();
+    application = app;
     // Recorded as the window is created, before anything could show it.
     await app.evaluate(({ BrowserWindow }) => {
       const seen = ((globalThis as any).__shownWhileHidden = [] as string[]);
@@ -34,17 +33,22 @@ test('E2E launches keep the app hidden from creation while the page stays usable
         w.on('focus', () => seen.push('focus'));
       }
     });
-    const page = await appWindow(app);
     await page.waitForLoadState('domcontentloaded');
     await scriptDialogs(app, page);
 
     const state = await app.evaluate(({ app: electronApp, BrowserWindow }) => {
       const windows = BrowserWindow.getAllWindows();
-      for (const w of windows) {
-        // What a tray click, dock click or notification click would do.
-        w.show();
-        w.showInactive();
-        w.focus();
+      // Deliberately exercise the guard without counting the probe as a
+      // product request. Product window requests otherwise fail the fixture.
+      (globalThis as any).__listenerAllowWindowGuardProbe = true;
+      try {
+        for (const w of windows) {
+          w.show();
+          w.showInactive();
+          w.focus();
+        }
+      } finally {
+        (globalThis as any).__listenerAllowWindowGuardProbe = false;
       }
       return {
         helper: (globalThis as any).__listenerHiddenE2E,
@@ -79,10 +83,15 @@ test('E2E launches keep the app hidden from creation while the page stays usable
     await expect(page.locator('#searchInput')).toHaveValue('hidden launch');
     expect(await scriptedDialogs(page)).toEqual([]);
   } finally {
-    // Soft, so a failure earlier in the test keeps its own error.
-    const visible = await visibleWindows(app).catch(() => []);
-    expect.soft(visible, 'app windows stayed hidden').toEqual([]);
-    await app.close();
-    rmSync(dataDir, { recursive: true, force: true });
+    try {
+      // Soft, so a failure earlier in the test keeps its own error.
+      if (application) {
+        const visible = await visibleWindows(application).catch(() => []);
+        expect.soft(visible, 'app windows stayed hidden').toEqual([]);
+      }
+      await owned.finish();
+    } finally {
+      await owned.close();
+    }
   }
 });

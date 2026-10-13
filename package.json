@@ -69,6 +69,8 @@
     "format:check": "oxfmt --check 'src/**/*.ts' 'renderer/**/*.ts' 'renderer/**/*.tsx' 'scripts/**/*.js' 'scripts/**/*.ts'",
     "test": "tsc && NODE_ENV=test node --test --require ./dist/test-setup.js \"dist/**/*.test.js\"",
     "test:e2e": "playwright test",
+    "test:e2e:harness": "node --test e2e/support/reusable-lifecycle.test.mts e2e/support/packaged-guards.test.mts",
+    "test:e2e:types": "tsc --ignoreConfig --noEmit --target es2022 --module esnext --moduleResolution bundler --strict --skipLibCheck e2e/support/reusable-app.ts e2e/support/launch-reporter.ts",
     "dist": "pnpm run build && electron-builder",
     "dist:mac": "pnpm run build && electron-builder --mac",
     "dist:mac-x64": "pnpm run build && electron-builder --mac --x64",

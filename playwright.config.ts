@@ -1,14 +1,41 @@
 import { defineConfig } from '@playwright/test';
+import { initializeLaunchLog } from './e2e/support/launch-reporter';
 
-// E2E config for the packaged-app smoke test (see e2e/). Kept separate from the
-// unit suite (node --test). Run with `pnpm run test:e2e` after an electron-builder
-// build has produced output under release/.
+initializeLaunchLog();
+
+// Warm groups reuse one owned process; startup contracts run as fresh cases.
 export default defineConfig({
   testDir: './e2e',
   timeout: 60_000,
-  // Headroom for auto-retrying assertions (e.g. toHaveURL) while the packaged
-  // app finishes loading its renderer on a slow headless CI runner.
   expect: { timeout: 15_000 },
   workers: 1,
-  reporter: 'list',
+  retries: 0,
+  maxFailures: 1,
+  reporter: [['list'], ['./e2e/support/launch-reporter.ts']],
+  projects: [
+    {
+      name: 'settings',
+      testMatch: 'settings.spec.ts',
+      grepInvert: /captures every Settings tab for visual review$/,
+    },
+    {
+      name: 'settings-shots',
+      testMatch: 'settings.spec.ts',
+      grep: /captures every Settings tab for visual review$/,
+    },
+    { name: 'cutoff', testMatch: 'transcript-cutoff.spec.ts' },
+    { name: 'reload', testMatch: 'transcription-reload.spec.ts' },
+    {
+      name: 'chatgpt',
+      testMatch: 'chatgpt-integration.spec.ts',
+      grepInvert: /startup .* opens without AI setup prompt/,
+    },
+    {
+      name: 'chatgpt-startup',
+      testMatch: 'chatgpt-integration.spec.ts',
+      grep: /startup .* opens without AI setup prompt/,
+    },
+    { name: 'hidden-startup', testMatch: 'hidden-launch.spec.ts' },
+    { name: 'package-smoke', testMatch: 'smoke.spec.ts' },
+  ],
 });

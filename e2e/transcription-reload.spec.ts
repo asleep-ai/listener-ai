@@ -1,19 +1,10 @@
 import { test, expect } from '@playwright/test';
-import type { ElectronApplication, Page } from 'playwright';
-import {
-  existsSync,
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import type { Dialog, ElectronApplication, Page } from 'playwright';
+import { existsSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, appWindow, launchApp } from './support/launch';
+import { ROOT } from './support/launch';
 import { answerConfirm, scriptDialogs, scriptedDialogs, visibleWindows } from './support/dialogs';
+import { ReusableApp } from './support/reusable-app';
 
 // Reload-safe transcription jobs, end to end in the real Electron app.
 //
@@ -31,6 +22,12 @@ import { answerConfirm, scriptDialogs, scriptedDialogs, visibleWindows } from '.
 const TS = '2026-10-12T05-00-00-000Z';
 const SLACK_WEBHOOK = 'https://hooks.slack.com/services/T000/B000/fixture';
 const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version as string;
+const shared = new ReusableApp('reload');
+const dismissNativeDialog = (dialog: Dialog) => void dialog.dismiss();
+
+test.afterAll(async () => {
+  await shared.close();
+});
 
 interface Fixture {
   dataDir: string;
@@ -39,21 +36,14 @@ interface Fixture {
 }
 
 function seed(config: Record<string, unknown> = {}): string {
-  const dataDir = mkdtempSync(join(tmpdir(), 'listener-reload-e2e-'));
-  mkdirSync(join(dataDir, 'recordings'));
-  mkdirSync(join(dataDir, 'metadata'));
-  writeFileSync(
-    join(dataDir, 'config.json'),
-    JSON.stringify({
-      aiProvider: 'gemini',
-      geminiApiKey: 'e2e-unused',
-      autoMode: false,
-      googleDriveEnabled: false,
-      lastSeenVersion: VERSION,
-      ...config,
-    }),
-  );
-  return dataDir;
+  return shared.seed({
+    aiProvider: 'gemini',
+    geminiApiKey: 'e2e-unused',
+    autoMode: false,
+    googleDriveEnabled: false,
+    lastSeenVersion: VERSION,
+    ...config,
+  });
 }
 
 function seedRecording(dataDir: string, name: string): string {
@@ -67,110 +57,159 @@ function seedRecording(dataDir: string, name: string): string {
 }
 
 async function launch(dataDir: string): Promise<Fixture> {
-  const app = await launchApp({ ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: dataDir });
-  await app.evaluate(({ session, shell }, root) => {
-    type Call = {
-      file: string;
-      aborted: boolean;
-      settled: boolean;
-      progress: (percent: number, message: string) => void;
-      resolve: (value: unknown) => void;
-    };
-    const fx = {
-      calls: [] as Call[],
-      notion: [] as Array<{ title: string; resolve: (value: unknown) => void }>,
-      slack: [] as Array<{
+  const { app, page } = await shared.start();
+  try {
+    await app.evaluate(({ session, shell }, root) => {
+      type Call = {
+        file: string;
+        aborted: boolean;
+        settled: boolean;
+        progress: (percent: number, message: string) => void;
+        resolve: (value: unknown) => void;
+        reject: (error: Error) => void;
+      };
+      const fx = {
+        calls: [] as Call[],
+        notion: [] as Array<{ title: string; resolve: (value: unknown) => void }>,
+        slack: [] as Array<{
+          title: string;
+          notionUrl?: string;
+          notionError?: string;
+          resolve: (value: unknown) => void;
+        }>,
+        opened: [] as string[],
+        blocked: [] as string[],
+        concat: 0,
+        holdSave: null as null | { path: string; reached: boolean; release: () => void },
+      };
+      (globalThis as Record<string, unknown>).__jobFixture = fx;
+      session.defaultSession.webRequest.onBeforeRequest(
+        { urls: ['http://*/*', 'https://*/*'] },
+        (details, callback) => {
+          fx.blocked.push(details.url);
+          callback({ cancel: true });
+        },
+      );
+      const load = (rel: string) => (process as any).mainModule.require(`${root}/dist/${rel}`);
+      load('geminiService.js').GeminiService.prototype.transcribeAudio = function (
+        file: string,
+        progress: Call['progress'],
+        _prompt: unknown,
+        _notes: unknown,
+        options?: { signal?: AbortSignal },
+      ) {
+        return new Promise((resolve, reject) => {
+          const call: Call = {
+            file,
+            aborted: false,
+            settled: false,
+            progress,
+            resolve,
+            reject: (error) => {
+              if (call.settled) return;
+              call.aborted = true;
+              call.settled = true;
+              reject(error);
+            },
+          };
+          fx.calls.push(call);
+          // Cleanup can cancel admission before metadata reads reach this fake
+          // provider. An already-aborted signal does not fire a new event.
+          if (options?.signal?.aborted) {
+            call.reject(new Error('Deferred fixture aborted'));
+            return;
+          }
+          options?.signal?.addEventListener(
+            'abort',
+            () => {
+              call.reject(new Error('Deferred fixture aborted'));
+            },
+            { once: true },
+          );
+          progress(25, 'Deferred fixture pending');
+        });
+      };
+      load('notionService.js').NotionService.prototype.createMeetingNote = function (
+        title: string,
+      ) {
+        return new Promise((resolve) => fx.notion.push({ title, resolve }));
+      };
+      load('slackService.js').SlackService.prototype.sendMeetingSummary = function (o: {
         title: string;
         notionUrl?: string;
         notionError?: string;
-        resolve: (value: unknown) => void;
-      }>,
-      opened: [] as string[],
-      blocked: [] as string[],
-      concat: 0,
-      holdSave: null as null | { path: string; reached: boolean; release: () => void },
-    };
-    (globalThis as Record<string, unknown>).__jobFixture = fx;
-    session.defaultSession.webRequest.onBeforeRequest(
-      { urls: ['http://*/*', 'https://*/*'] },
-      (details, callback) => {
-        fx.blocked.push(details.url);
-        callback({ cancel: true });
-      },
-    );
-    const load = (rel: string) => (process as any).mainModule.require(`${root}/dist/${rel}`);
-    load('geminiService.js').GeminiService.prototype.transcribeAudio = function (
-      file: string,
-      progress: Call['progress'],
-      _prompt: unknown,
-      _notes: unknown,
-      options?: { signal?: AbortSignal },
-    ) {
-      return new Promise((resolve, reject) => {
-        const call: Call = { file, aborted: false, settled: false, progress, resolve };
-        fx.calls.push(call);
-        options?.signal?.addEventListener(
-          'abort',
-          () => {
-            call.aborted = true;
-            call.settled = true;
-            reject(new Error('Deferred fixture aborted'));
-          },
-          { once: true },
+      }) {
+        return new Promise((resolve) =>
+          fx.slack.push({
+            title: o.title,
+            notionUrl: o.notionUrl,
+            notionError: o.notionError,
+            resolve,
+          }),
         );
-        progress(25, 'Deferred fixture pending');
-      });
-    };
-    load('notionService.js').NotionService.prototype.createMeetingNote = function (title: string) {
-      return new Promise((resolve) => fx.notion.push({ title, resolve }));
-    };
-    load('slackService.js').SlackService.prototype.sendMeetingSummary = function (o: {
-      title: string;
-      notionUrl?: string;
-      notionError?: string;
-    }) {
-      return new Promise((resolve) =>
-        fx.slack.push({
-          title: o.title,
-          notionUrl: o.notionUrl,
-          notionError: o.notionError,
-          resolve,
-        }),
-      );
-    };
-    load('services/ffmpegManager.js').FFmpegManager.prototype.ensureFFmpeg = async () =>
-      '/fixture/ffmpeg';
-    load('services/audioConcatService.js').concatAudioFiles = async (o: { outputPath: string }) => {
-      fx.concat++;
-      (process as any).mainModule.require('fs').writeFileSync(o.outputPath, Buffer.alloc(44));
-    };
-    const metadata = load('services/metadataService.js').metadataService;
-    const save = metadata.saveMetadata.bind(metadata);
-    metadata.saveMetadata = async (file: string, data: unknown) => {
-      const hold = fx.holdSave;
-      if (hold && file === hold.path) {
-        hold.reached = true;
-        await new Promise<void>((release) => {
-          hold.release = release;
-        });
-      }
-      return save(file, data);
-    };
-    const opener = async (url: string) => {
-      fx.opened.push(url);
-    };
-    shell.openExternal = opener;
-    if (shell.openExternal !== opener) throw new Error('shell.openExternal could not be replaced');
-  }, ROOT);
-  const page = await appWindow(app);
-  // Safety net only: scriptDialogs keeps dialogs from going native at all.
-  page.on('dialog', (dialog) => void dialog.dismiss());
-  await page.waitForLoadState('domcontentloaded');
-  await scriptDialogs(app, page);
-  return { dataDir, app, page };
+      };
+      load('services/ffmpegManager.js').FFmpegManager.prototype.ensureFFmpeg = async () =>
+        '/fixture/ffmpeg';
+      load('services/audioConcatService.js').concatAudioFiles = async (o: {
+        outputPath: string;
+      }) => {
+        fx.concat++;
+        (process as any).mainModule.require('fs').writeFileSync(o.outputPath, Buffer.alloc(44));
+      };
+      const metadata = load('services/metadataService.js').metadataService;
+      const save = metadata.saveMetadata.bind(metadata);
+      metadata.saveMetadata = async (file: string, data: unknown) => {
+        const hold = fx.holdSave;
+        if (hold && file === hold.path) {
+          hold.reached = true;
+          await new Promise<void>((release) => {
+            hold.release = release;
+          });
+        }
+        return save(file, data);
+      };
+      const opener = async (url: string) => {
+        fx.opened.push(url);
+      };
+      shell.openExternal = opener;
+      if (shell.openExternal !== opener)
+        throw new Error('shell.openExternal could not be replaced');
+    }, ROOT);
+    // Safety net only: scriptDialogs keeps dialogs from going native at all.
+    page.off('dialog', dismissNativeDialog);
+    page.on('dialog', dismissNativeDialog);
+    await page.waitForLoadState('domcontentloaded');
+    await scriptDialogs(app, page);
+    return { dataDir, app, page };
+  } catch (error) {
+    await shared.close();
+    throw error;
+  }
 }
 
-async function close(fx: Fixture | undefined, dataDir: string): Promise<void> {
+type CaseFailure = { error: unknown };
+
+async function close(
+  fx: Fixture | undefined,
+  dataDir: string,
+  failure?: CaseFailure,
+): Promise<void> {
+  try {
+    await closeFixture(fx, dataDir);
+  } catch (cleanupError) {
+    if (failure) {
+      const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
+      throw new AggregateError(
+        [failure.error, cleanupError],
+        `Test failure: ${describe(failure.error)}\nFixture cleanup failure: ${describe(cleanupError)}`,
+      );
+    }
+    throw cleanupError;
+  }
+}
+
+async function closeFixture(fx: Fixture | undefined, dataDir: string): Promise<void> {
+  expect(dataDir).toBe(shared.dataDir);
   if (fx) {
     const blocked = await fx.app
       .evaluate(() => (globalThis as any).__jobFixture.blocked as string[])
@@ -180,11 +219,46 @@ async function close(fx: Fixture | undefined, dataDir: string): Promise<void> {
       const visible = await visibleWindows(fx.app).catch(() => []);
       expect.soft(visible, 'app windows stayed hidden').toEqual([]);
     }
-    await fx.app.close();
+    await shared.finish(async () => {
+      // A failed assertion can leave deferred providers, exports or note locks
+      // pending. Release those fixtures before restoring their original hooks;
+      // never remove a running job from the registry to make cleanup appear done.
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const running = await fx.app.evaluate(({ app }) => {
+          const load = (rel: string) =>
+            (process as any).mainModule.require(`${app.getAppPath()}/dist/${rel}`);
+          const registry = load('transcriptionJobs.js').transcriptionJobs;
+          const fixture = (globalThis as any).__jobFixture;
+          fixture?.holdSave?.release();
+          (globalThis as any).__lockGate?.release();
+          fixture?.modalResolve?.({ success: false, cancelled: true });
+          fixture?.downloadResolve?.({ success: false, error: 'Fixture cleanup' });
+          for (const record of registry.jobs.values()) {
+            if (record.snapshot.status === 'running' && record.snapshot.cancellable)
+              record.controller.abort();
+          }
+          // Merge does not pass an AbortSignal to its provider, so aborting
+          // the registry controller alone cannot release its deferred call.
+          for (const pending of fixture?.calls ?? [])
+            pending.reject(new Error('Deferred fixture cleanup'));
+          // Notion may resolve into a deferred Slack call in the next turn, so
+          // repeat until the whole main-owned export chain has settled.
+          for (const pending of fixture?.notion ?? [])
+            pending.resolve({ url: 'https://www.notion.so/fixture-cleanup' });
+          for (const pending of fixture?.slack ?? [])
+            pending.resolve({ success: false, error: 'Fixture cleanup' });
+          return registry.list().jobs.some((job: { status: string }) => job.status === 'running');
+        });
+        if (!running) break;
+        if (Date.now() >= deadline)
+          throw new Error('Deferred transcription fixtures did not drain');
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      }
+    });
     // Renderer network stayed fixture-only; record what was refused, if anything.
     if (blocked.length) console.log('Blocked renderer requests:', blocked);
-  }
-  rmSync(dataDir, { recursive: true, force: true });
+  } else await shared.finish();
 }
 
 const stats = (app: ElectronApplication) =>
@@ -251,6 +325,7 @@ test('reload, list refresh and a duplicate request keep one provider run, then C
   const dataDir = seed();
   const audio = seedRecording(dataDir, 'Untitled_Meeting');
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -319,8 +394,11 @@ test('reload, list refresh and a duplicate request keep one provider run, then C
     expect(existsSync(audio)).toBe(true);
     const [cancelled] = (await jobsFromMain(page)).jobs;
     expect(cancelled.status).toBe('cancelled');
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -329,6 +407,7 @@ test('a job completed after reload saves one note and updates the row; regenerat
   const audio = seedRecording(dataDir, 'Untitled_Meeting');
   const renamed = join(dataDir, 'recordings', `Reload_QA_Title_${TS}.wav`);
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -367,8 +446,11 @@ test('a job completed after reload saves one note and updates the row; regenerat
     await expect.poll(() => page.evaluate(() => (window as any).__regen?.success)).toBe(true);
     expect(noteMetas(dataDir)).toEqual(notes);
     expect(readFileSync(join(notes[0], 'summary.md'), 'utf8')).toContain('Reload QA Title fixture');
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -377,6 +459,7 @@ test('Cancel from the renamed row after reload rolls the rename back before the 
   const audio = seedRecording(dataDir, 'Untitled_Meeting');
   const renamed = join(dataDir, 'recordings', `Alias_Title_${TS}.wav`);
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -404,8 +487,11 @@ test('Cancel from the renamed row after reload rolls the rename back before the 
     expect(existsSync(audio)).toBe(true);
     expect(existsSync(renamed)).toBe(false);
     expect(noteMetas(dataDir)).toHaveLength(0);
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -418,6 +504,7 @@ test('auto-mode Notion and Slack follow-ups survive reloads in every phase and r
   });
   const audio = seedRecording(dataDir, 'Untitled_Meeting');
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -487,8 +574,11 @@ test('auto-mode Notion and Slack follow-ups survive reloads in every phase and r
       notion: { status: 'succeeded', url: 'https://notion.invalid/page-1' },
       slack: { status: 'succeeded' },
     });
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -501,6 +591,7 @@ test('a Notion failure keeps the saved note and still reaches Slack with the err
   });
   const audio = seedRecording(dataDir, 'Planning');
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -545,8 +636,11 @@ test('a Notion failure keeps the saved note and still reaches Slack with the err
     const [job] = (await jobsFromMain(page)).jobs;
     expect(job.status).toBe('succeeded');
     expect(job.exports?.notion).toEqual({ status: 'failed', error: 'Fixture Notion down' });
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -555,6 +649,7 @@ test('a merge reconnects after reload, stays single-flight, and shows its note w
   const first = seedRecording(dataDir, 'Part_One');
   const second = seedRecording(dataDir, 'Part_Two');
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -594,8 +689,11 @@ test('a merge reconnects after reload, stays single-flight, and shows its note w
     expect(job.status).toBe('succeeded');
     expect(job.transcriptionPath).toBe(notes[0]);
     expect(job.sourcePaths).toEqual([first, second]);
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -654,6 +752,7 @@ test('with two row jobs and a merge pending, the modal only follows its own job 
   const partTwo = seedRecording(dataDir, 'Part_Two');
   seedSavedNote(dataDir, 'Saved_Note', 'Saved note summary only.');
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -704,8 +803,11 @@ test('with two row jobs and a merge pending, the modal only follows its own job 
     expect(noteMetas(dataDir)).toHaveLength(4);
     const s = await stats(app);
     expect(s.calls.filter((c) => c.aborted)).toHaveLength(0);
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -716,6 +818,7 @@ test('a merge modal reconnected after reload yields to a newly opened note while
   const partTwo = seedRecording(dataDir, 'Part_Two');
   seedSavedNote(dataDir, 'Saved_Note', 'Saved note summary only.');
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -755,8 +858,11 @@ test('a merge modal reconnected after reload yields to a newly opened note while
     await expect(page.getByRole('button', { name: 'Open transcript for Row_A' })).toBeVisible();
     await expectSavedNoteShown(page);
     expect(noteMetas(dataDir)).toHaveLength(3);
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -771,6 +877,7 @@ test('a recording renamed to a name another running job holds keeps both recordi
   writeFileSync(other, 'B-audio-bytes');
   const audio = seedRecording(dataDir, 'Untitled_Meeting');
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -796,8 +903,11 @@ test('a recording renamed to a name another running job holds keeps both recordi
     const notes = noteMetas(dataDir);
     expect(notes).toHaveLength(1);
     expect(JSON.parse(readFileSync(join(notes[0], 'meta.json'), 'utf8')).audioFile).toBe(audio);
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -806,6 +916,7 @@ test('a cancelled rename is reconciled in a rebuilt list even without a file-wat
   const audio = seedRecording(dataDir, 'Untitled_Meeting');
   const renamed = join(dataDir, 'recordings', `Alias_Title_${TS}.wav`);
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -840,8 +951,11 @@ test('a cancelled rename is reconciled in a rebuilt list even without a file-wat
     expect(noteMetas(dataDir)).toHaveLength(0);
     await expect(row(page, audio).locator('.transcribe-btn')).toBeVisible();
     await expect(row(page, renamed)).toHaveCount(0);
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -850,6 +964,7 @@ test('after a reload, Cancel appears while Regenerate waits on the note lock, an
   const audio = seedSavedNote(dataDir, 'Saved_Note', 'Saved note summary only.');
   const [folder] = noteMetas(dataDir);
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -900,9 +1015,12 @@ test('after a reload, Cancel appears while Regenerate waits on the note lock, an
     await expect(
       page.getByRole('button', { name: 'Open transcript for Saved_Note' }),
     ).toBeVisible();
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
     if (fx) await fx.app.evaluate(() => (globalThis as any).__lockGate?.release()).catch(() => {});
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -913,6 +1031,7 @@ test('the canonical row reconnects to a job started through a symlinked director
   symlinkSync(join(dataDir, 'recordings'), aliasDir);
   const alias = join(aliasDir, `Canonical_Record_${TS}.wav`);
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -927,8 +1046,11 @@ test('the canonical row reconnects to a job started through a symlinked director
     await expect.poll(async () => (await jobsFromMain(page)).jobs[0]?.status).toBe('cancelled');
     await expect(row(page, audio).locator('.transcribe-btn')).toBeVisible();
     expect((await stats(app)).calls).toHaveLength(1);
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -942,6 +1064,7 @@ test('a refused second merge leaves the modal the user closed alone while the fi
   const partTwo = seedRecording(dataDir, 'Part_Two');
   seedRecording(dataDir, 'Part_Three');
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -959,11 +1082,13 @@ test('a refused second merge leaves the modal the user closed alone while the fi
     await expect(page.locator('#transcriptionTitle')).toHaveText('Merging - First Merge');
     await page.locator('#transcriptionModal .close').click();
     await expect(page.locator('#transcriptionModal')).toBeHidden();
-    // The merged audio file appears in the recordings folder and the list is
-    // rebuilt for it. Wait for that row, and for the watcher's debounced
-    // refresh to settle, so the next menu is opened on rows that stay put.
+    // This case verifies modal ownership while the first merge stays pending.
+    // Refresh through the existing search Escape action so the case does not
+    // depend on OS watcher delivery; all merged-row assertions still apply.
+    await page.locator('#searchInput').press('Escape');
     await expect(page.locator('.recording-item', { hasText: 'First Merge' })).toBeVisible();
     await expect(page.locator('.recording-item')).toHaveCount(5);
+    // Allow any delayed watcher refresh to settle before opening the next menu.
     await page.waitForTimeout(650);
 
     await startMerge('Part_Two', partOne, 'Second Merge');
@@ -982,8 +1107,11 @@ test('a refused second merge leaves the modal the user closed alone while the fi
     expect((await stats(app)).calls).toHaveLength(1);
     await page.getByRole('button', { name: 'Open transcript for Saved_Note' }).click();
     await expectSavedNoteShown(page);
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -1018,6 +1146,7 @@ test('an imported file whose row is missing falls back to the modal, which yield
   const source = join(dataDir, 'Imported_Fallback.wav');
   writeFileSync(source, Buffer.alloc(44));
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -1057,8 +1186,11 @@ test('an imported file whose row is missing falls back to the modal, which yield
     await expectSavedNoteShown(page);
     expect(noteMetas(dataDir)).toHaveLength(2);
     expect((await stats(app)).calls).toHaveLength(1);
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -1067,6 +1199,7 @@ test('declining the import confirmation keeps the imported row and starts no tra
   const source = join(dataDir, 'Imported_Declined.wav');
   writeFileSync(source, Buffer.alloc(44));
   let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
   try {
     fx = await launch(dataDir);
     const { app, page } = fx;
@@ -1090,8 +1223,11 @@ test('declining the import confirmation keeps the imported row and starts no tra
     expect((await stats(app)).calls).toHaveLength(0);
     expect((await jobsFromMain(page)).jobs).toHaveLength(0);
     expect(noteMetas(dataDir)).toHaveLength(0);
+  } catch (error) {
+    failure = { error };
+    throw error;
   } finally {
-    await close(fx, dataDir);
+    await close(fx, dataDir, failure);
   }
 });
 
@@ -1107,6 +1243,7 @@ for (const afterCommit of [false, true]) {
     const alias = join(dataDir, 'recordings', `Promoted_Alias_${TS}.wav`);
     symlinkSync(audio, alias);
     let fx: Fixture | undefined;
+    let failure: CaseFailure | undefined;
     try {
       fx = await launch(dataDir);
       const { app, page } = fx;
@@ -1190,8 +1327,11 @@ for (const afterCommit of [false, true]) {
         notion: { status: 'succeeded', url: 'https://notion.invalid/promoted' },
         slack: { status: 'succeeded' },
       });
+    } catch (error) {
+      failure = { error };
+      throw error;
     } finally {
-      await close(fx, dataDir);
+      await close(fx, dataDir, failure);
     }
   });
 }
@@ -1234,6 +1374,7 @@ for (const outcome of [
     const source = join(dataDir, 'Imported_Fallback.wav');
     writeFileSync(source, Buffer.alloc(44));
     let fx: Fixture | undefined;
+    let failure: CaseFailure | undefined;
     try {
       fx = await launch(dataDir);
       const { app, page } = fx;
@@ -1285,8 +1426,11 @@ for (const outcome of [
       await expect(page.locator('#ffmpegDownloadOverlay')).toBeHidden();
       expect((await scriptedDialogs(page)).filter((dialog) => dialog.type === 'alert')).toEqual([]);
       expect(await app.evaluate(() => (globalThis as any).__jobFixture.modalRequests)).toBe(1);
+    } catch (error) {
+      failure = { error };
+      throw error;
     } finally {
-      await close(fx, dataDir);
+      await close(fx, dataDir, failure);
     }
   });
 }

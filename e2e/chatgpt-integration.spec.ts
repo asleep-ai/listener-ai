@@ -1,10 +1,11 @@
 import { test, expect } from '@playwright/test';
-import { _electron as electron, type ElectronApplication, type Page } from 'playwright';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { type ElectronApplication, type Page } from 'playwright';
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { backgroundArtifact } from './background-test';
+import { ReusableApp } from './support/reusable-app';
 
 // Offline UI evidence only: every connected account and model below is an
 // injected fake auth/service response. Real IPC and config gates stay intact.
@@ -12,6 +13,14 @@ import { backgroundArtifact } from './background-test';
 const evidenceDir =
   process.env.LISTENER_CHATGPT_EVIDENCE_DIR ?? join(tmpdir(), 'listener-chatgpt-gui');
 mkdirSync(evidenceDir, { recursive: true });
+
+function readFixtureHashes(path: string): { path: string; sha256: string }[] | undefined {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
 
 // Module-level preflight also protects the smoke test in this combined invocation.
 if (process.env.LISTENER_SMOKE_BUILD_DIR) backgroundArtifact(process.env.LISTENER_SMOKE_BUILD_DIR);
@@ -31,20 +40,30 @@ let page: Page;
 let dataDir: string;
 let preserved: Map<string, Buffer>;
 let nativeDialogs: string[];
+const sharedSession = new ReusableApp('chatgpt', { packaged: true });
+let selectedSession: ReusableApp | undefined;
+let freshSession = false;
+let disposeDialogObserver: (() => void) | undefined;
+let unsafeNativeState = false;
 
 async function launch(config: Record<string, unknown> = {}, rawConfig = false): Promise<void> {
   app = undefined!;
   page = undefined!;
+  dataDir = undefined!;
+  preserved = undefined!;
   nativeDialogs = [];
-  dataDir = mkdtempSync(join(tmpdir(), 'listener-chatgpt-e2e-'));
-  mkdirSync(join(dataDir, 'recordings'));
-  mkdirSync(join(dataDir, 'metadata'));
-  writeFileSync(
-    join(dataDir, 'config.json'),
-    JSON.stringify(
-      rawConfig ? config : { aiProvider: 'chatgpt', transcriptionProvider: 'auto', ...config },
-    ),
+  unsafeNativeState = false;
+  if (rawConfig !== test.info().title.startsWith('startup '))
+    throw new Error('Only the four startup cases may request a fresh ChatGPT app.');
+  freshSession = rawConfig;
+  selectedSession = rawConfig
+    ? new ReusableApp(`chatgpt-startup-${test.info().testId}`, { packaged: true, fresh: true })
+    : sharedSession;
+  dataDir = selectedSession.seed(
+    rawConfig ? config : { aiProvider: 'chatgpt', transcriptionProvider: 'auto', ...config },
   );
+  mkdirSync(join(dataDir, 'recordings'), { recursive: true });
+  mkdirSync(join(dataDir, 'metadata'), { recursive: true });
   const name = 'Synthetic_Meeting_2026-10-12T00-00-00-000Z';
   const audioPath = join(dataDir, 'recordings', `${name}.wav`);
   writeFileSync(audioPath, Buffer.alloc(44));
@@ -89,69 +108,49 @@ async function launch(config: Record<string, unknown> = {}, rawConfig = false): 
       2,
     ),
   );
-  const buildDir = process.env.LISTENER_SMOKE_BUILD_DIR;
-  if (!buildDir)
-    throw new Error(
-      'Set LISTENER_SMOKE_BUILD_DIR to an external packaged build; this suite never silently substitutes a development launch.',
-    );
-  const packaged = backgroundArtifact(buildDir);
-  const isolatedEnv = Object.fromEntries(
-    Object.entries(process.env).filter(
-      ([key]) => !/API_KEY|OAUTH|TOKEN|SECRET|PASSWORD/i.test(key),
-    ),
-  );
-  app = await electron.launch({
-    executablePath: packaged.executable,
-    args: ['--no-sandbox'],
-    cwd: dataDir,
-    env: {
-      ...isolatedEnv,
-      NODE_ENV: 'test',
-      LISTENER_DATA_PATH: dataDir,
-      LISTENER_TEST_MODE: '',
-      LISTENER_BACKGROUND_TEST: '1',
-    },
-  });
-  // Force Electron's lazy native export to finish before waiting for its window.
-  await app.evaluate(({ BrowserWindow }) => typeof BrowserWindow);
+  ({ app, page } = await selectedSession.start());
+  const observedApp = app;
   const observed = new WeakSet<Page>();
+  const handlers = new Map<Page, (dialog: import('playwright').Dialog) => void>();
   const observe = (window: Page) => {
     if (observed.has(window)) return;
     observed.add(window);
-    window.on('dialog', (dialog) => {
+    const handler = (dialog: import('playwright').Dialog) => {
       nativeDialogs.push(dialog.message());
-      void dialog.dismiss();
-    });
+      void dialog.dismiss().catch(() => {});
+    };
+    handlers.set(window, handler);
+    window.on('dialog', handler);
   };
   app.on('window', observe);
   app.windows().forEach(observe);
-  await expect
-    .poll(() => app.windows().find((window) => /renderer\/index\.html/.test(window.url())), {
-      timeout: 30_000,
-    })
-    .toBeTruthy();
-  page = app.windows().find((window) => /renderer\/index\.html/.test(window.url()))!;
-  await page.waitForLoadState('domcontentloaded');
+  disposeDialogObserver = () => {
+    observedApp.off('window', observe);
+    for (const [window, handler] of handlers) window.off('dialog', handler);
+  };
   await expect
     .poll(() => page.evaluate(() => !!(window as any).__listenerBackgroundTestDialogs))
     .toBe(true);
   await app.evaluate(({ BrowserWindow, app }) => {
     const proof = { pid: process.pid, events: [] as string[], snapshots: [] as unknown[] };
     (globalThis as any).__listenerBackgroundProof = proof;
+    const handlers: (() => void)[] = [];
     const observe = (window: Electron.BrowserWindow) => {
-      for (const event of ['show', 'focus', 'restore'] as const)
-        window.on(event, () => proof.events.push(`${window.id}:${event}`));
+      for (const event of ['show', 'focus', 'restore'] as const) {
+        const handler = () => proof.events.push(`${window.id}:${event}`);
+        window.on(event, handler);
+        handlers.push(() => window.off(event, handler));
+      }
     };
     BrowserWindow.getAllWindows().forEach(observe);
-    app.on('browser-window-created', (_event, window) => observe(window));
+    const onWindow = (_event: unknown, window: Electron.BrowserWindow) => observe(window);
+    app.on('browser-window-created', onWindow);
+    (globalThis as any).__listenerDisposeBackgroundProof = () => {
+      app.off('browser-window-created', onWindow);
+      handlers.forEach((dispose) => dispose());
+    };
   });
   await assertBackground();
-  // Deny permission requests, including accidental microphone access.
-  await app.evaluate(({ session }) => {
-    session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) =>
-      callback(false),
-    );
-  });
 }
 
 async function dialogMessages(): Promise<string[]> {
@@ -163,6 +162,7 @@ async function dialogMessages(): Promise<string[]> {
 }
 
 async function assertBackground(): Promise<void> {
+  await assertNativeSafety('background-observation');
   const shortcut = await page.evaluate(
     async () => (await window.electronAPI.getConfig()).globalShortcut,
   );
@@ -199,6 +199,25 @@ async function assertBackground(): Promise<void> {
     }
   }
   expect(nativeDialogs, 'Native dialog escaped the non-visible test observer').toEqual([]);
+}
+
+async function assertNativeSafety(stage: string): Promise<void> {
+  try {
+    await app.evaluate((_electron, stage) => {
+      const guards = (globalThis as any).__listenerPackagedGuards;
+      if (!guards) throw new Error('Packaged guard baseline is missing.');
+      guards.assertNativeState(stage);
+    }, stage);
+  } catch (error) {
+    unsafeNativeState = true;
+    try {
+      await selectedSession?.close();
+    } finally {
+      app = undefined!;
+      page = undefined!;
+    }
+    throw error;
+  }
 }
 
 async function fake(state: FakeState): Promise<void> {
@@ -324,23 +343,34 @@ async function settings(): Promise<void> {
 
 async function capture(name: string): Promise<void> {
   await assertBackground();
+  await assertNativeSafety('before-screenshot');
   await page.screenshot({
     path: join(evidenceDir, `${name}.png`),
     fullPage: true,
     animations: 'disabled',
   });
+  await assertNativeSafety('after-screenshot');
 }
 
 test.afterEach(async () => {
+  if (unsafeNativeState) {
+    disposeDialogObserver?.();
+    disposeDialogObserver = undefined;
+    const owned = selectedSession;
+    selectedSession = undefined;
+    await owned?.close();
+    preserved = undefined!;
+    return;
+  }
   try {
     if (app && page) await assertBackground();
-    if (preserved)
+    if (preserved && app)
       for (const [path, bytes] of preserved)
         expect(
           readFileSync(path).equals(bytes),
           `Existing synthetic fixture changed: ${path}`,
         ).toBe(true);
-    if (preserved)
+    if (preserved && app)
       writeFileSync(
         join(dataDir, 'fixture-after.json'),
         JSON.stringify(
@@ -353,14 +383,70 @@ test.afterEach(async () => {
         ),
       );
   } finally {
-    if (app) await app.close();
-    // Retain synthetic fixtures beside evidence for independently inspectable byte proof.
-    if (dataDir)
-      writeFileSync(
-        join(evidenceDir, `${test.info().testId.replace(/[^a-zA-Z0-9]/g, '_')}-fixture.txt`),
-        dataDir,
-      );
+    try {
+      // Archive only this case's synthetic fixture before the reusable root is reset.
+      if (dataDir && preserved && app) {
+        const archive = join(
+          evidenceDir,
+          `${test.info().testId.replace(/[^a-zA-Z0-9]/g, '_')}-fixture`,
+        );
+        for (const path of [...preserved.keys(), join(dataDir, 'config.json')]) {
+          const destination = join(archive, relative(dataDir, path));
+          mkdirSync(dirname(destination), { recursive: true });
+          cpSync(path, destination);
+        }
+        for (const name of ['fixture-before.json', 'fixture-after.json']) {
+          const path = join(dataDir, name);
+          const hashes = readFixtureHashes(path);
+          if (hashes) {
+            writeFileSync(
+              join(archive, name),
+              JSON.stringify(
+                hashes.map((entry) => ({
+                  ...entry,
+                  originalPath: entry.path,
+                  path: join(archive, relative(dataDir, entry.path)),
+                })),
+                null,
+                2,
+              ),
+            );
+          }
+        }
+        writeFileSync(
+          join(evidenceDir, `${test.info().testId.replace(/[^a-zA-Z0-9]/g, '_')}-fixture.txt`),
+          archive,
+        );
+      }
+    } finally {
+      disposeDialogObserver?.();
+      disposeDialogObserver = undefined;
+      const session = selectedSession;
+      selectedSession = undefined;
+      if (session && unsafeNativeState) await session.close();
+      else if (session) {
+        try {
+          await session.finish(async () => {
+            if (!app || !page) return;
+            await app.evaluate(() => {
+              (globalThis as any).__listenerDelayedPreflight?.release();
+              (globalThis as any).__listenerDisposeBackgroundProof?.();
+            });
+            await page.evaluate(() => window.electronAPI.cancelChatGPTLogin());
+          });
+        } finally {
+          if (freshSession) await session.close();
+        }
+      }
+      app = undefined!;
+      page = undefined!;
+      preserved = undefined!;
+    }
   }
+});
+
+test.afterAll(async () => {
+  await sharedSession.close();
 });
 
 test('signed-out card, text-only settings and explicit API billing preserve existing data', async () => {
@@ -433,8 +519,15 @@ test('legacy Codex config explains migration and requires an explicit STT choice
     aiProvider: 'codex',
     transcriptionProvider: 'codex',
     codexModel: 'synthetic-legacy-model',
+    codexTranscriptionModel: 'gpt-4o-transcribe',
+    codexTranscriptionMigratedToDiarize: false,
+    summaryPromptMigratedToStructured: false,
     codexOAuth: { access: 'synthetic-not-a-token' },
   });
+  const migrated = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8'));
+  expect(migrated.codexTranscriptionModel).toBeUndefined();
+  expect(migrated.codexTranscriptionMigratedToDiarize).toBe(true);
+  expect(migrated.summaryPromptMigratedToStructured).toBe(true);
   await settings();
   await expect(page.locator('#legacyCodexNotice')).toBeVisible();
   await expect(page.locator('#legacyCodexNotice')).toContainText(
@@ -595,7 +688,9 @@ test('injected fake profile switch reloads models and exposes keyboard labels', 
   await fake('plan');
   await settings();
   const account = page.getByRole('combobox', { name: 'Account or workspace', exact: true });
-  const model = page.getByRole('combobox', { name: 'Summary model optional', exact: true });
+  const model = page
+    .getByRole('group', { name: 'ChatGPT', exact: true })
+    .getByRole('combobox', { name: 'Summary model optional', exact: true });
   await expect(model).toBeEnabled();
   await account.focus();
   await expect(account).toBeFocused();

@@ -1,26 +1,23 @@
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication } from 'playwright';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { appWindow, launchApp } from './support/launch';
+import { ReusableApp } from './support/reusable-app';
 import { scriptDialogs, scriptedDialogs, visibleWindows } from './support/dialogs';
 
+const cutoffApp = new ReusableApp('cutoff');
+test.afterAll(async () => cutoffApp.close());
+
 test('dragging in the saved transcript previews a reversible tail cutoff', async () => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'listener-cutoff-e2e-'));
+  const dataDir = cutoffApp.seed({ aiProvider: 'gemini', geminiApiKey: 'e2e-unused' });
   const transcript = [
     'Speaker 1: We agreed to ship the draft on Friday.',
     'Speaker 2: The budget remains unchanged.',
     'Speaker 1: Unrelated conversation after the meeting ended.',
   ].join('\n');
   const audioPath = join(dataDir, 'recordings', 'Cutoff_QA_2026-09-29T02-43-29-413Z.wav');
-  mkdirSync(join(dataDir, 'recordings'));
-  mkdirSync(join(dataDir, 'metadata'));
-  // Skip the first-run native credentials prompt so recording-list startup is deterministic.
-  writeFileSync(
-    join(dataDir, 'config.json'),
-    JSON.stringify({ aiProvider: 'gemini', geminiApiKey: 'e2e-unused' }),
-  );
+  mkdirSync(join(dataDir, 'recordings'), { recursive: true });
+  mkdirSync(join(dataDir, 'metadata'), { recursive: true });
   writeFileSync(audioPath, Buffer.alloc(44));
 
   // The compiled writer produces the same saved-note layout the app reads.
@@ -52,15 +49,9 @@ test('dragging in the saved transcript previews a reversible tail cutoff', async
   const originalMeta = readFileSync(metaPath, 'utf8');
   const originalTranscript = readFileSync(transcriptPath, 'utf8');
 
-  const electronApp = await launchApp({
-    ...process.env,
-    NODE_ENV: 'test',
-    LISTENER_DATA_PATH: dataDir,
-  });
+  const { app: electronApp, page: window } = await cutoffApp.start();
   try {
-    const window = await appWindow(electronApp);
     // Safety net only: scriptDialogs keeps dialogs from going native at all.
-    window.on('dialog', (dialog) => void dialog.dismiss());
     await window.waitForLoadState('domcontentloaded');
     await scriptDialogs(electronApp, window);
     await window.getByRole('button', { name: 'Open transcript for Cutoff_QA' }).click();
@@ -88,21 +79,16 @@ test('dragging in the saved transcript previews a reversible tail cutoff', async
     expect(await scriptedDialogs(window)).toEqual([]);
   } finally {
     await expectHidden(electronApp);
-    await electronApp.close();
-    rmSync(dataDir, { recursive: true, force: true });
+    await cutoffApp.finish();
   }
 });
 
 test('reopened cut report uses its new title and does not revive old sidecar fields', async () => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'listener-cutoff-reopen-'));
+  const dataDir = cutoffApp.seed({ aiProvider: 'gemini', geminiApiKey: 'e2e-unused' });
   const transcript = 'Speaker 1: We agreed to ship Friday.\nSpeaker 2: Unrelated tail topic.';
   const audioPath = join(dataDir, 'recordings', 'Old_Title_2026-09-29T02-43-29-413Z.wav');
-  mkdirSync(join(dataDir, 'recordings'));
-  mkdirSync(join(dataDir, 'metadata'));
-  writeFileSync(
-    join(dataDir, 'config.json'),
-    JSON.stringify({ aiProvider: 'gemini', geminiApiKey: 'e2e-unused' }),
-  );
+  mkdirSync(join(dataDir, 'recordings'), { recursive: true });
+  mkdirSync(join(dataDir, 'metadata'), { recursive: true });
   writeFileSync(audioPath, Buffer.alloc(44));
   const { saveTranscription } =
     require('../dist/outputService.js') as typeof import('../src/outputService');
@@ -141,15 +127,9 @@ test('reopened cut report uses its new title and does not revive old sidecar fie
     }),
   );
 
-  const electronApp = await launchApp({
-    ...process.env,
-    NODE_ENV: 'test',
-    LISTENER_DATA_PATH: dataDir,
-  });
+  const { app: electronApp, page: window } = await cutoffApp.start();
   try {
-    const window = await appWindow(electronApp);
     // Safety net only: scriptDialogs keeps dialogs from going native at all.
-    window.on('dialog', (dialog) => void dialog.dismiss());
     await window.waitForLoadState('domcontentloaded');
     await scriptDialogs(electronApp, window);
     await window.getByRole('button', { name: 'Open transcript for Old_Title' }).click();
@@ -162,14 +142,12 @@ test('reopened cut report uses its new title and does not revive old sidecar fie
     expect(await scriptedDialogs(window)).toEqual([]);
   } finally {
     await expectHidden(electronApp);
-    await electronApp.close();
-    rmSync(dataDir, { recursive: true, force: true });
+    await cutoffApp.finish();
   }
 });
 
 // Soft, so a failure earlier in the test keeps its own error.
 async function expectHidden(app: ElectronApplication): Promise<void> {
-  if (process.env.LISTENER_E2E_SHOW === '1') return;
   const visible = await visibleWindows(app).catch(() => []);
   expect.soft(visible, 'app windows stayed hidden').toEqual([]);
 }

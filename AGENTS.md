@@ -2,6 +2,8 @@
 
 ## Background Testing
 
+- The behavioral Electron suites reuse one owned main process and hidden window per compatible group; startup and packaged-boot contracts remain fresh. See `docs/electron-test-reuse.md`. Run `test:e2e:harness` and `test:e2e:types` before native execution; retain the per-case reset and launch-count proofs.
+
 - Prefer background tests that let the user continue other work: unit tests, CLI/API checks, and hidden Electron automation. Running a command as a background process alone does not prevent its app from taking desktop focus.
 - For Electron automation, set `NODE_ENV=test`, `LISTENER_BACKGROUND_TEST=1`, and an isolated temporary `LISTENER_DATA_PATH`. Use the preflight checks in `e2e/background-test.ts` for the development or packaged build; rebuild unsupported artifacts before launching them.
 - Background tests must not show, focus, restore, or activate app windows, send desktop keyboard/mouse input, register global shortcuts, or display native notifications, dialogs, or permission prompts. Use hidden-window automation and test dialog instrumentation instead.
