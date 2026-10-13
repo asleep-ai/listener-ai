@@ -1,6 +1,6 @@
 import { extractFile } from '@electron/asar';
 import { findLatestBuild, parseElectronApp } from 'electron-playwright-helpers';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 
 function assertBackgroundMarkers(main: string, preload: string): void {
@@ -33,7 +33,7 @@ export function backgroundArtifact(buildDir: string) {
     extractFile(archive, packaged.packageJson.main).toString('utf8'),
     extractFile(archive, 'dist/preload.js').toString('utf8'),
   );
-  return packaged;
+  return { ...packaged, verifiedArchive: realpathSync(archive) };
 }
 
 export function assertBackgroundDevBuild(): void {

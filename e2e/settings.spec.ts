@@ -1,54 +1,13 @@
 import { test, expect } from '@playwright/test';
-import { type ElectronApplication, type Page, _electron as electron } from 'playwright';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import type { Page } from 'playwright';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { assertBackgroundDevBuild } from './background-test';
+import { ReusableApp } from './support/reusable-app';
 
-// Drives the Settings window against an isolated data dir and HOME, so neither
-// the developer's config.json nor a saved ChatGPT sign-in leaks in. Runs in
-// background-test mode (see AGENTS.md, Background Testing): hidden, unfocused
-// windows with no global shortcut, tray, notifications or native dialogs. Set
-// LISTENER_E2E_SHOTS=<dir> to also save a screenshot of every Settings tab.
-
-async function appWindow(electronApp: ElectronApplication): Promise<Page> {
-  let page: Page | undefined;
-  await expect
-    .poll(
-      () => {
-        page = electronApp.windows().find((w) => w.url().endsWith('/renderer/index.html'));
-        return page;
-      },
-      { timeout: 30_000, message: 'The application window did not open' },
-    )
-    .toBeTruthy();
-  return page!;
-}
-
-// Every provider/auth override the app reads from the environment. An empty
-// value reads as unset, so a developer shell's real keys, retired Codex
-// variables or forced provider cannot change what these tests see.
-const CLEARED_ENV = Object.fromEntries(
-  [
-    'LISTENER_AI_PROVIDER',
-    'LISTENER_CODEX_AUTH_PATH',
-    'GEMINI_API_KEY',
-    'OPENAI_API_KEY',
-    'SONIOX_API_KEY',
-    'NOTION_API_KEY',
-    'NOTION_DATABASE_ID',
-    'SLACK_WEBHOOK_URL',
-    'CODEX_OAUTH_ACCESS_TOKEN',
-    'CODEX_OAUTH_REFRESH_TOKEN',
-    'CODEX_OAUTH_EXPIRES',
-    'OPENAI_CODEX_ACCESS_TOKEN',
-    'OPENAI_CODEX_REFRESH_TOKEN',
-    'OPENAI_CODEX_EXPIRES',
-    'GOOGLE_OAUTH_ACCESS_TOKEN',
-    'GOOGLE_OAUTH_REFRESH_TOKEN',
-    'GOOGLE_OAUTH_EXPIRES',
-  ].map((name) => [name, '']),
-);
+// Settings cases share one hidden app with isolated fixture data and credentials.
+// LISTENER_E2E_SHOTS=<dir> opts into a separate fresh app for visual evidence.
+const settingsApp = new ReusableApp('settings');
+test.afterAll(async () => settingsApp.close());
 
 type Session = {
   window: Page;
@@ -59,51 +18,23 @@ type Session = {
 async function withSettings(
   config: Record<string, unknown>,
   run: (session: Session) => Promise<void>,
+  fixture = settingsApp,
 ): Promise<void> {
-  const dataDir = mkdtempSync(join(tmpdir(), 'listener-settings-e2e-'));
+  const dataDir = fixture.seed(config);
   const configPath = join(dataDir, 'config.json');
-  writeFileSync(configPath, JSON.stringify(config));
-  // Refuse to launch a dev build that lacks background-test support.
-  assertBackgroundDevBuild();
-  const electronApp = await electron.launch({
-    executablePath: require('electron') as string,
-    // Background launch: transparent, unfocused window (see support file).
-    args: [
-      '-r',
-      join(__dirname, 'support', 'background-window.cjs'),
-      '.',
-      '--disable-gpu',
-      '--no-sandbox',
-    ],
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      LISTENER_BACKGROUND_TEST: '1',
-      LISTENER_DATA_PATH: dataDir,
-      HOME: dataDir,
-      ...CLEARED_ENV,
-    },
-  });
+  const { app: electronApp, page: window } = await fixture.start();
   try {
-    const window = await appWindow(electronApp);
-    // The background preload must have applied, or this run took focus.
-    // Window opacity exists only on macOS and Windows; Linux always reports 1.
     const windows = await electronApp.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows().map((w) => ({
+        visible: w.isVisible(),
         focused: w.isFocused(),
         devTools: w.webContents.isDevToolsOpened(),
-        transparent: process.platform === 'linux' || w.getOpacity() === 0,
       })),
     );
-    expect(windows.length).toBeGreaterThan(0);
+    expect(windows).toHaveLength(1);
     for (const state of windows) {
-      expect(state).toEqual({ focused: false, devTools: false, transparent: true });
+      expect(state).toEqual({ visible: false, focused: false, devTools: false });
     }
-    // Background-test mode records alert/confirm in the page instead of
-    // showing them; this is a fallback should a native dialog still appear.
-    // A dialog can close with the app mid-dismiss; that is not a test failure.
-    window.on('dialog', (dialog) => void dialog.dismiss().catch(() => {}));
     await window.waitForLoadState('domcontentloaded');
     await expect(window.locator('#loadingIndicator')).toBeHidden();
     await run({
@@ -112,8 +43,7 @@ async function withSettings(
       readConfig: () => JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>,
     });
   } finally {
-    await electronApp.close();
-    rmSync(dataDir, { recursive: true, force: true });
+    await fixture.finish();
   }
 }
 
@@ -141,7 +71,9 @@ test('credential sections follow every provider that uses them', async () => {
       // transcription service.
       await expect(gemini).toBeVisible();
       await expect(chatgpt).toBeVisible();
-      await expect(window.locator('#chatgptUsage')).toHaveText('Used for summaries and Ask Listener.');
+      await expect(window.locator('#chatgptUsage')).toHaveText(
+        'Used for summaries and Ask Listener.',
+      );
       await expect(window.locator('#geminiUsage')).toHaveText(
         'Used for transcribing recordings and live captions.',
       );
@@ -361,26 +293,32 @@ test('missing credentials point to the field instead of an alert', async () => {
 const shotsDir = process.env.LISTENER_E2E_SHOTS;
 test('captures every Settings tab for visual review', async () => {
   test.skip(!shotsDir, 'LISTENER_E2E_SHOTS is not set');
-  await withSettings(
-    {
-      aiProvider: 'chatgpt',
-      transcriptionProvider: 'gemini',
-      liveSttProvider: 'soniox',
-      knownWords: ['Listener', 'Orca'],
-    },
-    async ({ window }) => {
-      await window.emulateMedia({ reducedMotion: 'reduce' });
-      await window.setViewportSize({ width: 1100, height: 900 });
-      await openSettings(window);
-      for (const tab of ['ai', 'transcription', 'recording', 'integrations', 'advanced']) {
-        await window.locator(`#config-tab-${tab}`).click();
-        await window
-          .locator('.config-modal')
-          .screenshot({ path: join(shotsDir!, `settings-${tab}.png`) });
-      }
-      await window.setViewportSize({ width: 420, height: 760 });
-      await window.locator('#config-tab-ai').click();
-      await window.screenshot({ path: join(shotsDir!, 'settings-narrow.png') });
-    },
-  );
+  const screenshotApp = new ReusableApp('settings-shots', { fresh: true });
+  try {
+    await withSettings(
+      {
+        aiProvider: 'chatgpt',
+        transcriptionProvider: 'gemini',
+        liveSttProvider: 'soniox',
+        knownWords: ['Listener', 'Orca'],
+      },
+      async ({ window }) => {
+        await window.emulateMedia({ reducedMotion: 'reduce' });
+        await window.setViewportSize({ width: 1100, height: 900 });
+        await openSettings(window);
+        for (const tab of ['ai', 'transcription', 'recording', 'integrations', 'advanced']) {
+          await window.locator(`#config-tab-${tab}`).click();
+          await window
+            .locator('.config-modal')
+            .screenshot({ path: join(shotsDir!, `settings-${tab}.png`) });
+        }
+        await window.setViewportSize({ width: 420, height: 760 });
+        await window.locator('#config-tab-ai').click();
+        await window.screenshot({ path: join(shotsDir!, 'settings-narrow.png') });
+      },
+      screenshotApp,
+    );
+  } finally {
+    await screenshotApp.close();
+  }
 });

@@ -1,79 +1,78 @@
-// TEST-ONLY. Keeps unpackaged Electron E2E runs in the background.
-//
-// e2e/support/launch.ts loads this file into the Electron main process with
-// `-r` ahead of the app's own entry (`.`), so it runs before dist/main.js
-// requires `electron`. NODE_OPTIONS is not an option here: Playwright removes
-// it from the environment it launches Electron with.
-//
-// - Windows are created hidden (`show: false`), skip the taskbar, and keep
-//   timers and animation frames running (`backgroundThrottling: false`).
-// - show / showInactive / focus / moveTop on app windows do nothing, so no
-//   product code path (tray, dock click, notification click) can raise one.
-// - DevTools, which unpackaged launches open in their own window, stay closed.
-// - On macOS the test app leaves the Dock and Cmd-Tab.
-//
-// Product code and the packaged smoke test (e2e/smoke.spec.ts) do not use
-// this; Playwright drives the hidden pages over CDP as usual.
-
+// TEST-ONLY preload, installed before the development app entry.
+// Native constructors remain native so enumeration cannot pass vacuously.
 'use strict';
-
-const Module = require('module');
+if (process.env.NODE_ENV !== 'test' || process.env.LISTENER_BACKGROUND_TEST !== '1') {
+  throw new Error('Hidden Electron preload requires explicit background test mode.');
+}
+const Module = require('node:module');
 const electron = require('electron');
-
 const { app } = electron;
-
-// Named BrowserWindow on purpose: Electron's BrowserWindow.getAllWindows()
-// (used by the app and the tests) only lists windows whose constructor is
-// named BrowserWindow.
-const HiddenBrowserWindow = class BrowserWindow extends electron.BrowserWindow {
-  constructor(options = {}) {
-    super({
+const effects = [];
+globalThis.__listenerTestNativeEffects = effects;
+const forbidden =
+  (name) =>
+  (..._args) => {
+    effects.push(name);
+    throw new Error(`Native effect forbidden in background tests: ${name}`);
+  };
+for (const name of ['openExternal', 'openPath', 'showItemInFolder'])
+  electron.shell[name] = forbidden(`shell.${name}`);
+for (const name of [
+  'showOpenDialog',
+  'showOpenDialogSync',
+  'showSaveDialog',
+  'showSaveDialogSync',
+  'showMessageBox',
+  'showMessageBoxSync',
+  'showErrorBox',
+])
+  electron.dialog[name] = forbidden(`dialog.${name}`);
+electron.systemPreferences.askForMediaAccess = forbidden('media permission');
+globalThis.fetch = forbidden('unmocked provider fetch');
+if (process.platform === 'darwin') app.setActivationPolicy('accessory');
+app.whenReady().then(() => {
+  electron.session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => {
+    effects.push(`permission:${permission}`);
+    callback(false);
+  });
+  electron.session.defaultSession.setPermissionCheckHandler(() => false);
+  if (process.platform === 'darwin') app.dock?.hide();
+});
+const HiddenBrowserWindow = new Proxy(electron.BrowserWindow, {
+  construct(target, [options = {}]) {
+    if (options.show !== false || options.focusable !== false)
+      effects.push('unsafe native window creation options');
+    const window = new target({
       ...options,
       show: false,
+      focusable: false,
       skipTaskbar: true,
-      webPreferences: { ...(options.webPreferences || {}), backgroundThrottling: false },
+      webPreferences: { ...options.webPreferences, backgroundThrottling: false },
     });
-    this.hiddenForE2E = true;
-  }
-
-  show() {}
-
-  showInactive() {}
-
-  focus() {}
-
-  moveTop() {}
-};
-
-// What `require('electron')` returns to the app: the real module, except for
-// BrowserWindow. Getters keep every other export live.
-const hiddenElectron = {};
-for (const key of Object.getOwnPropertyNames(electron)) {
-  Object.defineProperty(hiddenElectron, key, {
-    enumerable: true,
-    get: () => (key === 'BrowserWindow' ? HiddenBrowserWindow : electron[key]),
-  });
-}
-
+    window.hiddenForE2E = true;
+    for (const name of ['show', 'showInactive', 'focus', 'moveTop', 'restore'])
+      window[name] = () => {
+        if (!globalThis.__listenerAllowWindowGuardProbe) effects.push(`window.${name}`);
+      };
+    window.webContents.openDevTools = () => {};
+    return window;
+  },
+  get(target, key) {
+    const value = Reflect.get(target, key, target);
+    return typeof value === 'function' ? value.bind(target) : value;
+  },
+});
+const hiddenElectron = new Proxy(electron, {
+  get: (target, key) => (key === 'BrowserWindow' ? HiddenBrowserWindow : target[key]),
+});
 const originalLoad = Module._load;
 Module._load = function load(request, parent, isMain) {
-  if (request === 'electron') return hiddenElectron;
-  return originalLoad.call(this, request, parent, isMain);
+  return request === 'electron' ? hiddenElectron : originalLoad.call(this, request, parent, isMain);
 };
-
 app.on('web-contents-created', (_event, contents) => {
   contents.openDevTools = () => {};
 });
-
-if (process.platform === 'darwin') {
-  app.whenReady().then(() => {
-    app.setActivationPolicy('accessory');
-    app.dock?.hide();
-  });
-}
-
-// Lets a test confirm the helper ran before the app's main module was loaded.
-const mainModule = require('path').join('dist', 'main.js');
+const mainModule = require('node:path').join('dist', 'main.js');
 globalThis.__listenerHiddenE2E = {
   loadedBeforeMain: !Object.keys(require.cache).some((file) => file.endsWith(mainModule)),
 };
