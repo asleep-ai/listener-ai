@@ -23,7 +23,7 @@ function fixture(options: Record<string, unknown> = {}) {
   const context = createContext({
     process: {
       env: { NODE_ENV: 'test', LISTENER_BACKGROUND_TEST: '1' },
-      platform: 'darwin',
+      platform: options.platform ?? 'darwin',
       versions: { electron: '43.3.0' },
       pid: 12345,
     },
@@ -199,6 +199,49 @@ test('missing mandatory capture guard rejects before mutation', () => {
   assert.throws(() => f.install(), /Required packaged guard surface is missing/);
   assert.equal(f.state.electron.shell.openExternal, open);
   assert.equal(runInContext('globalThis.__listenerTestNativeEffects', f.context), undefined);
+});
+
+for (const platform of ['linux', 'win32']) {
+  test(`${platform} without macOS permission API retains mandatory blockers and permission denial`, () => {
+    const f = fixture({ platform });
+    delete f.state.electron.systemPreferences.askForMediaAccess;
+    f.install();
+    runInContext('__listenerPackagedGuards.assertIntact()', f.context);
+    for (const attempt of [
+      () => f.state.electron.shell.openExternal('https://example.com'),
+      () => f.state.electron.desktopCapturer.getSources({ types: ['screen'] }),
+      () => new f.state.SystemAudioService().start(),
+      () => f.state.transports['node:https'].request('https://example.com'),
+      () => f.state.windows[0].show(),
+    ]) {
+      assert.throws(attempt, /Native effect forbidden/);
+    }
+    let permission: unknown;
+    f.state.session.request({}, 'media', (allowed: unknown) => {
+      permission = allowed;
+    });
+    assert.equal(permission, false);
+    assert.equal(f.state.session.check(), false);
+    assert.equal(runInContext('__listenerTestNativeEffects.length', f.context), 6);
+    assert.equal(f.state.calls.length, 0);
+    assert.throws(
+      () => runInContext('__listenerPackagedGuards.restoreAndAssert()', f.context),
+      /Mandatory packaged effect ledger was replaced or recorded an attempt/,
+    );
+  });
+}
+
+test('macOS requires its native permission API before installing hooks', () => {
+  const f = fixture({ platform: 'darwin' });
+  const open = f.state.electron.shell.openExternal;
+  delete f.state.electron.systemPreferences.askForMediaAccess;
+  assert.throws(() => f.install(), /Required packaged guard surface is missing: askForMediaAccess/);
+  assert.equal(f.state.electron.shell.openExternal, open);
+  assert.equal(f.state.listeners.size, 0);
+  assert.equal(f.state.session.request, undefined);
+  assert.equal(runInContext('globalThis.__listenerTestNativeEffects', f.context), undefined);
+  assert.equal(runInContext('globalThis.__listenerPackagedGuards', f.context), undefined);
+  assert.equal(f.state.calls.length, 0);
 });
 
 for (const shape of ['readonly', 'accessor', 'inherited'] as const) {

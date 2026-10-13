@@ -176,7 +176,6 @@ export function installPackagedGuards(
       'showMessageBoxSync',
       'showErrorBox',
     ].map((name): [any, string, string] => [dialog, name, `dialog.${name}`]),
-    [systemPreferences, 'askForMediaAccess', 'media permission'],
     [desktopCapturer, 'getSources', 'desktop capture'],
     [systemAudio?.prototype, 'start', 'system audio capture'],
     [electron.Notification.prototype, 'show', 'notification.show'],
@@ -192,6 +191,9 @@ export function installPackagedGuards(
     [net, 'createConnection', 'net.createConnection'],
     [tls, 'connect', 'tls.connect'],
   ];
+  // Electron exposes this native permission prompt only on macOS.
+  if (process.platform === 'darwin')
+    methods.push([systemPreferences, 'askForMediaAccess', 'media permission']);
   if (app.dock) methods.push([app.dock, 'show', 'dock.show'], [app.dock, 'bounce', 'dock.bounce']);
   const assertReplaceable = (object: any, key: string) => {
     const descriptor = Object.getOwnPropertyDescriptor(object, key);

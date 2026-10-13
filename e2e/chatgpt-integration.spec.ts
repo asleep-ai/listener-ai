@@ -519,8 +519,15 @@ test('legacy Codex config explains migration and requires an explicit STT choice
     aiProvider: 'codex',
     transcriptionProvider: 'codex',
     codexModel: 'synthetic-legacy-model',
+    codexTranscriptionModel: 'gpt-4o-transcribe',
+    codexTranscriptionMigratedToDiarize: false,
+    summaryPromptMigratedToStructured: false,
     codexOAuth: { access: 'synthetic-not-a-token' },
   });
+  const migrated = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8'));
+  expect(migrated.codexTranscriptionModel).toBeUndefined();
+  expect(migrated.codexTranscriptionMigratedToDiarize).toBe(true);
+  expect(migrated.summaryPromptMigratedToStructured).toBe(true);
   await settings();
   await expect(page.locator('#legacyCodexNotice')).toBeVisible();
   await expect(page.locator('#legacyCodexNotice')).toContainText(

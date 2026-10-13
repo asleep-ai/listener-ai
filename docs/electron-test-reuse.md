@@ -50,6 +50,10 @@ committed exports and tracked IPC calls before removing those files. Finished
 job records are cleared only after settlement; listeners and revision counters
 remain intact.
 
+Warm case seeds use the existing config load and migration methods on the same
+singleton; cleanup restores the raw seed after settlement. Startup contracts
+remain fresh processes.
+
 The test harness restores the original IPC handlers, module/prototype overrides,
 auth methods and global fetch. Existing config IPC invalidates client caches,
 then the exact raw seed is restored in memory and on disk. Every successful
@@ -93,7 +97,7 @@ Electron watcher delivery remains a separate verification limit.
 | Check                                                                         | Actual result                                                           |
 | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | Existing unit/CLI suite                                                       | 1,234 PASS in the earlier build validation; production source unchanged |
-| Pure Node lifecycle and native-guard harness                                  | 59 PASS, 0 FAIL                                                         |
+| Pure Node lifecycle and native-guard harness                                  | 62 PASS, 0 FAIL                                                         |
 | Targeted helper/reporter types, lint, format and diff checks                  | PASS                                                                    |
 | Final native suite                                                            | 57 PASS, 1 existing opt-in SKIP, 0 FAIL; 58 selected                    |
 | Native process budget and reset proof                                         | 10 launches; 51 verified shared resets; no replacement launches         |

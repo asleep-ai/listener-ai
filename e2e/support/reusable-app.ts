@@ -33,40 +33,50 @@ import {
 async function resetConfiguration(
   app: ElectronApplication,
   raw: Record<string, unknown>,
+  options: { load?: boolean } = {},
 ): Promise<void> {
-  await app.evaluate(async ({ session }, raw) => {
-    const baseline = (globalThis as any).__listenerReusableBaseline;
-    const config = baseline.config;
-    config.config = JSON.parse(JSON.stringify(raw));
-    config.dirtyKeys.clear();
-    config.setChatGPTStatus({ connected: false, planEnabled: false });
-    const fields = [
-      'aiProvider',
-      'knownWords',
-      'geminiApiKey',
-      'geminiModel',
-      'geminiFlashModel',
-      'geminiThinkingLevel',
-      'chatgptModel',
-      'openaiApiKey',
-      'openaiTranscriptionModel',
-      'transcriptionProvider',
-      'sonioxApiKey',
-      'notionApiKey',
-      'notionDatabaseId',
-      'slackWebhookUrl',
-    ];
-    const effective = config.getAllConfig();
-    const payload = Object.fromEntries(fields.map((key) => [key, effective[key] ?? '']));
-    const result = await baseline.handlers.get('save-config')({}, payload);
-    if (!result.success) throw new Error(`Config reset failed: ${result.error}`);
-    config.config = JSON.parse(JSON.stringify(raw));
-    config.dirtyKeys.clear();
-    process
-      .mainModule!.require('node:fs')
-      .writeFileSync(config.getConfigPath(), JSON.stringify(raw));
-    await session.defaultSession.clearStorageData();
-  }, raw);
+  await app.evaluate(
+    async ({ session }, { raw, load }) => {
+      const baseline = (globalThis as any).__listenerReusableBaseline;
+      const config = baseline.config;
+      config.dirtyKeys.clear();
+      if (load) {
+        // A warm case must load its seed with the same native migration semantics
+        // as a cold ConfigService constructor, using the existing singleton.
+        config.loadConfig();
+        config.migrateLegacyDefaults();
+      } else config.config = JSON.parse(JSON.stringify(raw));
+      const settled = JSON.parse(JSON.stringify(config.config));
+      config.setChatGPTStatus({ connected: false, planEnabled: false });
+      const fields = [
+        'aiProvider',
+        'knownWords',
+        'geminiApiKey',
+        'geminiModel',
+        'geminiFlashModel',
+        'geminiThinkingLevel',
+        'chatgptModel',
+        'openaiApiKey',
+        'openaiTranscriptionModel',
+        'transcriptionProvider',
+        'sonioxApiKey',
+        'notionApiKey',
+        'notionDatabaseId',
+        'slackWebhookUrl',
+      ];
+      const effective = config.getAllConfig();
+      const payload = Object.fromEntries(fields.map((key) => [key, effective[key] ?? '']));
+      const result = await baseline.handlers.get('save-config')({}, payload);
+      if (!result.success) throw new Error(`Config reset failed: ${result.error}`);
+      config.config = settled;
+      config.dirtyKeys.clear();
+      process
+        .mainModule!.require('node:fs')
+        .writeFileSync(config.getConfigPath(), JSON.stringify(settled));
+      await session.defaultSession.clearStorageData();
+    },
+    { raw, load: options.load === true },
+  );
 }
 
 async function closeOwnedElectron(app: ElectronApplication): Promise<void> {
@@ -432,7 +442,7 @@ export class ReusableApp {
       if (this.packaged) await this.configurePackagedProof(app);
       if (this.cases) {
         const config = JSON.parse(readFileSync(join(this.dataDir, 'config.json'), 'utf8'));
-        await resetConfiguration(app, config);
+        await resetConfiguration(app, config, { load: true });
         await app.context().clearCookies();
         await this.window!.reload();
       }
