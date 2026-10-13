@@ -1,5 +1,19 @@
 name: Build and Release
 
+# Two-stage release (issue #218).
+#
+# Stage 1 (dispatched by a maintainer on main, expected_source_sha empty):
+#   `prepare` commits the version bump on release/vX.Y.Z, pushes it, and
+#   dispatches this same workflow on that branch with the version commit SHA.
+#   A workflow_dispatch made with GITHUB_TOKEN still creates a run.
+#
+# Stage 2 (the dispatched run, expected_source_sha set): `identity` binds the
+#   run to the prepared version commit (github.sha == expected_source_sha), and
+#   every build, tag, and npm publish uses that one immutable commit. npm
+#   provenance takes its source commit from GITHUB_SHA, so it names the same
+#   commit. Main is merged only after both the GitHub release and npm publish
+#   succeed.
+
 on:
   workflow_dispatch:
     inputs:
@@ -12,19 +26,57 @@ on:
           - patch
           - minor
           - major
+      expected_source_sha:
+        description: 'Internal: version commit set by the prepare stage. Leave empty to start a release.'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
   pull-requests: write
 
+# One prepare at a time on main, and one release run per release branch.
+# Stage 1 and stage 2 run on different refs, so they never wait on each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   prepare:
+    if: inputs.expected_source_sha == ''
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      branch: ${{ steps.branch.outputs.branch }}
+    permissions:
+      contents: write
+      actions: write
     steps:
+      - name: Require main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::Start a release from main (got $REF)."
+            exit 1
+          fi
+
       - uses: actions/checkout@v5
+
+      # An existing release/v* branch is the release reservation: it is deleted
+      # only after a merge or after a failure that published nothing. Prepares
+      # on main are serialized by the concurrency group, so two cannot both pass.
+      - name: Require no release in progress
+        run: |
+          RC=0
+          IN_FLIGHT=$(git ls-remote --exit-code origin 'refs/heads/release/v*') || RC=$?
+          case "$RC" in
+            2) ;;
+            0)
+              echo "::error::A release is in progress or needs recovery. Finish or clean it up first:"
+              printf '%s\n' "$IN_FLIGHT"
+              exit 1
+              ;;
+            *) echo "::error::Could not list release branches (git ls-remote rc $RC)."; exit 1 ;;
+          esac
 
       - name: Install pnpm
         uses: pnpm/action-setup@v5
@@ -42,31 +94,177 @@ jobs:
 
       - name: Calculate new version
         id: version
+        env:
+          VERSION_TYPE: ${{ inputs.version_type }}
         run: |
+          case "$VERSION_TYPE" in
+            patch|minor|major) ;;
+            *) echo "::error::Invalid version type: $VERSION_TYPE"; exit 1 ;;
+          esac
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          NEW_VERSION=$(pnpm exec semver $CURRENT_VERSION -i ${{ github.event.inputs.version_type }})
-          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          NEW_VERSION=$(pnpm exec semver "$CURRENT_VERSION" -i "$VERSION_TYPE")
+          if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Unexpected version: $NEW_VERSION"
+            exit 1
+          fi
+          RC=0
+          git ls-remote --exit-code origin "refs/tags/v$NEW_VERSION" >/dev/null || RC=$?
+          case "$RC" in
+            2) ;;
+            0) echo "::error::Tag v$NEW_VERSION already exists."; exit 1 ;;
+            *) echo "::error::Could not look up tag v$NEW_VERSION (git ls-remote rc $RC)."; exit 1 ;;
+          esac
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "New version will be: $NEW_VERSION"
 
       - name: Create release branch
         id: branch
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          BRANCH_NAME="release/v${{ steps.version.outputs.version }}"
-          echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          BRANCH_NAME="release/v$VERSION"
+          echo "branch=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
 
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
 
-          git checkout -b $BRANCH_NAME
-          npm version ${{ steps.version.outputs.version }} --no-git-tag-version
+          git checkout -b "$BRANCH_NAME"
+          npm version "$VERSION" --no-git-tag-version
           pnpm install --lockfile-only
 
           git add package.json pnpm-lock.yaml
-          git commit -m "chore: bump version to ${{ steps.version.outputs.version }}"
-          git push origin $BRANCH_NAME
+          git commit -m "chore: bump version to $VERSION"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git push origin "$BRANCH_NAME"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Start release run at the version commit
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          SOURCE_SHA: ${{ steps.branch.outputs.sha }}
+          VERSION_TYPE: ${{ inputs.version_type }}
+        run: |
+          gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$BRANCH" \
+            -f version_type="$VERSION_TYPE" \
+            -f expected_source_sha="$SOURCE_SHA"
+          echo "Release run dispatched on $BRANCH at $SOURCE_SHA"
+
+      # A failed dispatch call does not prove that no release run started, so
+      # the branch is kept. It also blocks new releases until someone checks.
+      - name: Explain recovery after a failed dispatch
+        if: failure() && steps.branch.outputs.pushed == 'true' && steps.dispatch.outcome != 'success'
+        env:
+          BRANCH: ${{ steps.branch.outputs.branch }}
+        run: |
+          echo "::error::Dispatching the release run for $BRANCH failed or its result is unknown. The branch is kept."
+          echo "Check: gh run list --workflow release.yml --branch $BRANCH"
+          echo "If no run exists there, delete the branch (git push origin --delete $BRANCH) and start the release again."
+
+  identity:
+    if: inputs.expected_source_sha != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.verify.outputs.sha }}
+      version: ${{ steps.verify.outputs.version }}
+      branch: ${{ steps.verify.outputs.branch }}
+    steps:
+      - name: Verify run identity
+        id: ref
+        env:
+          REF: ${{ github.ref }}
+          RUN_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ inputs.expected_source_sha }}
+        run: |
+          if ! [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::expected_source_sha must be a full 40-character commit SHA."
+            exit 1
+          fi
+          if ! [[ "$REF" =~ ^refs/heads/release/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::Release runs must be dispatched on release/vX.Y.Z (got $REF)."
+            exit 1
+          fi
+          if [ "$RUN_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Run commit $RUN_SHA is not the prepared version commit $EXPECTED_SHA."
+            exit 1
+          fi
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.expected_source_sha }}
+          fetch-depth: 0
+
+      - name: Verify source commit
+        id: verify
+        env:
+          SHA: ${{ inputs.expected_source_sha }}
+          VERSION: ${{ steps.ref.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="release/v$VERSION"
+          test "$(git rev-parse HEAD)" = "$SHA"
+
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$PKG_VERSION" != "$VERSION" ]; then
+            echo "::error::package.json version $PKG_VERSION does not match $BRANCH."
+            exit 1
+          fi
+
+          # The source must be a main commit plus only the version bump.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if [ "$(git rev-list --parents -n 1 "$SHA" | wc -w)" -ne 2 ]; then
+            echo "::error::The version commit must have exactly one parent."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$SHA^" origin/main; then
+            echo "::error::The parent of $SHA is not on main."
+            exit 1
+          fi
+          CHANGED=$(git diff --name-only "$SHA^" "$SHA")
+          if ! printf '%s\n' "$CHANGED" | grep -Fqx 'package.json' ||
+             printf '%s\n' "$CHANGED" | grep -Fvqx -e 'package.json' -e 'pnpm-lock.yaml'; then
+            echo "::error::The version commit must change package.json and nothing but pnpm-lock.yaml besides it:"
+            printf '%s\n' "$CHANGED"
+            exit 1
+          fi
+
+          if [ "$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)" != "$SHA" ]; then
+            echo "::error::$BRANCH no longer points at $SHA."
+            exit 1
+          fi
+          # Only a confirmed absence passes; a lookup error stops the release.
+          RC=0
+          git ls-remote --exit-code origin "refs/tags/v$VERSION" >/dev/null || RC=$?
+          if [ "$RC" != 2 ]; then
+            echo "::error::Tag v$VERSION exists or could not be checked (git ls-remote rc $RC)."
+            exit 1
+          fi
+          STATUS=$(gh api -i "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION" 2>/dev/null | head -n 1) || true
+          if ! [[ "$STATUS" =~ ^HTTP/[0-9.]+\ 404 ]]; then
+            echo "::error::GitHub release v$VERSION exists or could not be checked (${STATUS:-no response})."
+            exit 1
+          fi
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/listener-ai/$VERSION") || true
+          if [ "$CODE" != 404 ]; then
+            echo "::error::listener-ai@$VERSION exists on npm or could not be checked (HTTP ${CODE:-none})."
+            exit 1
+          fi
+
+          {
+            echo "sha=$SHA"
+            echo "version=$VERSION"
+            echo "branch=$BRANCH"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release v$VERSION from $SHA"
 
   build:
-    needs: prepare
+    needs: identity
     strategy:
       matrix:
         include:
@@ -80,7 +278,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.prepare.outputs.branch }}
+          ref: ${{ needs.identity.outputs.sha }}
+
+      - name: Verify source commit
+        shell: bash
+        env:
+          SHA: ${{ needs.identity.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SHA" && test "$GITHUB_SHA" = "$SHA"
 
       - name: Install pnpm
         uses: pnpm/action-setup@v5
@@ -126,45 +330,40 @@ jobs:
             release/*.yml
             release/*.blockmap
 
-  merge-to-main:
-    needs: [prepare, build]
+  # The tag is created before either channel publishes. Creating a ref fails
+  # when it already exists, so the tag can only point at the source commit.
+  tag:
+    needs: [identity, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Fetch release branch
-        run: git fetch origin ${{ needs.prepare.outputs.branch }}:${{ needs.prepare.outputs.branch }}
-
-      - name: Create PR and merge
+      - name: Create tag at the source commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ needs.identity.outputs.sha }}
+          VERSION: ${{ needs.identity.outputs.version }}
         run: |
-          PR_URL=$(gh pr list --base main --head ${{ needs.prepare.outputs.branch }} --json url --jq '.[0].url' || echo "")
-
-          if [ -z "$PR_URL" ]; then
-            gh pr create \
-              --base main \
-              --head ${{ needs.prepare.outputs.branch }} \
-              --title "Release v${{ needs.prepare.outputs.version }}" \
-              --body "Automated release PR for version ${{ needs.prepare.outputs.version }}"
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$SHA" >/dev/null
+          TAG=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" --jq '.object.type + " " + .object.sha')
+          if [ "$TAG" != "commit $SHA" ]; then
+            echo "::error::Tag v$VERSION resolves to '$TAG', expected 'commit $SHA'."
+            exit 1
           fi
 
-          gh pr merge ${{ needs.prepare.outputs.branch }} \
-            --merge \
-            --delete-branch \
-            --subject "Release v${{ needs.prepare.outputs.version }}"
-
   release:
-    needs: [prepare, build, merge-to-main]
+    needs: [identity, build, tag]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: main
+          ref: ${{ needs.identity.outputs.sha }}
           fetch-depth: 0
+
+      - name: Verify source commit
+        env:
+          SHA: ${{ needs.identity.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SHA" && test "$GITHUB_SHA" = "$SHA"
 
       - name: Download artifacts
         uses: actions/download-artifact@v5
@@ -207,16 +406,31 @@ jobs:
             echo "NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # release-action publishes on the existing tag, so check it still
+      # points at the source commit.
+      - name: Verify tag commit
+        env:
+          SHA: ${{ needs.identity.outputs.sha }}
+          VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          git fetch --no-tags origin "+refs/tags/v$VERSION:refs/tags/v$VERSION"
+          TAG_SHA=$(git rev-parse "refs/tags/v$VERSION^{commit}")
+          if [ "$TAG_SHA" != "$SHA" ]; then
+            echo "::error::Tag v$VERSION points at $TAG_SHA, expected $SHA."
+            exit 1
+          fi
+
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          tag: v${{ needs.prepare.outputs.version }}
-          name: Release v${{ needs.prepare.outputs.version }}
+          tag: v${{ needs.identity.outputs.version }}
+          commit: ${{ needs.identity.outputs.sha }}
+          name: Release v${{ needs.identity.outputs.version }}
           body: |
             ### Downloads
-            - macOS (Intel): `Listener.AI-${{ needs.prepare.outputs.version }}-x64.dmg`
-            - macOS (Apple Silicon): `Listener.AI-${{ needs.prepare.outputs.version }}-arm64.dmg`
-            - Windows: `Listener.AI-Setup-${{ needs.prepare.outputs.version }}.exe`
+            - macOS (Intel): `Listener.AI-${{ needs.identity.outputs.version }}-x64.dmg`
+            - macOS (Apple Silicon): `Listener.AI-${{ needs.identity.outputs.version }}-arm64.dmg`
+            - Windows: `Listener.AI-Setup-${{ needs.identity.outputs.version }}.exe`
             - CLI: `npx listener-ai <audio-file>`
 
             Installation: see the [README](https://github.com/asleep-ai/listener-ai#installation).
@@ -236,7 +450,7 @@ jobs:
           makeLatest: true
 
   npm-publish:
-    needs: [prepare, build, merge-to-main]
+    needs: [identity, build, tag]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -244,7 +458,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: main
+          ref: ${{ needs.identity.outputs.sha }}
+
+      # npm provenance records GITHUB_SHA and GITHUB_REF as the source, so the
+      # run itself (not only the checkout) must be at the version commit.
+      - name: Verify source commit
+        env:
+          SHA: ${{ needs.identity.outputs.sha }}
+          VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SHA"
+          test "$GITHUB_SHA" = "$SHA"
+          test "$GITHUB_REF" = "refs/heads/release/v$VERSION"
+          test "$(node -p "require('./package.json').version")" = "$VERSION"
 
       - name: Install pnpm
         uses: pnpm/action-setup@v5
@@ -265,14 +491,80 @@ jobs:
           LISTENER_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.LISTENER_GOOGLE_OAUTH_CLIENT_ID }}
           LISTENER_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.LISTENER_GOOGLE_OAUTH_CLIENT_SECRET }}
 
-  cleanup-on-failure:
-    needs: [prepare, build, merge-to-main, release, npm-publish]
-    if: failure()
+  merge-to-main:
+    needs: [identity, release, npm-publish]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.identity.outputs.sha }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create PR and merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ needs.identity.outputs.branch }}
+          VERSION: ${{ needs.identity.outputs.version }}
+          SHA: ${{ needs.identity.outputs.sha }}
+        run: |
+          PR_URL=$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" --json url --jq '.[0].url' || echo "")
+
+          if [ -z "$PR_URL" ]; then
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base main \
+              --head "$BRANCH" \
+              --title "Release v$VERSION" \
+              --body "Automated release PR for version $VERSION"
+          fi
+
+          # The branch is deleted only by a successful merge of the released commit.
+          # With --repo, gh deletes the remote branch and leaves the checkout alone.
+          gh pr merge "$BRANCH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --merge \
+            --match-head-commit "$SHA" \
+            --delete-branch \
+            --subject "Release v$VERSION"
+
+  cleanup-on-failure:
+    needs: [identity, build, tag, release, npm-publish, merge-to-main]
+    # Delete the branch only when nothing was published, so a retry can start
+    # clean. After any tag or publication attempt, or when a lookup fails, the
+    # branch is kept for recovery. Tags are never deleted.
+    if: >-
+      failure() &&
+      needs.identity.result == 'success' &&
+      needs.tag.result == 'skipped' &&
+      needs.release.result == 'skipped' &&
+      needs.npm-publish.result == 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.identity.outputs.sha }}
 
       - name: Delete release branch on failure
         env:
+          BRANCH: ${{ needs.identity.outputs.branch }}
+          SHA: ${{ needs.identity.outputs.sha }}
+          VERSION: ${{ needs.identity.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: git push origin --delete ${{ needs.prepare.outputs.branch }} || true
+        run: |
+          keep() {
+            echo "::warning::Keeping $BRANCH: $1"
+            exit 0
+          }
+          RC=0
+          git ls-remote --exit-code origin "refs/tags/v$VERSION" >/dev/null || RC=$?
+          [ "$RC" = 2 ] || keep "tag v$VERSION exists or could not be checked (git ls-remote rc $RC)."
+          STATUS=$(gh api -i "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION" 2>/dev/null | head -n 1) || true
+          [[ "$STATUS" =~ ^HTTP/[0-9.]+\ 404 ]] || keep "GitHub release v$VERSION exists or could not be checked (${STATUS:-no response})."
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/listener-ai/$VERSION") || true
+          [ "$CODE" = 404 ] || keep "listener-ai@$VERSION exists on npm or could not be checked (HTTP ${CODE:-none})."
+          TIP=$(git ls-remote --exit-code origin "refs/heads/$BRANCH") || keep "could not read $BRANCH."
+          TIP=${TIP%%[[:space:]]*}
+          [ "$TIP" = "$SHA" ] || keep "$BRANCH points at ${TIP:-nothing}, not $SHA."
+          git push --force-with-lease="refs/heads/$BRANCH:$SHA" origin --delete "refs/heads/$BRANCH" ||
+            keep "deleting it failed."
