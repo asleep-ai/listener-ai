@@ -4,6 +4,7 @@
 // run can be reported with the actual upstream response intact.
 
 import type { TranscriptionErrorPayload } from '../electronAPI';
+import { isChatGPTUsageLimitCode, openChatGPTUsage } from '../services/chatgpt-usage';
 import { showToast } from './notifications';
 
 export function showTranscriptionErrorDialog(
@@ -21,6 +22,9 @@ export function showTranscriptionErrorDialog(
       'transcriptionErrorCopyBtn',
     ) as HTMLButtonElement | null;
     const okBtn = document.getElementById('transcriptionErrorOkBtn') as HTMLButtonElement | null;
+    const manageUsageBtn = document.getElementById(
+      'transcriptionErrorManageUsageBtn',
+    ) as HTMLButtonElement | null;
 
     // Defensive fallback: if the markup is missing for any reason, surface the
     // friendly message via the browser alert so the user still sees something.
@@ -53,6 +57,15 @@ export function showTranscriptionErrorDialog(
     detailsBlock.open = false;
     detailTextEl.textContent = detailLines.join('\n');
 
+    // A ChatGPT plan usage limit makes Manage usage the primary action (SIWC
+    // UI guidelines): shown first and focused when the dialog opens.
+    const usageLimit = isChatGPTUsageLimitCode(details?.errorCode);
+    if (manageUsageBtn) {
+      manageUsageBtn.hidden = !usageLimit;
+      manageUsageBtn.onclick = usageLimit ? openChatGPTUsage : null;
+    }
+    okBtn.className = usageLimit ? 'transcription-error-copy' : 'primary-button';
+
     let settled = false;
     const settle = () => {
       if (settled) return;
@@ -60,6 +73,7 @@ export function showTranscriptionErrorDialog(
       dialog.removeEventListener('cancel', onCancel);
       okBtn.onclick = null;
       copyBtn.onclick = null;
+      if (manageUsageBtn) manageUsageBtn.onclick = null;
       if (dialog.open) dialog.close();
       resolve();
     };
@@ -86,5 +100,6 @@ export function showTranscriptionErrorDialog(
     };
 
     if (!dialog.open) dialog.showModal();
+    if (usageLimit) manageUsageBtn?.focus();
   });
 }

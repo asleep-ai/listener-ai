@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { TranscriptionResult } from './geminiService';
 import { NotionService } from './notionService';
+import { createTranscriptCutoff, exportPayloadFromNote } from './transcriptCutoff';
 
 describe('NotionService', () => {
   it('renders structured summary sections and action item groups instead of legacy fields', async () => {
@@ -96,7 +97,7 @@ describe('NotionService', () => {
     const serializedInput = JSON.stringify(createInput);
     assert.match(serializedInput, /SUMMARY_SENTINEL/);
     assert.match(serializedInput, /DECISION_SENTINEL/);
-    assert.match(serializedInput, /Full Transcript/);
+    assert.match(serializedInput, /Transcript used for report/);
     assert.match(serializedInput, /TRANSCRIPT_SENTINEL/);
     assert.doesNotMatch(serializedInput, /Transcript Quality/);
     assert.doesNotMatch(serializedInput, /QUALITY_SENTINEL/);
@@ -200,5 +201,65 @@ describe('NotionService', () => {
     assert.equal(initialChildren.length, 100);
     assert.equal(appendedBatches.length, 1);
     assert.equal(appendedBatches[0].length, 21);
+  });
+  it('receives only the transcript before a saved cutoff, with the matching report', async () => {
+    const service = new NotionService({
+      apiKey: 'test-api-key',
+      databaseId: 'test-database-id',
+    });
+    let createInput: unknown;
+    (
+      service as unknown as {
+        notion: { pages: { create: (input: unknown) => Promise<{ id: string }> } };
+      }
+    ).notion = {
+      pages: {
+        create: async (input) => {
+          createInput = input;
+          return { id: '12345678-1234-1234-1234-123456789abc' };
+        },
+      },
+    };
+
+    const transcript = 'Speaker 1: MEETING_BODY\nSpeaker 2: EXCLUDED_TAIL private chat';
+    // A whole-file transcript carries no timing, so no flagged note can be
+    // proven to precede the cutoff: none may reach the page.
+    const tailNote = { offsetMs: 3_300_000, text: 'TAIL_NOTE budget cut' };
+    const note = {
+      transcript,
+      transcriptCutoff: createTranscriptCutoff(transcript, transcript.indexOf('Speaker 2')),
+      summary: 'REGENERATED_SUMMARY',
+      keyPoints: ['REGENERATED_POINT'],
+      actionItems: [],
+      emoji: '✂️',
+      liveNotes: [tailNote],
+      highlights: [{ ...tailNote, userText: tailNote.text, subtitle: 'TAIL_HIGHLIGHT' }],
+    };
+    // What main builds from the saved note, whatever the renderer sent.
+    const payload = exportPayloadFromNote(
+      {
+        transcript,
+        summary: 'STALE_SUMMARY',
+        keyPoints: ['STALE_POINT'],
+        emoji: '📝',
+        customFields: { decisions: ['TAIL_SECRET'] },
+        liveNotes: [tailNote],
+      },
+      note,
+    );
+
+    await service.createMeetingNote(
+      'Test meeting',
+      new Date('2026-09-29T00:00:00Z'),
+      payload as TranscriptionResult,
+    );
+
+    const serializedInput = JSON.stringify(createInput);
+    assert.match(serializedInput, /MEETING_BODY/);
+    assert.match(serializedInput, /REGENERATED_SUMMARY/);
+    assert.match(serializedInput, /REGENERATED_POINT/);
+    assert.doesNotMatch(serializedInput, /EXCLUDED_TAIL/);
+    assert.doesNotMatch(serializedInput, /STALE_/);
+    assert.doesNotMatch(serializedInput, /TAIL_NOTE|TAIL_HIGHLIGHT|TAIL_SECRET|Highlights/);
   });
 });

@@ -1,10 +1,8 @@
 // Error types shared by every batch transcription backend.
 //
-// These used to live in `codexTranscription.ts`, which made them the de-facto
-// "OpenAI transcription" errors even though the pipeline treats them as
-// provider-neutral control flow. A third backend (Soniox) must be able to
-// throw them without importing the Codex client, so they live here and
-// `codexTranscription.ts` re-exports them for existing importers.
+// They are provider-neutral control flow: every STT client (OpenAI,
+// Soniox) throws them without importing another backend's client, and
+// `openaiTranscription.ts` re-exports them for its importers.
 
 export interface TranscriptionApiErrorDetails {
   status: number;

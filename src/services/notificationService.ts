@@ -2,12 +2,22 @@ import { type BrowserWindow, Notification, app } from 'electron';
 
 export class NotificationService {
   private mainWindow: BrowserWindow | null = null;
+  private suppressed = false;
 
   setMainWindow(window: BrowserWindow) {
     this.mainWindow = window;
   }
 
+  // Hidden background test runs (main.ts `backgroundTestMode`) must not post
+  // OS notifications: a banner or the first-use permission prompt interrupts
+  // the desktop, and its click handler would show and focus the hidden
+  // window. Every notification goes through this gate.
+  setSuppressed(suppressed: boolean) {
+    this.suppressed = suppressed;
+  }
+
   private shouldNotify(): boolean {
+    if (this.suppressed) return false;
     if (!this.mainWindow || this.mainWindow.isDestroyed()) return true;
     if (!this.mainWindow.isVisible()) return true;
     if (!this.mainWindow.isFocused()) return true;
@@ -59,7 +69,7 @@ export class NotificationService {
   }
 
   notifyDisplayDetected(onAllow: () => void): Notification | null {
-    if (!Notification.isSupported()) return null;
+    if (this.suppressed || !Notification.isSupported()) return null;
 
     const isMac = process.platform === 'darwin';
     const notification = new Notification({

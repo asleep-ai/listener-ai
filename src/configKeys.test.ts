@@ -27,17 +27,21 @@ type Equal<A, B> =
 type Expect<T extends true> = T;
 
 // Documented exclusion set 1: `AppConfig` keys that deliberately never reach
-// the renderer payload. The two OAuth blobs are credential objects that must
-// not leave the main process; the three `*Configured` / `*Source` fields are
-// derived read-only outputs (they live in `getAllConfig`, not in a save
-// payload); `lastSeenVersion` is app-managed by releaseNotesService; the two
-// migration markers are internal idempotency flags.
+// the renderer payload. The OAuth blobs are credential objects that must not
+// leave the main process; the obsolete Codex keys are tolerated on disk only;
+// `googleOAuthConfigured`, `chatgptStatus`, `legacyCodexConfigured` and
+// `transcriptionProviderIssue` are derived read-only outputs (they live in
+// `getAllConfig`, not in a save payload); `lastSeenVersion` is app-managed by
+// releaseNotesService; the two migration markers are internal idempotency flags.
 type NonPayloadKeys =
   | 'codexOAuth'
+  | 'codexModel'
+  | 'codexTranscriptionModel'
   | 'googleOAuth'
-  | 'codexOAuthConfigured'
-  | 'codexOAuthSource'
   | 'googleOAuthConfigured'
+  | 'chatgptStatus'
+  | 'legacyCodexConfigured'
+  | 'transcriptionProviderIssue'
   | 'lastSeenVersion'
   | 'codexTranscriptionMigratedToDiarize'
   | 'summaryPromptMigratedToStructured';
@@ -56,7 +60,9 @@ type NonCliKeys =
   | 'defaultSummaryPrompt'
   | 'audioDeviceId'
   | 'crashReportingEnabled'
-  | 'googleDriveEnabled';
+  | 'googleDriveEnabled'
+  // UI-only dismissal flag for the one-time ChatGPT plan notice.
+  | 'chatgptPlanNoticeAcknowledged';
 
 // 1. The preload `saveConfig` parameter is the renderer's only write surface;
 //    it must be exactly `ConfigPayload`.
@@ -85,8 +91,8 @@ const TODAY_KNOWN_CONFIG_KEYS = [
   'geminiModel',
   'geminiFlashModel',
   'geminiThinkingLevel',
-  'codexModel',
-  'codexTranscriptionModel',
+  'chatgptModel',
+  'openaiTranscriptionModel',
   'liveSttProvider',
   'openaiApiKey',
   'sonioxApiKey',
@@ -130,8 +136,8 @@ const TODAY_READABLE_CONFIG_KEYS = [
   'aiProvider',
   'geminiModel',
   'geminiFlashModel',
-  'codexModel',
-  'codexTranscriptionModel',
+  'chatgptModel',
+  'openaiTranscriptionModel',
   'openaiLiveTranscriptionModel',
   'openaiLiveTranslationModel',
 ];

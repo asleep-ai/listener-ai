@@ -32,6 +32,7 @@ import {
   splitV2FolderName,
   updateTranscriptionStatus,
 } from './outputService';
+import { createTranscriptCutoff } from './transcriptCutoff';
 import { makeTempDir, rmDir } from './test-helpers';
 
 const tmpDirs: string[] = [];
@@ -1458,5 +1459,102 @@ describe('repairMissingAudioFiles (#209 backfill)', () => {
       failed: [],
     });
     assert.deepEqual(JSON.parse(fs.readFileSync(metaPath, 'utf-8')), future);
+  });
+});
+
+describe('transcript cutoff in meta.json', () => {
+  const transcript = 'Speaker 1: agenda.\nSpeaker 2: decision made.\nSpeaker 1: unrelated chat.';
+  const cutAt = transcript.indexOf('Speaker 1: unrelated');
+
+  function saveWithMeta(patch: (meta: Record<string, any>) => void): string {
+    const dataPath = makeTmpDataPath();
+    const folderPath = saveTranscription({
+      title: 'Cutoff',
+      result: { ...baseResult, transcript } as TranscriptionResult,
+      dataPath,
+    });
+    const metaPath = path.join(folderPath, META_JSON);
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    patch(meta);
+    fs.writeFileSync(metaPath, JSON.stringify(meta));
+    return folderPath;
+  }
+
+  it('reads a legacy note without the key as the full transcript', async () => {
+    const folderPath = saveWithMeta(() => {});
+    const data = await readTranscription(folderPath);
+    assert.equal(data!.transcript, transcript);
+    assert.equal(data!.transcriptCutoff, undefined);
+    assert.equal(data!.transcriptCutoffMismatch, undefined);
+    assert.equal(data!.supersededNotionPageUrl, undefined);
+  });
+
+  it('returns a cutoff that matches the stored transcript and drops one that does not', async () => {
+    const valid = createTranscriptCutoff(transcript, cutAt);
+    const folderPath = saveWithMeta((meta) => {
+      meta.transcriptCutoff = valid;
+    });
+    assert.deepEqual((await readTranscription(folderPath))!.transcriptCutoff, valid);
+    // skipTranscript readers (search) still see the stored shape.
+    assert.deepEqual(
+      (await readTranscription(folderPath, { skipTranscript: true }))!.transcriptCutoff,
+      valid,
+    );
+
+    fs.writeFileSync(path.join(folderPath, TRANSCRIPT_FILE), `${transcript} more\n`);
+    const changed = await readTranscription(folderPath);
+    assert.equal(changed!.transcriptCutoff, undefined, 'a changed transcript falls back to full');
+    assert.equal(changed!.transcriptCutoffMismatch, true, 'and is flagged so exports fail closed');
+  });
+
+  it('ignores a structurally invalid cutoff like an absent one instead of failing closed', async () => {
+    for (const raw of [
+      null,
+      'not an object',
+      { offset: 'invalid' },
+      { offset: cutAt, transcriptLength: transcript.length },
+    ]) {
+      const folderPath = saveWithMeta((meta) => {
+        meta.transcriptCutoff = raw;
+      });
+      const data = await readTranscription(folderPath);
+      assert.equal(data!.transcriptCutoff, undefined, JSON.stringify(raw));
+      assert.equal(data!.transcriptCutoffMismatch, undefined, JSON.stringify(raw));
+    }
+  });
+
+  it('fails closed on a well-formed cutoff whose offset no longer fits the transcript', async () => {
+    const folderPath = saveWithMeta((meta) => {
+      // Matching fingerprint, but an offset no cutoff could have been set at.
+      meta.transcriptCutoff = { ...createTranscriptCutoff(transcript, cutAt), offset: 0 };
+    });
+    const data = await readTranscription(folderPath);
+    assert.equal(data!.transcriptCutoff, undefined);
+    assert.equal(data!.transcriptCutoffMismatch, true);
+  });
+
+  it('clears the superseded Notion notice once a new page is uploaded', async () => {
+    const folderPath = saveWithMeta((meta) => {
+      meta.exports = {
+        notionSuperseded: {
+          pageUrl: 'https://notion.so/old',
+          supersededAt: '2026-09-29T00:00:00Z',
+        },
+      };
+    });
+    assert.equal(
+      (await readTranscription(folderPath))!.supersededNotionPageUrl,
+      'https://notion.so/old',
+    );
+    await updateTranscriptionStatus(folderPath, { slackSentAt: '2026-09-29T01:00:00Z' });
+    assert.equal(
+      (await readTranscription(folderPath))!.supersededNotionPageUrl,
+      'https://notion.so/old',
+      'unrelated status updates keep the notice',
+    );
+    await updateTranscriptionStatus(folderPath, { notionPageUrl: 'https://notion.so/new' });
+    const data = await readTranscription(folderPath);
+    assert.equal(data!.notionPageUrl, 'https://notion.so/new');
+    assert.equal(data!.supersededNotionPageUrl, undefined);
   });
 });

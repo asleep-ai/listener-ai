@@ -2,6 +2,7 @@
 // Extracted from legacy.ts (~lines 1284-1416). Behavior preserved verbatim.
 
 import { type Tokens, marked } from 'marked';
+import { reportNotesAtCutoff } from '../../src/transcriptCutoff';
 import {
   camelToLabel,
   formatCustomFieldItem,
@@ -76,10 +77,33 @@ function highlightsToLines(highlights: unknown): string[] {
   return lines;
 }
 
+// Only the flagged notes the note's cutoff keeps belong in the report views;
+// the raw arrays on `data` are the full stored notes.
+function reportNotes(data: TranscriptionData): { liveNotes?: unknown[]; highlights?: unknown[] } {
+  const notes = reportNotesAtCutoff({
+    transcript: String(data.transcript || '').trim(),
+    transcriptCutoff: data.transcriptCutoff,
+    liveNotes: timedOnly(data.liveNotes),
+    highlights: timedOnly(data.highlights),
+  });
+  return { liveNotes: notes.liveNotes, highlights: notes.highlights };
+}
+
+function timedOnly(value: unknown): Array<{ offsetMs: number }> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter(
+    (item): item is { offsetMs: number } =>
+      !!item &&
+      typeof item === 'object' &&
+      Number.isFinite((item as { offsetMs?: unknown }).offsetMs),
+  );
+}
+
 function renderHighlightLines(data: TranscriptionData): string[] {
-  const enriched = highlightsToLines(data.highlights);
+  const notes = reportNotes(data);
+  const enriched = highlightsToLines(notes.highlights);
   if (enriched.length > 0) return enriched;
-  return liveNotesToLines(data.liveNotes);
+  return liveNotesToLines(notes.liveNotes);
 }
 
 // Convert structured transcription data to a markdown string
@@ -163,13 +187,14 @@ export function renderDynamicFields(data: TranscriptionData): void {
       value: data.actionItemGroups || data.actionItems,
     });
   }
-  const hasHighlights = Array.isArray(data.highlights) && data.highlights.length > 0;
-  const hasLiveNotes = Array.isArray(data.liveNotes) && data.liveNotes.length > 0;
+  const notes = reportNotes(data);
+  const hasHighlights = !!notes.highlights?.length;
+  const hasLiveNotes = !!notes.liveNotes?.length;
   if (hasHighlights || hasLiveNotes) {
     fields.push({
       key: 'livenotes',
       label: '🗒️ Highlights',
-      value: hasHighlights ? data.highlights : data.liveNotes,
+      value: hasHighlights ? notes.highlights : notes.liveNotes,
     });
   }
   if (data.customFields) {

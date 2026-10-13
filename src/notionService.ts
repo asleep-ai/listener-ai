@@ -297,7 +297,7 @@ export class NotionService {
               rich_text: [
                 {
                   type: 'text',
-                  text: { content: '📄 Full Transcript' },
+                  text: { content: '📄 Transcript used for report' },
                 },
               ],
             },

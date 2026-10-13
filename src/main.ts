@@ -20,14 +20,22 @@ import {
   type ConfigProposal,
 } from './agentService';
 import { isSupportedAudioExtension, isTranscriptionTempFile } from './audioFormats';
-import { type AppConfig, ConfigService } from './configService';
-import { loginCodexOAuth } from './codexOAuth';
+import {
+  type AppConfig,
+  type ChatGPTStatusPayload,
+  ConfigService,
+  chatGPTBindingChanged,
+} from './configService';
+import { CHATGPT_NOT_SIGNED_IN_MESSAGE, ChatGPTBindingError } from './chatgptBinding';
+import { ChatGPTAuthError, getChatGPTAuth, isExpectedSignInOutcome } from './chatgptAuth';
+import { CHATGPT_MANAGE_USAGE_URL, ChatGPTInferenceError } from './chatgptResponses';
 import { getDataPath } from './dataPath';
 import { maybeAutoSync, refreshGoogleSyncTimer } from './ipc/googleDrive';
 import { registerAllIpc } from './ipc/register';
+import { pathKeys } from './transcriptionJobs';
 import { DisplayDetectorService } from './displayDetectorService';
 import { GeminiService, TranscriptionError, type TranscriptionErrorPayload } from './geminiService';
-import { LiveSessionService } from './liveSessionService';
+import { LiveChunkedCaptionsUnavailableError, LiveSessionService } from './liveSessionService';
 import type { LiveSttProviderConfig } from './liveSttProvider';
 import { MeetingDetectorService } from './meetingDetectorService';
 import { MenuBarManager } from './menuBarManager';
@@ -38,10 +46,8 @@ import {
   getTranscriptionsDir,
   type LiveNote,
   readTranscription,
-  readTranscriptionGeneration,
   repairMissingAudioFiles,
   repairRenamedRecordingSidecars,
-  updateTranscriptionStatus,
 } from './outputService';
 import { recoverInterruptedRegenerations } from './regenerateTranscription';
 import { ALL_FIELDS, type SearchField, searchTranscriptions } from './searchService';
@@ -58,6 +64,7 @@ import {
   summarizeUsage,
   type UsageSummaryResult,
 } from './services/usageTracker';
+import { reportCustomFields } from './transcriptCutoff';
 import {
   createOpenAiRealtimeClientConfig,
   type OpenAiRealtimeBearer,
@@ -202,6 +209,10 @@ ipcMain.on('renderer-log', (_event, payload: RendererLogPayload) => {
   handleRendererLog(payload);
 });
 
+// Explicit test opt-in: isolated GUI checks must not take the user's desktop.
+const backgroundTestMode =
+  process.env.NODE_ENV === 'test' && process.env.LISTENER_BACKGROUND_TEST === '1';
+notificationService.setSuppressed(backgroundTestMode);
 let mainWindow: BrowserWindow | null = null;
 const audioRecorder = new SimpleAudioRecorder();
 const systemAudioService = new SystemAudioService();
@@ -243,33 +254,70 @@ function serializeTranscriptionError(error: unknown): TranscriptionErrorPayload 
 }
 
 function formatAiCredentialsError(): string {
-  return configService.getAiProvider() === 'codex'
-    ? 'Codex OAuth is not configured. Sign in with Codex OAuth or switch back to Gemini.'
-    : 'Gemini API key not configured.';
+  if (configService.getAiProvider() !== 'chatgpt') return 'Gemini API key not configured.';
+  const status = configService.getChatGPTStatus();
+  if (status.connected && status.planState === 'incomplete') {
+    return 'ChatGPT plan sign-in did not finish. Sign in with ChatGPT again, or switch to Gemini.';
+  }
+  return status.connected && !status.planEnabled
+    ? 'ChatGPT plan usage was not granted. Sign in with ChatGPT again and allow plan usage, or switch to Gemini.'
+    : CHATGPT_NOT_SIGNED_IN_MESSAGE;
 }
 
 function getAgentService(): AgentService | null {
+  syncChatGPTStatusForNewWork();
   if (agentService) return agentService;
   if (!configService.hasAiAuth()) return null;
-  const codexOAuthSource = configService.getCodexOAuthSource();
   agentService = new AgentService({
     provider: configService.getAiProvider(),
     apiKey: configService.getGeminiApiKey(),
-    codexOAuth: codexOAuthSource?.credentials,
-    // Only persist refreshed tokens when the credentials originated in
-    // config.json. Env and Codex CLI credentials must stay external.
-    onCodexOAuthUpdate:
-      codexOAuthSource?.source === 'config'
-        ? (credentials) => {
-            configService.setCodexOAuth(credentials);
-            broadcastConfigChanged();
-          }
-        : undefined,
-    codexModel: configService.getCodexModel(),
+    // The agent binds its ChatGPT profile on first use; a profile switch
+    // drops this instance (refreshChatGPTStatus) so new chats rebind.
+    chatgptModel: configService.getChatGPTModel(),
     dataPath: app.getPath('userData'),
     configService,
   });
   return agentService;
+}
+
+// Refresh the cached ChatGPT sign-in status the synchronous credential gates
+// read, and rebuild the AI services when it changed so NEW work binds to the
+// current profile and grant. In-flight jobs keep the binding they started with.
+async function refreshChatGPTStatus(): Promise<void> {
+  let next: ChatGPTStatusPayload;
+  try {
+    next = await getChatGPTAuth().getStatus();
+  } catch (error) {
+    console.error('ChatGPT status refresh failed:', error instanceof Error ? error.message : error);
+    reportError(error, { operation: 'chatgpt.status', severity: 'warning' });
+    next = { connected: false, planEnabled: false };
+  }
+  applyChatGPTStatus(next);
+}
+
+// Before NEW work: a sign-in, sign-out or same-profile reauthorization made
+// since the last refresh (from the CLI while the app runs, for example) must
+// rebuild the services, or a new job would reuse a binding to an ended grant.
+// Synchronous and network-free. A store read failure keeps the cached status;
+// the stale binding then fails closed on its first request.
+function syncChatGPTStatusForNewWork(): void {
+  let next: ChatGPTStatusPayload;
+  try {
+    next = getChatGPTAuth().getStatusSync();
+  } catch {
+    return;
+  }
+  applyChatGPTStatus(next);
+}
+
+function applyChatGPTStatus(next: ChatGPTStatusPayload): void {
+  const before = configService.getChatGPTStatus();
+  configService.setChatGPTStatus(next);
+  if (chatGPTBindingChanged(before, configService.getChatGPTStatus())) {
+    geminiService = createGeminiService();
+    agentService = null;
+    broadcastConfigChanged();
+  }
 }
 
 // Pending agent confirmation resolvers keyed by request id. The renderer responds
@@ -309,30 +357,28 @@ function trackFinalize(work: Promise<void>): void {
   pendingFinalize = pendingFinalize.then(() => work).catch(() => {});
 }
 
-function createGeminiService(): GeminiService | null {
-  if (!configService.hasAiAuth()) return null;
-  const codexOAuthSource = configService.getCodexOAuthSource();
+function createGeminiService(opts: { transcriptionOnly?: boolean } = {}): GeminiService | null {
+  if (opts.transcriptionOnly ? !configService.hasTranscriptionAuth() : !configService.hasAiAuth()) {
+    return null;
+  }
+  // An unresolvable transcription selection (ChatGPT + auto, retired codex)
+  // still builds the service: summary, report regeneration and the agent
+  // work, and transcription refuses with the resolution's message.
+  const stt = configService.getTranscriptionResolution();
   return new GeminiService({
     provider: configService.getAiProvider(),
-    transcriptionProvider: configService.resolveTranscriptionProvider(),
+    transcriptionProvider: stt.provider,
+    transcriptionUnavailableMessage: stt.message,
     apiKey: configService.getGeminiApiKey(),
     sonioxApiKey: configService.getSonioxApiKey(),
-    codexOAuth: codexOAuthSource?.credentials,
-    // Persist refreshed tokens only when they came from app config. Env and
-    // Codex CLI credentials are external sources and must remain read-only here.
-    onCodexOAuthUpdate:
-      codexOAuthSource?.source === 'config'
-        ? (credentials) => {
-            configService.setCodexOAuth(credentials);
-            broadcastConfigChanged();
-          }
-        : undefined,
+    openaiApiKey: configService.getOpenAiApiKey(),
+    openaiTranscriptionModel: configService.getOpenAiTranscriptionModel(),
+    chatgptModel: configService.getChatGPTModel(),
     knownWords: configService.getKnownWords(),
     proModel: configService.getGeminiModel(),
     flashModel: configService.getGeminiFlashModel(),
     thinkingLevel: configService.getGeminiThinkingLevel(),
-    codexModel: configService.getCodexModel(),
-    codexTranscriptionModel: configService.getCodexTranscriptionModel(),
+    transcriptionOnly: opts.transcriptionOnly,
     dataPath: app.getPath('userData'),
   });
 }
@@ -342,9 +388,35 @@ function createGeminiService(): GeminiService | null {
 // triggered immediately after a credentials change) use this so they don't
 // hit a stale null. Returns null when no AI credentials are configured.
 function ensureGeminiService(): GeminiService | null {
+  syncChatGPTStatusForNewWork();
   if (geminiService) return geminiService;
   geminiService = createGeminiService();
   return geminiService;
+}
+
+// Chunked live-caption snippets need only the batch STT backend, so with no
+// text-provider credentials (signed-out ChatGPT plus an explicit OpenAI or
+// Soniox backend, say) a transcription-only service still serves them. It
+// holds no ChatGPT binding and refuses every text task.
+let liveTranscriptionService: GeminiService | null = null;
+function ensureLiveTranscriptionService(): GeminiService | null {
+  const service = ensureGeminiService();
+  if (service) return service;
+  liveTranscriptionService ??= createGeminiService({ transcriptionOnly: true });
+  return liveTranscriptionService;
+}
+
+// Why chunked live captions cannot run as configured (null when they can).
+function chunkedLiveCaptionsIssue(translate: boolean): string | null {
+  syncChatGPTStatusForNewWork();
+  switch (configService.getChunkedLiveCaptionsBlocker(translate)) {
+    case 'transcription':
+      return configService.describeMissingTranscriptionAuth();
+    case 'ai':
+      return `${formatAiCredentialsError()} Turn off translation to show captions without it.`;
+    default:
+      return null;
+  }
 }
 
 async function resolveOpenAiRealtimeBearer(
@@ -357,7 +429,8 @@ async function resolveOpenAiRealtimeBearer(
   const openaiApiKey = config.openaiApiKey?.trim();
   if (openaiApiKey) return { token: openaiApiKey, source: 'apiKey' };
 
-  console.warn('OpenAI Realtime requires a standard OpenAI API key; skipping Codex OAuth.');
+  // Never a ChatGPT sign-in token: SIWC excludes audio and Realtime.
+  console.warn('OpenAI Realtime requires a standard OpenAI API key.');
   return null;
 }
 
@@ -368,6 +441,10 @@ async function createOpenAiRealtimeClientConfigForLive(config: LiveSttProviderCo
 const liveSessionService = new LiveSessionService({
   getDataPath: () => app.getPath('userData'),
   ensureGeminiService,
+  ensureTranscriptionService: ensureLiveTranscriptionService,
+  // Snippets only: once a session is running, an untranslatable caption is
+  // kept with a per-segment translation error rather than ending captions.
+  getChunkedCaptionsIssue: () => chunkedLiveCaptionsIssue(false),
   getAgentService,
   formatAiCredentialsError,
   getLiveSttConfig: () => ({
@@ -391,6 +468,7 @@ const liveSessionService = new LiveSessionService({
 });
 
 function registerGlobalShortcut() {
+  if (backgroundTestMode) return;
   try {
     const shortcut = configService.getGlobalShortcut();
 
@@ -545,11 +623,16 @@ function startRecordingsWatcher(): void {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 700,
+    show: !backgroundTestMode,
+    focusable: !backgroundTestMode,
+    skipTaskbar: backgroundTestMode,
+    width: 1200,
+    height: 850,
     minWidth: 480,
     minHeight: 520,
     webPreferences: {
+      backgroundThrottling: !backgroundTestMode,
+      additionalArguments: backgroundTestMode ? ['--listener-background-test'] : [],
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
@@ -567,21 +650,23 @@ function createWindow() {
 
   mainWindow.loadFile(indexPath).catch((err) => {
     console.error('Failed to load index.html:', err);
-    dialog.showErrorBox(
-      'Loading Error',
-      `Failed to load application UI: ${err.message}\n\nPath: ${indexPath}`,
-    );
+    if (!backgroundTestMode) {
+      dialog.showErrorBox(
+        'Loading Error',
+        `Failed to load application UI: ${err.message}\n\nPath: ${indexPath}`,
+      );
+    }
   });
 
   // Open DevTools in development or if there's an error
-  if (!app.isPackaged) {
+  if (!app.isPackaged && !backgroundTestMode) {
     mainWindow.webContents.openDevTools();
   }
 
   // Also open DevTools if page fails to load
   mainWindow.webContents.on('did-fail-load', () => {
     console.error('Page failed to load');
-    mainWindow?.webContents.openDevTools();
+    if (!backgroundTestMode) mainWindow?.webContents.openDevTools();
   });
 
   // Handle window close events
@@ -666,12 +751,14 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error('[startup] migration or note recovery failed:', err);
     const message = err instanceof Error ? err.message : 'Unknown error preparing your meetings.';
-    dialog.showErrorBox(
-      'Listener.AI could not start',
-      `Preparing your existing meetings failed:\n\n${message}\n\n` +
-        `Your files were kept under ${getDataPath()}. The app will now quit. ` +
-        `Please report this to the maintainer.`,
-    );
+    if (!backgroundTestMode) {
+      dialog.showErrorBox(
+        'Listener.AI could not start',
+        `Preparing your existing meetings failed:\n\n${message}\n\n` +
+          `Your files were kept under ${getDataPath()}. The app will now quit. ` +
+          `Please report this to the maintainer.`,
+      );
+    }
     app.quit();
     return;
   }
@@ -700,6 +787,11 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.warn('[audio-repair] failed:', err);
   }
+
+  // Prime the cached ChatGPT sign-in status before the first service build,
+  // so a signed-in ChatGPT user is not reported as unconfigured at launch.
+  // Failures are logged inside and leave the status disconnected.
+  await refreshChatGPTStatus();
 
   // Create menu with DevTools option
   const template = [
@@ -753,7 +845,7 @@ app.whenReady().then(async () => {
           click: () => {
             console.log('Release notes menu: clicked, sending open-release-history');
             if (mainWindow && !mainWindow.isDestroyed()) {
-              if (!mainWindow.isVisible()) mainWindow.show();
+              if (!backgroundTestMode && !mainWindow.isVisible()) mainWindow.show();
               mainWindow.webContents.send('open-release-history');
             }
           },
@@ -779,8 +871,8 @@ app.whenReady().then(async () => {
           accelerator: 'Cmd+,',
           click: () => {
             if (mainWindow && !mainWindow.isDestroyed()) {
-              if (!mainWindow.isVisible()) mainWindow.show();
-              mainWindow.focus();
+              if (!backgroundTestMode && !mainWindow.isVisible()) mainWindow.show();
+              if (!backgroundTestMode) mainWindow.focus();
               mainWindow.webContents.send('open-config');
             }
           },
@@ -835,11 +927,12 @@ app.whenReady().then(async () => {
     });
   }
 
+  if (backgroundTestMode && process.platform === 'darwin') await app.dock?.hide();
   createWindow();
 
   // Initialize menu bar manager
   if (mainWindow) {
-    menuBarManager.init(mainWindow, audioRecorder);
+    if (!backgroundTestMode) menuBarManager.init(mainWindow, audioRecorder);
     // Set main window for auto-updater and notifications
     autoUpdaterService.setMainWindow(mainWindow);
     notificationService.setMainWindow(mainWindow);
@@ -848,8 +941,10 @@ app.whenReady().then(async () => {
   startRecordingsWatcher();
 
   // Kick off initial + periodic update checks once the renderer can receive IPC.
-  autoUpdaterService.checkForUpdates();
-  autoUpdaterService.startPeriodicCheck();
+  if (!backgroundTestMode) {
+    autoUpdaterService.checkForUpdates();
+    autoUpdaterService.startPeriodicCheck();
+  }
 
   // Show release notes on first launch after an update.
   checkAndShowReleaseNotes().catch((err) => {
@@ -864,7 +959,7 @@ app.whenReady().then(async () => {
   refreshGoogleSyncTimer();
 
   // Initialize meeting detector
-  if (configService.getMeetingDetection()) {
+  if (!backgroundTestMode && configService.getMeetingDetection()) {
     meetingDetector.start();
   }
 
@@ -896,7 +991,7 @@ app.whenReady().then(async () => {
   });
 
   // Initialize display detector
-  if (configService.getDisplayDetection()) {
+  if (!backgroundTestMode && configService.getDisplayDetection()) {
     displayDetector.start();
   }
 
@@ -1057,6 +1152,9 @@ registerAllIpc({
   sanitizeLiveNotes,
   applyConfigSideEffects,
   broadcastConfigChanged,
+  getNotionService,
+  getSlackService,
+  openExternal: (url) => void shell.openExternal(url),
 });
 
 // Audio capture runs in the renderer via MediaRecorder; chunks stream over IPC as
@@ -1231,13 +1329,14 @@ function applyConfigSideEffects(changed: Partial<AppConfig>): void {
     changed.geminiModel !== undefined ||
     changed.geminiFlashModel !== undefined ||
     changed.geminiThinkingLevel !== undefined ||
-    changed.codexOAuth !== undefined ||
-    changed.codexModel !== undefined ||
-    changed.codexTranscriptionModel !== undefined ||
+    changed.chatgptModel !== undefined ||
+    changed.openaiApiKey !== undefined ||
+    changed.openaiTranscriptionModel !== undefined ||
     changed.transcriptionProvider !== undefined ||
     changed.sonioxApiKey !== undefined
   ) {
     geminiService = createGeminiService();
+    liveTranscriptionService = null;
     agentService = null;
   }
   if (changed.globalShortcut !== undefined) {
@@ -1271,6 +1370,18 @@ function applyConfigSideEffects(changed: Partial<AppConfig>): void {
   if (changed.googleDriveEnabled !== undefined || changed.googleOAuth !== undefined) {
     refreshGoogleSyncTimer();
   }
+}
+
+function getNotionService(): NotionService | null {
+  if (notionService) return notionService;
+  const notionApiKey = configService.getNotionApiKey();
+  const notionDatabaseId = configService.getNotionDatabaseId();
+  if (!notionApiKey || !notionDatabaseId) return null;
+  notionService = new NotionService({
+    apiKey: notionApiKey,
+    databaseId: notionDatabaseId,
+  });
+  return notionService;
 }
 
 function getSlackService(): SlackService | null {
@@ -1341,90 +1452,94 @@ ipcMain.handle('get-config', async () => {
   return configService.getAllConfig();
 });
 
-// pi-ai's Codex OAuth helper binds a loopback HTTP server to a fixed port
-// (1455) and only resolves when the browser redirects back to it. If the user
-// closes the browser before completing sign-in, the IPC awaits forever and the
-// renderer button stays disabled. We track the in-flight attempt so a second
-// login click can abort the previous one (releasing the port) and start fresh.
-//
-// The slot stays occupied until pi-ai's `finally{server.close()}` has run AND
-// a short timer has elapsed -- only then is port 1455 actually free. `done`
-// resolves at that point, so any waiter blocking on it is safe to bind.
-type PendingCodexLogin = {
+// Sign in with ChatGPT. A second click aborts the in-flight attempt (the
+// loopback port is dynamic, so the next attempt never races the old bind).
+type PendingChatGPTLogin = {
   controller: AbortController;
   done: Promise<void>;
 };
-let pendingCodexLogin: PendingCodexLogin | null = null;
-// On abort, pi-ai's login() rejects immediately while the provider closes the
-// loopback server on a detached promise chain -- and server.close() itself
-// releases the socket only on a later libuv tick. The cushion therefore counts
-// from the rejection, not from the actual close, and is the only spacing
-// between a cancelled attempt and the next bind on fixed port 1455. Heuristic,
-// not a guarantee.
-const PORT_RELEASE_CUSHION_MS = 250;
+let pendingChatGPTLogin: PendingChatGPTLogin | null = null;
 
-ipcMain.handle('codex-oauth-login', async () => {
-  // Drain every prior attempt -- a third click while a second is still tearing
-  // down should still find an empty slot.
-  while (pendingCodexLogin) {
-    const prior = pendingCodexLogin;
-    prior.controller.abort();
-    await prior.done;
-  }
-
-  const controller = new AbortController();
-  let resolveDone: () => void = () => {};
-  const done = new Promise<void>((resolve) => {
-    resolveDone = resolve;
-  });
-  pendingCodexLogin = { controller, done };
-
-  const sendProgress = (phase: 'browser-opened' | 'progress', message?: string) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('codex-oauth-progress', { phase, message });
-    }
+function chatGPTErrorResult(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    success: false as const,
+    error: message,
+    ...(error instanceof ChatGPTAuthError ? { code: error.code } : {}),
   };
+}
 
-  try {
-    const credentials = await loginCodexOAuth({
-      openUrl: async (url) => {
-        await shell.openExternal(url);
-        sendProgress('browser-opened');
-      },
-      onProgress: (message) => {
-        console.log(`Codex OAuth: ${message}`);
-        sendProgress('progress', message);
-      },
-      signal: controller.signal,
+ipcMain.handle(
+  'chatgpt-oauth-login',
+  async (
+    _,
+    opts?: {
+      newProfile?: boolean;
+      /** Alias of `newProfile`. */
+      addProfile?: boolean;
+      profileId?: string;
+      /** Only for the explicit "Enable ChatGPT plan" action (prompt=consent). */
+      requestPlanConsent?: boolean;
+    },
+  ) => {
+    while (pendingChatGPTLogin) {
+      const prior = pendingChatGPTLogin;
+      prior.controller.abort();
+      await prior.done;
+    }
+
+    const controller = new AbortController();
+    let resolveDone: () => void = () => {};
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve;
     });
-    configService.setCodexOAuth(credentials);
-    configService.setAiProvider('codex');
-    applyConfigSideEffects({ aiProvider: 'codex', codexOAuth: credentials });
-    broadcastConfigChanged();
-    return { success: true as const, config: configService.getAllConfig() };
-  } catch (error) {
-    if (controller.signal.aborted) {
-      return { success: false as const, error: 'Sign-in cancelled.', cancelled: true as const };
-    }
-    console.error('Codex OAuth login failed:', error);
-    reportError(error, { operation: 'codex.oauthLogin', severity: 'error' });
-    return {
-      success: false as const,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  } finally {
-    // Hold the slot until the port is presumed free, so the next attempt --
-    // queued behind `done` -- can bind without racing.
-    await new Promise((resolve) => setTimeout(resolve, PORT_RELEASE_CUSHION_MS));
-    if (pendingCodexLogin?.controller === controller) {
-      pendingCodexLogin = null;
-    }
-    resolveDone();
-  }
-});
+    pendingChatGPTLogin = { controller, done };
 
-ipcMain.handle('codex-oauth-cancel', async () => {
-  const prior = pendingCodexLogin;
+    const sendProgress = (phase: 'browser-opened' | 'progress', message?: string) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('chatgpt-oauth-progress', { phase, message });
+      }
+    };
+
+    try {
+      const status = await getChatGPTAuth().signIn({
+        openBrowser: async (url) => {
+          await shell.openExternal(url);
+          sendProgress('browser-opened');
+        },
+        onProgress: (message) => sendProgress('progress', message),
+        signal: controller.signal,
+        newProfile: opts?.newProfile === true || opts?.addProfile === true,
+        profileId: typeof opts?.profileId === 'string' ? opts.profileId : undefined,
+        requestPlanConsent: opts?.requestPlanConsent === true,
+      });
+      await refreshChatGPTStatus();
+      broadcastConfigChanged();
+      return { success: true as const, status, config: configService.getAllConfig() };
+    } catch (error) {
+      // Also cancelled when a sign-out of the same account stopped it.
+      if (
+        controller.signal.aborted ||
+        (error instanceof ChatGPTAuthError && error.code === 'cancelled')
+      ) {
+        return { success: false as const, error: 'Sign-in cancelled.', cancelled: true as const };
+      }
+      console.error('ChatGPT sign-in failed:', error instanceof Error ? error.message : error);
+      if (!isExpectedSignInOutcome(error)) {
+        reportError(error, { operation: 'chatgpt.signIn', severity: 'error' });
+      }
+      return chatGPTErrorResult(error);
+    } finally {
+      if (pendingChatGPTLogin?.controller === controller) {
+        pendingChatGPTLogin = null;
+      }
+      resolveDone();
+    }
+  },
+);
+
+ipcMain.handle('chatgpt-oauth-cancel', async () => {
+  const prior = pendingChatGPTLogin;
   if (prior) {
     prior.controller.abort();
     await prior.done;
@@ -1432,17 +1547,103 @@ ipcMain.handle('codex-oauth-cancel', async () => {
   return { success: true };
 });
 
-ipcMain.handle('codex-oauth-clear', async () => {
+// Stops a pending sign-in of the same account, clears the sign-in locally,
+// then tries to revoke the refresh token (see ChatGPTAuth.signOut). `revoked:
+// false` means OpenAI did not confirm; the renderer must say so.
+ipcMain.handle('chatgpt-oauth-clear', async (_, profileId?: string) => {
   try {
-    configService.clearCodexOAuth();
-    applyConfigSideEffects({ aiProvider: configService.getAiProvider() });
+    const result = await getChatGPTAuth().signOut(
+      typeof profileId === 'string' ? profileId : undefined,
+    );
+    // Retired Codex tokens are dead weight once the user signs out.
+    configService.clearLegacyCodexSignIn();
+    await refreshChatGPTStatus();
     broadcastConfigChanged();
-    return { success: true, config: configService.getAllConfig() };
+    return {
+      success: true as const,
+      ...result,
+      status: configService.getChatGPTStatus(),
+      config: configService.getAllConfig(),
+    };
   } catch (error) {
-    console.error('Codex OAuth clear failed:', error);
-    reportError(error, { operation: 'codex.oauthClear', severity: 'warning' });
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
+    console.error('ChatGPT sign-out failed:', error instanceof Error ? error.message : error);
+    reportError(error, { operation: 'chatgpt.signOut', severity: 'warning' });
+    return chatGPTErrorResult(error);
   }
+});
+
+// The status is returned both nested (`status`) and flattened at the top
+// level, so the result is also usable directly as an auth status.
+ipcMain.handle('chatgpt-oauth-status', async () => {
+  await refreshChatGPTStatus();
+  const status = configService.getChatGPTStatus();
+  return {
+    success: true as const,
+    ...status,
+    status,
+    legacyCodexConfigured: configService.hasLegacyCodexConfig(),
+  };
+});
+
+ipcMain.handle('chatgpt-list-models', async (_, profileId?: string) => {
+  try {
+    const models = await getChatGPTAuth().listModels(
+      typeof profileId === 'string' ? profileId : undefined,
+    );
+    return { success: true as const, models };
+  } catch (error) {
+    console.error('ChatGPT model list failed:', error instanceof Error ? error.message : error);
+    reportError(error, { operation: 'chatgpt.listModels', severity: 'warning' });
+    return chatGPTErrorResult(error);
+  }
+});
+
+ipcMain.handle('chatgpt-list-profiles', async () => {
+  try {
+    return { success: true as const, profiles: await getChatGPTAuth().listProfiles() };
+  } catch (error) {
+    reportError(error, { operation: 'chatgpt.listProfiles', severity: 'warning' });
+    return chatGPTErrorResult(error);
+  }
+});
+
+// Switching accounts affects NEW work only: refreshChatGPTStatus rebuilds the
+// services, and a job already running keeps the profile it bound to.
+ipcMain.handle('chatgpt-select-profile', async (_, profileId: string) => {
+  if (typeof profileId !== 'string' || !profileId) {
+    return { success: false as const, error: 'A ChatGPT account id is required.' };
+  }
+  try {
+    const status = await getChatGPTAuth().selectProfile(profileId);
+    await refreshChatGPTStatus();
+    broadcastConfigChanged();
+    return { success: true as const, status, config: configService.getAllConfig() };
+  } catch (error) {
+    reportError(error, { operation: 'chatgpt.selectProfile', severity: 'warning' });
+    return chatGPTErrorResult(error);
+  }
+});
+
+ipcMain.handle('chatgpt-manage-usage', async () => {
+  await shell.openExternal(CHATGPT_MANAGE_USAGE_URL);
+  return { success: true as const };
+});
+
+// DEPRECATED Codex OAuth channels. The unofficial Codex transport is gone;
+// these answer with the replacement instead of running it, so an older
+// renderer build gets an actionable message rather than a missing handler.
+const CODEX_REPLACED_MESSAGE =
+  'Codex sign-in was replaced by Sign in with ChatGPT. Use "Continue with ChatGPT" in Settings.';
+ipcMain.handle('codex-oauth-login', async () => ({
+  success: false as const,
+  error: CODEX_REPLACED_MESSAGE,
+  deprecated: true as const,
+}));
+ipcMain.handle('codex-oauth-cancel', async () => ({ success: true }));
+ipcMain.handle('codex-oauth-clear', async () => {
+  configService.clearLegacyCodexSignIn();
+  broadcastConfigChanged();
+  return { success: true as const, config: configService.getAllConfig() };
 });
 
 ipcMain.handle('get-all-releases', async () => {
@@ -1470,6 +1671,7 @@ ipcMain.handle('update:simulate', async (_, event: string, data?: any) => {
 });
 
 ipcMain.handle('check-config', async () => {
+  syncChatGPTStatusForNewWork();
   return {
     hasConfig: configService.hasRequiredConfig(),
     hasAiAuth: configService.hasAiAuth(),
@@ -1477,14 +1679,24 @@ ipcMain.handle('check-config', async () => {
     // credentials, so the renderer must check both before spending ffmpeg work.
     hasTranscriptionAuth: configService.hasTranscriptionAuth(),
     aiProvider: configService.getAiProvider(),
-    transcriptionProvider: configService.resolveTranscriptionProvider(),
-    codexOAuthConfigured: configService.hasCodexOAuth(),
+    // Null when the selection cannot run; `transcriptionProviderIssue` says why.
+    transcriptionProvider: configService.getTranscriptionResolution().provider ?? null,
+    transcriptionProviderIssue: configService.getTranscriptionResolution().message,
+    chatgptStatus: configService.getChatGPTStatus(),
     missing: configService.getMissingConfigs(),
   };
 });
 
 // Global shortcut handlers
 ipcMain.handle('validate-shortcut', async (_, shortcut: string) => {
+  // Validation needs a real OS registration; background tests must not make one.
+  if (backgroundTestMode) {
+    return {
+      valid: false,
+      unavailable: true,
+      error: 'Shortcut validation is unavailable in background test mode',
+    };
+  }
   try {
     // Temporarily register the shortcut to check if it's valid
     const isValid = globalShortcut.register(shortcut, () => {});
@@ -1507,175 +1719,6 @@ ipcMain.handle('get-meeting-status', async () => {
     app: meeting?.app,
   };
 });
-
-// Notion upload handler
-ipcMain.handle(
-  'upload-to-notion',
-  async (
-    _,
-    data: {
-      title: string;
-      transcriptionData: any;
-      audioFilePath?: string;
-      transcriptionPath?: string;
-      expectedGenerationId?: string | null;
-    },
-  ) => {
-    try {
-      console.log('Uploading to Notion:', data.title);
-
-      // Initialize Notion service if not already initialized
-      if (!notionService) {
-        const notionApiKey = configService.getNotionApiKey();
-        const notionDatabaseId = configService.getNotionDatabaseId();
-
-        if (!notionApiKey || !notionDatabaseId) {
-          return { success: false, error: 'Notion configuration not found' };
-        }
-
-        notionService = new NotionService({
-          apiKey: notionApiKey,
-          databaseId: notionDatabaseId,
-        });
-      }
-
-      // Add "by L.AI" to the title for distinction
-      const titleWithSuffix = `${data.title} by L.AI`;
-      const generation = isContainedTranscriptionPath(data.transcriptionPath)
-        ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
-        : undefined;
-      if (
-        isContainedTranscriptionPath(data.transcriptionPath) &&
-        data.expectedGenerationId !== undefined &&
-        generation !== data.expectedGenerationId
-      ) {
-        return { success: false, error: 'This note changed. Reopen it before uploading.' };
-      }
-
-      const result = await notionService.createMeetingNote(
-        titleWithSuffix,
-        new Date(),
-        data.transcriptionData,
-        data.audioFilePath,
-      );
-
-      if (
-        result.success &&
-        result.url &&
-        generation !== undefined &&
-        isContainedTranscriptionPath(data.transcriptionPath)
-      ) {
-        try {
-          await updateTranscriptionStatus(
-            data.transcriptionPath,
-            {
-              notionPageUrl: result.url,
-            },
-            generation,
-          );
-        } catch (error) {
-          console.error('Failed to persist Notion URL to transcription:', error);
-          reportError(error, { operation: 'notion.persistUrl', severity: 'warning' });
-        }
-      } else if (!result.success) {
-        reportError(new Error('Notion upload reported failure'), {
-          operation: 'notion.upload',
-          severity: 'error',
-        });
-      }
-
-      notificationService.notifyUploadComplete(data.title);
-      return result;
-    } catch (error) {
-      console.error('Error uploading to Notion:', error);
-      reportError(error, { operation: 'notion.upload', severity: 'error' });
-      notificationService.notifyUploadFailed('Upload failed. Check the app for details.');
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  },
-);
-
-ipcMain.handle(
-  'send-to-slack',
-  async (
-    _,
-    data: {
-      title: string;
-      transcriptionData: any;
-      transcriptionPath?: string;
-      expectedGenerationId?: string | null;
-      notionUrl?: string;
-      notionError?: string;
-    },
-  ) => {
-    try {
-      console.log('Sending to Slack:', data.title);
-
-      const service = getSlackService();
-      if (!service) {
-        return { success: false, error: 'Slack webhook URL is not configured' };
-      }
-      const generation = isContainedTranscriptionPath(data.transcriptionPath)
-        ? await readTranscriptionGeneration(data.transcriptionPath).catch(() => undefined)
-        : undefined;
-      if (
-        isContainedTranscriptionPath(data.transcriptionPath) &&
-        data.expectedGenerationId !== undefined &&
-        generation !== data.expectedGenerationId
-      ) {
-        return { success: false, error: 'This note changed. Reopen it before sending.' };
-      }
-
-      // For a historical resend, use the original meeting time from frontmatter
-      // so the Slack message shows when the meeting actually happened, not now.
-      let meetingDate = new Date();
-      if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
-        const stored = await readTranscription(data.transcriptionPath).catch(() => null);
-        if (stored?.transcribedAt) {
-          const parsed = new Date(stored.transcribedAt);
-          if (!Number.isNaN(parsed.getTime())) meetingDate = parsed;
-        }
-      }
-
-      const result = await service.sendMeetingSummary({
-        title: data.title,
-        date: meetingDate,
-        result: data.transcriptionData,
-        notionUrl: data.notionUrl,
-        notionError: data.notionError,
-      });
-
-      if (generation !== undefined && isContainedTranscriptionPath(data.transcriptionPath)) {
-        try {
-          // Preserve the previous successful slackSentAt on a failed resend;
-          // only the error field reflects the new failure.
-          await updateTranscriptionStatus(
-            data.transcriptionPath,
-            {
-              ...(result.success ? { slackSentAt: result.sentAt } : {}),
-              slackError: result.success ? null : result.error,
-            },
-            generation,
-          );
-        } catch (error) {
-          console.error('Failed to persist Slack status to transcription:', error);
-          reportError(error, { operation: 'slack.persistStatus', severity: 'warning' });
-        }
-      }
-
-      if (!result.success) {
-        reportError(new Error(result.error), { operation: 'slack.send', severity: 'error' });
-      }
-
-      return result;
-    } catch (error) {
-      console.error('Error sending to Slack:', error);
-      reportError(error, { operation: 'slack.send', severity: 'error' });
-      const message = error instanceof Error ? error.message : String(error);
-      return { success: false, error: message };
-    }
-  },
-);
 
 ipcMain.handle('test-slack-webhook', async (_, webhookUrl?: string) => {
   try {
@@ -1717,6 +1760,8 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
           data: {
             ...metadata,
             folderName: path.basename(metadata.transcriptionPath),
+            reportTitle: transcription.title,
+            reportSuggestedTitle: transcription.suggestedTitle,
             generationId: transcription.generationId,
             transcript: transcription.transcript,
             summary: transcription.summary,
@@ -1724,14 +1769,17 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
             actionItems: transcription.actionItems,
             summarySections: transcription.summarySections,
             actionItemGroups: transcription.actionItemGroups,
-            customFields: transcription.customFields ?? metadata.customFields,
+            customFields: reportCustomFields(transcription, metadata.customFields),
             emoji: transcription.emoji,
             liveNotes: transcription.liveNotes ?? metadata.liveNotes,
             highlights: transcription.highlights,
             notionPageUrl: transcription.notionPageUrl,
+            supersededNotionPageUrl: transcription.supersededNotionPageUrl,
             slackSentAt: transcription.slackSentAt,
             slackError: transcription.slackError,
             cost: transcription.cost,
+            transcriptCutoff: transcription.transcriptCutoff,
+            transcriptCutoffMismatch: transcription.transcriptCutoffMismatch,
           },
         };
       }
@@ -1825,6 +1873,11 @@ ipcMain.handle(
         snippet: h.snippet,
         snippetField: h.snippetField ?? null,
         data: {
+          // The saved note behind the hit, so the modal treats it like one
+          // opened from the recordings list: exports re-read it and a stale
+          // cutoff fails closed instead of sending the full transcript.
+          transcriptionPath: h.entry.folderPath,
+          generationId: h.data.generationId ?? null,
           title: h.data.title,
           suggestedTitle: h.data.suggestedTitle,
           summary: h.data.summary,
@@ -1835,6 +1888,13 @@ ipcMain.handle(
           actionItemGroups: h.data.actionItemGroups ?? [],
           customFields: h.data.customFields ?? {},
           emoji: h.data.emoji,
+          liveNotes: h.data.liveNotes,
+          highlights: h.data.highlights,
+          notionPageUrl: h.data.notionPageUrl,
+          supersededNotionPageUrl: h.data.supersededNotionPageUrl,
+          slackSentAt: h.data.slackSentAt,
+          transcriptCutoff: h.data.transcriptCutoff,
+          transcriptCutoffMismatch: h.data.transcriptCutoffMismatch,
         },
       }));
 
@@ -1869,6 +1929,9 @@ ipcMain.handle('get-recordings', async () => {
       size: number;
       createdAt: Date;
       modifiedAt: Date;
+      // Same keys the transcription job registry matches on, so the renderer
+      // can tie this row to a job started through another path spelling.
+      aliases: string[];
     }> = [];
     for (const file of files) {
       if (isTranscriptionTempFile(file)) continue;
@@ -1897,6 +1960,7 @@ ipcMain.handle('get-recordings', async () => {
         size: stats.size,
         createdAt: stats.birthtime,
         modifiedAt: stats.mtime,
+        aliases: pathKeys(filePath),
       });
     }
 
@@ -1974,20 +2038,28 @@ ipcMain.handle('system-audio-stop', async () => {
 
 ipcMain.handle('live-session-start', async (_, opts?: { title?: string; translate?: boolean }) => {
   try {
-    if (!configService.hasStreamingLiveSttAuth() && !configService.hasAiAuth()) {
+    const translate = opts?.translate !== false;
+    // Without streaming credentials the session is chunked captions: snippets
+    // on the batch STT backend (ChatGPT itself carries no audio), plus the
+    // text provider only to translate them. The issue check also refreshes
+    // the ChatGPT status, so a CLI sign-in or sign-out counts.
+    const chunkedIssue = chunkedLiveCaptionsIssue(translate);
+    if (!configService.hasStreamingLiveSttAuth() && chunkedIssue) {
       return {
         success: false,
-        error: `Live transcription auth is not configured, and fallback is unavailable: ${formatAiCredentialsError()}`,
+        error: `Live transcription auth is not configured, and fallback is unavailable: ${chunkedIssue}`,
       };
     }
     const session = await liveSessionService.start({
       title: typeof opts?.title === 'string' ? opts.title : undefined,
-      translate: opts?.translate !== false,
+      translate,
     });
     return { success: true, session };
   } catch (error) {
     console.error('live-session-start failed:', error);
-    reportError(error, { operation: 'liveSession.start', severity: 'error' });
+    if (!(error instanceof LiveChunkedCaptionsUnavailableError)) {
+      reportError(error, { operation: 'liveSession.start', severity: 'error' });
+    }
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
@@ -2004,7 +2076,9 @@ ipcMain.handle(
       return { success: true, session };
     } catch (error) {
       console.error('live-session-realtime-failed failed:', error);
-      reportError(error, { operation: 'liveSession.realtimeFallback', severity: 'warning' });
+      if (!(error instanceof LiveChunkedCaptionsUnavailableError)) {
+        reportError(error, { operation: 'liveSession.realtimeFallback', severity: 'warning' });
+      }
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
@@ -2204,7 +2278,16 @@ ipcMain.handle(
   async (
     _event,
     opts: { question: string; history?: AgentChatMessage[]; scope: AgentScope },
-  ): Promise<{ success: true; result: AgentRunResult } | { success: false; error: string }> => {
+  ): Promise<
+    | { success: true; result: AgentRunResult }
+    | {
+        success: false;
+        error: string;
+        errorType?: 'chatgpt';
+        errorCode?: string;
+        manageUsageUrl?: string;
+      }
+  > => {
     try {
       const agent = getAgentService();
       if (!agent) {
@@ -2252,6 +2335,22 @@ ipcMain.handle(
 
       return { success: true, result };
     } catch (error) {
+      // ChatGPT plan states (signed out mid-chat, usage limit, ...) carry
+      // their own actionable copy and code; they are user states, not bugs.
+      if (error instanceof ChatGPTInferenceError || error instanceof ChatGPTBindingError) {
+        if (error instanceof ChatGPTInferenceError && error.code === 'failed') {
+          reportError(error, { operation: 'agent.chat', severity: 'error' });
+        }
+        return {
+          success: false,
+          error: error.userMessage,
+          errorType: 'chatgpt',
+          errorCode: error.code,
+          ...(error instanceof ChatGPTInferenceError && error.manageUsageUrl
+            ? { manageUsageUrl: error.manageUsageUrl }
+            : {}),
+        };
+      }
       console.error('agent-chat failed:', error);
       reportError(error, { operation: 'agent.chat', severity: 'error' });
       return { success: false, error: error instanceof Error ? error.message : String(error) };

@@ -36,6 +36,7 @@ type TranscribeFn = (
 // per test so they bind to the stub and the current temp dir.
 const RELOAD = [
   './transcription',
+  './noteExports',
   '../services/metadataService',
   '../services/notificationService',
 ];
@@ -57,6 +58,9 @@ describe('transcribe-audio regenerate (#213)', () => {
   let handlers: Map<string, Handler>;
   let originalLoad: ModuleWithLoad['_load'];
   let transcribe: TranscribeFn;
+  let notionCalls: Array<{ summary: string }>;
+  let notionGate: Promise<void> | null;
+  let onUploadComplete: () => void;
 
   beforeEach(() => {
     dataPath = makeTempDir('ipc-transcription');
@@ -78,8 +82,23 @@ describe('transcribe-audio regenerate (#213)', () => {
     };
     for (const m of RELOAD) delete require.cache[require.resolve(m)];
 
+    notionCalls = [];
+    notionGate = null;
+    onUploadComplete = () => {};
     const transcriptionsRoot = getTranscriptionsDir(dataPath);
     const ctx = {
+      // Notion upload runs through the real handler; only the remote call is faked.
+      notificationService: {
+        notifyUploadComplete: () => onUploadComplete(),
+        notifyUploadFailed: () => {},
+      },
+      getNotionService: () => ({
+        createMeetingNote: async (_title: string, _date: Date, data: { summary: string }) => {
+          notionCalls.push({ summary: data.summary });
+          await notionGate;
+          return { success: true, url: `https://www.notion.so/page-${notionCalls.length}` };
+        },
+      }),
       getMainWindow: () => null,
       configService: { getSummaryPrompt: () => '' },
       ensureGeminiService: () => ({
@@ -94,6 +113,7 @@ describe('transcribe-audio regenerate (#213)', () => {
     } as unknown as IpcContext;
     const mod = require('./transcription') as { register: (ctx: IpcContext) => void };
     mod.register(ctx);
+    (require('./noteExports') as { register: (ctx: IpcContext) => void }).register(ctx);
   });
 
   afterEach(() => {
@@ -160,6 +180,132 @@ describe('transcribe-audio regenerate (#213)', () => {
     const note = await readTranscription(second.transcriptionPath!);
     assert.equal(note?.notionPageUrl, undefined);
     assert.equal(note?.slackSentAt, undefined);
+  });
+
+  const upload = (
+    folder: string,
+    expectedGenerationId?: string | null,
+  ): Promise<{ success: boolean; url?: string; error?: string }> =>
+    handlers.get('upload-to-notion')!(undefined, {
+      title: 'First Title',
+      transcriptionData: {},
+      transcriptionPath: folder,
+      ...(expectedGenerationId === undefined ? {} : { expectedGenerationId }),
+    }) as Promise<{ success: boolean; url?: string; error?: string }>;
+  const waitFor = async (condition: () => boolean): Promise<void> => {
+    const deadline = Date.now() + 5000;
+    while (!condition()) {
+      if (Date.now() > deadline) throw new Error('timed out');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
+
+  it('lets an in-flight Notion upload record its page before Regenerate replaces the note', async () => {
+    transcribe = async () => resultFor('First');
+    const first = await run();
+    const folder = first.transcriptionPath!;
+
+    let openGate!: () => void;
+    notionGate = new Promise((resolve) => {
+      openGate = resolve;
+    });
+    // What the note looks like when the upload's status write has finished.
+    let atUploadComplete: { summary?: string; notionPageUrl?: string } | undefined;
+    onUploadComplete = () => {
+      const note = JSON.parse(fs.readFileSync(path.join(folder, 'meta.json'), 'utf-8'));
+      atUploadComplete = {
+        summary: fs.readFileSync(path.join(folder, 'summary.md'), 'utf-8').trim(),
+        notionPageUrl: note.exports?.notion?.pageUrl,
+      };
+    };
+    const uploading = upload(folder, first.generationId);
+    await waitFor(() => notionCalls.length === 1);
+
+    transcribe = async () => resultFor('Second');
+    const regenerating = run();
+    await settle();
+    assert.equal(
+      (await readTranscription(folder))?.summary,
+      'First summary.',
+      'the note is not replaced while the upload of it is outstanding',
+    );
+
+    openGate();
+    assert.deepEqual(await uploading, { success: true, url: 'https://www.notion.so/page-1' });
+    assert.deepEqual(atUploadComplete, {
+      summary: 'First summary.',
+      notionPageUrl: 'https://www.notion.so/page-1',
+    });
+    const second = await regenerating;
+    assert.equal(second.success, true);
+    assert.equal(second.transcriptionPath, folder);
+    assert.equal((await readTranscription(folder))?.summary, 'Second summary.');
+    assert.deepEqual(notionCalls, [{ summary: 'First summary.' }]);
+  });
+
+  it('runs exports requested during a queued Regenerate against the new note', async () => {
+    transcribe = async () => resultFor('First');
+    const first = await run();
+    const folder = first.transcriptionPath!;
+
+    // Hold the note's queue with an upload, then queue Regenerate and two more
+    // uploads behind it.
+    let openGate!: () => void;
+    notionGate = new Promise((resolve) => {
+      openGate = resolve;
+    });
+    const holding = upload(folder);
+    await waitFor(() => notionCalls.length === 1);
+    transcribe = async () => resultFor('Second');
+    const regenerating = run();
+    await settle();
+    const stale = upload(folder, first.generationId);
+    const current = upload(folder);
+    await settle();
+    assert.equal(notionCalls.length, 1);
+
+    openGate();
+    assert.equal((await holding).success, true);
+    const second = await regenerating;
+    assert.equal(second.success, true);
+    assert.deepEqual(await stale, {
+      success: false,
+      error: 'This note changed. Reopen it before uploading.',
+    });
+    assert.equal((await current).success, true);
+    assert.deepEqual(notionCalls, [{ summary: 'First summary.' }, { summary: 'Second summary.' }]);
+    const note = await readTranscription(folder);
+    assert.equal(note?.generationId, second.generationId);
+    assert.equal(note?.notionPageUrl, 'https://www.notion.so/page-2');
+  });
+
+  it('cancels a Regenerate still waiting behind an export without touching the note', async () => {
+    transcribe = async () => resultFor('First');
+    const first = await run();
+    const folder = first.transcriptionPath!;
+
+    let openGate!: () => void;
+    notionGate = new Promise((resolve) => {
+      openGate = resolve;
+    });
+    const uploading = upload(folder, first.generationId);
+    await waitFor(() => notionCalls.length === 1);
+    transcribe = async () => resultFor('Second');
+    const regenerating = run();
+    await settle();
+    await handlers.get('cancel-transcription')!(undefined, audioPath);
+    const cancelled = await regenerating;
+    assert.equal(cancelled.cancelled, true, 'cancel does not wait for the export');
+
+    openGate();
+    assert.equal((await uploading).success, true);
+    const note = await readTranscription(folder);
+    assert.equal(note?.summary, 'First summary.');
+    assert.equal(note?.generationId, first.generationId);
+    assert.equal(note?.notionPageUrl, 'https://www.notion.so/page-1');
+    assert.equal(linkedPath(), folder);
+    assert.equal(noteFolders().length, 1);
   });
 
   it('keeps the note locked until the regenerated sidecar is saved', async () => {

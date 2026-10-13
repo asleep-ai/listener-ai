@@ -7,7 +7,7 @@ import { setupFileHandler } from './services/file-handler';
 import { setupRendererLogger } from './services/renderer-logger';
 import { getDom, initDom } from './state';
 import { setupAgentConfirmHandler, setupHomeChat, setupModalChat } from './ui/chat-panel';
-import { checkAndPromptForConfig, setupConfigModal, showConfigModal } from './ui/config-modal';
+import { setupConfigModal, showConfigModal } from './ui/config-modal';
 import { setupDragAndDrop, setupPasteListener } from './ui/drag-drop';
 import { setupHomeToggles } from './ui/home-toggles';
 import { setupLiveNotes } from './ui/live-notes';
@@ -18,7 +18,8 @@ import { setupPermissionStatus } from './ui/permission-status';
 import { loadRecordings, setupRecordingsList } from './ui/recordings-list';
 import { setupReleaseNotes } from './ui/release-notes';
 import { setupSearch } from './ui/search';
-import { setupTranscriptionModal } from './ui/transcription-modal';
+import { setupTranscriptionJobs } from './ui/transcription-jobs';
+import { progressBelongsToModal, setupTranscriptionModal } from './ui/transcription-modal';
 import { setupUpdateBadge } from './ui/update-badge';
 import { initRendererSentry } from './sentry';
 
@@ -92,6 +93,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     // Setup order: notifications first (other modules call showNotification),
     // recorder before UI that triggers it, then UI modules in any order.
     setupNotifications();
+    // Job state first: rows, auto mode and the modal reconnect from it.
+    const jobsReady = setupTranscriptionJobs();
     setupRecorder();
     setupLiveNotes();
     setupLiveSession();
@@ -114,12 +117,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     // both drive their progress through this listener. Gate on the modal's
     // progress container being VISIBLE -- inline row transcribes never show
     // the modal, so updates land while hidden and waste DOM mutations; worse,
-    // they'd leak the inline message into the modal next time it opens.
-    // recordings-list.ts owns the inline dispatch via its own subscription.
+    // they'd leak the inline message into the modal next time it opens. Also
+    // gate on the job the modal belongs to, so a row transcription running at
+    // the same time never moves the modal's bar.
+    // recordings-list.ts owns the inline rows via main-owned job state.
     window.electronAPI.onTranscriptionProgress((progress) => {
       const dom = getDom();
       if (!dom.progressContainer || !dom.progressFill || !dom.progressText) return;
       if (dom.progressContainer.style.display === 'none') return;
+      if (!progressBelongsToModal(progress)) return;
       dom.progressFill.style.width = `${progress.percent}%`;
       dom.progressText.textContent = progress.message;
     });
@@ -136,8 +142,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       });
     }
 
-    // Initial async work: prompt for missing API keys, load recordings list.
-    await checkAndPromptForConfig();
+    // Initial async work: load recordings list. Missing AI setup is surfaced
+    // only when an action that needs it is chosen (requireAiSetup), never on
+    // startup.
+    await jobsReady;
     await loadRecordings();
 
     const loadingIndicator = document.getElementById('loadingIndicator');

@@ -5,18 +5,34 @@
 
 import { getDom } from '../state';
 import { resetModalChatFor } from './chat-panel';
-import { showConfigModal } from './config-modal';
+import { requireAiSetup } from './config-modal';
 import { camelToLabel } from '../../src/meetingRecord';
 import {
+  includedTranscript,
+  resolveTranscriptCutoff,
+  titleForSavedReport,
+} from '../../src/transcriptCutoff';
+import {
   type TranscriptionData,
-  escapeHtml,
   renderDynamicFields,
   renderMarkdown,
   structuredToMarkdown,
 } from './markdown-utils';
 import { showToast } from './notifications';
 import { refreshRecordingsList } from './recordings-list';
+import { jobMatchesPath } from '../../src/transcriptionJobView';
+import { getTranscriptionJob } from './transcription-jobs';
 import { showTranscriptionErrorDialog } from './transcription-error-dialog';
+import {
+  clearTranscriptCutoffBusy,
+  describeFlaggedNotes,
+  focusTranscriptCutoffStatus,
+  renderTranscriptPane,
+  clearTranscriptSelectionOnPointerDown,
+  setTranscriptCutoffBusy,
+  showTranscriptCutoffMessage,
+  trackTranscriptSelection,
+} from './transcript-cutoff';
 
 // Modal-level mutable state. These were top-level `let`s in legacy.ts; keeping
 // them module-private mirrors the original visibility (handleTranscribe,
@@ -27,7 +43,46 @@ let currentFilePath: string | null | undefined = '';
 let currentTranscriptionPath: string | null = null;
 let currentGenerationId: string | null | undefined;
 let currentNotionUrl: string | null = null;
+// Notion page uploaded before the last cutoff change; it still shows the older report.
+let supersededNotionUrl: string | null = null;
 let currentSlackSentAt: string | null = null;
+let cutoffInFlight = false;
+
+// Which job the modal's progress bar and pending result belong to. Several
+// jobs can run at once (row transcriptions, a merge), so progress and results
+// for anything else must not land in the modal. `modalSession` changes
+// whenever the modal starts showing something else; a result that arrives for
+// an older session is not shown.
+export type ModalJobTarget =
+  | { kind: 'transcribe'; filePath: string }
+  | { kind: 'merge'; jobId?: string };
+let modalJobTarget: ModalJobTarget | null = null;
+let modalSession = 0;
+
+export function getModalSession(): number {
+  return modalSession;
+}
+
+export function progressBelongsToModal(progress: { filePath?: string; jobId?: string }): boolean {
+  const target = modalJobTarget;
+  if (!target) return false;
+  const job = progress.jobId ? getTranscriptionJob(progress.jobId) : undefined;
+  if (target.kind === 'merge') {
+    if (target.jobId) return progress.jobId === target.jobId;
+    // Merges are single-flight; a merge job (or a legacy event without a
+    // path) is the one this modal started.
+    return job ? job.kind === 'merge' : !progress.filePath;
+  }
+  if (progress.filePath === target.filePath) return true;
+  return !!job && job.kind === 'transcribe' && jobMatchesPath(job, target.filePath);
+}
+
+export function setModalProgress(percent: number, message: string): void {
+  const { progressContainer, progressFill, progressText } = getDom();
+  if (!progressContainer || progressContainer.style.display === 'none') return;
+  if (progressFill) progressFill.style.width = `${percent}%`;
+  if (progressText && message) progressText.textContent = message;
+}
 
 let transcriptionModal: HTMLDialogElement | null = null;
 let closeTranscriptionBtn: Element | null = null;
@@ -49,7 +104,39 @@ function refreshSlackButtonLabel(): void {
 
 function refreshNotionButtonLabel(): void {
   if (!notionButtonLabel) return;
-  notionButtonLabel.textContent = currentNotionUrl ? 'View in Notion' : 'Upload to Notion';
+  notionButtonLabel.textContent = currentNotionUrl
+    ? 'View in Notion'
+    : supersededNotionUrl
+      ? 'Upload new version to Notion'
+      : 'Upload to Notion';
+  refreshNotionSupersededNotice();
+}
+
+// Visible on every tab: after a cutoff change the earlier Notion page still
+// shows the previous report, and nothing in the app edits it.
+function refreshNotionSupersededNotice(): void {
+  const notice = document.getElementById('notionSupersededNotice');
+  if (!notice) return;
+  const show = !!supersededNotionUrl && !currentNotionUrl;
+  notice.hidden = !show;
+  if (!show) {
+    notice.replaceChildren();
+    return;
+  }
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'link-button';
+  open.textContent = 'Open the earlier Notion page';
+  const url = supersededNotionUrl;
+  open.addEventListener('click', () => {
+    if (url) void window.electronAPI.openExternal(url);
+  });
+  notice.replaceChildren(
+    document.createTextNode(
+      'The report changed after it was uploaded to Notion. The earlier Notion page was not changed and still shows the previous report. Upload to Notion to publish the current report as a new page. ',
+    ),
+    open,
+  );
 }
 
 function ensureTranscriptionModal(): HTMLDialogElement | null {
@@ -81,18 +168,23 @@ export function populateTranscriptionUI(data: TranscriptionData): void {
       : '<p class="loading">No summary available</p>';
   }
 
-  // Transcript tab
-  const formattedTranscript = (data.transcript || '')
-    .split('\n')
-    .map((line: string) => line.trim())
-    .filter((line: string) => line.length > 0)
-    .join('\n');
+  // Transcript tab: the full transcript, with any excluded tail marked.
   const transcriptDiv = document.getElementById('transcript');
   if (transcriptDiv) {
-    transcriptDiv.innerHTML = `
-    <button class="copy-button" data-copy-target="transcript">📋 Copy</button>
-    <div class="transcript-content">${escapeHtml(formattedTranscript)}</div>
-  `;
+    const transcript = String(data.transcript || '').trim();
+    renderTranscriptPane(transcriptDiv, {
+      transcript,
+      cutoff: resolveTranscriptCutoff(transcript, data.transcriptCutoff),
+      cutoffMismatch: data.transcriptCutoffMismatch === true,
+      flaggedNotes: Array.isArray(data.liveNotes)
+        ? data.liveNotes
+        : Array.isArray(data.highlights)
+          ? data.highlights
+          : undefined,
+      // Only a saved note whose generation we know can be changed safely.
+      editable: !!currentTranscriptionPath && currentGenerationId !== undefined,
+      onApply: (offset) => void applyTranscriptCutoff(offset),
+    });
   }
 
   renderDynamicFields(data);
@@ -103,7 +195,11 @@ export function populateTranscriptionUI(data: TranscriptionData): void {
 export function showSavedTranscript(
   filePath: string,
   title: string,
-  metadata: TranscriptionData & { folderName?: string },
+  metadata: TranscriptionData & {
+    folderName?: string;
+    reportTitle?: string;
+    reportSuggestedTitle?: string;
+  },
   folderName?: string | null,
 ): void {
   // Make sure modal elements are loaded
@@ -111,9 +207,16 @@ export function showSavedTranscript(
 
   // Show transcription modal
   if (modal) {
+    modalJobTarget = null;
+    modalSession++;
     if (!modal.open) modal.showModal();
     const titleEl = document.getElementById('transcriptionTitle');
-    if (titleEl) titleEl.textContent = `Transcription - ${title}`;
+    const reportTitle = titleForSavedReport(
+      title,
+      metadata.suggestedTitle,
+      metadata.reportTitle ?? title,
+    );
+    if (titleEl) titleEl.textContent = `Transcription - ${reportTitle}`;
 
     // Hide progress bar since we're showing saved data
     const { progressContainer } = getDom();
@@ -129,13 +232,15 @@ export function showSavedTranscript(
       keyPoints: metadata.keyPoints || [],
       actionItems: metadata.actionItems || [],
       actionItemGroups: metadata.actionItemGroups,
-      suggestedTitle: metadata.suggestedTitle,
+      suggestedTitle: metadata.reportSuggestedTitle ?? metadata.suggestedTitle,
       customFields: metadata.customFields,
       emoji: metadata.emoji,
       liveNotes: metadata.liveNotes,
       highlights: metadata.highlights,
+      transcriptCutoff: metadata.transcriptCutoff,
+      transcriptCutoffMismatch: metadata.transcriptCutoffMismatch,
     };
-    currentMeetingTitle = title;
+    currentMeetingTitle = reportTitle;
     currentFilePath = filePath;
     currentTranscriptionPath =
       (metadata as { transcriptionPath?: string }).transcriptionPath ?? null;
@@ -143,6 +248,8 @@ export function showSavedTranscript(
       ? (metadata as { generationId?: string | null }).generationId
       : undefined;
     currentNotionUrl = (metadata as { notionPageUrl?: string }).notionPageUrl ?? null;
+    supersededNotionUrl =
+      (metadata as { supersededNotionPageUrl?: string }).supersededNotionPageUrl ?? null;
     currentSlackSentAt = (metadata as { slackSentAt?: string }).slackSentAt ?? null;
     refreshSlackButtonLabel();
     refreshNotionButtonLabel();
@@ -164,43 +271,20 @@ export function showSavedTranscript(
   }
 }
 
-// Gate transcription on both credential sets: the AI provider (summary, quality
-// judge, agent) and the selected transcription backend, which can be a
-// different vendor with its own key. Returns true when the caller can proceed;
-// false when the user needs to configure first (and the appropriate UI has
-// already been surfaced). Checking here keeps a missing backend key from
-// failing only after the ffmpeg work. Shared by the modal and the inline-row
-// transcribe flows.
-export async function requireAiAuth(): Promise<boolean> {
-  const configCheck = await window.electronAPI.checkConfig();
-  if (configCheck.hasAiAuth && configCheck.hasTranscriptionAuth) return true;
-  const message = !configCheck.hasAiAuth
-    ? 'Please configure your AI provider first'
-    : configCheck.transcriptionProvider === 'soniox'
-      ? 'Transcription is set to Soniox, but no Soniox API key is saved. Add the key in Settings, or set Transcription back to "Follow AI provider".'
-      : 'The selected transcription backend has no credentials saved. Check the Transcription setting in Settings.';
-  if (document.getElementById('configModal')) {
-    // The provider case is self-evident once Settings opens; a missing backend
-    // key is not, so name it before the modal appears.
-    if (configCheck.hasAiAuth) alert(message);
-    void showConfigModal();
-  } else {
-    alert(message);
-  }
-  return false;
-}
-
 // Retry `transcribeAudio` once after the ffmpeg-missing download dialog if the
 // first call surfaced that specific failure. Returns the (possibly retried)
 // result so callers don't need to know about the recovery path.
 export async function transcribeWithFfmpegRetry(
   filePath: string,
+  ownsSession: () => boolean = () => true,
 ): Promise<Awaited<ReturnType<typeof window.electronAPI.transcribeAudio>>> {
   let result = await window.electronAPI.transcribeAudio(filePath);
   if (!result.success && (result as { code?: string }).code === 'ffmpeg-missing') {
+    if (!ownsSession()) return result;
     const { showFFmpegDownloadDialog } = await import('./ffmpeg-dialog');
+    if (!ownsSession()) return result;
     const dlResult = await showFFmpegDownloadDialog();
-    if (dlResult.success) {
+    if (dlResult.success && ownsSession()) {
       result = await window.electronAPI.transcribeAudio(filePath);
     }
   }
@@ -212,11 +296,20 @@ export async function handleTranscribe(filePath: string, title: string): Promise
 
   // Transcription only needs the AI provider auth; Notion is for the optional
   // upload step and shouldn't gate the recording -> transcript flow.
-  if (!(await requireAiAuth())) return;
+  if (!(await requireAiSetup({ transcription: true }))) return;
 
-  if (!prepareTranscriptionModal(`Transcription - ${title}`, 'Initializing transcription...')) {
+  if (
+    !prepareTranscriptionModal(
+      `Transcription - ${title}`,
+      'Initializing transcription...',
+      undefined,
+      { kind: 'transcribe', filePath },
+    )
+  ) {
     return;
   }
+  const session = modalSession;
+  const ownsSession = () => session === modalSession;
 
   const button = document.querySelector(
     `[data-filepath="${filePath}"]`,
@@ -227,8 +320,14 @@ export async function handleTranscribe(filePath: string, title: string): Promise
   }
 
   try {
-    const result = await transcribeWithFfmpegRetry(filePath);
+    const result = await transcribeWithFfmpegRetry(filePath, ownsSession);
 
+    if (!ownsSession()) {
+      // The modal shows something else now; keep it, just surface a new note.
+      if (result.success) await refreshRecordingsList();
+      return;
+    }
+    if (result.cancelled) return;
     if (result.success) {
       // Hide progress bar
       const { progressContainer } = getDom();
@@ -259,6 +358,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
         ? (result as { generationId?: string | null }).generationId
         : undefined;
       currentNotionUrl = null;
+      supersededNotionUrl = null;
       currentSlackSentAt = null;
       refreshSlackButtonLabel();
       refreshNotionButtonLabel();
@@ -270,6 +370,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       await refreshRecordingsList();
 
       const cfg = await window.electronAPI.getConfig();
+      if (!ownsSession()) return;
       if (uploadToNotionBtn) {
         uploadToNotionBtn.style.display =
           cfg.notionApiKey && cfg.notionDatabaseId ? 'flex' : 'none';
@@ -284,6 +385,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       );
     }
   } catch (error) {
+    if (!ownsSession()) return;
     const message = error instanceof Error ? error.message : String(error);
     await showTranscriptionErrorDialog(undefined, `Error transcribing audio: ${message}`);
   } finally {
@@ -301,12 +403,15 @@ export function prepareTranscriptionModal(
   modalTitle: string,
   progressMessage: string,
   allLoadingText?: string,
+  target?: ModalJobTarget,
 ): boolean {
   const modal = ensureTranscriptionModal();
   if (!modal) {
     console.error('Transcription modal not found');
     return false;
   }
+  modalJobTarget = target ?? null;
+  modalSession++;
   if (!modal.open) modal.showModal();
   const titleEl = document.getElementById('transcriptionTitle');
   if (titleEl) titleEl.textContent = modalTitle;
@@ -350,11 +455,27 @@ export function setupCopyButtons(transcriptionData: TranscriptionData): void {
       const sectionName = target.startsWith('cf-')
         ? camelToLabel(target.slice(3))
         : sectionLabels[target] || target;
-      const textToCopy = structuredToMarkdown(transcriptionData, target);
+      // With a cutoff, copy what the report covers: the text before it.
+      const cutTranscript =
+        target === 'transcript' &&
+        resolveTranscriptCutoff(
+          String(transcriptionData.transcript || '').trim(),
+          transcriptionData.transcriptCutoff,
+        );
+      const textToCopy = cutTranscript
+        ? includedTranscript(
+            String(transcriptionData.transcript || '').trim(),
+            transcriptionData.transcriptCutoff,
+          )
+        : structuredToMarkdown(transcriptionData, target);
 
       try {
         await navigator.clipboard.writeText(textToCopy);
-        showToast(`${sectionName} copied to clipboard`);
+        showToast(
+          cutTranscript
+            ? 'Transcript before the cutoff copied to clipboard'
+            : `${sectionName} copied to clipboard`,
+        );
       } catch (err) {
         console.error('Failed to copy:', err);
         showToast('Failed to copy to clipboard', 'error');
@@ -376,6 +497,9 @@ export function setupTranscriptionModal(): void {
       transcriptionModal?.close();
     });
   }
+
+  document.addEventListener('selectionchange', trackTranscriptSelection);
+  document.addEventListener('pointerdown', clearTranscriptSelectionOnPointerDown);
 
   // Tab handling for transcription modal (event delegation for dynamic tabs)
   const tabsContainer = document.querySelector('.transcription-tabs');
@@ -403,7 +527,7 @@ export function setupTranscriptionModal(): void {
         alert('No transcription data available');
         return;
       }
-      if (!uploadToNotionBtn || uploadToNotionBtn.disabled) return;
+      if (!uploadToNotionBtn || uploadToNotionBtn.disabled || cutoffInFlight) return;
 
       uploadToNotionBtn.disabled = true;
       if (notionButtonLabel) notionButtonLabel.textContent = 'Uploading...';
@@ -422,6 +546,7 @@ export function setupTranscriptionModal(): void {
         if (result.success) {
           if (result.url) {
             currentNotionUrl = result.url;
+            supersededNotionUrl = null;
             window.electronAPI.openExternal(result.url);
           }
           alert('Successfully uploaded to Notion!');
@@ -444,7 +569,7 @@ export function setupTranscriptionModal(): void {
         alert('No transcription data available');
         return;
       }
-      if (!sendToSlackBtn || sendToSlackBtn.disabled) return;
+      if (!sendToSlackBtn || sendToSlackBtn.disabled || cutoffInFlight) return;
 
       // Disable before confirm() to block double-clicks during the prompt.
       sendToSlackBtn.disabled = true;
@@ -501,7 +626,129 @@ export function _setCurrentTranscription(data: {
   currentTranscriptionPath = data.transcriptionPath ?? null;
   currentGenerationId = currentTranscriptionPath ? data.generationId : undefined;
   currentNotionUrl = null;
+  supersededNotionUrl = null;
   currentSlackSentAt = null;
   refreshSlackButtonLabel();
   refreshNotionButtonLabel();
+}
+
+// Set (offset) or remove (null) the saved note's transcript cutoff, then show
+// the report main regenerated from the included text. Uploads and sends stay
+// blocked meanwhile so nothing publishes the report being replaced.
+async function applyTranscriptCutoff(offset: number | null): Promise<void> {
+  const transcriptionPath = currentTranscriptionPath;
+  const generationId = currentGenerationId;
+  if (!transcriptionPath || generationId === undefined || cutoffInFlight) return;
+  // Report regeneration re-summarizes stored text: it needs the AI provider,
+  // not a transcription backend.
+  if (!(await requireAiSetup({ transcription: false }))) return;
+  if (currentTranscriptionPath !== transcriptionPath || cutoffInFlight) return;
+  if (uploadToNotionBtn?.disabled || sendToSlackBtn?.disabled) {
+    showTranscriptCutoffMessage(
+      'Wait for the Notion upload or Slack send to finish, then try again.',
+      true,
+    );
+    return;
+  }
+  if (
+    currentNotionUrl &&
+    !confirm(
+      'This report was already uploaded to Notion. That page will not be changed and will keep showing the current report. After the report is regenerated, you can upload the new version as a new Notion page.\n\nContinue?',
+    )
+  ) {
+    return;
+  }
+
+  cutoffInFlight = true;
+  setExportButtonsDisabled(true);
+  setTranscriptCutoffBusy(
+    true,
+    offset === null
+      ? 'Regenerating the report from the whole transcript...'
+      : 'Regenerating the report from the transcript text before the cutoff...',
+  );
+  try {
+    const result = await window.electronAPI.applyTranscriptCutoff({
+      transcriptionPath,
+      expectedGenerationId: generationId,
+      cutoffOffset: offset,
+    });
+    // The modal may show another note by now; its state is not ours to touch.
+    if (currentTranscriptionPath !== transcriptionPath) {
+      if (result.success) showToast('Report regenerated');
+      return;
+    }
+    if (!result.success) {
+      setTranscriptCutoffBusy(false);
+      showTranscriptCutoffMessage(`The report was not changed: ${result.error}`, true);
+      return;
+    }
+
+    const note = result.data;
+    const nextTitle = titleForSavedReport(
+      currentMeetingTitle,
+      currentTranscriptionData.suggestedTitle,
+      note.title,
+    );
+    const titleWasUpdated = nextTitle !== currentMeetingTitle;
+    currentMeetingTitle = nextTitle;
+    const titleEl = document.getElementById('transcriptionTitle');
+    if (titleEl) titleEl.textContent = `Transcription - ${nextTitle}`;
+    currentTranscriptionData = {
+      ...currentTranscriptionData,
+      suggestedTitle: note.suggestedTitle,
+      transcript: note.transcript,
+      summary: note.summary,
+      summarySections: note.summarySections,
+      keyPoints: note.keyPoints || [],
+      actionItems: note.actionItems || [],
+      actionItemGroups: note.actionItemGroups,
+      customFields: note.customFields,
+      emoji: note.emoji,
+      liveNotes: note.liveNotes,
+      highlights: note.highlights,
+      transcriptCutoff: note.transcriptCutoff,
+      transcriptCutoffMismatch: undefined,
+    };
+    currentGenerationId = note.generationId;
+    currentNotionUrl = note.notionPageUrl ?? null;
+    supersededNotionUrl = note.supersededNotionPageUrl ?? null;
+    currentSlackSentAt = note.slackSentAt ?? null;
+    refreshSlackButtonLabel();
+    refreshNotionButtonLabel();
+
+    populateTranscriptionUI(currentTranscriptionData);
+    showTab('transcript');
+    showTranscriptCutoffMessage(
+      note.transcriptCutoff
+        ? `Report regenerated from the transcript text before the cutoff. The summary, key points, action items and highlights now cover only that part.${describeFlaggedNotes(note.transcriptCutoff.offset)} ${titleWasUpdated ? 'The suggested meeting title was updated.' : 'The meeting title was kept.'}`
+        : 'Report regenerated from the whole transcript and every flagged note.',
+    );
+    focusTranscriptCutoffStatus();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (currentTranscriptionPath === transcriptionPath) {
+      setTranscriptCutoffBusy(false);
+      showTranscriptCutoffMessage(`The report was not changed: ${message}`, true);
+    }
+  } finally {
+    cutoffInFlight = false;
+    setExportButtonsDisabled(false);
+    // Every exit, including success and a modal that now shows another note,
+    // must end the busy state or assistive technology keeps the whole modal
+    // body marked as loading.
+    clearTranscriptCutoffBusy();
+  }
+}
+
+function setExportButtonsDisabled(disabled: boolean): void {
+  if (uploadToNotionBtn) uploadToNotionBtn.disabled = disabled;
+  if (sendToSlackBtn) sendToSlackBtn.disabled = disabled;
+}
+
+function showTab(tab: string): void {
+  document.querySelectorAll('.tab-button').forEach((b) => b.classList.remove('active'));
+  document.querySelectorAll('.tab-pane').forEach((p) => p.classList.remove('active'));
+  document.querySelector(`.tab-button[data-tab="${tab}"]`)?.classList.add('active');
+  document.getElementById(tab)?.classList.add('active');
 }

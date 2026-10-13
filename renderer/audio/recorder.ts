@@ -1,6 +1,7 @@
 // Recording session orchestration: start/stop, MediaRecorder wiring, timer,
 // auto-mode post-processing. Owns the click handler on the record button.
 
+import { autoModeSkipMessage } from '../../src/aiProvider';
 import { getDom, state } from '../state';
 import { hideLiveNotesPanel, showLiveNotesPanel } from '../ui/live-notes';
 import {
@@ -11,6 +12,9 @@ import {
 } from '../ui/live-session';
 import { showNotification, showToast } from '../ui/notifications';
 import { refreshRecordingsList } from '../ui/recordings-list';
+import { onTranscriptionJobChange } from '../ui/transcription-jobs';
+import { describeAutoExports, isActiveJob } from '../../src/transcriptionJobView';
+import type { TranscriptionJobSnapshot } from '../electronAPI';
 import { reportError } from '../sentry';
 import { buildProcessedStream, cleanupAudioState, pickRecordingMimeType } from './graph';
 import { acquireMediaStream, attachTrackEndedHandlers } from './mic';
@@ -199,10 +203,54 @@ export function resetRecordingUI(): void {
   clearLiveSessionLauncher();
 }
 
-function pickMeetingTitle(recordingTitle: string, suggestedTitle?: string): string {
-  const isPlaceholder = recordingTitle === '' || recordingTitle === 'Untitled_Meeting';
-  if (isPlaceholder && suggestedTitle) return suggestedTitle;
-  return recordingTitle || suggestedTitle || 'Untitled Meeting';
+// True while this renderer awaits its own auto-mode transcription. An auto job
+// seen only through job state (this window reloaded mid-run) is followed by
+// `followAutoJob` instead.
+let localAutoRunInFlight = false;
+let followedAutoJobId: string | null = null;
+
+function setAutoModeProcessing(processing: boolean): void {
+  const { recordButton } = getDom();
+  state.isAutoModeProcessing = processing;
+  recordButton.disabled = processing;
+  recordButton.style.opacity = processing ? '0.5' : '';
+  recordButton.style.cursor = processing ? 'not-allowed' : '';
+}
+
+function scheduleReadyStatus(): void {
+  const { statusText } = getDom();
+  setTimeout(() => {
+    statusText.textContent = 'Ready to record';
+  }, 5000);
+}
+
+function autoJobOutcome(job: Pick<TranscriptionJobSnapshot, 'status' | 'exports'>): string {
+  if (job.status === 'succeeded') return describeAutoExports(job.exports);
+  if (job.status === 'cancelled') return 'Auto mode: Transcription cancelled';
+  return 'Auto mode: Transcription failed';
+}
+
+// Auto mode's transcription and Notion/Slack follow-ups run as one main-owned
+// job. After a reload this restores the processing state and reports the
+// outcome when the job ends.
+function followAutoJob(job: TranscriptionJobSnapshot): void {
+  if (job.kind !== 'transcribe' || job.origin !== 'auto' || localAutoRunInFlight) return;
+  const { statusText } = getDom();
+  if (isActiveJob(job)) {
+    if (followedAutoJobId && followedAutoJobId !== job.id) return;
+    followedAutoJobId = job.id;
+    setAutoModeProcessing(true);
+    statusText.textContent =
+      job.phase === 'exporting'
+        ? 'Auto mode: Sending to Notion/Slack...'
+        : 'Auto mode: Processing recording...';
+    return;
+  }
+  if (followedAutoJobId !== job.id) return;
+  followedAutoJobId = null;
+  statusText.textContent = autoJobOutcome(job);
+  setAutoModeProcessing(false);
+  scheduleReadyStatus();
 }
 
 export async function processAutoMode(
@@ -211,7 +259,7 @@ export async function processAutoMode(
   durationMs: number | undefined,
   liveNotes?: Array<{ offsetMs: number; text: string }>,
 ): Promise<void> {
-  const { autoModeToggle, recordButton, statusText } = getDom();
+  const { autoModeToggle, statusText } = getDom();
   if (!autoModeToggle.checked || !audioPath) return;
 
   const config = await window.electronAPI.getConfig();
@@ -235,12 +283,7 @@ export async function processAutoMode(
   // nothing on screen naming the setting that has to change.
   const configCheck = await window.electronAPI.checkConfig();
   if (!configCheck.hasAiAuth || !configCheck.hasTranscriptionAuth) {
-    const reason = !configCheck.hasAiAuth
-      ? 'configure your AI provider in Settings'
-      : configCheck.transcriptionProvider === 'soniox'
-        ? 'transcription is set to Soniox but no Soniox API key is saved'
-        : 'the selected transcription backend has no credentials saved';
-    const message = `Auto mode: Skipped -- ${reason}. The recording was saved.`;
+    const message = autoModeSkipMessage(configCheck);
     console.warn(message);
     statusText.textContent = message;
     showNotification(message, 'error');
@@ -252,91 +295,38 @@ export async function processAutoMode(
     return;
   }
 
-  state.isAutoModeProcessing = true;
-  recordButton.disabled = true;
-  recordButton.style.opacity = '0.5';
-  recordButton.style.cursor = 'not-allowed';
+  localAutoRunInFlight = true;
+  setAutoModeProcessing(true);
   statusText.textContent = 'Auto mode: Processing recording...';
 
   try {
     console.log('Auto mode: Starting transcription...');
-    const transcriptionResult = await window.electronAPI.transcribeAudio(audioPath, liveNotes);
+    // Main runs the configured Notion upload and Slack send as part of this
+    // job (and opens the Notion page), so they still happen if this window
+    // reloads before the job ends.
+    const transcriptionResult = await window.electronAPI.transcribeAudio(audioPath, liveNotes, {
+      autoExport: true,
+      recordingTitle,
+    });
 
     if (transcriptionResult.success) {
       console.log('Auto mode: Transcription complete');
-
-      let finalAudioPath = audioPath;
       if (transcriptionResult.newFilePath) {
-        finalAudioPath = transcriptionResult.newFilePath;
-        console.log('Auto mode: File renamed to:', finalAudioPath);
+        console.log('Auto mode: File renamed to:', transcriptionResult.newFilePath);
       }
-
-      const finalTitle = pickMeetingTitle(recordingTitle, transcriptionResult.data.suggestedTitle);
-
-      let notionUrl: string | undefined;
-      let notionError: string | undefined;
-      let notionConfigured = false;
-      let notionSucceeded = false;
-
-      if (config.notionApiKey && config.notionDatabaseId) {
-        notionConfigured = true;
-        console.log('Auto mode: Uploading to Notion...');
-
-        const uploadResult = await window.electronAPI.uploadToNotion({
-          title: finalTitle,
-          transcriptionData: transcriptionResult.data,
-          audioFilePath: finalAudioPath,
-          transcriptionPath: transcriptionResult.transcriptionPath,
-          ...(transcriptionResult.generationId !== undefined
-            ? { expectedGenerationId: transcriptionResult.generationId }
-            : {}),
-        });
-
-        if (uploadResult.success) {
-          notionSucceeded = true;
-          notionUrl = uploadResult.url;
-          statusText.textContent = 'Auto mode: Successfully uploaded to Notion!';
-          if (uploadResult.url) {
-            window.electronAPI.openExternal(uploadResult.url);
-          }
-        } else {
-          notionError = uploadResult.error || 'Unknown error';
-          statusText.textContent = 'Auto mode: Failed to upload to Notion';
-          console.error('Auto mode: Notion upload failed:', uploadResult.error);
-        }
+      if (transcriptionResult.exports?.notion?.status === 'failed') {
+        console.error('Auto mode: Notion upload failed:', transcriptionResult.exports.notion.error);
       }
-
-      if (config.slackWebhookUrl && config.slackAutoShare) {
-        console.log('Auto mode: Sending to Slack...');
-        const slackResult = await window.electronAPI.sendToSlack({
-          title: finalTitle,
-          transcriptionData: transcriptionResult.data,
-          transcriptionPath: transcriptionResult.transcriptionPath,
-          ...(transcriptionResult.generationId !== undefined
-            ? { expectedGenerationId: transcriptionResult.generationId }
-            : {}),
-          notionUrl,
-          notionError,
-        });
-        if (slackResult.success) {
-          if (notionSucceeded) {
-            statusText.textContent = 'Auto mode: Sent to Notion and Slack.';
-          } else if (notionConfigured) {
-            statusText.textContent = 'Auto mode: Sent to Slack (Notion failed).';
-          } else {
-            statusText.textContent = 'Auto mode: Sent to Slack.';
-          }
-        } else {
-          statusText.textContent = 'Auto mode: Failed to send to Slack';
-          console.error('Auto mode: Slack send failed:', slackResult.error);
-        }
-      } else if (!notionConfigured) {
-        statusText.textContent = 'Auto mode: Transcription complete (Notion/Slack not configured)';
+      if (transcriptionResult.exports?.slack?.status === 'failed') {
+        console.error('Auto mode: Slack send failed:', transcriptionResult.exports.slack.error);
       }
+      statusText.textContent = describeAutoExports(transcriptionResult.exports);
 
       await refreshRecordingsList();
     } else {
-      statusText.textContent = 'Auto mode: Transcription failed';
+      statusText.textContent = autoJobOutcome({
+        status: transcriptionResult.cancelled ? 'cancelled' : 'failed',
+      });
       console.error('Auto mode: Transcription failed:', transcriptionResult.error);
     }
   } catch (error) {
@@ -347,15 +337,11 @@ export async function processAutoMode(
     }
     reportError(error, { operation: 'recording.auto-mode', severity: 'error' });
   } finally {
-    state.isAutoModeProcessing = false;
-    recordButton.disabled = false;
-    recordButton.style.opacity = '';
-    recordButton.style.cursor = '';
+    localAutoRunInFlight = false;
+    setAutoModeProcessing(false);
   }
 
-  setTimeout(() => {
-    statusText.textContent = 'Ready to record';
-  }, 5000);
+  scheduleReadyStatus();
 }
 
 export async function handleRecordingStopped(
@@ -466,6 +452,8 @@ export function stopTimer(): void {
 // Called once from main.ts after initDom().
 export function setupRecorder(): void {
   const { recordButton } = getDom();
+
+  onTranscriptionJobChange(({ job }) => followAutoJob(job));
 
   // Setup record button listener
   recordButton.addEventListener('click', async () => {

@@ -21,7 +21,12 @@ export type {
   RendererLogPayload,
   SlackSendApiResult,
   SystemAudioStartResult,
+  TranscriptCutoffApiResult,
+  TranscriptCutoffNotePayload,
   TranscriptionErrorPayload,
+  TranscriptionJobExports,
+  TranscriptionJobSnapshot,
+  TranscriptionJobsList,
 } from '../src/electronApiTypes';
 
 declare global {

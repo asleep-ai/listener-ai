@@ -5,6 +5,13 @@ repetition/hallucination ("repeat curse") guard sits. It covers the issue #182
 batch path from finished recording to saved note. When code and this document
 disagree, fix one of them.
 
+Modal fallback results belong to the session that requested them. Stale success
+still refreshes the recordings list; stale failure, cancellation, and IPC
+rejection leave a newer selected note alone. Cancellation is silent. The ffmpeg
+recovery helper checks the same ownership before opening its dialog and before
+retrying, while callers without an ownership predicate keep the existing retry
+behavior. Originating-button cleanup always runs.
+
 ## Batch pipeline
 
 ```
@@ -28,12 +35,84 @@ All file entrypoints (auto-record, modal, regenerate, drag-drop, IPC, CLI,
 merge) converge on `GeminiService.transcribeAudio` → `transcribeWithTwoSteps`
 (`src/geminiService.ts`).
 
+In the app, each `transcribe-audio` or `merge-recordings` call runs as a job
+in the main-owned registry (`src/transcriptionJobs.ts`). The job keeps its
+progress, cancellation and result in the main process, so it survives a
+renderer reload or a recording-list refresh, and the renderer rebuilds its
+row progress, Cancel button, auto-mode status and merge modal from a
+`get-transcription-jobs` snapshot plus `transcription-job-changed` events.
+Every job change carries a registry-wide revision. A late snapshot therefore
+cannot make a finished job look like it is running again. The renderer keeps
+at most 20 finished jobs and ignores late events for the ones it dropped.
+It keeps every dropped id until its one load snapshot has been applied, so a
+late snapshot cannot revive a job that finished meanwhile. A running job that
+the snapshot lists is still accepted, however old its revision. A row that
+showed a job's progress through a path the job no longer answers to returns
+to its own state. A
+row whose recording has a running job is drawn without reading its saved
+note, because the job may hold that note's lock while it saves. The list is
+rebuilt from disk whenever a job ends.
+
+- A request for a recording that is already transcribing joins that job. It
+  never aborts and restarts the job. An automatic caller joining a manual job
+  promotes its origin with a revisioned event and latches the first automatic
+  title. Once persistence finishes, one finalization gate runs the configured
+  Notion/Slack chain for all callers, including joins after the save boundary
+  while metadata is pending. A manual-only completion settles synchronously
+  with its no-export decision, so no accepted join can miss the chain.
+  The requested, resolved and real
+  (symlink-free) paths and the renamed path all identify the job. Snapshots
+  list these keys as `aliases`, and `get-recordings` lists the same keys for
+  each row, so the renderer matches rows to jobs on the keys main uses.
+  Identity is never inferred beyond what the filesystem reports.
+- A path belongs to one running job only. A name that already holds a file,
+  or that another running job answers to or has reserved, is refused without
+  touching the filesystem. Before renaming an untitled recording, the job
+  reserves the new name privately, before any file is touched. The
+  reservation stops other jobs from claiming the name, but it is not listed
+  in snapshots or events, and nothing joins or cancels through it. A request
+  or cancel for that name waits until the move settles, so it never reads a
+  half-created copy and never reaches a job that only tried to take the name.
+  Once the file is ours (the hard link exists, or the exclusive copy has
+  finished), the name becomes one of the job's paths. If the move fails, the
+  reservation is dropped. For a file that does not exist yet, the job's keys
+  include the real parent directory plus the name, so a symlinked spelling
+  and the canonical one match. The rename
+  and its rollback on cancel never replace another file: they claim the
+  destination with a hard link (an exclusive copy where hard links are not
+  supported), and only then remove the old name. If the suggested name is
+  taken, or another running job owns that path, the recording keeps its
+  original name. If the original name was taken during a cancelled run, the
+  audio stays at the renamed path and the response carries `newFilePath`.
+- Cancel aborts the job only until the note is saved. After that commit
+  point, `cancel-transcription` returns `{ success: false, reason:
+  'committed' }` and the job finishes normally. A request that arrives while
+  a cancel is still rolling back, through any of the job's paths, joins that
+  job and gets the same cancelled result. Nothing restarts automatically. A
+  new run starts only after the job has ended (the row offers Transcribe
+  again then). To restart deliberately, cancel the job and start it again
+  once it has ended, or regenerate it after it finishes.
+- Auto mode passes `{ autoExport: true }`. Once the note is saved, the job
+  itself runs the configured Notion upload and Slack send through the same
+  guarded functions as the export IPC (`uploadNoteToNotion` /
+  `sendNoteToSlack` in `src/ipc/noteExports.ts`), then opens the Notion page.
+  A Notion failure is still passed to Slack. Each destination's outcome is
+  recorded on the job and in the response's `exports` field. An export
+  failure never marks the saved transcription as failed.
+- Merge stays single-flight: while a merge job runs, another merge returns
+  `merge-busy`. A merge's source recordings are not aliases of the merge job,
+  so they can still be transcribed separately.
+
+The registry is in memory. Jobs keep running across renderer reloads, but not
+across an app quit, and the app does not resume them on the next launch.
+Finished jobs stay listed for up to 15 minutes (at most 20 of them).
+
 ### 1. Segmentation (duration > `maxSegmentSeconds`, or file > `maxBytes`)
 
 Both thresholds are properties of the selected batch backend
 (`src/batchSttBackend.ts`), read by the pure `planSegmentation` helper rather
 than branched on the provider name. Gemini declares `maxSegmentSeconds: 300`
-and no byte cap; Codex declares the same 300s plus `maxBytes: 24 MB`, and a
+and no byte cap; OpenAI declares the same 300s plus `maxBytes: 24 MB`, and a
 file above that also shrinks the segment length proportionally (targeting
 20 MB per cut, floored at 30s) so each segment fits one request. A backend
 that keeps speaker identity consistent only within a single request raises
@@ -182,6 +261,51 @@ kept, or another quality finding exists. The transcript is stored after the
 retry/cleanup gate and boundary reconciliation. Flagged but unrecovered text
 is kept and marked.
 
+A saved note can later exclude a transcript tail from its report
+(`meta.transcriptCutoff`, a text offset). That regenerates only the report
+from the included text through `GeminiService.summarizeTranscript`; the
+stored transcript, audio and `transcriptQuality` above are never rewritten.
+An AI-suggested title follows the regenerated report; a title chosen by the
+user stays as it was. The note folder and audio filename stay unchanged.
+Flagged live notes are timed, so under a cutoff only the notes the segment
+headers above prove to precede the cut segment reach the summary prompt and
+highlights; the rest (and every note of a header-less transcript) are
+withheld, not placed by guess (`splitNotesAtCutoff`). `lostSegments` past the
+cut segment are likewise left out of the coverage notice.
+A regenerated report always stores its own custom fields in `meta.json`,
+`{}` when it has none, so fields from an older report are not restored from
+the recording metadata sidecar when the note is reopened or exported, whether
+the cutoff was set or removed. Only a note that never stored custom fields
+falls back to the sidecar copy.
+
+A cutoff with the wrong shape is ignored like an absent one. A well-formed
+cutoff that no longer matches the stored transcript fails closed: Notion and
+Slack refuse the note until the cutoff is set again or removed, and the CLI
+prints a warning but keeps its local output whole. In the app, an upload or
+send of a note and a cutoff change of the same note run one at a time
+(`withNoteOperation`): a cutoff waits for an in-flight export to record its
+result, then marks the Notion page superseded, and an export requested during
+a cutoff waits and publishes the new report (or is refused when the caller
+expected the old one). Regenerate of a linked note saves through the same
+queue (only the save waits; transcription runs meanwhile), so an in-flight
+export records its status against the previous note before it is replaced.
+
+Known limitations, both from Drive sync working per file without a note-level
+transaction:
+
+- An app version from before the cutoff feature that receives a cut note does
+  not know `transcriptCutoff`. Its Notion and Slack exports send the full
+  transcript with the cut report. A full Regenerate on that version keeps the
+  key as unknown metadata against the new transcript, so a current version
+  then sees a mismatch and fails closed.
+- Two devices changing the cutoff of the same note at about the same time can
+  each win different files under last-writer-wins sync, for example one
+  device's `summary.md` with the other's `meta.json`. The fingerprint checks
+  the cutoff against the transcript, not against the report files, so such a
+  mix is not detected. A full Regenerate has the same exposure. The
+  coordination above is per process and does not cover the CLI or another
+  device.
+
 ## Defect guards
 
 A store-wide audit of the saved store (2026-09-18; 102 substantive transcripts
@@ -315,6 +439,22 @@ above.
 
 ## Provider matrix
 
+Backend selection (`resolveBatchSttProvider`, `src/aiProvider.ts`):
+`transcriptionProvider=auto` follows `aiProvider` only for Gemini. With
+`aiProvider=chatgpt` it refuses with an actionable error instead of picking a
+backend, because Sign in with ChatGPT cannot carry audio ("Audio/video input,
+the Files upload API, and the transcription API are not supported by this
+flow", SIWC preview limitations) and nothing may silently move audio to
+another vendor or billing account. A stored retired `codex` value refuses the
+same way, and Settings keeps it (Save omits the field) until the user
+explicitly picks a backend, so an unrelated save never moves audio. `openai` is always an explicit choice and authenticates with
+`openaiApiKey`, never with a ChatGPT sign-in token. OpenAI has announced the
+shutdown of `gpt-4o-transcribe-diarize`, `gpt-4o-transcribe`,
+`gpt-4o-mini-transcribe` and `whisper-1` for 2027-02-26 (OpenAI deprecations
+page, 2026-08-26 entry); the named replacement `gpt-transcribe` is selectable
+but its guide documents no speaker diarization, so the diarize model stays the
+default until a diarizing successor is verified.
+
 Each row below is a property of the `BatchSttBackend` the pipeline holds
 (`src/batchSttBackend.ts`), not a branch inside `geminiService.ts`.
 `acceptedExtensions` (`null` = no pre-conversion) drives the ffmpeg remux.
@@ -325,14 +465,14 @@ vocabulary is handed over as a separate `glossary` field instead.
 `maxBytes` / `maxSegmentSeconds` feed `planSegmentation`. Adding an engine
 means adding a backend, not another provider branch.
 
-| Stage | Gemini (default) | Codex — `gpt-4o-transcribe`, `whisper-1` | Codex — `gpt-4o-transcribe-diarize` (codex default) | Soniox — `stt-async-v5` (opt-in) |
+| Stage | Gemini (default) | OpenAI API — `gpt-transcribe`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `whisper-1` | OpenAI API — `gpt-4o-transcribe-diarize` (openai default) | Soniox — `stt-async-v5` (opt-in) |
 |---|---|---|---|---|
-| Transcription call | `generateContent` on `geminiFlashModel` (inline ≤ 20 MB, files API above) | `POST /v1/audio/transcriptions` | same endpoint, `diarized_json` + `chunking_strategy=auto` | async job: `POST /v1/files` → `POST /v1/transcriptions` → poll → `GET .../transcript`, then `DELETE` both (account quotas) |
-| Per-result quality judge | `gemini-2.5-flash-lite` via text-only `generateContent` | configured `codexModel` via pi-ai | configured `codexModel` via pi-ai | judge follows the chat provider (`aiProvider`), not the backend |
-| Exhaustion cleanup | `gemini-2.5-flash-lite` via text-only `generateContent` | configured `codexModel` via pi-ai | configured `codexModel` via pi-ai | same — cleanup also follows `aiProvider` |
+| Transcription call | `generateContent` on `geminiFlashModel` (inline ≤ 20 MB, files API above) | `POST /v1/audio/transcriptions` with `Authorization: Bearer <openaiApiKey>` (`src/openaiTranscription.ts`); `gpt-transcribe` gets `languages[]` instead of `language` | same endpoint, `diarized_json` + `chunking_strategy=auto` | async job: `POST /v1/files` → `POST /v1/transcriptions` → poll → `GET .../transcript`, then `DELETE` both (account quotas) |
+| Per-result quality judge | `gemini-2.5-flash-lite` via text-only `generateContent` | follows `aiProvider`: Gemini flash-lite, or the ChatGPT plan's `chatgptModel` via pi-ai | same | judge follows the chat provider (`aiProvider`), not the backend |
+| Exhaustion cleanup | `gemini-2.5-flash-lite` via text-only `generateContent` | follows `aiProvider`, like the judge | same | same — cleanup also follows `aiProvider` |
 | Prompt (glossary, instructions, `[NO_SPEECH]`) — `supportsPrompt` | sent | sent | **not sent** — model rejects `prompt`, so the pipeline never assembles one | **not sent** — no prompt surface at all; the glossary goes out of band as `context.terms` |
 | First-attempt temperature | 0.2 | provider default (field omitted) | provider default | no temperature parameter exists |
-| Retry ladder temperatures | 0.4 → 0.8 via `config.temperature` | 0.4 → 0.8 via `temperature` form field | **no temperature knob** — one re-roll relying on provider nondeterminism | **no temperature knob** — one re-roll, same as the diarize model |
+| Retry ladder temperatures | 0.4 → 0.8 via `config.temperature` | 0.4 → 0.8 via `temperature` form field (`gpt-transcribe` documents no temperature, so the field is omitted and its rungs are provider-nondeterministic re-rolls) | **no temperature knob** — one re-roll relying on provider nondeterminism | **no temperature knob** — one re-roll, same as the diarize model |
 | Empty result semantics | `text === ''` → `EmptyTranscriptionError` | empty `text` → `EmptyTranscriptionError`; missing `text` → malformed-response error | zero/all-empty segments → `EmptyTranscriptionError` | no tokens, or only audio-event/whitespace tokens → `EmptyTranscriptionError` |
 | Speaker labels | prompted `참가자N` | none (plain text) | provider speakers re-labeled to `참가자N` | provider speaker ids re-labeled to `참가자N` by first appearance, consistent across the whole file below the 300-minute segmentation threshold; a longer file is segmented and renumbers per segment |
 | Segmentation trigger (`maxSegmentSeconds`, `maxBytes`) | > 300s | > 300s or > 24 MB (size-shrunk segment length) | same | > 18,000s (300 min), no byte cap |

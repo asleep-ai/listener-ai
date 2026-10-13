@@ -22,7 +22,7 @@
     <div class="header">
       <h1>Listener.AI</h1>
       <button id="updateBadge" class="update-badge" type="button" hidden aria-live="polite"></button>
-      <button id="settingsButton" class="settings-button" title="API Settings">⚙️</button>
+      <button type="button" id="settingsButton" class="settings-button" title="Settings" aria-label="Settings">⚙️</button>
     </div>
     <p class="subtitle">Record and transcribe your meetings with AI</p>
 
@@ -197,177 +197,263 @@
       </div>
     </div>
 
-    <dialog id="configModal" class="modal">
+    <dialog id="configModal" class="modal" aria-labelledby="configModalTitle">
       <div class="modal-content config-modal">
         <div class="modal-header">
-          <h2>Settings</h2>
+          <h2 id="configModalTitle">Settings</h2>
           <button type="button" class="close" id="configClose" aria-label="Close">&times;</button>
         </div>
         <div class="config-tabs" role="tablist" aria-label="Settings sections">
           <button type="button" class="config-tab is-active" data-tab="ai" role="tab" id="config-tab-ai" aria-controls="config-pane-ai" aria-selected="true">
-            AI Provider
-            <span class="config-tab-badge">Required</span>
+            AI connection
+            <span class="config-tab-badge" id="configAiRequiredBadge">Required</span>
           </button>
-          <button type="button" class="config-tab" data-tab="integrations" role="tab" id="config-tab-integrations" aria-controls="config-pane-integrations" aria-selected="false">
-            Integrations
+          <button type="button" class="config-tab" data-tab="transcription" role="tab" id="config-tab-transcription" aria-controls="config-pane-transcription" aria-selected="false" tabindex="-1">
+            Transcription and summary
           </button>
-          <button type="button" class="config-tab" data-tab="recording" role="tab" id="config-tab-recording" aria-controls="config-pane-recording" aria-selected="false">
+          <button type="button" class="config-tab" data-tab="recording" role="tab" id="config-tab-recording" aria-controls="config-pane-recording" aria-selected="false" tabindex="-1">
             Recording
           </button>
-          <button type="button" class="config-tab" data-tab="advanced" role="tab" id="config-tab-advanced" aria-controls="config-pane-advanced" aria-selected="false">
-            Advanced
+          <button type="button" class="config-tab" data-tab="integrations" role="tab" id="config-tab-integrations" aria-controls="config-pane-integrations" aria-selected="false" tabindex="-1">
+            Integrations
+          </button>
+          <button type="button" class="config-tab" data-tab="advanced" role="tab" id="config-tab-advanced" aria-controls="config-pane-advanced" aria-selected="false" tabindex="-1">
+            Privacy and usage
           </button>
         </div>
         <div class="config-body">
           <section class="config-pane is-active" id="config-pane-ai" data-pane="ai" role="tabpanel" aria-labelledby="config-tab-ai">
-            <p class="config-pane-hint">Choose the provider you want to use. Switching is safe -- credentials for the other provider stay saved.</p>
+            <p class="config-pane-hint">Connect the accounts Listener.AI uses. Keys for services you stop using stay saved, so switching back is safe.</p>
+            <div id="legacyCodexNotice" class="config-notice is-warning" role="status" hidden>
+              Codex sign-in is no longer supported. Your old Codex settings were kept but are not used, and the old sign-in is not reused.
+              To use your ChatGPT plan, select Continue with ChatGPT below. Recording transcription needs its own provider.
+            </div>
             <div class="form-group">
-              <label for="aiProvider">Active Provider</label>
-              <select id="aiProvider">
+              <label for="aiProvider">Summary provider</label>
+              <select id="aiProvider" aria-describedby="aiProviderHelp">
                 <option value="gemini">Gemini API</option>
-                <option value="codex">Codex (ChatGPT Plus/Pro)</option>
+                <option value="chatgpt">ChatGPT plan (Sign in with ChatGPT)</option>
               </select>
+              <small id="aiProviderHelp">Writes summaries, titles, and action items, runs quality checks and report regeneration, and answers Ask Listener. Choose how recordings and live captions are transcribed in <button type="button" class="config-link-button" data-goto="transcriptionProvider">Transcription and summary</button>.</small>
             </div>
-            <div class="form-group">
-              <label for="transcriptionProvider">Transcription</label>
-              <select id="transcriptionProvider">
-                <option value="auto">Follow AI provider</option>
-                <option value="gemini">Gemini</option>
-                <option value="codex">Codex (OpenAI transcription)</option>
-                <option value="soniox">Soniox (stt-async-v5)</option>
-              </select>
-              <small>Backend for transcribing recorded files. Summaries and Ask Listener always use the active provider above.</small>
-              <div id="transcriptionProviderNotice" class="config-notice" role="status" aria-live="polite"></div>
-            </div>
-            <fieldset class="config-subgroup">
-              <legend>Live transcription</legend>
+            <fieldset class="config-subgroup" data-provider="gemini">
+              <legend>Gemini</legend>
+              <p class="config-usage" id="geminiUsage"></p>
               <div class="form-group">
-                <label for="liveSttProvider">Provider</label>
-                <select id="liveSttProvider">
+                <label for="geminiApiKey">API key</label>
+                <input type="password" id="geminiApiKey" placeholder="Enter your Gemini API key" aria-describedby="geminiApiKeyError geminiApiKeyHelp">
+                <p class="config-field-error" id="geminiApiKeyError" hidden></p>
+                <small id="geminiApiKeyHelp">Get a key from <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI Studio</a>.</small>
+              </div>
+              <div class="form-group">
+                <div class="prompt-label-row">
+                  <label for="geminiModelSelect">Summary model <span class="config-optional">optional</span></label>
+                  <button type="button" id="resetGeminiModel" class="reset-prompt-button">Reset to Default</button>
+                </div>
+                <select id="geminiModelSelect"></select>
+                <input type="text" id="geminiModel" placeholder="gemini-3.5-flash" aria-label="Custom Gemini summary model" hidden>
+              </div>
+              <div class="form-group">
+                <div class="prompt-label-row">
+                  <label for="geminiFlashModelSelect">Transcription model <span class="config-optional">optional</span></label>
+                  <button type="button" id="resetGeminiFlashModel" class="reset-prompt-button">Reset to Default</button>
+                </div>
+                <select id="geminiFlashModelSelect"></select>
+                <input type="text" id="geminiFlashModel" placeholder="gemini-2.5-flash" aria-label="Custom Gemini transcription model" hidden>
+              </div>
+              <div class="form-group">
+                <label for="geminiThinkingLevel">Summary thinking level <span class="config-optional">optional</span></label>
+                <select id="geminiThinkingLevel" aria-describedby="geminiThinkingLevelHelp">
+                  <option value="low">Low (fastest, terser)</option>
+                  <option value="medium">Medium (default)</option>
+                  <option value="high">High (deepest analysis)</option>
+                </select>
+                <small id="geminiThinkingLevelHelp">Applies to Gemini 3.x summaries only.</small>
+              </div>
+            </fieldset>
+            <fieldset class="config-subgroup" data-provider="chatgpt">
+              <legend>ChatGPT</legend>
+              <p class="config-usage" id="chatgptUsage"></p>
+              <div class="chatgpt-card" id="chatgptCard" aria-busy="false">
+                <p id="chatgptStatus" class="chatgpt-status" role="status" aria-live="polite">Not connected</p>
+                <p id="chatgptPlanBadge" class="chatgpt-plan-badge" hidden></p>
+                <div class="oauth-row chatgpt-actions">
+                  <button type="button" id="chatgptLogin" class="chatgpt-primary-button">Continue with ChatGPT</button>
+                  <button type="button" id="chatgptCancelLogin" class="reset-prompt-button" hidden>Cancel sign-in</button>
+                  <button type="button" id="chatgptLogout" class="reset-prompt-button" hidden>Sign out</button>
+                </div>
+                <div class="form-group chatgpt-profile-group" id="chatgptProfileGroup" hidden>
+                  <label for="chatgptProfile">Account or workspace</label>
+                  <div class="oauth-row">
+                    <select id="chatgptProfile"></select>
+                    <button type="button" id="chatgptAddProfile" class="reset-prompt-button">Add account</button>
+                  </div>
+                  <small>Each account or workspace signs in separately. Switching applies to new jobs only.</small>
+                </div>
+                <div id="chatgptNotice" class="config-notice" role="status" aria-live="polite" hidden>
+                  <span id="chatgptNoticeText"></span>
+                  <div class="oauth-row" id="chatgptNoticeActions" hidden>
+                    <button type="button" id="chatgptNoticeManageUsage" class="chatgpt-primary-button">Manage usage</button>
+                  </div>
+                </div>
+                <small>Opens your browser to sign in to OpenAI. Plan usage works with ChatGPT Plus and Pro and shares your plan's usage limits with your other apps. Listener.AI never sees your password, and your sign-in tokens stay in the app's main process.</small>
+              </div>
+              <div class="form-group">
+                <div class="prompt-label-row">
+                  <label for="chatgptModelSelect">Summary model <span class="config-optional">optional</span></label>
+                  <span id="chatgptUsingPlan" class="chatgpt-using-plan" hidden>
+                    Using ChatGPT plan ·
+                    <button type="button" id="chatgptManageUsage" class="link-button">Manage usage</button>
+                  </span>
+                </div>
+                <div class="oauth-row">
+                  <select id="chatgptModelSelect" aria-describedby="chatgptModelHint"></select>
+                  <button type="button" id="chatgptRefreshModels" class="reset-prompt-button">Refresh list</button>
+                </div>
+                <small id="chatgptModelHint">The list comes from your signed-in account. Default uses the first model your account lists.</small>
+              </div>
+            </fieldset>
+            <fieldset class="config-subgroup">
+              <legend>Other services</legend>
+              <div class="form-group">
+                <label for="openaiApiKey">OpenAI API key <span class="config-optional">optional</span></label>
+                <input type="password" id="openaiApiKey" placeholder="sk-..." aria-describedby="openaiUsage openaiApiKeyHelp">
+                <p class="config-usage" id="openaiUsage"></p>
+                <small id="openaiApiKeyHelp">A standard OpenAI API key from <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com</a>, billed to your OpenAI API account. ChatGPT sign-in does not cover these calls. Used for OpenAI recording transcription and OpenAI Realtime live captions.</small>
+              </div>
+              <div class="form-group">
+                <div class="prompt-label-row">
+                  <label for="openaiTranscriptionModelSelect">OpenAI transcription model <span class="config-optional">optional</span></label>
+                  <button type="button" id="resetOpenaiTranscriptionModel" class="reset-prompt-button">Reset to Default</button>
+                </div>
+                <select id="openaiTranscriptionModelSelect" aria-describedby="openaiTranscriptionModelHelp"></select>
+                <input type="text" id="openaiTranscriptionModel" placeholder="gpt-4o-transcribe-diarize" aria-label="Custom OpenAI transcription model" hidden>
+                <small id="openaiTranscriptionModelHelp">Default: gpt-4o-transcribe-diarize, which labels speakers. Other models do not label speakers but can use your Known Words.</small>
+              </div>
+              <div class="form-group">
+                <label for="sonioxApiKey">Soniox API key <span class="config-optional">optional</span></label>
+                <input type="password" id="sonioxApiKey" placeholder="Enter your Soniox API key" aria-describedby="sonioxUsage sonioxApiKeyHelp">
+                <p class="config-usage" id="sonioxUsage"></p>
+                <small id="sonioxApiKeyHelp">Needed only when transcription or live captions use Soniox. Requires a separate account at <a href="https://console.soniox.com" target="_blank">console.soniox.com</a>, billed by Soniox at about $0.10/hour for recordings and $0.12/hour for live captions.</small>
+              </div>
+            </fieldset>
+          </section>
+
+          <section class="config-pane" id="config-pane-transcription" data-pane="transcription" role="tabpanel" aria-labelledby="config-tab-transcription" hidden>
+            <p class="config-pane-hint">Choose who transcribes your meetings and how summaries are written. Credentials live in <button type="button" class="config-link-button" data-goto="aiProvider">AI connection</button>.</p>
+            <fieldset class="config-subgroup">
+              <legend>Recorded files</legend>
+              <div class="form-group">
+                <label for="transcriptionProvider">Transcription service</label>
+                <select id="transcriptionProvider" aria-describedby="transcriptionProviderHelp transcriptionProviderNotice">
+                  <option value="auto">Follow summary provider (Gemini only)</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="openai">OpenAI API (billed to your API key)</option>
+                  <option value="soniox">Soniox (stt-async-v5)</option>
+                </select>
+                <small id="transcriptionProviderHelp">Turns finished recordings into transcripts. Summaries always use the summary provider. ChatGPT sign-in cannot transcribe audio, so with the ChatGPT plan choose Gemini, OpenAI API, or Soniox here.</small>
+                <div id="transcriptionProviderNotice" class="config-notice" role="status" aria-live="polite" hidden></div>
+              </div>
+            </fieldset>
+            <fieldset class="config-subgroup">
+              <legend>Live captions</legend>
+              <div class="form-group">
+                <label for="liveSttProvider">Live caption service</label>
+                <select id="liveSttProvider" aria-describedby="liveSttProviderHelp liveProviderNotice">
                   <option value="auto">Auto (OpenAI key, Gemini Live, then fallback)</option>
                   <option value="openai">OpenAI Realtime</option>
                   <option value="gemini">Gemini Live</option>
                   <option value="soniox">Soniox (stt-rt-v5)</option>
                   <option value="chunked">12s fallback</option>
                 </select>
-                <small>Used only while recording. Auto tries a direct OpenAI key first, then Gemini Live, then 12-second chunks.</small>
+                <small id="liveSttProviderHelp">Used only while recording. Auto tries an OpenAI key first, then Gemini Live, then 12-second chunks.</small>
+                <div id="liveProviderNotice" class="config-notice" role="status" aria-live="polite" hidden></div>
               </div>
               <div class="form-group">
-                <label for="openaiApiKey">OpenAI API Key</label>
-                <input type="password" id="openaiApiKey" placeholder="sk-...">
-                <small>Required for OpenAI Realtime live translation. Codex sign-in does not currently authorize this live translation call.</small>
-                <div id="liveProviderNotice" class="config-notice" role="status" aria-live="polite"></div>
+                <label for="liveSttLanguage">Spoken language <span class="config-optional">optional</span></label>
+                <input type="text" id="liveSttLanguage" placeholder="auto, en, ko, ja" aria-describedby="liveSttLanguageHelp">
+                <small id="liveSttLanguageHelp">A hint for the language being spoken. Leave empty to detect it automatically.</small>
               </div>
               <div class="form-group">
-                <label for="liveSttLanguage">Language Hint <span class="config-optional">optional</span></label>
-                <input type="text" id="liveSttLanguage" placeholder="auto, en, ko, ja">
-                <small>Optional source-language hint for live transcription.</small>
-              </div>
-              <div class="form-group">
-                <label for="liveTranslationLanguage">Translation Target</label>
-                <input type="text" id="liveTranslationLanguage" placeholder="ko">
-                <small>BCP-47 target language for live translated captions. Default: ko.</small>
+                <label for="liveTranslationLanguage">Translate captions into</label>
+                <input type="text" id="liveTranslationLanguage" placeholder="ko" aria-describedby="liveTranslationLanguageHelp">
+                <small id="liveTranslationLanguageHelp">A BCP-47 language code such as ko, en, or ja. Default: ko.</small>
               </div>
             </fieldset>
             <fieldset class="config-subgroup">
-              <legend>Soniox</legend>
+              <legend>Accuracy and style</legend>
               <div class="form-group">
-                <label for="sonioxApiKey">API Key <span class="config-optional">optional</span></label>
-                <input type="password" id="sonioxApiKey" placeholder="Enter your Soniox API key">
-                <small>Opt-in only. Needed when Transcription or the live provider is set to Soniox. Requires a separate Soniox account at <a href="https://console.soniox.com" target="_blank">console.soniox.com</a>; billed by them at about $0.10/hour for recorded files and $0.12/hour for live captions.</small>
-              </div>
-            </fieldset>
-            <fieldset class="config-subgroup" data-provider="gemini">
-              <legend>Gemini</legend>
-              <div class="form-group">
-                <label for="geminiApiKey">API Key</label>
-                <input type="password" id="geminiApiKey" placeholder="Enter your Gemini API key">
-                <small>Get your API key from <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI Studio</a></small>
+                <label for="knownWordsField">Known words</label>
+                <div class="chip-input" id="knownWordsChips">
+                  <input type="text" id="knownWordsField" class="chip-input-field"
+                         placeholder="Type a term, press comma or Enter"
+                         autocomplete="off" spellcheck="false" aria-describedby="knownWordsHelp">
+                </div>
+                <small id="knownWordsHelp">Names, products, and jargon the transcript should spell correctly. Press <kbd>,</kbd> or <kbd>Enter</kbd> to add; Backspace removes the last one.</small>
               </div>
               <div class="form-group">
                 <div class="prompt-label-row">
-                  <label for="geminiModelSelect">Summary Model <span class="config-optional">optional</span></label>
-                  <button type="button" id="resetGeminiModel" class="reset-prompt-button">Reset to Default</button>
+                  <label for="summaryPrompt">Summary prompt</label>
+                  <button type="button" id="resetPrompt" class="reset-prompt-button">Reset to Default</button>
                 </div>
-                <select id="geminiModelSelect"></select>
-                <input type="text" id="geminiModel" placeholder="gemini-3.5-flash" hidden>
-                <small>Default: gemini-3.5-flash</small>
-              </div>
-              <div class="form-group">
-                <div class="prompt-label-row">
-                  <label for="geminiFlashModelSelect">Transcription Model <span class="config-optional">optional</span></label>
-                  <button type="button" id="resetGeminiFlashModel" class="reset-prompt-button">Reset to Default</button>
-                </div>
-                <select id="geminiFlashModelSelect"></select>
-                <input type="text" id="geminiFlashModel" placeholder="gemini-3.5-flash" hidden>
-                <small>Default: gemini-3.5-flash</small>
-              </div>
-              <div class="form-group">
-                <label for="geminiThinkingLevel">Summary Thinking Level <span class="config-optional">optional</span></label>
-                <select id="geminiThinkingLevel">
-                  <option value="low">Low (fastest, terser)</option>
-                  <option value="medium">Medium (default)</option>
-                  <option value="high">High (deepest analysis)</option>
-                </select>
-                <small>Applies to Gemini 3.x summary calls only. Default: medium.</small>
-              </div>
-            </fieldset>
-            <fieldset class="config-subgroup" data-provider="codex">
-              <legend>Codex</legend>
-              <div class="form-group">
-                <label>Sign-in</label>
-                <div class="codex-oauth-row">
-                  <button type="button" id="loginCodexOAuth" class="reset-prompt-button">Sign in</button>
-                  <button type="button" id="clearCodexOAuth" class="reset-prompt-button">Sign out</button>
-                  <span id="codexOAuthStatus" class="slack-webhook-status"></span>
-                </div>
-                <small>Uses your ChatGPT Plus/Pro account via browser sign-in. If the browser tab closes before sign-in completes, just click Sign in again.</small>
-              </div>
-              <div class="form-group">
-                <div class="prompt-label-row">
-                  <label for="codexModelSelect">Model <span class="config-optional">optional</span></label>
-                  <button type="button" id="resetCodexModel" class="reset-prompt-button">Reset to Default</button>
-                </div>
-                <select id="codexModelSelect"></select>
-                <input type="text" id="codexModel" placeholder="gpt-5.5" hidden>
-                <small>Used for summaries and Ask Listener. Default: gpt-5.5</small>
-              </div>
-              <div class="form-group">
-                <div class="prompt-label-row">
-                  <label for="codexTranscriptionModelSelect">Transcription Model <span class="config-optional">optional</span></label>
-                  <button type="button" id="resetCodexTranscriptionModel" class="reset-prompt-button">Reset to Default</button>
-                </div>
-                <select id="codexTranscriptionModelSelect"></select>
-                <input type="text" id="codexTranscriptionModel" placeholder="gpt-4o-transcribe-diarize" hidden>
-                <small>Default: gpt-4o-transcribe-diarize</small>
+                <textarea id="summaryPrompt" rows="10" placeholder="Enter your custom summary prompt..." aria-describedby="summaryPromptHelp"></textarea>
+                <small id="summaryPromptHelp">Instructions sent with every summary request. Keep the JSON response fields described in the default prompt.</small>
               </div>
             </fieldset>
           </section>
 
-          <section class="config-pane" id="config-pane-integrations" data-pane="integrations" role="tabpanel" aria-labelledby="config-tab-integrations">
-            <p class="config-pane-hint">All optional. Export summaries to Notion or share them to Slack.</p>
+          <section class="config-pane" id="config-pane-recording" data-pane="recording" role="tabpanel" aria-labelledby="config-tab-recording" hidden>
+            <p class="config-pane-hint">All optional. By default, recordings run until you stop them and Command/Ctrl+Shift+L starts or stops one. Auto Upload, meeting and display detection, system audio, and the microphone are on the main window, next to the record button.</p>
+            <div class="form-group">
+              <label for="globalShortcut">Start/stop shortcut</label>
+              <div class="shortcut-row">
+                <input type="text" id="globalShortcut" placeholder="Press shortcut keys" readonly aria-describedby="globalShortcutError globalShortcutHelp">
+                <button type="button" id="resetGlobalShortcut" class="reset-prompt-button">Reset to Default</button>
+              </div>
+              <p class="config-field-error" id="globalShortcutError" role="alert" hidden></p>
+              <small id="globalShortcutHelp">Focus the field and press a key combination with a modifier (Command/Ctrl, Option/Alt, or Shift). Works while Listener.AI is in the background. Tab moves to the next setting.</small>
+            </div>
+            <div class="form-group">
+              <label for="maxRecordingMinutes">Stop recording after (minutes)</label>
+              <input type="number" id="maxRecordingMinutes" min="0" max="1440" step="1" placeholder="0 = off" aria-describedby="maxRecordingMinutesHelp">
+              <small id="maxRecordingMinutesHelp">Ends a recording automatically after this long. 0 or empty means no limit.</small>
+            </div>
+            <div class="form-group">
+              <label for="recordingReminderMinutes">Remind me every (minutes)</label>
+              <input type="number" id="recordingReminderMinutes" min="0" max="1440" step="1" placeholder="0 = off" aria-describedby="recordingReminderMinutesHelp">
+              <small id="recordingReminderMinutesHelp">Shows a notification while a recording is still running. 0 or empty turns reminders off.</small>
+            </div>
+            <div class="form-group">
+              <label for="minRecordingSeconds">Auto Upload minimum length (seconds)</label>
+              <input type="number" id="minRecordingSeconds" min="0" max="3600" step="1" placeholder="0 = off" aria-describedby="minRecordingSecondsHelp">
+              <small id="minRecordingSecondsHelp">With Auto Upload on, shorter recordings are saved but not transcribed or uploaded, so accidental taps stay out of your notes. 0 or empty processes every recording.</small>
+            </div>
+          </section>
+
+          <section class="config-pane" id="config-pane-integrations" data-pane="integrations" role="tabpanel" aria-labelledby="config-tab-integrations" hidden>
+            <p class="config-pane-hint">All optional. Send summaries to Notion or Slack, and back up meetings to Google Drive.</p>
             <fieldset class="config-subgroup">
               <legend>Notion</legend>
               <div class="form-group">
-                <label for="notionApiKey">Integration Token</label>
-                <input type="password" id="notionApiKey" placeholder="Enter your Notion integration token">
-                <small>Create an integration at <a href="https://www.notion.so/my-integrations" target="_blank">Notion Integrations</a></small>
+                <label for="notionApiKey">Integration token</label>
+                <input type="password" id="notionApiKey" placeholder="Enter your Notion integration token" aria-describedby="notionApiKeyHelp">
+                <small id="notionApiKeyHelp">Create an integration at <a href="https://www.notion.so/my-integrations" target="_blank">Notion Integrations</a>.</small>
               </div>
               <div class="form-group">
                 <label for="notionDatabaseId">Database ID</label>
-                <input type="text" id="notionDatabaseId" placeholder="Enter your Notion database ID">
-                <small>Copy from your database URL: notion.so/[workspace]/[database-id]?v=...</small>
+                <input type="text" id="notionDatabaseId" placeholder="Enter your Notion database ID" aria-describedby="notionDatabaseIdHelp">
+                <small id="notionDatabaseIdHelp">Copy it from the database URL: notion.so/[workspace]/[database-id]?v=...</small>
               </div>
             </fieldset>
             <fieldset class="config-subgroup">
               <legend>Slack</legend>
               <div class="form-group">
-                <label for="slackWebhookUrl">Incoming Webhook URL</label>
-                <input type="password" id="slackWebhookUrl" placeholder="https://hooks.slack.com/services/...">
+                <label for="slackWebhookUrl">Incoming webhook URL</label>
+                <input type="password" id="slackWebhookUrl" placeholder="https://hooks.slack.com/services/..." aria-describedby="slackWebhookUrlHelp">
                 <div class="slack-webhook-row">
                   <button type="button" id="openSlackAppCreator" class="reset-prompt-button">Get Webhook URL</button>
                   <button type="button" id="testSlackWebhook" class="reset-prompt-button">Send Test Message</button>
-                  <span id="slackWebhookStatus" class="slack-webhook-status"></span>
+                  <span id="slackWebhookStatus" class="slack-webhook-status" role="status" aria-live="polite"></span>
                 </div>
                 <details class="slack-help">
                   <summary>How do I get this URL?</summary>
@@ -381,69 +467,47 @@
                   </ol>
                   <small>If your workspace blocks app installs, ask an admin to do steps 1&ndash;4 for you.</small>
                 </details>
-                <small>Stored locally; never logged.</small>
+                <small id="slackWebhookUrlHelp">Stored on this computer only and never logged.</small>
               </div>
               <div class="form-group">
                 <label class="inline-label">
-                  <input type="checkbox" id="slackAutoShare">
+                  <input type="checkbox" id="slackAutoShare" aria-describedby="slackAutoShareHelp">
                   Automatically share completed meetings to Slack
                 </label>
-                <small>When auto mode is on, post the summary + Notion link to the configured webhook after each meeting.</small>
+                <small id="slackAutoShareHelp">Works with Auto Upload, the toggle on the main window: after each meeting, posts the summary and Notion link to this webhook.</small>
               </div>
             </fieldset>
             <fieldset class="config-subgroup">
               <legend>Google Drive</legend>
               <div class="form-group">
-                <label>Sign-in</label>
-                <div class="codex-oauth-row">
+                <span class="config-label" id="googleSignInLabel">Sign-in</span>
+                <div class="oauth-row" role="group" aria-labelledby="googleSignInLabel" aria-describedby="googleSignInHelp">
                   <button type="button" id="loginGoogleOAuth" class="reset-prompt-button">Sign in</button>
                   <button type="button" id="clearGoogleOAuth" class="reset-prompt-button">Sign out</button>
-                  <span id="googleOAuthStatus" class="slack-webhook-status"></span>
+                  <span id="googleOAuthStatus" class="slack-webhook-status" role="status" aria-live="polite"></span>
                 </div>
-                <small>Signs you in to your asleep-ai Google account so meeting transcripts can sync to Drive. Uses the <code>drive.file</code> scope -- the app only sees files it created.</small>
+                <small id="googleSignInHelp">Signs you in to your asleep-ai Google account so meeting transcripts can sync to Drive, and takes effect right away. Uses the <code>drive.file</code> scope, so the app only sees files it created.</small>
               </div>
               <div class="form-group">
                 <label class="inline-label">
-                  <input type="checkbox" id="googleDriveEnabled">
-                  Enable Google Drive sync
+                  <input type="checkbox" id="googleDriveEnabled" aria-describedby="googleDriveEnabledHelp">
+                  Sync meetings to Google Drive automatically
                 </label>
-                <small>When on, transcripts auto-sync after each recording and every minute. When off, sync only runs from the Sync now button or CLI.</small>
+                <small id="googleDriveEnabledHelp">When on, meetings sync after each recording and every minute. When off, sync runs only from Sync now or the CLI.</small>
               </div>
               <div class="form-group">
-                <label>Sync</label>
-                <div class="codex-oauth-row">
+                <span class="config-label" id="googleSyncLabel">Sync</span>
+                <div class="oauth-row" role="group" aria-labelledby="googleSyncLabel" aria-describedby="googleSyncHelp">
                   <button type="button" id="googleDriveSyncNow" class="reset-prompt-button">Sync now</button>
-                  <span id="googleDriveSyncStatus" class="slack-webhook-status"></span>
+                  <span id="googleDriveSyncStatus" class="slack-webhook-status" role="status" aria-live="polite"></span>
                 </div>
-                <small>Manually runs one sync cycle. Safe to click any time; uploads only files that changed since the last sync.</small>
+                <small id="googleSyncHelp">Runs one sync right away. Safe at any time; only files changed since the last sync are uploaded.</small>
               </div>
             </fieldset>
           </section>
 
-          <section class="config-pane" id="config-pane-recording" data-pane="recording" role="tabpanel" aria-labelledby="config-tab-recording">
-            <p class="config-pane-hint">All optional. Default behaviour records indefinitely with no shortcut.</p>
-            <div class="form-group">
-              <label for="globalShortcut">Global Start/Stop Shortcut</label>
-              <input type="text" id="globalShortcut" placeholder="Press shortcut keys" readonly>
-              <small>Click the input and press your desired shortcut combination</small>
-            </div>
-            <div class="form-group">
-              <label for="maxRecordingMinutes">Max Recording Length (minutes)</label>
-              <input type="number" id="maxRecordingMinutes" min="0" max="1440" step="1" placeholder="0 = disabled">
-            </div>
-            <div class="form-group">
-              <label for="recordingReminderMinutes">Recording Reminder Interval (minutes)</label>
-              <input type="number" id="recordingReminderMinutes" min="0" max="1440" step="1" placeholder="0 = disabled">
-            </div>
-            <div class="form-group">
-              <label for="minRecordingSeconds">Minimum Recording Duration (seconds)</label>
-              <input type="number" id="minRecordingSeconds" min="0" max="3600" step="1" placeholder="0 = disabled">
-              <small>Auto mode will skip transcription/upload for recordings shorter than this (0 disables)</small>
-            </div>
-          </section>
-
-          <section class="config-pane" id="config-pane-advanced" data-pane="advanced" role="tabpanel" aria-labelledby="config-tab-advanced">
-            <p class="config-pane-hint">All optional. Tune transcription accuracy and summary style.</p>
+          <section class="config-pane" id="config-pane-advanced" data-pane="advanced" role="tabpanel" aria-labelledby="config-tab-advanced" hidden>
+            <p class="config-pane-hint">See what this month's API calls cost and choose what diagnostics Listener.AI sends.</p>
             <fieldset class="config-subgroup" id="usageSummaryCard">
               <legend>Usage this month</legend>
               <div class="usage-summary" role="status" aria-live="polite" aria-atomic="true">
@@ -452,35 +516,21 @@
                 <small id="usageSummaryFootnote">Best-effort estimate from logged API calls. Your provider invoice is the source of truth.</small>
               </div>
             </fieldset>
-            <div class="form-group">
-              <label for="knownWordsField">Known Words</label>
-              <div class="chip-input" id="knownWordsChips">
-                <input type="text" id="knownWordsField" class="chip-input-field"
-                       placeholder="Type a term, press comma or Enter"
-                       autocomplete="off" spellcheck="false">
+            <fieldset class="config-subgroup">
+              <legend>Diagnostics</legend>
+              <div class="form-group">
+                <label class="inline-label">
+                  <input type="checkbox" id="crashReportingEnabled" aria-describedby="crashReportingEnabledHelp">
+                  Send crash &amp; error reports
+                </label>
+                <small id="crashReportingEnabledHelp">Helps fix bugs by sending crash and error diagnostics. Never includes transcripts, audio, meeting content, or API keys. On by default; uncheck to opt out.</small>
               </div>
-              <small>Proper nouns, names, and terms to improve transcription accuracy. Press <kbd>,</kbd> or <kbd>Enter</kbd> to add; backspace removes the last one.</small>
-            </div>
-            <div class="form-group">
-              <div class="prompt-label-row">
-                <label for="summaryPrompt">Summary Prompt</label>
-                <button type="button" id="resetPrompt" class="reset-prompt-button">Reset to Default</button>
-              </div>
-              <textarea id="summaryPrompt" rows="10" placeholder="Enter your custom summary prompt..."></textarea>
-              <small>Customize the prompt sent to the AI for generating summaries. Preserve the JSON response fields described by the default prompt.</small>
-            </div>
-            <div class="form-group">
-              <label class="inline-label">
-                <input type="checkbox" id="crashReportingEnabled">
-                Send crash &amp; error reports
-              </label>
-              <small>Helps fix bugs by sending crash and error diagnostics. Never includes transcripts, audio, meeting content, or API keys. On by default; uncheck to opt out.</small>
-            </div>
+            </fieldset>
           </section>
         </div>
         <div class="config-footer">
-          <button id="cancelConfig" class="cancel-button">Cancel</button>
-          <button id="saveConfig" class="save-button">Save</button>
+          <button type="button" id="cancelConfig" class="cancel-button">Cancel</button>
+          <button type="button" id="saveConfig" class="save-button">Save</button>
         </div>
       </div>
     </dialog>
@@ -516,6 +566,7 @@
             </button>
           </div>
         </div>
+        <p id="notionSupersededNotice" class="export-notice" hidden></p>
         <div class="transcription-body">
           <div class="tab-content">
             <div id="all" class="tab-pane active">
@@ -634,6 +685,20 @@
     </div>
   </dialog>
 
+  <dialog id="chatgptPlanDialog" class="modal" aria-labelledby="chatgptPlanTitle" aria-describedby="chatgptPlanBody">
+    <div class="transcription-error-card">
+      <h3 id="chatgptPlanTitle">You're using your ChatGPT plan</h3>
+      <div id="chatgptPlanBody" class="chatgpt-plan-body">
+        <p>Summaries, quality checks, report regeneration, and Ask Listener now run on your ChatGPT plan and count toward its usage limits, which are shared with your other apps.</p>
+        <p>Recording transcription is not part of the plan. It uses the transcription service chosen under Transcription and summary (Gemini, OpenAI API, or Soniox) and is billed by that provider.</p>
+      </div>
+      <div class="transcription-error-actions">
+        <button id="chatgptPlanManageUsage" class="reset-prompt-button" type="button">Manage usage</button>
+        <button id="chatgptPlanGotIt" class="primary-button" type="button">Got it</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog id="transcriptionErrorDialog" class="modal">
     <div class="transcription-error-card">
       <h3 id="transcriptionErrorTitle">Transcription failed</h3>
@@ -648,6 +713,7 @@
       </details>
 
       <div class="transcription-error-actions">
+        <button id="transcriptionErrorManageUsageBtn" class="primary-button" type="button" hidden>Manage usage</button>
         <button id="transcriptionErrorOkBtn" class="primary-button" type="button">OK</button>
       </div>
     </div>

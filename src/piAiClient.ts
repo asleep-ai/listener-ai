@@ -7,7 +7,20 @@
 // `/compat` entrypoint): one shared Models collection carrying only the two
 // providers Listener uses, which also skips /compat's eager evaluation of
 // every bundled provider catalog at module load.
+//
+// The two providers are Google (Gemini API key) and `chatgpt`: Sign in with
+// ChatGPT plan usage on the PUBLIC `api.openai.com/v1/responses` route, through
+// pi-ai's own `openai-responses` API. Its body is rewritten onto the SIWC
+// contract by the `onPayload` hook (see chatgptResponses.ts).
 
+import {
+  CHATGPT_PI_PROVIDER,
+  CHATGPT_RESPONSES_BASE_URL,
+  ChatGPTInferenceError,
+  stripChatGPTToolNamespace,
+  toChatGPTInferenceError,
+  toChatGPTResponsesPayload,
+} from './chatgptResponses';
 import { importEsm } from './esmImport';
 
 import type {
@@ -42,7 +55,7 @@ export type PiAiModel = Model<Api>;
 
 type PiAiModule = typeof import('@earendil-works/pi-ai');
 type GoogleProviderModule = typeof import('@earendil-works/pi-ai/providers/google');
-type CodexProviderModule = typeof import('@earendil-works/pi-ai/providers/openai-codex');
+type OpenAIResponsesApiModule = typeof import('@earendil-works/pi-ai/api/openai-responses.lazy');
 
 interface PiAiRuntime {
   pi: PiAiModule;
@@ -54,15 +67,36 @@ let runtimePromise: Promise<PiAiRuntime> | undefined;
 
 function loadRuntime(): Promise<PiAiRuntime> {
   runtimePromise ??= (async () => {
-    const [pi, google, codex] = await Promise.all([
+    const [pi, google, responses] = await Promise.all([
       importEsm<PiAiModule>('@earendil-works/pi-ai'),
       importEsm<GoogleProviderModule>('@earendil-works/pi-ai/providers/google'),
-      importEsm<CodexProviderModule>('@earendil-works/pi-ai/providers/openai-codex'),
+      importEsm<OpenAIResponsesApiModule>('@earendil-works/pi-ai/api/openai-responses.lazy'),
     ]);
     const models = pi.createModels();
     const registerBuiltinProviders = () => {
       models.setProvider(google.googleProvider());
-      models.setProvider(codex.openaiCodexProvider());
+      models.setProvider(
+        pi.createProvider({
+          id: CHATGPT_PI_PROVIDER,
+          name: 'ChatGPT plan',
+          baseUrl: CHATGPT_RESPONSES_BASE_URL,
+          // Explicit per-call bearer only. No env var, no stored credential:
+          // an absent ChatGPT token must fail, never fall back to an
+          // OPENAI_API_KEY (a different billing path).
+          auth: {
+            apiKey: {
+              name: 'ChatGPT sign-in',
+              resolve: async ({ credential }) =>
+                credential?.key
+                  ? { auth: { apiKey: credential.key }, source: 'ChatGPT sign-in' }
+                  : undefined,
+            },
+          },
+          // Account-discovered models are built per call (buildChatGPTModel).
+          models: [],
+          api: responses.openAIResponsesApi(),
+        }),
+      );
     };
     registerBuiltinProviders();
     return { pi, models, registerBuiltinProviders };
@@ -81,12 +115,7 @@ export async function swapProviderForTest(
   return registerBuiltinProviders;
 }
 
-import {
-  type AiProvider,
-  DEFAULT_CODEX_MODEL,
-  DEFAULT_GEMINI_MODEL,
-  toPiAiProvider,
-} from './aiProvider';
+import { type AiProvider, DEFAULT_GEMINI_MODEL, toPiAiProvider } from './aiProvider';
 import { type CostSession, type UsageKind, recordUsage } from './services/usageTracker';
 
 /**
@@ -100,12 +129,12 @@ export interface UsageContext {
   transcriptionRef?: string;
 }
 
-const DEFAULT_MODEL_BY_PROVIDER: Record<AiProvider, string> = {
-  gemini: DEFAULT_GEMINI_MODEL,
-  codex: DEFAULT_CODEX_MODEL,
-};
-
+// Gemini only: ChatGPT models are account-discovered (ChatGPTBinding.model()
+// in chatgptBinding.ts) and must never be substituted, so getModel refuses them.
 export async function getModel(provider: AiProvider, modelId: string): Promise<PiAiModel> {
+  if (provider === 'chatgpt') {
+    throw new Error('ChatGPT models come from the signed-in account; use ChatGPTBinding.model().');
+  }
   const { models } = await loadRuntime();
   const piId = toPiAiProvider(provider);
   const lookup = (id: string) => models.getModel(piId, id);
@@ -114,7 +143,7 @@ export async function getModel(provider: AiProvider, modelId: string): Promise<P
   // pi-ai bumps occasionally retire catalog entries (0.84 dropped several
   // gpt-5.x ids). A configured id that vanished must not brick every summary
   // and agent call -- fall back to the provider default and say so.
-  const fallbackId = DEFAULT_MODEL_BY_PROVIDER[provider];
+  const fallbackId = DEFAULT_GEMINI_MODEL;
   if (fallbackId !== modelId) {
     const fallback = lookup(fallbackId);
     if (fallback) {
@@ -151,22 +180,80 @@ function summarizeContextSize(context: Context): string {
   return `messages=${context.messages.length} chars=${chars + systemChars} (system=${systemChars}) toolCalls=${toolCalls} toolResults=${toolResults} tools=${context.tools?.length ?? 0}`;
 }
 
-// Strip options the target provider doesn't accept. OpenAI Codex routes
-// through GPT-5.x reasoning models which reject sampling parameters
-// (`Unsupported parameter: temperature`). pi-ai forwards options verbatim,
-// so the adjustment has to happen at our boundary -- doing it here keeps
-// callsites free of provider conditionals.
+export function isChatGPTModel(model: PiAiModel): boolean {
+  return model.provider === CHATGPT_PI_PROVIDER;
+}
+
+// Strip options the target provider doesn't accept, so callsites stay free of
+// provider conditionals. On the ChatGPT route the sampling/limit options are
+// unsupported fields; dropping them here keeps pi-ai from even building them,
+// and the onPayload rewrite is the authoritative allowlist on the wire.
 function adjustOptionsForModel(
   model: PiAiModel,
   options: ProviderStreamOptions | undefined,
 ): Record<string, unknown> | undefined {
-  if (!options) return undefined;
-  const isCodex = model.api === 'openai-codex-responses' || model.provider === 'openai-codex';
-  if (isCodex) {
-    const { temperature: _t, ...rest } = options;
-    return { ...rest };
+  if (!isChatGPTModel(model)) return options ? { ...options } : undefined;
+  const {
+    temperature: _temperature,
+    maxTokens: _maxTokens,
+    serviceTier: _serviceTier,
+    samplingParams: _samplingParams,
+    sessionId: _sessionId,
+    metadata: _metadata,
+    reasoning: _reasoning,
+    reasoningEffort: _reasoningEffort,
+    reasoningSummary: _reasoningSummary,
+    onPayload: callerOnPayload,
+    ...rest
+  } = (options ?? {}) as Record<string, unknown> & {
+    onPayload?: (params: unknown, model: PiAiModel) => unknown;
+  };
+  return {
+    ...rest,
+    // The OpenAI SDK adds OpenAI-Organization / OpenAI-Project from the
+    // OPENAI_ORG_ID / OPENAI_PROJECT_ID environment. Those select API-platform
+    // billing scopes and do not belong on a ChatGPT plan request; a null
+    // header removes them after the SDK's env defaults are applied.
+    headers: {
+      ...(rest.headers as Record<string, string | null> | undefined),
+      'OpenAI-Organization': null,
+      'OpenAI-Project': null,
+    },
+    cacheRetention: 'none',
+    // A usage-limit 429 or an auth failure is a user-facing state, not a
+    // transient fault; pi-ai must not re-send the request on its own.
+    maxRetries: 0,
+    onPayload: async (params: unknown, payloadModel: PiAiModel) => {
+      const next = callerOnPayload ? await callerOnPayload(params, payloadModel) : undefined;
+      return toChatGPTResponsesPayload(next ?? params);
+    },
+  };
+}
+
+// The ChatGPT route counts a call as successful only after
+// `response.completed` ("Treat inference as successful only after receiving
+// response.completed"). pi-ai maps `incomplete` with max_output_tokens to
+// stopReason 'length' and an in-progress terminal status to 'stop', so check
+// the raw terminal status too. Anything else throws and nothing is persisted.
+function assertChatGPTCompleted(response: AssistantMessage): void {
+  const raw = (response as AssistantMessage & { rawStopReason?: string }).rawStopReason;
+  if (response.stopReason === 'error') {
+    throw toChatGPTInferenceError(response.errorMessage ?? 'no errorMessage');
   }
-  return { ...options };
+  if (
+    raw !== 'completed' ||
+    (response.stopReason !== 'stop' && response.stopReason !== 'toolUse')
+  ) {
+    throw new ChatGPTInferenceError(
+      'incomplete',
+      'The ChatGPT response ended before it completed. The ChatGPT result was not saved; try again.',
+      { rawMessage: `stopReason=${response.stopReason} status=${raw ?? 'none'}` },
+    );
+  }
+  // Tool calls inside the `listener` namespace may come back qualified.
+  for (const block of response.content) {
+    if (block.type === 'toolCall') block.name = stripChatGPTToolNamespace(block.name);
+  }
 }
 
 // Shared instrumentation + error/abort promotion for both `complete()` and
@@ -192,7 +279,11 @@ async function runPiAiCall(
   console.log(
     `${tag} <- ${elapsed}ms stop=${stop} textChars=${textChars} usage=in:${response.usage?.input ?? '?'}/out:${response.usage?.output ?? '?'}${response.errorMessage ? ` errorMessage=${response.errorMessage.slice(0, 300)}` : ''}`,
   );
-  // Record cost only on successful turns -- error/aborted paths throw below.
+  if (isChatGPTModel(model) && response.stopReason !== 'aborted') {
+    assertChatGPTCompleted(response);
+  }
+  // Record cost only on successful turns -- error/aborted paths throw below
+  // (a ChatGPT turn that did not complete was rejected just above).
   // pi-ai already priced this call against its bundled per-provider catalog
   // (node_modules/@earendil-works/pi-ai/dist/providers/data/*.json); pass
   // its `cost.total` through verbatim rather than re-implementing.
@@ -208,6 +299,8 @@ async function runPiAiCall(
         cacheWrite: typeof usage?.cacheWrite === 'number' ? usage.cacheWrite : undefined,
       },
       precomputedUsd: typeof usage?.cost?.total === 'number' ? usage.cost.total : undefined,
+      // ChatGPT plan calls are subscription usage, not priced API tokens.
+      billing: isChatGPTModel(model) ? ('chatgpt-plan' as const) : undefined,
       transcriptionRef: usageContext.transcriptionRef,
     };
     if (usageContext.session) {

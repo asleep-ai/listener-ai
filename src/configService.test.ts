@@ -8,8 +8,18 @@ import assert from 'node:assert/strict';
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import * as path from 'path';
 import { diffConfigPayload } from './configDiff';
-import { CONFIG_KEY_DEFINITIONS } from './configKeys';
-import { ConfigService, DEFAULT_SUMMARY_PROMPT } from './configService';
+import {
+  AGENT_READABLE_CONFIG_KEYS,
+  AGENT_WRITABLE_CONFIG_KEYS,
+  CONFIG_KEY_DEFINITIONS,
+  KNOWN_CONFIG_KEYS,
+} from './configKeys';
+import {
+  ConfigService,
+  chatGPTBindingChanged,
+  DEFAULT_SUMMARY_PROMPT,
+  TranscriptionProviderSelectionError,
+} from './configService';
 import { makeTempDir, rmDir } from './test-helpers';
 
 let workDir: string;
@@ -91,100 +101,145 @@ function writeCodexCliAuth(filePath: string, expMs = Date.now() + 60_000): void 
   );
 }
 
-describe('ConfigService: Codex OAuth credential source', () => {
-  it('returns env credentials when config has none', () => {
+// The retired Codex OAuth path must never authenticate anything: not tokens
+// stored in config.json, not CODEX_* env vars, not ~/.codex/auth.json. A user
+// who chose Codex keeps the ChatGPT-plan intent but must sign in again.
+describe('ConfigService: legacy Codex migration (no credential reuse)', () => {
+  function writeLegacyConfig(dataPath: string, extra: Record<string, unknown> = {}): void {
+    fs.writeFileSync(
+      path.join(dataPath, 'config.json'),
+      JSON.stringify({
+        codexOAuth: {
+          access: 'legacy-access',
+          refresh: 'legacy-refresh',
+          expires: Date.now() + 3_600_000,
+        },
+        ...extra,
+      }),
+    );
+  }
+
+  it('maps a stored aiProvider=codex to chatgpt, unauthenticated until a new sign-in', () => {
+    const dataPath = freshDataPath('legacy-codex-provider');
+    writeLegacyConfig(dataPath, { aiProvider: 'codex' });
     process.env.CODEX_OAUTH_ACCESS_TOKEN = 'env-access';
     process.env.CODEX_OAUTH_REFRESH_TOKEN = 'env-refresh';
-    process.env.CODEX_OAUTH_EXPIRES = String(Date.now() + 30 * 60_000);
+    process.env.CODEX_OAUTH_EXPIRES = String(Date.now() + 3_600_000);
+    const authPath = path.join(dataPath, 'codex-cli', 'auth.json');
+    writeCodexCliAuth(authPath);
+    process.env.LISTENER_CODEX_AUTH_PATH = authPath;
 
-    const cfg = new ConfigService(freshDataPath('env-only'));
-    const creds = cfg.getCodexOAuth();
-    assert.ok(creds, 'expected env credentials to be returned');
-    assert.equal(creds?.access, 'env-access');
-  });
-
-  it('hasStoredCodexOAuth is false for env-only credentials', () => {
-    process.env.CODEX_OAUTH_ACCESS_TOKEN = 'env-access';
-    process.env.CODEX_OAUTH_REFRESH_TOKEN = 'env-refresh';
-
-    const cfg = new ConfigService(freshDataPath('env-only-stored'));
-    assert.equal(cfg.hasStoredCodexOAuth(), false);
-    // hasCodexOAuth, in contrast, accepts env-sourced credentials.
-    assert.equal(cfg.hasCodexOAuth(), true);
-  });
-
-  it('hasStoredCodexOAuth is true after explicit setCodexOAuth', () => {
-    const cfg = new ConfigService(freshDataPath('stored'));
-    cfg.setCodexOAuth({ access: 'a', refresh: 'r', expires: Date.now() + 60_000 });
-    assert.equal(cfg.hasStoredCodexOAuth(), true);
-  });
-
-  it('config credentials win over env credentials', () => {
-    process.env.CODEX_OAUTH_ACCESS_TOKEN = 'env-access';
-    process.env.CODEX_OAUTH_REFRESH_TOKEN = 'env-refresh';
-
-    const dataPath = freshDataPath('config-vs-env');
     const cfg = new ConfigService(dataPath);
-    cfg.setCodexOAuth({ access: 'config-access', refresh: 'r', expires: Date.now() + 60_000 });
 
-    assert.equal(cfg.getCodexOAuth()?.access, 'config-access');
+    assert.equal(cfg.getAiProvider(), 'chatgpt');
+    assert.equal(cfg.isLegacyCodexProviderConfigured(), true);
+    assert.equal(cfg.hasLegacyCodexSignIn(), true);
+    assert.equal(cfg.hasAiAuth(), false, 'old Codex tokens must never count as ChatGPT auth');
+    assert.deepEqual(cfg.getMissingConfigs().slice(0, 1), ['Sign in with ChatGPT']);
   });
 
-  it('returns Codex CLI credentials when app config and env have none', () => {
-    const authPath = path.join(freshDataPath('cli-auth'), 'auth.json');
-    writeCodexCliAuth(authPath);
-    process.env.LISTENER_CODEX_AUTH_PATH = authPath;
-
-    const cfg = new ConfigService(freshDataPath('cli-only'));
-    const source = cfg.getCodexOAuthSource();
-
-    assert.equal(source?.source, 'codexCli');
-    assert.equal(source?.credentials.refresh, 'cli-refresh');
-    assert.equal(source?.credentials.accountId, 'acct_cli');
-    assert.equal(cfg.hasStoredCodexOAuth(), false);
-    assert.equal(cfg.hasCodexOAuth(), true);
-  });
-
-  it('prefers fresh Codex CLI credentials over stale app config credentials', () => {
-    const authPath = path.join(freshDataPath('cli-auth-over-stale'), 'auth.json');
-    writeCodexCliAuth(authPath, Date.now() + 60_000);
-    process.env.LISTENER_CODEX_AUTH_PATH = authPath;
-
-    const cfg = new ConfigService(freshDataPath('stale-config-cli-fallback'));
-    cfg.setCodexOAuth({ access: 'stale-config-access', refresh: 'stale-refresh', expires: 1 });
-    const source = cfg.getCodexOAuthSource();
-
-    assert.equal(source?.source, 'codexCli');
-    assert.equal(source?.credentials.refresh, 'cli-refresh');
-    assert.equal(cfg.getCodexOAuth()?.refresh, 'cli-refresh');
-    assert.equal(cfg.hasStoredCodexOAuth(), true);
-  });
-
-  it('keeps fresh app config credentials ahead of Codex CLI credentials', () => {
-    const authPath = path.join(freshDataPath('cli-auth-lower-priority'), 'auth.json');
-    writeCodexCliAuth(authPath);
-    process.env.LISTENER_CODEX_AUTH_PATH = authPath;
-
-    const cfg = new ConfigService(freshDataPath('fresh-config-cli-present'));
-    cfg.setCodexOAuth({
-      access: 'fresh-config-access',
-      refresh: 'fresh-config-refresh',
-      expires: Date.now() + 60_000,
+  it('carries the plan state into the renderer status payload', () => {
+    const cfg = new ConfigService(freshDataPath('chatgpt-plan-state'));
+    cfg.setChatGPTStatus({
+      connected: true,
+      planEnabled: false,
+      planState: 'incomplete',
+      profileId: 'p1',
     });
-
-    assert.equal(cfg.getCodexOAuthSource()?.source, 'config');
-    assert.equal(cfg.getCodexOAuth()?.access, 'fresh-config-access');
+    assert.equal(cfg.getAllConfig().chatgptStatus?.planState, 'incomplete');
+    assert.equal(cfg.hasChatGPTPlan(), false);
   });
 
-  it('clearCodexOAuth removes the key from disk (not resurrected by save-merge)', () => {
-    const dataPath = freshDataPath('clear');
-    const cfg = new ConfigService(dataPath);
-    cfg.setCodexOAuth({ access: 'a', refresh: 'r', expires: Date.now() + 60_000 });
-    cfg.clearCodexOAuth();
+  it('treats a same-profile reauthorization as a binding change for new work', () => {
+    const cfg = new ConfigService(freshDataPath('chatgpt-session-revision'));
+    const first = { connected: true, planEnabled: true, profileId: 'p1', sessionRevision: 'aaaa' };
+    cfg.setChatGPTStatus(first);
+    const cached = cfg.getChatGPTStatus();
+    assert.equal(cached.sessionRevision, 'aaaa');
+    assert.equal(chatGPTBindingChanged(cached, { ...first }), false);
+    assert.equal(chatGPTBindingChanged(cached, { ...first, sessionRevision: 'bbbb' }), true);
+    assert.equal(chatGPTBindingChanged(cached, { ...first, profileId: 'p2' }), true);
+    assert.equal(chatGPTBindingChanged(cached, { ...first, planEnabled: false }), true);
+    assert.equal(chatGPTBindingChanged(cached, { connected: false, planEnabled: false }), true);
+  });
 
+  it('counts only a fresh ChatGPT sign-in with plan usage as chat auth', () => {
+    const dataPath = freshDataPath('legacy-codex-then-chatgpt');
+    writeLegacyConfig(dataPath, { aiProvider: 'codex' });
+    const cfg = new ConfigService(dataPath);
+    cfg.setChatGPTStatus({ connected: true, planEnabled: false, profileId: 'p1' });
+    assert.equal(cfg.hasAiAuth(), false, 'plan scope missing');
+    cfg.setChatGPTStatus({ connected: true, planEnabled: true, profileId: 'p1' });
+    assert.equal(cfg.hasAiAuth(), true);
+  });
+
+  it('keeps the ChatGPT-plan intent for an unset provider that only had Codex tokens', () => {
+    const dataPath = freshDataPath('legacy-codex-implicit');
+    writeLegacyConfig(dataPath);
+    assert.equal(new ConfigService(dataPath).getAiProvider(), 'chatgpt');
+
+    const withGemini = freshDataPath('legacy-codex-implicit-gemini');
+    writeLegacyConfig(withGemini, { geminiApiKey: 'gemini-key' });
+    assert.equal(new ConfigService(withGemini).getAiProvider(), 'gemini');
+  });
+
+  it('never exposes legacy tokens through getAllConfig', () => {
+    const dataPath = freshDataPath('legacy-codex-projection');
+    writeLegacyConfig(dataPath, { aiProvider: 'codex' });
+    const all = new ConfigService(dataPath).getAllConfig();
+    assert.equal(JSON.stringify(all).includes('legacy-access'), false);
+    assert.equal(JSON.stringify(all).includes('legacy-refresh'), false);
+    assert.equal(all.legacyCodexConfigured, true);
+    assert.equal(all.aiProvider, 'chatgpt');
+  });
+
+  it('accepts a legacy codex write as chatgpt', () => {
+    const dataPath = freshDataPath('legacy-codex-write');
+    const cfg = new ConfigService(dataPath);
+    cfg.updateConfig({ aiProvider: 'codex' as never });
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dataPath, 'config.json'), 'utf-8'));
+    assert.equal(onDisk.aiProvider, 'chatgpt');
+  });
+
+  it('clearLegacyCodexSignIn removes the tokens from disk', () => {
+    const dataPath = freshDataPath('legacy-codex-clear');
+    writeLegacyConfig(dataPath);
+    const cfg = new ConfigService(dataPath);
+    cfg.clearLegacyCodexSignIn();
     const onDisk = JSON.parse(fs.readFileSync(path.join(dataPath, 'config.json'), 'utf-8'));
     assert.equal(onDisk.codexOAuth, undefined);
-    assert.equal(cfg.hasStoredCodexOAuth(), false);
+    assert.equal(cfg.hasLegacyCodexSignIn(), false);
+  });
+});
+
+describe('ConfigService: chatgptPlanNoticeAcknowledged', () => {
+  it('persists through a settings save and reads back in getAllConfig', () => {
+    const dataPath = freshDataPath('plan-notice');
+    const cfg = new ConfigService(dataPath);
+    assert.equal(cfg.getAllConfig().chatgptPlanNoticeAcknowledged, false);
+    cfg.updateConfig({ chatgptPlanNoticeAcknowledged: true });
+    const reloaded = new ConfigService(dataPath);
+    assert.equal(reloaded.getAllConfig().chatgptPlanNoticeAcknowledged, true);
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dataPath, 'config.json'), 'utf-8'));
+    assert.equal(onDisk.chatgptPlanNoticeAcknowledged, true);
+  });
+
+  it('ignores a non-boolean value', () => {
+    const cfg = new ConfigService(freshDataPath('plan-notice-invalid'));
+    cfg.updateConfig({ chatgptPlanNoticeAcknowledged: 'yes' as never });
+    assert.equal(cfg.getAllConfig().chatgptPlanNoticeAcknowledged, false);
+  });
+
+  it('is neither agent-readable, agent-writable nor a CLI key', () => {
+    assert.equal(
+      AGENT_WRITABLE_CONFIG_KEYS.includes('chatgptPlanNoticeAcknowledged' as never),
+      false,
+    );
+    assert.equal(
+      AGENT_READABLE_CONFIG_KEYS.includes('chatgptPlanNoticeAcknowledged' as never),
+      false,
+    );
+    assert.equal(KNOWN_CONFIG_KEYS.includes('chatgptPlanNoticeAcknowledged' as never), false);
   });
 });
 
@@ -192,14 +247,20 @@ describe('ConfigService: LISTENER_AI_PROVIDER env override', () => {
   it('overrides configured provider', () => {
     const cfg = new ConfigService(freshDataPath('env-override'));
     cfg.setAiProvider('gemini');
+    process.env.LISTENER_AI_PROVIDER = 'chatgpt';
+    assert.equal(cfg.getAiProvider(), 'chatgpt');
+  });
+
+  it('treats a legacy LISTENER_AI_PROVIDER=codex as chatgpt', () => {
+    const cfg = new ConfigService(freshDataPath('env-override-legacy'));
     process.env.LISTENER_AI_PROVIDER = 'codex';
-    assert.equal(cfg.getAiProvider(), 'codex');
+    assert.equal(cfg.getAiProvider(), 'chatgpt');
   });
 
   it('warns exactly once when env disagrees with configured value', () => {
     const cfg = new ConfigService(freshDataPath('env-warn'));
     cfg.setAiProvider('gemini');
-    process.env.LISTENER_AI_PROVIDER = 'codex';
+    process.env.LISTENER_AI_PROVIDER = 'chatgpt';
 
     const originalWarn = console.warn;
     const warnings: string[] = [];
@@ -214,14 +275,14 @@ describe('ConfigService: LISTENER_AI_PROVIDER env override', () => {
       console.warn = originalWarn;
     }
     assert.equal(warnings.length, 1, 'expected one warning across repeated calls');
-    assert.match(warnings[0], /LISTENER_AI_PROVIDER=codex/);
+    assert.match(warnings[0], /LISTENER_AI_PROVIDER=chatgpt/);
     assert.match(warnings[0], /aiProvider=gemini/);
   });
 
   it('does not warn when env matches configured value', () => {
     const cfg = new ConfigService(freshDataPath('env-no-warn'));
-    cfg.setAiProvider('codex');
-    process.env.LISTENER_AI_PROVIDER = 'codex';
+    cfg.setAiProvider('chatgpt');
+    process.env.LISTENER_AI_PROVIDER = 'chatgpt';
 
     const originalWarn = console.warn;
     const warnings: string[] = [];
@@ -263,7 +324,7 @@ describe('ConfigService: saveConfig file mode + concurrent merge', () => {
       assert.equal(fs.statSync(configPath).mode & 0o777, 0o644);
 
       const cfg = new ConfigService(dataPath);
-      cfg.setCodexOAuth({ access: 'a', refresh: 'r', expires: Date.now() + 60_000 });
+      cfg.setGeminiApiKey('rotated');
 
       assert.equal(
         fs.statSync(configPath).mode & 0o777,
@@ -501,8 +562,8 @@ describe('ConfigService: updateConfig validation for aiProvider', () => {
   it('accepts valid aiProvider values', () => {
     const dataPath = freshDataPath('provider-update-valid');
     const cfg = new ConfigService(dataPath);
-    cfg.updateConfig({ aiProvider: 'codex' });
-    assert.equal(cfg.getAiProvider(), 'codex');
+    cfg.updateConfig({ aiProvider: 'chatgpt' });
+    assert.equal(cfg.getAiProvider(), 'chatgpt');
   });
 });
 
@@ -515,27 +576,24 @@ describe('ConfigService: live STT config', () => {
     assert.equal(cfg.hasStreamingLiveSttAuth(), true);
   });
 
-  it('does not count Codex OAuth as OpenAI live Realtime auth', () => {
-    const cfg = new ConfigService(freshDataPath('live-codex-oauth'));
+  it('does not count a ChatGPT sign-in or legacy Codex tokens as OpenAI live Realtime auth', () => {
+    const dataPath = freshDataPath('live-chatgpt');
+    fs.writeFileSync(
+      path.join(dataPath, 'config.json'),
+      JSON.stringify({ codexOAuth: { access: 'a', refresh: 'r', expires: Date.now() + 60_000 } }),
+    );
+    const cfg = new ConfigService(dataPath);
     cfg.updateConfig({ liveSttProvider: 'openai' });
-    cfg.setCodexOAuth({
-      access: 'codex-access',
-      refresh: 'codex-refresh',
-      expires: Date.now() + 60_000,
-    });
+    cfg.setChatGPTStatus({ connected: true, planEnabled: true, profileId: 'p1' });
 
     assert.equal(cfg.getOpenAiApiKey(), undefined);
     assert.equal(cfg.hasStreamingLiveSttAuth(), false);
   });
 
-  it('does not count Codex OAuth as auto live streaming auth', () => {
-    const cfg = new ConfigService(freshDataPath('live-auto-codex-oauth'));
+  it('does not count a ChatGPT sign-in as auto live streaming auth', () => {
+    const cfg = new ConfigService(freshDataPath('live-auto-chatgpt'));
     cfg.updateConfig({ liveSttProvider: 'auto' });
-    cfg.setCodexOAuth({
-      access: 'codex-access',
-      refresh: 'codex-refresh',
-      expires: Date.now() + 60_000,
-    });
+    cfg.setChatGPTStatus({ connected: true, planEnabled: true, profileId: 'p1' });
 
     assert.equal(cfg.hasStreamingLiveSttAuth(), false);
   });
@@ -582,19 +640,74 @@ describe('ConfigService: live STT config', () => {
 });
 
 describe('ConfigService: transcription provider', () => {
-  it('defaults to auto and follows the AI provider', () => {
+  it('defaults to auto, which follows Gemini and refuses for ChatGPT', () => {
     const cfg = new ConfigService(freshDataPath('transcription-default'));
     assert.equal(cfg.getTranscriptionProvider(), 'auto');
     cfg.setAiProvider('gemini');
     assert.equal(cfg.resolveTranscriptionProvider(), 'gemini');
-    cfg.setAiProvider('codex');
-    assert.equal(cfg.resolveTranscriptionProvider(), 'codex');
+    cfg.setAiProvider('chatgpt');
+    assert.throws(() => cfg.resolveTranscriptionProvider(), TranscriptionProviderSelectionError);
+    assert.equal(cfg.getTranscriptionResolution().issue, 'chatgpt-auto');
+  });
+
+  it('ChatGPT + auto refuses even when every STT key is configured (no silent provider)', () => {
+    const cfg = new ConfigService(freshDataPath('transcription-chatgpt-auto-keys'));
+    cfg.setAiProvider('chatgpt');
+    cfg.setChatGPTStatus({ connected: true, planEnabled: true, profileId: 'p1' });
+    cfg.setGeminiApiKey('gemini-key');
+    cfg.setOpenAiApiKey('sk-openai');
+    cfg.setSonioxApiKey('soniox-key');
+    cfg.setNotionApiKey('notion-key');
+    cfg.setNotionDatabaseId('db-id');
+
+    assert.equal(cfg.getTranscriptionResolution().provider, undefined);
+    assert.equal(cfg.hasAiAuth(), true);
+    assert.equal(cfg.hasTranscriptionAuth(), false);
+    assert.equal(cfg.hasRequiredConfig(), false);
+    assert.deepEqual(cfg.getMissingConfigs(), [
+      'Transcription provider (choose Gemini, OpenAI, or Soniox)',
+    ]);
+    assert.match(cfg.getAllConfig().transcriptionProviderIssue?.message ?? '', /cannot transcribe/);
+  });
+
+  it('a stored legacy transcriptionProvider=codex never resolves, not even with an OpenAI key', () => {
+    for (const aiProvider of ['gemini', 'chatgpt'] as const) {
+      const dataPath = freshDataPath(`transcription-legacy-codex-${aiProvider}`);
+      fs.writeFileSync(
+        path.join(dataPath, 'config.json'),
+        JSON.stringify({
+          aiProvider,
+          transcriptionProvider: 'codex',
+          geminiApiKey: 'gemini-key',
+          openaiApiKey: 'sk-openai',
+        }),
+      );
+      const cfg = new ConfigService(dataPath);
+      assert.equal(cfg.isLegacyCodexTranscriptionConfigured(), true);
+      const resolution = cfg.getTranscriptionResolution();
+      assert.equal(resolution.provider, undefined);
+      assert.equal(resolution.issue, 'legacy-codex');
+      assert.match(resolution.message ?? '', /transcriptionProvider openai/);
+      assert.equal(cfg.hasTranscriptionAuth(), false);
+    }
+  });
+
+  it('OpenAI transcription is explicit and needs its own API key', () => {
+    const cfg = new ConfigService(freshDataPath('transcription-openai'));
+    cfg.setAiProvider('chatgpt');
+    cfg.setChatGPTStatus({ connected: true, planEnabled: true, profileId: 'p1' });
+    cfg.setTranscriptionProvider('openai');
+    assert.equal(cfg.resolveTranscriptionProvider(), 'openai');
+    assert.equal(cfg.hasTranscriptionAuth(), false, 'a ChatGPT sign-in never pays for audio');
+    cfg.setOpenAiApiKey('sk-openai');
+    assert.equal(cfg.hasTranscriptionAuth(), true);
+    assert.equal(cfg.getOpenAiTranscriptionModel(), 'gpt-4o-transcribe-diarize');
   });
 
   it('round-trips an explicit provider through disk and ignores aiProvider', () => {
     const dataPath = freshDataPath('transcription-roundtrip');
     const cfg = new ConfigService(dataPath);
-    cfg.setAiProvider('codex');
+    cfg.setAiProvider('chatgpt');
     cfg.setTranscriptionProvider('soniox');
 
     const reloaded = new ConfigService(dataPath);
@@ -649,8 +762,8 @@ describe('ConfigService: transcription provider', () => {
 
   it('reports a missing Gemini transcription credential while the chat provider is signed in', () => {
     const cfg = new ConfigService(freshDataPath('missing-gemini-backend'));
-    cfg.setCodexOAuth({ access: 'a', refresh: 'r', expires: Date.now() + 3_600_000 });
-    cfg.setAiProvider('codex');
+    cfg.setChatGPTStatus({ connected: true, planEnabled: true, profileId: 'p1' });
+    cfg.setAiProvider('chatgpt');
     cfg.setNotionApiKey('notion-key');
     cfg.setNotionDatabaseId('db-id');
     cfg.setTranscriptionProvider('gemini');
@@ -712,18 +825,6 @@ describe('ConfigService: codexTranscriptionModel migration to diarize default', 
 
     const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     assert.equal(onDisk.codexTranscriptionMigratedToDiarize, true);
-  });
-
-  it('preserves a deliberate `gpt-4o-transcribe` opt-out after the marker is set', () => {
-    const dataPath = freshDataPath('migrate-deliberate-optout');
-    // First launch: empty config -> marker gets stamped, no model cleared.
-    new ConfigService(dataPath);
-    // Second session: user deliberately picks the non-diarize model.
-    const second = new ConfigService(dataPath);
-    second.setCodexTranscriptionModel('gpt-4o-transcribe');
-    // Third launch must not re-migrate.
-    const third = new ConfigService(dataPath);
-    assert.equal(third.getCodexTranscriptionModel(), 'gpt-4o-transcribe');
   });
 
   it('does not re-run the migration once the marker is set', () => {
@@ -789,20 +890,22 @@ describe('ConfigService: getAllConfig projection', () => {
     process.env.NOTION_API_KEY = 'env-notion-key';
     process.env.NOTION_DATABASE_ID = 'env-db';
     process.env.SLACK_WEBHOOK_URL = 'https://hooks.example/env';
-    // Keep the Codex CLI auth file out of the picture so the derived
-    // codexOAuth* fields stay deterministic on developer machines.
+    // A Codex CLI auth file must not influence anything anymore; point the
+    // retired override at nothing to prove the projection ignores it.
     process.env.LISTENER_CODEX_AUTH_PATH = path.join(dataPath, 'no-such-codex-auth.json');
   }
 
   const expected = {
-    aiProvider: 'codex',
+    // Stored legacy `codex` reads as `chatgpt`.
+    aiProvider: 'chatgpt',
     transcriptionProvider: 'soniox',
     geminiApiKey: 'env-gemini-key',
     geminiModel: 'custom-gemini',
     geminiFlashModel: 'gemini-2.5-flash',
     geminiThinkingLevel: 'high',
-    codexModel: 'gpt-5.5',
-    codexTranscriptionModel: 'gpt-4o-transcribe-diarize',
+    chatgptModel: undefined,
+    chatgptPlanNoticeAcknowledged: false,
+    openaiTranscriptionModel: 'gpt-4o-transcribe-diarize',
     liveSttProvider: 'soniox',
     openaiApiKey: '',
     sonioxApiKey: undefined,
@@ -810,8 +913,9 @@ describe('ConfigService: getAllConfig projection', () => {
     openaiLiveTranslationModel: 'gpt-realtime-translate',
     liveSttLanguage: 'en',
     liveTranslationLanguage: 'ko',
-    codexOAuthConfigured: false,
-    codexOAuthSource: undefined,
+    chatgptStatus: { connected: false, planEnabled: false },
+    // The fixture still stores aiProvider=codex.
+    legacyCodexConfigured: true,
     googleOAuthConfigured: false,
     googleDriveEnabled: false,
     notionApiKey: 'env-notion-key',
@@ -876,7 +980,7 @@ describe('ConfigService: settings save only persists edited fields', () => {
     process.env.NOTION_API_KEY = 'env-notion-key';
     process.env.NOTION_DATABASE_ID = 'env-db';
     process.env.SLACK_WEBHOOK_URL = 'https://hooks.example/env';
-    process.env.LISTENER_AI_PROVIDER = 'codex';
+    process.env.LISTENER_AI_PROVIDER = 'chatgpt';
     process.env.LISTENER_CODEX_AUTH_PATH = path.join(dataPath, 'no-such-codex-auth.json');
   }
 
@@ -919,7 +1023,7 @@ describe('ConfigService: settings save only persists edited fields', () => {
     const baseline = readSettingsForm(config);
     // The form shows the env values, so a leak would be visible here.
     assert.equal(baseline.geminiApiKey, 'env-gemini-key');
-    assert.equal(baseline.aiProvider, 'codex');
+    assert.equal(baseline.aiProvider, 'chatgpt');
     config.updateConfig(diffConfigPayload(baseline, { ...baseline, autoMode: true }));
 
     const disk = JSON.parse(fs.readFileSync(config.getConfigPath(), 'utf-8'));
@@ -928,7 +1032,7 @@ describe('ConfigService: settings save only persists edited fields', () => {
     assert.equal(config.getGeminiApiKey(), 'env-gemini-key');
     assert.equal(config.getNotionApiKey(), 'env-notion-key');
     assert.equal(config.getSlackWebhookUrl(), 'https://hooks.example/env');
-    assert.equal(config.getAiProvider(), 'codex');
+    assert.equal(config.getAiProvider(), 'chatgpt');
   });
 
   it('persists explicit edits and leaves untouched stored values alone', () => {
@@ -980,5 +1084,49 @@ describe('ConfigService: settings save only persists edited fields', () => {
     ]) {
       assert.equal(key in disk, false, `${key} should not be persisted`);
     }
+  });
+});
+
+describe('ConfigService: chunked live captions gate', () => {
+  it('needs only the batch STT backend when translation is off', () => {
+    // Signed-out ChatGPT plus an explicit OpenAI backend: captions can run,
+    // translating them cannot.
+    const cfg = new ConfigService(freshDataPath('chunked-transcription-only'));
+    cfg.setAiProvider('chatgpt');
+    cfg.setTranscriptionProvider('openai');
+    cfg.setOpenAiApiKey('sk-openai');
+    assert.equal(cfg.hasAiAuth(), false);
+    assert.equal(cfg.getChunkedLiveCaptionsBlocker(false), null);
+    assert.equal(cfg.getChunkedLiveCaptionsBlocker(true), 'ai');
+  });
+
+  it('follows the ChatGPT status projection, so a sign-in or sign-out counts', () => {
+    const cfg = new ConfigService(freshDataPath('chunked-chatgpt-status'));
+    cfg.setAiProvider('chatgpt');
+    cfg.setTranscriptionProvider('openai');
+    cfg.setOpenAiApiKey('sk-openai');
+    cfg.setChatGPTStatus({ connected: true, planEnabled: true, profileId: 'p1' });
+    assert.equal(cfg.getChunkedLiveCaptionsBlocker(true), null);
+    cfg.setChatGPTStatus({ connected: false, planEnabled: false });
+    assert.equal(cfg.getChunkedLiveCaptionsBlocker(true), 'ai');
+  });
+
+  it('blocks on an unresolvable or uncredentialed backend with an actionable message', () => {
+    const chatgptAuto = new ConfigService(freshDataPath('chunked-chatgpt-auto'));
+    chatgptAuto.setAiProvider('chatgpt');
+    chatgptAuto.setChatGPTStatus({ connected: true, planEnabled: true, profileId: 'p1' });
+    assert.equal(chatgptAuto.getChunkedLiveCaptionsBlocker(false), 'transcription');
+    assert.equal(
+      chatgptAuto.describeMissingTranscriptionAuth(),
+      chatgptAuto.getTranscriptionResolution().message,
+    );
+
+    const missingKey = new ConfigService(freshDataPath('chunked-missing-openai-key'));
+    missingKey.setTranscriptionProvider('openai');
+    assert.equal(missingKey.getChunkedLiveCaptionsBlocker(false), 'transcription');
+    assert.equal(
+      missingKey.describeMissingTranscriptionAuth(),
+      'Add the OpenAI API key for transcription.',
+    );
   });
 });

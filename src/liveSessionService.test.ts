@@ -8,7 +8,11 @@ import {
   type TranscriptionOptions,
   type TranscriptionResult,
 } from './geminiService';
-import { LiveSessionService, type LiveSessionEvent } from './liveSessionService';
+import {
+  LiveChunkedCaptionsUnavailableError,
+  LiveSessionService,
+  type LiveSessionEvent,
+} from './liveSessionService';
 import type { LiveSttCallbacks, LiveSttSession } from './liveSttProvider';
 import type { RecordInput } from './services/usageTracker';
 import { makeTempDir, rmDir } from './test-helpers';
@@ -936,7 +940,238 @@ describe('LiveSessionService duplicate suppression and quality flags', () => {
   });
 });
 
+describe('LiveSessionService chunked captions without text-provider credentials', () => {
+  function transcriptionOnlyFake(transcript: string) {
+    return {
+      async transcribeLiveSnippet(): Promise<string> {
+        return transcript;
+      },
+      async translateText(): Promise<string> {
+        throw new Error('a transcription-only service must not be asked to translate');
+      },
+    } as unknown as GeminiService;
+  }
+
+  it('captions with translation off through the transcription-only service', async () => {
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      ensureTranscriptionService: () => transcriptionOnlyFake('참가자1: 시작하겠습니다.'),
+      getChunkedCaptionsIssue: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'Not signed in with ChatGPT.',
+      getLiveSttConfig: chunkedConfig,
+    });
+
+    const session = await service.start({ title: 'Live', translate: false });
+    assert.equal(session.mode, 'chunked');
+    const segment = await service.processAudioChunk({
+      sessionId: session.sessionId,
+      audioData: makeAudioBytes(),
+      mimeType: 'audio/webm',
+      offsetMs: 0,
+      durationMs: 12_000,
+      translate: false,
+    });
+
+    assert.equal(segment?.transcript, '참가자1: 시작하겠습니다.');
+    assert.equal(segment?.translation, undefined);
+    assert.equal(segment?.translationError, undefined);
+  });
+
+  it('keeps the caption and names the missing text provider when translation is turned on', async () => {
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      ensureTranscriptionService: () => transcriptionOnlyFake('참가자1: 다음 안건입니다.'),
+      getChunkedCaptionsIssue: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'Not signed in with ChatGPT.',
+      getLiveSttConfig: chunkedConfig,
+    });
+
+    const session = await service.start({ title: 'Live', translate: false });
+    const segment = await service.processAudioChunk({
+      sessionId: session.sessionId,
+      audioData: makeAudioBytes(),
+      mimeType: 'audio/webm',
+      offsetMs: 0,
+      durationMs: 12_000,
+      translate: true,
+    });
+
+    assert.equal(segment?.transcript, '참가자1: 다음 안건입니다.');
+    assert.equal(segment?.translationError, 'Not signed in with ChatGPT.');
+  });
+
+  it('ends the session instead of announcing chunked captions after Realtime fails with no usable batch backend', async () => {
+    const events: LiveSessionEvent[] = [];
+    let transcribeCalls = 0;
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      ensureTranscriptionService: () => {
+        transcribeCalls += 1;
+        return null;
+      },
+      getChunkedCaptionsIssue: () => 'Choose a transcription service.',
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      // OpenAI key only: the realtime fallbacks are all OpenAI and fail.
+      getLiveSttConfig: () => ({ provider: 'auto', openaiApiKey: 'sk-openai' }),
+      emitEvent: (event) => events.push(event),
+      createRealtimeClientConfig: async () => ({
+        transport: 'webrtc',
+        endpoint: 'realtime',
+        clientSecret: 'ek_test',
+      }),
+      createLiveSttSession: async () => {
+        throw new Error('OpenAI WebSocket failed');
+      },
+    });
+
+    const session = await service.start({ title: 'Live', translate: false });
+    assert.equal(session.mode, 'streaming');
+    await assert.rejects(
+      service.fallbackFromRealtime({ sessionId: session.sessionId, error: 'ICE failed' }),
+      (error: unknown) =>
+        error instanceof LiveChunkedCaptionsUnavailableError &&
+        /Choose a transcription service\./.test(error.message),
+    );
+
+    assert.equal(service.snapshot()?.active, false);
+    assert.equal(
+      events.some((event) => event.type === 'status' && /chunked fallback/i.test(event.status)),
+      false,
+      'chunked captions are never announced',
+    );
+    const late = await service.processAudioChunk({
+      sessionId: session.sessionId,
+      audioData: makeAudioBytes(),
+      mimeType: 'audio/webm',
+      offsetMs: 0,
+      durationMs: 12_000,
+    });
+    assert.equal(late, null);
+    assert.equal(transcribeCalls, 0);
+  });
+
+  it('still falls back to chunked captions after Realtime fails when the batch backend can run', async () => {
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getChunkedCaptionsIssue: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'auto', openaiApiKey: 'sk-openai' }),
+      createRealtimeClientConfig: async () => ({
+        transport: 'webrtc',
+        endpoint: 'realtime',
+        clientSecret: 'ek_test',
+      }),
+      createLiveSttSession: async () => {
+        throw new Error('OpenAI WebSocket failed');
+      },
+    });
+
+    const session = await service.start({ title: 'Live', translate: false });
+    const fallback = await service.fallbackFromRealtime({ sessionId: session.sessionId });
+    assert.equal(fallback.mode, 'chunked');
+    assert.equal(service.snapshot()?.active, true);
+  });
+
+  it('refuses to start on chunked captions when the realtime setup fails and the batch backend cannot run', async () => {
+    const events: LiveSessionEvent[] = [];
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getChunkedCaptionsIssue: () => 'Choose a transcription service.',
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'auto', openaiApiKey: 'sk-openai' }),
+      emitEvent: (event) => events.push(event),
+      createRealtimeClientConfig: async () => {
+        throw new Error('client secret failed');
+      },
+      // auto without a usable OpenAI key and no Gemini key: no stream.
+      createLiveSttSession: async () => null,
+    });
+
+    await assert.rejects(
+      service.start({ title: 'Live', translate: false }),
+      LiveChunkedCaptionsUnavailableError,
+    );
+    assert.equal(service.snapshot()?.active, false);
+    assert.equal(
+      events.some((event) => event.type === 'status' && /chunked fallback/i.test(event.status)),
+      false,
+    );
+  });
+});
+
 describe('GeminiService live snippets', () => {
+  it('builds a transcription-only service without text credentials and refuses text tasks', async () => {
+    assert.throws(
+      () =>
+        new GeminiService({
+          provider: 'gemini',
+          transcriptionProvider: 'openai',
+          openaiApiKey: 'sk-openai',
+          dataPath: workDir,
+          proModel: 'm',
+          flashModel: 'm',
+        }),
+      /Gemini API key is required/,
+    );
+    for (const provider of ['gemini', 'chatgpt'] as const) {
+      const service = new GeminiService({
+        provider,
+        transcriptionProvider: 'openai',
+        openaiApiKey: 'sk-openai',
+        transcriptionOnly: true,
+        dataPath: workDir,
+        proModel: 'm',
+        flashModel: 'm',
+      });
+      await assert.rejects(service.translateText('hello'), /transcription only/);
+    }
+  });
+
+  it('transcribes a live snippet on a transcription-only service with no text call', async () => {
+    const audioPath = path.join(workDir, 'live.webm');
+    fs.writeFileSync(audioPath, Buffer.alloc(2048, 7));
+    const service = new GeminiService({
+      provider: 'chatgpt',
+      transcriptionProvider: 'openai',
+      openaiApiKey: 'sk-openai',
+      transcriptionOnly: true,
+      dataPath: workDir,
+      proModel: 'm',
+      flashModel: 'm',
+    });
+    const internals = service as unknown as {
+      getAudioDuration(): Promise<number>;
+      batchSttBackend: { transcribe(): Promise<string> };
+      judgeTranscriptQuality(): Promise<never>;
+      cleanupTranscriptQuality(): Promise<never>;
+    };
+    internals.getAudioDuration = async () => 12;
+    let sttCalls = 0;
+    internals.batchSttBackend.transcribe = async () => {
+      sttCalls += 1;
+      return '참가자1: 안녕하세요.';
+    };
+    internals.judgeTranscriptQuality = async () => {
+      throw new Error('no judge call on a live snippet');
+    };
+    internals.cleanupTranscriptQuality = async () => {
+      throw new Error('no cleanup call on a live snippet');
+    };
+
+    assert.equal(await service.transcribeLiveSnippet(audioPath), '참가자1: 안녕하세요.');
+    assert.equal(sttCalls, 1);
+  });
+
   it('does not apply knownWords to live snippet prompts and drops the no-speech sentinel', async () => {
     const service = new GeminiService({
       provider: 'gemini',

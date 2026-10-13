@@ -8,22 +8,35 @@
 
 import { getDom } from '../state';
 import { formatUsd } from '../../src/usageFormat';
+import { isActiveJob, jobMatchesPath } from '../../src/transcriptionJobView';
+import type { TranscriptionJobSnapshot } from '../electronAPI';
+import { requireAiSetup } from './config-modal';
 import { showToast } from './notifications';
 import {
   _setCurrentTranscription,
+  getModalSession,
   populateTranscriptionUI,
   prepareTranscriptionModal,
-  requireAiAuth,
+  setModalProgress,
   showSavedTranscript,
   transcribeWithFfmpegRetry,
 } from './transcription-modal';
+import { activeJobForPath, activeMergeJob, onTranscriptionJobChange } from './transcription-jobs';
 
 type Recording = {
   path: string;
   title: string;
   createdAt: string | number;
   size: number;
+  // Path keys main matches transcription jobs on (resolved, symlink-free).
+  aliases?: string[];
 };
+
+// Each row's path plus its aliases, for matching rows to running jobs.
+const rowKeys = new WeakMap<HTMLElement, string[]>();
+function keysForRow(item: HTMLElement): string[] {
+  return rowKeys.get(item) ?? (item.dataset.filepath ? [item.dataset.filepath] : []);
+}
 
 type CostSnapshotShape = { usd: number; modelUnknown?: boolean };
 
@@ -85,11 +98,17 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   const date = new Date(recording.createdAt);
   const sizeStr = formatFileSize(recording.size);
   const metaStr = formatRecordingMeta(date, sizeStr);
+  const keys = [recording.path, ...(recording.aliases ?? [])];
+  rowKeys.set(item, keys);
 
-  // Check if metadata exists for this recording
-  const metadataResult = (await window.electronAPI.getMetadata(
-    recording.path,
-  )) as unknown as GetMetadataResult;
+  // A row whose recording is still transcribing is built without reading its
+  // saved note: the job may hold that note's lock (Regenerate saving), and the
+  // read would wait for it, keeping the whole list (and Cancel) off screen.
+  // The list is rebuilt with the note when the job ends.
+  const runningJob = activeJobForPath(keys);
+  const metadataResult = runningJob
+    ? null
+    : ((await window.electronAPI.getMetadata(recording.path)) as unknown as GetMetadataResult);
   const hasTranscript = !!(
     metadataResult?.success &&
     metadataResult.data &&
@@ -233,6 +252,11 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
       void openDeleteRecordingDialog(recording.path, recording.title);
     });
   }
+
+  // A rebuilt row (list refresh, reload) keeps following a job that is still
+  // running in main for this recording.
+  const job = activeJobForPath(keys);
+  if (job) bindRowToJob(item, job);
 
   return item;
 }
@@ -627,27 +651,54 @@ function commonTitlePrefix(titles: string[]): string {
   return prefix.replace(/[\s_\-]*\d*\s*$/, '').trim();
 }
 
+// How many merge-recordings calls this renderer is awaiting; a merge seen only
+// through job state (after a reload) is reconnected separately. A count, not
+// a flag: a refused second request must not mark the first one as not local.
+let localMerges = 0;
+
 async function performMerge(paths: string[], title: string): Promise<void> {
+  // A merge is already running (possibly in a modal the user closed): say so
+  // without taking over the modal, which still belongs to that merge or to
+  // whatever the user opened since.
+  if (activeMergeJob()) {
+    alert('Failed to merge recordings: Another merge is already running. Wait for it to finish.');
+    return;
+  }
+  // Merging re-transcribes the joined audio, so it needs both credential sets.
+  if (!(await requireAiSetup({ transcription: true }))) return;
   if (
     !prepareTranscriptionModal(
       `Merging - ${title}`,
       'Preparing merge...',
       'Merging audio and re-transcribing...',
+      { kind: 'merge' },
     )
   ) {
     return;
   }
+  const session = getModalSession();
 
   const progressContainer = document.getElementById('transcriptionProgress');
   const transcriptionModal = document.getElementById(
     'transcriptionModal',
   ) as HTMLDialogElement | null;
 
+  localMerges++;
   try {
     const result = (await window.electronAPI.mergeRecordings({
       paths,
       title,
     })) as unknown as MergeRecordingsResult;
+    // The modal moved on to another note: don't overwrite what it shows.
+    if (session !== getModalSession()) {
+      if (result?.success) {
+        showToast('Merge complete');
+        await refreshRecordingsList();
+      } else if (result?.code !== 'merge-busy') {
+        showToast(`Failed to merge recordings: ${result?.error || 'Unknown error'}`, 'error');
+      }
+      return;
+    }
     if (!result || !result.success) {
       const message = result?.error || 'Unknown error';
       if (result && result.code === 'ffmpeg-missing') {
@@ -690,7 +741,59 @@ async function performMerge(paths: string[], title: string): Promise<void> {
       `Error merging recordings: ${err && (err as Error).message ? (err as Error).message : String(err)}`,
     );
     if (progressContainer) progressContainer.style.display = 'none';
+  } finally {
+    localMerges--;
   }
+}
+
+// A merge still running in main after a reload: reopen its progress in the
+// modal, then show the merged note when it finishes (if the modal still shows
+// this merge).
+let reconnectedMerge: { jobId: string; session: number } | null = null;
+
+function followMergeJob(job: TranscriptionJobSnapshot): void {
+  if (isActiveJob(job)) {
+    if (localMerges > 0 || reconnectedMerge?.jobId === job.id) return;
+    const title = job.title || 'Merged Meeting';
+    if (
+      !prepareTranscriptionModal(
+        `Merging - ${title}`,
+        job.message || 'Merging audio and re-transcribing...',
+        'Merging audio and re-transcribing...',
+        { kind: 'merge', jobId: job.id },
+      )
+    ) {
+      return;
+    }
+    setModalProgress(job.percent, job.message);
+    reconnectedMerge = { jobId: job.id, session: getModalSession() };
+    return;
+  }
+  if (reconnectedMerge?.jobId !== job.id) return;
+  const { session } = reconnectedMerge;
+  reconnectedMerge = null;
+  void (async () => {
+    await refreshRecordingsList();
+    if (session !== getModalSession()) return;
+    const modal = document.getElementById('transcriptionModal') as HTMLDialogElement | null;
+    const progressContainer = document.getElementById('transcriptionProgress');
+    if (job.status === 'succeeded' && job.mergedAudioPath) {
+      const meta = (await window.electronAPI.getMetadata(
+        job.mergedAudioPath,
+      )) as unknown as GetMetadataResult;
+      if (session !== getModalSession()) return;
+      if (meta?.success && meta.data) {
+        if (progressContainer) progressContainer.style.display = 'none';
+        showSavedTranscript(job.mergedAudioPath, job.title || 'Merged Meeting', meta.data as never);
+        return;
+      }
+    }
+    if (progressContainer) progressContainer.style.display = 'none';
+    modal?.close();
+    if (job.status === 'failed') {
+      showToast(`Failed to merge recordings: ${job.error || 'Unknown error'}`, 'error');
+    }
+  })();
 }
 
 // Function to format file size
@@ -738,13 +841,27 @@ export async function refreshRecordingsList(): Promise<void> {
 // --- Inline transcription progress ----------------------------------------
 //
 // Per-row progress UI: replaces the item's action buttons and meta line while
-// a transcribe-audio call is in flight, with a Cancel control. No modal opens
-// during transcription; on success the list refreshes so the row gains its
-// "View Transcript" affordance. The user then clicks the row to open the
-// modal viewer.
+// a transcription job runs for the row's recording, with a Cancel control. No
+// modal opens during transcription; on success the list refreshes so the row
+// gains its "View Transcript" affordance. The user then clicks the row to
+// open the modal viewer.
+//
+// The row follows the main-owned job (renderer/ui/transcription-jobs.ts), not
+// the request that started it, so a reload or a list refresh rebuilds the same
+// progress and Cancel for a job that is still running.
 
 type ProgressListener = (progress: { percent: number; message: string }) => void;
-const inlineProgressListeners = new Map<string, ProgressListener>();
+
+interface RowBinding {
+  item: HTMLElement;
+  setProgress: ProgressListener;
+  restore: () => void;
+  cancelBtn: HTMLButtonElement | null;
+}
+const rowBindings = new Map<string, RowBinding[]>();
+// Recordings this renderer is awaiting a transcribe-audio response for. That
+// call reports the outcome (toast, list refresh); other rows only follow.
+const awaitingPaths = new Map<string, number>();
 
 function mountInlineProgressUI(item: HTMLElement): {
   setProgress: ProgressListener;
@@ -815,6 +932,7 @@ function mountInlineProgressUI(item: HTMLElement): {
 
   const restore = (): void => {
     item.removeAttribute('data-transcribing');
+    item.removeAttribute('data-transcribing-job');
     progressLine.remove();
     bar.remove();
     if (actions) {
@@ -839,38 +957,100 @@ function mountInlineProgressUI(item: HTMLElement): {
   };
 }
 
+function bindRowToJob(item: HTMLElement, job: TranscriptionJobSnapshot): void {
+  if (item.dataset.transcribingJob === job.id) return;
+  if (item.dataset.transcribingJob) return;
+  const { setProgress, restore } = mountInlineProgressUI(item);
+  item.dataset.transcribingJob = job.id;
+  const filePath = item.dataset.filepath || job.filePath;
+  const cancelBtn = item.querySelector('.cancel-transcribe-btn') as HTMLButtonElement | null;
+  cancelBtn?.addEventListener('click', () => {
+    if (cancelBtn.disabled) return;
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = 'Cancelling…';
+    void window.electronAPI.cancelTranscription(filePath).then((result) => {
+      // Already saved: the job finishes normally, so say what is happening.
+      if (!result.success && result.reason === 'committed') cancelBtn.textContent = 'Saving…';
+    });
+  });
+  const binding: RowBinding = { item, setProgress, restore, cancelBtn };
+  rowBindings.set(job.id, [...(rowBindings.get(job.id) ?? []), binding]);
+  updateRowBinding(binding, job);
+}
+
+function updateRowBinding(binding: RowBinding, job: TranscriptionJobSnapshot): void {
+  binding.setProgress({ percent: job.percent, message: job.message });
+  const btn = binding.cancelBtn;
+  if (!btn) return;
+  if (job.cancelRequested) {
+    btn.disabled = true;
+    btn.textContent = 'Cancelling…';
+  } else if (!job.cancellable) {
+    // Past the commit boundary (note saved, exports running): nothing to cancel.
+    btn.disabled = true;
+    btn.textContent = job.phase === 'exporting' ? 'Sending…' : 'Saving…';
+    btn.setAttribute('aria-label', 'Transcription saved, finishing');
+  }
+}
+
+function followTranscriptionJob(
+  job: TranscriptionJobSnapshot,
+  previous: TranscriptionJobSnapshot | undefined,
+): void {
+  if (isActiveJob(job)) {
+    // A row whose path the job no longer answers to (a released rename name)
+    // goes back to its own state instead of showing this job's progress.
+    const bound = rowBindings.get(job.id) ?? [];
+    const kept = bound.filter((binding) => jobMatchesPath(job, keysForRow(binding.item)));
+    for (const binding of bound) if (!kept.includes(binding)) binding.restore();
+    rowBindings.set(job.id, kept);
+    document.querySelectorAll<HTMLElement>('.recording-item[data-filepath]').forEach((row) => {
+      if (jobMatchesPath(job, keysForRow(row))) bindRowToJob(row, job);
+    });
+    for (const binding of rowBindings.get(job.id) ?? []) updateRowBinding(binding, job);
+    return;
+  }
+  const bindings = rowBindings.get(job.id) ?? [];
+  rowBindings.delete(job.id);
+  for (const binding of bindings) binding.restore();
+  // Seen only as already finished (snapshot after reload): nothing to report.
+  if (!previous || !isActiveJob(previous)) return;
+  // Always reconcile the list with disk: a rebuilt row can name audio that a
+  // cancelled job just renamed back, and rows built while the job ran were
+  // built without their saved note. A request awaited here still reports the
+  // outcome itself, so only the toast depends on that.
+  void refreshRecordingsList();
+  if (job.paths.some((p) => awaitingPaths.has(p))) return;
+  // Auto mode reports its own outcome in the status line.
+  if (job.status === 'failed' && job.origin !== 'auto') {
+    showToast(`Failed to transcribe: ${job.error || 'Unknown error'}`, 'error');
+  }
+}
+
 async function runInlineTranscription(item: HTMLElement, filePath: string): Promise<void> {
-  // Synchronous double-fire guard. The `data-transcribing` attribute is set
-  // inside `mountInlineProgressUI` *after* awaits, so a rapid double-click on
-  // Transcribe/Regenerate would have both invocations pass that check and then
-  // mount twice. Slam the marker on now, before any await; the renderer's
-  // event loop guarantees a second click in the same tick is the only race
-  // window, and DOM dataset writes are synchronous.
+  // Synchronous double-fire guard. Slam the marker on now, before any await;
+  // the renderer's event loop guarantees a second click in the same tick is
+  // the only race window, and DOM dataset writes are synchronous.
   if (item.dataset.transcribing) return;
+  // Already running in main (started before a reload, or from another entry
+  // point): follow that job instead of asking again.
+  const running = activeJobForPath(keysForRow(item));
+  if (running) {
+    bindRowToJob(item, running);
+    return;
+  }
   item.dataset.transcribing = 'pending';
 
-  if (!(await requireAiAuth())) {
+  if (!(await requireAiSetup({ transcription: true }))) {
     item.removeAttribute('data-transcribing');
     return;
   }
 
-  const { setProgress, restore } = mountInlineProgressUI(item);
-  inlineProgressListeners.set(filePath, setProgress);
-
-  const cancelBtn = item.querySelector('.cancel-transcribe-btn') as HTMLButtonElement | null;
-  let cancelled = false;
-  cancelBtn?.addEventListener('click', () => {
-    if (cancelled) return;
-    cancelled = true;
-    cancelBtn.disabled = true;
-    cancelBtn.textContent = 'Cancelling…';
-    void window.electronAPI.cancelTranscription(filePath);
-  });
-
+  awaitingPaths.set(filePath, (awaitingPaths.get(filePath) ?? 0) + 1);
   try {
-    // `transcribeWithFfmpegRetry` issues the IPC immediately on the first
-    // line, so by the time the user could click Cancel the abort controller
-    // is already registered in main.
+    // Main registers the job before its first await, so the job event that
+    // mounts this row's progress and Cancel arrives right after the request.
+    // A request for a recording that is already transcribing joins that job.
     const result = await transcribeWithFfmpegRetry(filePath);
     if (result.cancelled) {
       // Row goes back to its pre-transcribe state; no toast — user chose this.
@@ -891,10 +1071,11 @@ async function runInlineTranscription(item: HTMLElement, filePath: string): Prom
     const message = error instanceof Error ? error.message : String(error);
     showToast(`Error transcribing: ${message}`, 'error');
   } finally {
-    inlineProgressListeners.delete(filePath);
-    // If we refreshed the list on success the original `item` is detached;
-    // calling restore on a detached node is a no-op but harmless.
-    restore();
+    const count = (awaitingPaths.get(filePath) ?? 1) - 1;
+    if (count > 0) awaitingPaths.set(filePath, count);
+    else awaitingPaths.delete(filePath);
+    // No job ever bound this row (e.g. the request failed before starting).
+    if (item.dataset.transcribing === 'pending') item.removeAttribute('data-transcribing');
   }
 }
 
@@ -924,12 +1105,13 @@ export function setupRecordingsList(): void {
     });
   }
 
-  // Single subscription, dispatched per-filePath to the right row. Events
-  // without a filePath (legacy callers like merge) or without a registered
-  // listener are dropped silently.
-  window.electronAPI.onTranscriptionProgress((progress) => {
-    if (!progress.filePath) return;
-    const listener = inlineProgressListeners.get(progress.filePath);
-    listener?.(progress);
+  // Rows and the merge modal follow main-owned job state; progress arrives as
+  // job changes, so a reload or list refresh picks up where the job is.
+  onTranscriptionJobChange(({ job, previous }) => {
+    if (job.kind === 'merge') followMergeJob(job);
+    else followTranscriptionJob(job, previous);
   });
+  // Covers a merge job already in the store before this listener existed.
+  const merge = activeMergeJob();
+  if (merge) followMergeJob(merge);
 }

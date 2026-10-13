@@ -8,7 +8,7 @@
 // The table encodes today's behaviour exactly, including the places where the
 // surfaces deliberately disagree (see `cli`, `envSurfaced` and `secret`).
 //
-// Non-scalar and derived keys (`codexOAuth`, `googleOAuth`, the `*Configured`
+// Non-scalar and derived keys (`googleOAuth`, the obsolete `codexOAuth`, the `*Configured`
 // / `*Source` read-only fields, `defaultSummaryPrompt`, and the two migration
 // markers) are NOT rows here; `configService.ts` declares them by hand.
 //
@@ -17,14 +17,13 @@
 
 import {
   AI_PROVIDERS,
-  DEFAULT_CODEX_MODEL,
-  DEFAULT_CODEX_TRANSCRIPTION_MODEL,
   DEFAULT_GEMINI_FLASH_MODEL,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_GEMINI_THINKING_LEVEL,
   DEFAULT_LIVE_STT_PROVIDER,
   DEFAULT_OPENAI_LIVE_TRANSCRIPTION_MODEL,
   DEFAULT_OPENAI_LIVE_TRANSLATION_MODEL,
+  DEFAULT_OPENAI_TRANSCRIPTION_MODEL,
   DEFAULT_TRANSCRIPTION_PROVIDER,
   GEMINI_THINKING_LEVELS,
   LIVE_STT_PROVIDERS,
@@ -105,16 +104,17 @@ export const CONFIG_KEYS = [
     values: AI_PROVIDERS,
     // No `default`: the resolved value depends on the LISTENER_AI_PROVIDER env
     // override (which WINS over the stored value, the inverse of the generic
-    // env fallback) and on whether Codex OAuth is present. See getAiProvider().
+    // env fallback) and on legacy Codex migration. See getAiProvider().
     customRead: true,
-    cliEnumMessage: 'aiProvider must be "gemini" or "codex"',
+    cliEnumMessage: 'aiProvider must be "gemini" or "chatgpt"',
     cli: true,
     agent: 'read',
     payload: true,
   },
   {
-    // Batch (file) speech-to-text backend. `auto` follows `aiProvider`;
-    // summary, judge and agent calls stay on `aiProvider` whatever this says.
+    // Batch (file) speech-to-text backend. `auto` follows `aiProvider` for
+    // Gemini and refuses for ChatGPT (no audio on that route); summary, judge
+    // and agent calls stay on `aiProvider` whatever this says.
     key: 'transcriptionProvider',
     kind: 'enum',
     values: TRANSCRIPTION_PROVIDERS,
@@ -160,17 +160,29 @@ export const CONFIG_KEYS = [
     payload: true,
   },
   {
-    key: 'codexModel',
+    // ChatGPT plan model slug from the signed-in account's `GET /v1/models`.
+    // No default: unset uses the first listed model; a set slug the account
+    // does not list fails instead of being substituted.
+    key: 'chatgptModel',
     kind: 'string',
-    default: DEFAULT_CODEX_MODEL,
     cli: true,
     agent: 'read',
     payload: true,
   },
   {
-    key: 'codexTranscriptionModel',
+    // Set once the user dismisses the one-time "You're using your ChatGPT
+    // plan" notice (SIWC UX guidelines). Settings-UI state only.
+    key: 'chatgptPlanNoticeAcknowledged',
+    kind: 'bool',
+    default: false,
+    payload: true,
+  },
+  {
+    // Standard OpenAI API transcription model (`transcriptionProvider=openai`,
+    // billed to `openaiApiKey`).
+    key: 'openaiTranscriptionModel',
     kind: 'string',
-    default: DEFAULT_CODEX_TRANSCRIPTION_MODEL,
+    default: DEFAULT_OPENAI_TRANSCRIPTION_MODEL,
     cli: true,
     agent: 'read',
     payload: true,
