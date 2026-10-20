@@ -1,0 +1,32 @@
+{
+  "sourceCommit": "7bc1b08c8c83749f1601c366bae69d1340eae444",
+  "durationSeconds": 29.033333,
+  "width": 1440,
+  "height": 1080,
+  "codec": "h264",
+  "fps": 30,
+  "fullDecode": "passed",
+  "visualInspection": [
+    "report poster",
+    "transcript frame at 17 seconds",
+    "Ask answer frame at 26 seconds"
+  ],
+  "credentialValueScan": "passed",
+  "artifacts": [
+    {
+      "path": "docs/assets/demos/listener-demo.mp4",
+      "bytes": 1558819,
+      "sha256": "08bf5c6def26008f1a104cb3aabb7fc6eed18d9ddba339c5c61e4db2bcfcca6a"
+    },
+    {
+      "path": "docs/assets/demos/listener-demo.jpg",
+      "bytes": 146768,
+      "sha256": "07dc5f383128b9e66177ef6b08cd4da2da13c98c53a6beccf4ea7fa03113900d"
+    },
+    {
+      "path": "docs/assets/demos/listener-demo.ko.vtt",
+      "bytes": 907,
+      "sha256": "12b848a37044cbdd600a87c599ab6db63120b147727ad7f4dba54f0e0ad1dd5c"
+    }
+  ]
+}

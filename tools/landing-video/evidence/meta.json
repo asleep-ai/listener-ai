@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "title": "Remote Control Design Project Kickoff & Icebreaker",
+  "transcribedAt": "2026-10-20T11:20:29.269Z",
+  "generationId": "c231a960-41b3-4ddb-aa99-d5355604d4e5",
+  "suggestedTitle": "Remote Control Design Project Kickoff & Icebreaker",
+  "emoji": "🎛️",
+  "audioFile": "/tmp/listener-landing-demo-6c6014/recordings/Product-design-meeting_2026-10-20_11-20-10-963Z.wav",
+  "cost": {
+    "usd": 0.014926833333333335,
+    "breakdown": [
+      {
+        "modelId": "stt-async-v5",
+        "kind": "transcription",
+        "usd": 0.0033333333333333335,
+        "usage": {
+          "audioSeconds": 120
+        }
+      },
+      {
+        "modelId": "gemini-3.5-flash",
+        "kind": "summary",
+        "usd": 0.011593500000000001,
+        "usage": {
+          "input": 1285,
+          "output": 1074,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        }
+      }
+    ]
+  },
+  "summarySections": [
+    {
+      "heading": "Project Overview & Design Process",
+      "bullets": [
+        "Discussion: Participant 1 explained that the design project involves three distinct stages.",
+        "Discussion: The project structure alternates between individual work and group meetings repeated three times.",
+        "Discussion: Participant 2 confirmed receiving the initial project announcement regarding designing a remote control."
+      ]
+    },
+    {
+      "heading": "Whiteboard Icebreaker Activity",
+      "bullets": [
+        "Discussion: Participant 1 initiated an icebreaker activity on the whiteboard, asking team members to draw their favorite animal and describe its key characteristics.",
+        "Discussion: Participant 3 volunteered to go first and selected a beagle as their favorite animal.",
+        "Discussion: Participant 3 listed top desired animal characteristics, including willingness to accept physical affection, strong personality, fitness, and robust health."
+      ]
+    }
+  ]
+}

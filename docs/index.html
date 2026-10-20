@@ -1,0 +1,301 @@
+---
+layout: null
+title: Listener.AI — 대화가 끝나면, 다음 할 일이 보이도록
+---
+
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="회의를 녹음하고, 대화록과 요약, 담당자별 할 일을 정리하세요. 내 컴퓨터에 보관하는 AI 회의 노트, Listener.AI."
+    />
+    <meta name="theme-color" content="#f1effb" />
+    <meta property="og:title" content="Listener.AI — 대화가 끝나면, 다음 할 일이 보이도록" />
+    <meta
+      property="og:description"
+      content="녹음부터 대화록, 회의 요약, 다시 찾기까지. 내 컴퓨터에 보관하는 AI 회의 노트."
+    />
+    <meta property="og:type" content="website" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%236550ad'/%3E%3Cpath d='M20 15v34h27v-8H28V15z' fill='white'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="{{ '/assets/landing.css' | relative_url }}" />
+    <title>Listener.AI — 대화가 끝나면, 다음 할 일이 보이도록</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">본문으로 건너뛰기</a>
+    <header class="site-header shell">
+      <a class="brand" href="{{ '/' | relative_url }}" aria-label="Listener.AI 홈"
+        ><span class="brand-mark" aria-hidden="true">L</span>Listener<span class="brand-ai"
+          >.AI</span
+        ></a
+      >
+      <nav aria-label="주요 메뉴">
+        <a href="#workflow">기능</a><a href="#demo">데모</a><a href="#questions">자주 묻는 질문</a>
+      </nav>
+      <a class="button button-small" href="#download">다운로드</a>
+    </header>
+    <main id="main" tabindex="-1">
+      <section class="hero shell" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="intro">내 컴퓨터에 남는 AI 회의 노트</p>
+          <h1 id="hero-title">대화가 끝나면,<br />다음 할 일이<br />보이도록.</h1>
+          <p class="hero-description">
+            회의에서는 대화에 집중하세요.<br />Listener.AI가 녹음한 대화를 읽을 수 있는 기록과<br
+              class="desktop-break"
+            />
+            실행할 수 있는 할 일로 정리합니다.
+          </p>
+          <div class="hero-actions">
+            <a class="button" href="#download">Listener.AI 다운로드</a
+            ><a class="text-link" href="#demo"
+              >실제 앱 데모 보기 <span aria-hidden="true">↗</span></a
+            >
+          </div>
+          <p class="small muted">macOS · Windows / 오픈 소스 / 내 AI 계정 연결</p>
+        </div>
+        <div
+          class="conversation"
+          role="group"
+          aria-label="대화가 회의 노트로 정리되는 과정의 설명용 예시"
+        >
+          <div class="conversation-top">
+            <span class="example-label">이렇게 정리해요</span
+            ><span class="example-label">설명용 예시</span>
+          </div>
+          <div class="transcript-example">
+            <p><span>참가자 1</span>온보딩은 금요일까지 수정하면 어떨까요?</p>
+            <p><span>참가자 2</span>좋아요. 제가 첫 화면 문구를 정리할게요.</p>
+            <p><span>참가자 1</span>그럼 다음 회의에서 같이 확인하죠.</p>
+          </div>
+          <div class="note-connector" aria-hidden="true">
+            <span></span>대화에서 결정으로<span></span>
+          </div>
+          <div class="note-example">
+            <div class="note-title">
+              <span class="note-symbol" aria-hidden="true">↳</span>
+              <h2>온보딩 개선 회의</h2>
+            </div>
+            <p class="note-heading">결정한 내용</p>
+            <p>첫 화면 문구를 수정하고 다음 회의에서 검토합니다.</p>
+            <p class="note-heading">다음 할 일</p>
+            <div class="task-example">
+              <span class="task-check" aria-hidden="true"></span><span>첫 화면 문구 정리</span
+              ><span class="task-owner">참가자 2</span>
+            </div>
+            <p class="example-footnote">
+              예시 대화와 요약입니다. 실제 앱 화면은 아래 데모에서 확인하세요.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="demo-section shell" id="demo" aria-labelledby="demo-title">
+        <div class="section-heading">
+          <div>
+            <p class="intro">직접 보고 시작하세요</p>
+            <h2 id="demo-title">오디오 하나가<br />회의 노트가 되기까지.</h2>
+          </div>
+          <p>
+            샘플 음원을 실제 앱에서 처리한 데모입니다.<br />대화록과 요약을 확인하는 흐름을
+            살펴보세요.
+          </p>
+        </div>
+        <figure class="demo-frame">
+          <video
+            controls
+            playsinline
+            preload="none"
+            poster="{{ '/assets/demos/listener-demo.jpg' | relative_url }}"
+            aria-label="Listener.AI 실제 앱 데모"
+            aria-describedby="demo-caption"
+          >
+            <source src="{{ '/assets/demos/listener-demo.mp4' | relative_url }}" type="video/mp4" />
+            <track
+              kind="captions"
+              src="{{ '/assets/demos/listener-demo.ko.vtt' | relative_url }}"
+              srclang="ko"
+              label="한국어"
+              default
+            />
+            브라우저가 동영상 재생을 지원하지 않습니다.
+            <a href="{{ '/assets/demos/listener-demo.mp4' | relative_url }}">데모 영상 다운로드</a>
+          </video>
+          <figcaption id="demo-caption">
+            <span>실제 앱 · 샘플 음원 사용</span
+            ><a href="#demo-description">영상의 텍스트 설명 읽기</a>
+          </figcaption>
+        </figure>
+        <details class="demo-description" id="demo-description">
+          <summary>영상의 텍스트 설명</summary>
+          <p>
+            Listener.AI에 샘플 대화 음원을 불러와 AI 처리를 실행합니다. 처리가 끝나면 저장된 회의를
+            열어 회의 요약과 발화자별 대화록을 확인하고, 이 회의에서 무엇을 설계하는지 질문합니다.
+            실제 답변은 리모컨을 설계하는 팀이며 구체적인 요구사항은 아직 논의하지 않았다는
+            내용입니다. 영상은 소리 없이 재생되며 처리 대기 시간을 줄이고 실제 화면 일부를 정지
+            화면으로 보여줍니다.
+          </p>
+        </details>
+        <p class="demo-credit">
+          샘플: <a href="https://groups.inf.ed.ac.uk/ami/download/">AMI Meeting Corpus</a>, AMI
+          Consortium, ES2002a 02:00–04:00 구간.
+          <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>. 원본 음원을
+          전사·요약한 결과를 실제 앱에서 촬영하고 편집했습니다.
+        </p>
+      </section>
+
+      <section class="workflow-section shell" id="workflow" aria-labelledby="workflow-title">
+        <div class="section-heading">
+          <h2 id="workflow-title">기록하고, 정리하고,<br />필요할 때 다시 꺼내세요.</h2>
+          <p>회의가 끝난 뒤 흩어진 메모를 맞추는 대신,<br />하나의 기록에서 이어가세요.</p>
+        </div>
+        <div class="workflow-list">
+          <article>
+            <span class="step-number" aria-hidden="true">1</span>
+            <div>
+              <h3>녹음하거나 오디오를 불러오세요</h3>
+              <p>
+                회의를 녹음하고, 이미 있는 음성 파일도 처리하세요. macOS에서는 시스템 오디오를 함께
+                녹음해 온라인 회의의 상대방 목소리도 담을 수 있습니다.
+              </p>
+            </div>
+            <span class="feature-tag">회의의 시작</span>
+          </article>
+          <article>
+            <span class="step-number" aria-hidden="true">2</span>
+            <div>
+              <h3>대화록에서 다음 할 일까지</h3>
+              <p>
+                발화자를 구분한 대화록, 안건별 요약, 핵심 내용과 담당자별 할 일을 확인하세요.
+                회의에서 사용한 언어로 정리합니다.
+              </p>
+            </div>
+            <span class="feature-tag">회의가 끝난 뒤</span>
+          </article>
+          <article>
+            <span class="step-number" aria-hidden="true">3</span>
+            <div>
+              <h3>기억이 흐려지면, 기록에 물어보세요</h3>
+              <p>
+                저장된 회의를 검색하거나 AI 채팅으로 질문하세요. 지난 회의의 결정과 맥락을 다시 찾아
+                다음 대화를 준비할 수 있습니다.
+              </p>
+            </div>
+            <span class="feature-tag">다음 회의 전에</span>
+          </article>
+        </div>
+      </section>
+
+      <section class="ownership-section" aria-labelledby="ownership-title">
+        <div class="shell ownership-grid">
+          <div>
+            <p class="intro">기록의 중심은 나에게</p>
+            <h2 id="ownership-title">내 컴퓨터에 보관하고,<br />내가 고른 AI로.</h2>
+            <p>
+              녹음과 회의 기록은 로컬에 저장합니다.<br />AI 처리는 연결한 제공자에게 요청하므로,<br />사용할
+              서비스와 공유할 내용을 직접 선택하세요.
+            </p>
+            <a class="text-link" href="{{ '/privacy/' | relative_url }}"
+              >개인정보 처리방침 읽기 <span aria-hidden="true">↗</span></a
+            >
+          </div>
+          <div class="ownership-notes">
+            <article>
+              <h3>가지고 있는 AI 계정 연결</h3>
+              <p>
+                Gemini, OpenAI, Soniox 등 지원하는 서비스의 API 키를 연결하세요. ChatGPT 로그인은
+                요약과 AI 채팅 같은 텍스트 작업에 사용할 수 있습니다.
+              </p>
+              <p class="billing-note">
+                음성 전사와 실시간 자막에는 별도 제공자 설정이 필요하며, API 사용 요금은 해당
+                제공자에서 발생할 수 있습니다. ChatGPT 로그인에 음성 처리가 포함되지는 않습니다.
+              </p>
+            </article>
+            <article>
+              <h3>팀이 쓰는 도구로 이어서</h3>
+              <p>
+                설정한 Notion과 Slack으로 회의 노트를 보내세요. Google Drive를 연결하면 회의 폴더를
+                동기화할 수 있습니다. 연동은 선택 사항입니다.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="questions-section shell" id="questions" aria-labelledby="questions-title">
+        <h2 id="questions-title">시작하기 전에.</h2>
+        <div class="questions-list">
+          <details>
+            <summary>앱을 사용하려면 무엇이 필요한가요?</summary>
+            <p>
+              macOS 또는 Windows 컴퓨터와 AI 제공자 연결이 필요합니다. 앱 설치 후 설정에서 요약에
+              사용할 AI와 음성 전사 제공자를 선택하세요. 서비스에 따라 API 키 또는 ChatGPT 로그인이
+              필요합니다.
+            </p>
+          </details>
+          <details>
+            <summary>오프라인에서도 AI 처리가 되나요?</summary>
+            <p>
+              녹음과 기록 보관은 내 컴퓨터에서 이루어집니다. AI 전사, 요약, 채팅에는 인터넷 연결이
+              필요하며 오디오나 텍스트가 선택한 제공자에게 전송됩니다. 로컬 저장이 로컬 AI 처리를
+              의미하지는 않습니다.
+            </p>
+          </details>
+          <details>
+            <summary>별도 구독이 필요한가요?</summary>
+            <p>
+              Listener.AI는 오픈 소스로 제공됩니다. 연결한 AI 서비스의 API 이용료와 계정 조건은 각
+              제공자의 정책을 따릅니다. ChatGPT 로그인을 사용해도 음성 전사 제공자의 API 비용은
+              별도로 발생할 수 있습니다.
+            </p>
+          </details>
+          <details>
+            <summary>내 기록을 다른 곳으로 보낼 수 있나요?</summary>
+            <p>
+              회의 노트는 로컬에 보관하며 내보내기와 검색을 지원합니다. Notion, Slack, Google
+              Drive를 연결한 경우 해당 서비스로 기록을 전송할 수 있습니다. 회의 참여자의 동의를
+              확인하고 필요한 내용만 공유하세요.
+            </p>
+          </details>
+        </div>
+      </section>
+
+      <section class="download-section shell" id="download" aria-labelledby="download-title">
+        <div>
+          <p class="intro">다음 회의부터 가볍게</p>
+          <h2 id="download-title">좋은 대화는 남기고,<br />정리는 맡기세요.</h2>
+          <p>운영체제에 맞는 최신 설치 파일을<br />GitHub Releases에서 선택하세요.</p>
+        </div>
+        <div class="download-options">
+          <a class="download-option" href="https://github.com/asleep-ai/listener-ai/releases/latest"
+            ><span><strong>macOS</strong><span>Apple Silicon · Intel</span></span
+            ><span aria-hidden="true">↗</span></a
+          ><a
+            class="download-option"
+            href="https://github.com/asleep-ai/listener-ai/releases/latest"
+            ><span><strong>Windows</strong><span>x64 설치 프로그램</span></span
+            ><span aria-hidden="true">↗</span></a
+          >
+          <p>
+            두 링크 모두 최신 릴리스 페이지를 엽니다.<br />개발자라면
+            <a href="https://github.com/asleep-ai/listener-ai">소스 코드와 CLI 안내</a>를
+            확인하세요.
+          </p>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer shell">
+      <a class="brand" href="{{ '/' | relative_url }}">Listener<span class="brand-ai">.AI</span></a>
+      <p>대화에 집중할 수 있도록.</p>
+      <nav aria-label="법적 정보 및 소스">
+        <a href="{{ '/privacy/' | relative_url }}">개인정보 처리방침</a
+        ><a href="{{ '/terms/' | relative_url }}">이용약관</a
+        ><a href="https://github.com/asleep-ai/listener-ai">GitHub</a>
+      </nav>
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,45 @@
+Listener.AI
+⚙️
+
+Record and transcribe your meetings with AI
+
+Ready to record
+Mic:
+System default (at start)
+MacBook Pro 마이크 (Built-in)
+Start Recording
+Auto Upload
+Automatically transcribe and upload to Notion after recording
+Meeting Detection
+Auto-detect Zoom, Meet, Teams, Webex calls and start recording
+Display Detection
+Prompt to start recording when an external display is connected
+Record System Audio
+Capture Zoom/Meet participants and other app audio alongside your mic (macOS only)
+Permission will be requested when you enable this
+📁
+
+Drag and drop or paste audio files here
+
+Supports MP3 and M4A formats • Use Cmd+V (or Ctrl+V)
+
+Recent Recordings
+📁
+Product-design-meeting_2026-10-20
+
+Today, 오후 8:18 · 3.66 MB · $0.01
+
+⋯
+›
+💬 Ask Listener
+▾
+Transcription - Product-design-meeting_2026-10-20
+×
+All
+Summary
+Key Points
+Transcript
+💬 Ask
+What is the team designing, and what requirements were discussed?
+팀은 리모컨을 디자인하고 있습니다. 리모컨 자체에 대한 구체적인 요구사항은 논의되지 않았습니다.
+Send

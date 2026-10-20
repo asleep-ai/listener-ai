@@ -196,7 +196,7 @@ jobs:
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
-          PREV=$(git describe --tags --abbrev=0 --exclude "v$VERSION" HEAD 2>/dev/null || echo "")
+          PREV=$(git describe --tags --abbrev=0 --match 'v*' --exclude "v$VERSION" HEAD 2>/dev/null || echo "")
           echo "tag=$PREV" >> "$GITHUB_OUTPUT"
           echo "Previous tag: ${PREV:-<none>}"
 
