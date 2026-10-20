@@ -362,6 +362,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       currentSlackSentAt = null;
       refreshSlackButtonLabel();
       refreshNotionButtonLabel();
+      resetModalChatFor(result.folderName ?? null);
 
       populateTranscriptionUI(result.data);
 
@@ -619,6 +620,9 @@ export function _setCurrentTranscription(data: {
   filePath: string | null | undefined;
   transcriptionPath?: string | null;
   generationId?: string | null;
+  // Saved note folder for Ask; required so a caller cannot silently leave
+  // the chat unscoped (pass null/undefined for an unsaved result).
+  folderName: string | null | undefined;
 }): void {
   currentTranscriptionData = data.transcriptionData;
   currentMeetingTitle = data.title;
@@ -630,6 +634,7 @@ export function _setCurrentTranscription(data: {
   currentSlackSentAt = null;
   refreshSlackButtonLabel();
   refreshNotionButtonLabel();
+  resetModalChatFor(data.folderName ?? null);
 }
 
 // Set (offset) or remove (null) the saved note's transcript cutoff, then show

@@ -347,6 +347,7 @@ async function runMerge(
       data: result,
       mergedAudioPath,
       transcriptionPath,
+      folderName: path.basename(transcriptionPath),
       generationId,
       mergedFrom: sourceFolders,
     };
