@@ -25,6 +25,7 @@ export default defineConfig({
     },
     { name: 'cutoff', testMatch: 'transcript-cutoff.spec.ts' },
     { name: 'reload', testMatch: 'transcription-reload.spec.ts' },
+    { name: 'live', testMatch: 'live-session.spec.ts' },
     {
       name: 'chatgpt',
       testMatch: 'chatgpt-integration.spec.ts',

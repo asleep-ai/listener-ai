@@ -51,11 +51,20 @@ export interface LiveSessionStartResult {
   realtimeClient?: LiveRealtimeClientConfig;
 }
 
+/**
+ * Why a live session ended. `renderer-lost` means main closed the provider
+ * because the window that captures the session's audio reloaded or crashed.
+ */
+export type LiveSessionEndReason = 'user' | 'renderer-lost';
+
 export interface LiveSessionSnapshot {
   sessionId: string;
   title: string;
   startedAt: string;
+  /** False from the moment a stop begins, while finals may still flush. */
   active: boolean;
+  /** Set once the session has stopped or begun stopping. Absent = never stopped. */
+  endedReason?: LiveSessionEndReason;
   translate: boolean;
   mode: 'streaming' | 'chunked';
   provider: StreamingLiveSttProvider | 'chunked';
@@ -83,6 +92,15 @@ export interface LiveRealtimeClientConfig {
   transport: 'webrtc';
   endpoint: 'realtime' | 'translation';
   clientSecret: string;
+}
+
+// The session was stopped or replaced while it was still starting (for
+// example, its window reloaded while the provider was connecting).
+export class LiveSessionEndedError extends Error {
+  constructor(message = 'Live session ended before it finished starting.') {
+    super(message);
+    this.name = 'LiveSessionEndedError';
+  }
 }
 
 // The chunked fallback cannot run as configured. Raised instead of reporting
@@ -115,6 +133,11 @@ export interface LiveSessionServiceOptions {
   formatAiCredentialsError(): string;
   getLiveSttConfig(): LiveSttProviderConfig;
   emitEvent?(event: LiveSessionEvent): void;
+  /**
+   * Called when whether a live session is running changes. Main uses it to keep
+   * a hidden or minimized window's capture from being throttled.
+   */
+  onActiveChange?(active: boolean): void;
   createLiveSttSession?(
     config: LiveSttProviderConfig,
     callbacks: Parameters<typeof createLiveSttSession>[1],
@@ -146,6 +169,8 @@ type LiveSessionState = {
   /** The stream itself returns the translation, so no Gemini call per final. */
   nativeTranslation: boolean;
   lastFinal?: { normalized: string; atMs: number };
+  endedReason?: LiveSessionEndReason;
+  stopping?: Promise<LiveSessionSnapshot | null>;
 };
 
 // Exact-duplicate suppression for live finals (issue #182): a provider stuck
@@ -247,6 +272,8 @@ function resolveLiveTranslationTarget(language: string | undefined): string {
 export class LiveSessionService {
   private readonly opts: LiveSessionServiceOptions;
   private session: LiveSessionState | null = null;
+  private notifiedActive = false;
+  private rendererGeneration = 0;
 
   constructor(opts: LiveSessionServiceOptions) {
     this.opts = opts;
@@ -255,10 +282,14 @@ export class LiveSessionService {
   async start(
     input: { title?: string; translate?: boolean } = {},
   ): Promise<LiveSessionStartResult> {
-    const previous = this.session;
-    previous?.abortController.abort();
-    await previous?.stream?.close().catch(() => {});
-    if (previous) this.recordLiveUsage(previous);
+    const rendererGeneration = this.rendererGeneration;
+    // Replace a running session through the same settlement as stop(), so a
+    // replacement racing a renderer-lost teardown never closes a stream twice.
+    // Loop: another start may have installed a session while this one waited.
+    for (let current = this.session; current?.active; current = this.session) {
+      await this.stop(current.id, 'user');
+    }
+    if (rendererGeneration !== this.rendererGeneration) throw new LiveSessionEndedError();
     const startedAt = new Date(this.opts.now?.() ?? Date.now()).toISOString();
     const session: LiveSessionState = {
       id: `live_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
@@ -280,6 +311,29 @@ export class LiveSessionService {
       nativeTranslation: false,
     };
     this.session = session;
+    try {
+      return await this.startSession(session);
+    } catch (error) {
+      // A failed start leaves no running session; don't report it as active.
+      // A stop that ended it mid-start owns the teardown.
+      if (session.stopping) {
+        await session.stopping;
+        // Whatever failed, the session had already been ended mid-start.
+        throw new LiveSessionEndedError();
+      } else if (this.session === session) {
+        session.active = false;
+        session.abortController.abort();
+        await session.stream?.close().catch(() => {});
+        session.stream = null;
+        this.recordLiveUsage(session);
+      }
+      throw error;
+    } finally {
+      this.notifyActiveChange();
+    }
+  }
+
+  private async startSession(session: LiveSessionState): Promise<LiveSessionStartResult> {
     let config = { ...this.opts.getLiveSttConfig(), translate: session.translate };
     // The realtime client-secret path is OpenAI's; `soniox` and `chunked` never
     // route through it.
@@ -290,7 +344,9 @@ export class LiveSessionService {
     ) {
       try {
         session.realtimeClient = await this.opts.createRealtimeClientConfig(config);
+        this.assertStillStarting(session);
       } catch (error) {
+        if (error instanceof LiveSessionEndedError) throw error;
         if (config.provider === 'openai') throw error;
         if (config.provider === 'auto') {
           // Realtime client-secret/WebRTC is the supported OpenAI live path.
@@ -305,6 +361,7 @@ export class LiveSessionService {
       try {
         await this.startStreamingProvider(session, config);
       } catch (error) {
+        if (error instanceof LiveSessionEndedError) throw error;
         const recovered = await this.tryProviderFallbackAfterStartFailure(session, config, error);
         if (!recovered) throw error;
       }
@@ -312,6 +369,8 @@ export class LiveSessionService {
       this.setRealtimeProvider(session, config);
     }
     if (session.mode === 'chunked') this.assertChunkedCaptionsAvailable(session);
+    // A stop during a failed provider attempt must not announce captions.
+    this.assertStillStarting(session);
     this.emit({
       type: 'status',
       sessionId: session.id,
@@ -332,8 +391,7 @@ export class LiveSessionService {
     const session = this.session;
     if (!session || session.id !== input.sessionId)
       throw new Error('Live session is no longer active.');
-    if (!session.active || session.abortController.signal.aborted)
-      throw new Error('Live session is no longer active.');
+    this.assertStillStarting(session);
     if (!session.realtimeClient) return this.startResult(session);
 
     session.realtimeClient = null;
@@ -357,10 +415,13 @@ export class LiveSessionService {
           return this.startResult(session);
         }
       } catch (error) {
+        if (error instanceof LiveSessionEndedError) throw error;
+        this.assertStillStarting(session);
         this.handleStreamError(session, error);
       }
     }
 
+    this.assertStillStarting(session);
     session.mode = 'chunked';
     session.provider = 'chunked';
     session.usageModelId = null;
@@ -375,9 +436,57 @@ export class LiveSessionService {
     return this.startResult(session);
   }
 
-  async stop(sessionId: string): Promise<LiveSessionSnapshot | null> {
+  async stop(
+    sessionId: string,
+    reason: LiveSessionEndReason = 'user',
+  ): Promise<LiveSessionSnapshot | null> {
     const session = this.session;
     if (!session || session.id !== sessionId) return null;
+    // A stop already in flight (the renderer's own stop racing a renderer-lost
+    // teardown) owns the close. Renderer loss promotes a draining user stop
+    // so its retained finals can be recovered after reload.
+    if (session.stopping) {
+      if (reason === 'renderer-lost') session.endedReason = reason;
+      return session.stopping;
+    }
+    if (!session.active) return this.snapshot();
+    session.endedReason = reason;
+    session.stopping = this.finishStop(session);
+    return session.stopping;
+  }
+
+  /**
+   * Ends whatever session is running, for a caller that has no session id --
+   * main, when the renderer feeding the session's audio is gone.
+   */
+  async stopActive(reason: LiveSessionEndReason): Promise<LiveSessionSnapshot | null> {
+    if (reason === 'renderer-lost') this.rendererGeneration++;
+    const session = this.session;
+    // `active` stays true until an in-flight stop finishes, so a teardown that
+    // races the renderer's own stop joins it instead of returning early.
+    if (!session || !session.active) return null;
+    return this.stop(session.id, reason);
+  }
+
+  isActive(): boolean {
+    const session = this.session;
+    return !!session && session.active && !session.stopping;
+  }
+
+  private isEnded(session: LiveSessionState): boolean {
+    return (
+      this.session !== session ||
+      !session.active ||
+      !!session.stopping ||
+      session.abortController.signal.aborted
+    );
+  }
+
+  private assertStillStarting(session: LiveSessionState): void {
+    if (this.isEnded(session)) throw new LiveSessionEndedError();
+  }
+
+  private async finishStop(session: LiveSessionState): Promise<LiveSessionSnapshot | null> {
     // Close the stream while the session is still active so streaming providers
     // (Gemini Live, OpenAI translation) can flush their final transcript via
     // onFinal -- handleFinalTranscript drops segments once active is false.
@@ -386,18 +495,30 @@ export class LiveSessionService {
     session.active = false;
     session.abortController.abort();
     this.recordLiveUsage(session);
-    return this.snapshot();
+    this.notifyActiveChange();
+    // This session's snapshot, even if a replacement start installed another.
+    return this.snapshotOf(session);
+  }
+
+  private notifyActiveChange(): void {
+    const active = this.isActive();
+    if (active === this.notifiedActive) return;
+    this.notifiedActive = active;
+    this.opts.onActiveChange?.(active);
   }
 
   snapshot(): LiveSessionSnapshot | null {
-    const session = this.session;
-    if (!session) return null;
+    return this.session ? this.snapshotOf(this.session) : null;
+  }
+
+  private snapshotOf(session: LiveSessionState): LiveSessionSnapshot {
     const segments = [...session.segments].sort((a, b) => a.offsetMs - b.offsetMs);
     return {
       sessionId: session.id,
       title: session.title,
       startedAt: session.startedAt,
-      active: session.active,
+      active: session.active && !session.stopping,
+      ...(session.endedReason ? { endedReason: session.endedReason } : {}),
       translate: session.translate,
       mode: session.mode,
       provider: session.provider,
@@ -427,8 +548,9 @@ export class LiveSessionService {
     session: LiveSessionState,
     config: LiveSttProviderConfig,
   ): Promise<void> {
+    this.assertStillStarting(session);
     const createSession = this.opts.createLiveSttSession ?? createLiveSttSession;
-    session.stream = await createSession(config, {
+    const stream = await createSession(config, {
       onStatus: (status) => this.emit({ type: 'status', sessionId: session.id, status }),
       onInterim: (event) => this.handleInterim(session, event),
       onTranslationInterim: (event) => this.handleTranslationInterim(session, event),
@@ -437,6 +559,13 @@ export class LiveSessionService {
       },
       onError: (error) => this.handleStreamError(session, error),
     });
+    // The session may have been stopped (renderer lost) or replaced while the
+    // provider connected; a transport nobody will close must not stay open.
+    if (this.isEnded(session)) {
+      await stream?.close().catch(() => {});
+      throw new LiveSessionEndedError();
+    }
+    session.stream = stream;
     if (!session.stream) return;
     session.mode = 'streaming';
     session.provider = session.stream.provider;
@@ -472,6 +601,7 @@ export class LiveSessionService {
     config: LiveSttProviderConfig,
     error: unknown,
   ): Promise<boolean> {
+    this.assertStillStarting(session);
     const fallbackConfigs = this.buildRealtimeFallbackConfigs({
       ...config,
       openaiApiKey: undefined,
@@ -504,6 +634,8 @@ export class LiveSessionService {
           return true;
         }
       } catch (fallbackError) {
+        if (fallbackError instanceof LiveSessionEndedError) throw fallbackError;
+        this.assertStillStarting(session);
         this.handleStreamError(session, fallbackError);
       }
     }
@@ -517,6 +649,7 @@ export class LiveSessionService {
     if (!issue) return;
     session.active = false;
     session.abortController.abort();
+    this.notifyActiveChange();
     throw new LiveChunkedCaptionsUnavailableError(
       `Live captions cannot continue with chunked transcription: ${issue}`,
     );

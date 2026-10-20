@@ -6,13 +6,25 @@ import type {
 } from '../electronAPI';
 import type { LivePcmFrame } from '../audio/graph';
 import { reportError } from '../sentry';
+import {
+  describeLiveIndicator,
+  type LiveIndicatorEndReason,
+  type LiveIndicatorPhase,
+  type LiveIndicatorView,
+} from '../../src/liveSessionView';
 
 const FALLBACK_SNIPPET_MS = 12_000;
 const MIN_LIVE_BLOB_BYTES = 1024;
 
-let panelEl: HTMLElement | null = null;
+let panelEl: HTMLDialogElement | null = null;
+let launcherEl: HTMLElement | null = null;
 let startButtonEl: HTMLButtonElement | null = null;
+let indicatorEl: HTMLElement | null = null;
+let indicatorStatusEl: HTMLElement | null = null;
+let indicatorDetailEl: HTMLElement | null = null;
 let closeButtonEl: HTMLButtonElement | null = null;
+let minimizeButtonEl: HTMLButtonElement | null = null;
+let restartButtonEl: HTMLButtonElement | null = null;
 let statusEl: HTMLElement | null = null;
 let translateToggleEl: HTMLInputElement | null = null;
 let translationColumnEl: HTMLElement | null = null;
@@ -59,6 +71,17 @@ let realtimeRendererActive = false;
 let realtimeFailureHandled = false;
 let realtimeTranslationFinalSent = false;
 let realtimeFinalChain: Promise<void> = Promise.resolve();
+// Main-screen indicator state (see src/liveSessionView.ts).
+let startingSession = false;
+let startToken = 0;
+let endedReason: LiveIndicatorEndReason | null = null;
+let lastLiveError: string | null = null;
+let captionIds = new Set<string>();
+// A session main ended because the previous page reloaded or crashed; its
+// remaining segment events are still rendered, read-only.
+let recoveredSessionId: string | null = null;
+const RECOVERED_STATUS =
+  'Live captions ended when the window reloaded. This transcript is read-only.';
 
 type RealtimeClientConfig = NonNullable<LiveSessionStartResult['realtimeClient']>;
 type RealtimeCallErrorDetails = {
@@ -78,12 +101,86 @@ function setStatus(text: string): void {
   if (statusEl) statusEl.textContent = text;
 }
 
+function indicatorPhase(): LiveIndicatorPhase {
+  if (finalizingCapture) return 'finalizing';
+  if (startingSession) return 'connecting';
+  if (activeSessionId) return 'active';
+  if (endedReason) return 'ended';
+  return 'idle';
+}
+
+function currentIndicatorView(): LiveIndicatorView {
+  return describeLiveIndicator({
+    recording: !!launcher,
+    phase: indicatorPhase(),
+    endedReason,
+    error: lastLiveError,
+    captionCount: captionIds.size,
+  });
+}
+
+function setTextIfChanged(el: HTMLElement | null, text: string): void {
+  // The status line is a live region: rewriting the same text would repeat the
+  // announcement, so only real phase changes reach assistive technology.
+  if (el && el.textContent !== text) el.textContent = text;
+}
+
+// The single writer for the launcher, its status line, and the dialog's
+// session controls.
+function renderIndicator(): void {
+  const view = currentIndicatorView();
+  if (launcherEl) launcherEl.hidden = !view.visible;
+  setTextIfChanged(startButtonEl, view.buttonLabel);
+  if (indicatorEl) indicatorEl.dataset.tone = view.tone;
+  setTextIfChanged(indicatorStatusEl, view.statusText);
+  setTextIfChanged(indicatorDetailEl, view.detailText);
+
+  const live = !!activeSessionId || startingSession || finalizingCapture;
+  if (closeButtonEl) {
+    closeButtonEl.hidden = !live;
+    closeButtonEl.disabled = finalizingCapture;
+  }
+  if (restartButtonEl) restartButtonEl.hidden = live || !launcher;
+  setTextIfChanged(minimizeButtonEl, live ? 'Minimize' : 'Close');
+}
+
+function focusIsInPanelOrLost(): boolean {
+  const active = document.activeElement;
+  return !active || active === document.body || !!panelEl?.contains(active);
+}
+
+function focusInsidePanel(): void {
+  const target = restartButtonEl && !restartButtonEl.hidden ? restartButtonEl : minimizeButtonEl;
+  target?.focus();
+}
+
+// Opens the dialog. Only user actions call this (the launcher, Restart); a
+// provider status or error never reopens a minimized dialog or moves focus.
 function showPanel(): void {
-  if (panelEl) panelEl.hidden = false;
+  const panel = panelEl;
+  if (!panel) return;
+  renderIndicator();
+  if (!panel.open) {
+    panel.showModal();
+    focusInsidePanel();
+  }
+}
+
+function returnFocusToLauncher(): void {
+  if (startButtonEl && launcherEl && !launcherEl.hidden) startButtonEl.focus();
+}
+
+// Minimize: hides the dialog and keeps the session running.
+function minimizePanel(): void {
+  const panel = panelEl;
+  if (!panel?.open) return;
+  const hadFocus = panel.contains(document.activeElement);
+  panel.close();
+  if (hadFocus) returnFocusToLauncher();
 }
 
 function hidePanel(): void {
-  if (panelEl) panelEl.hidden = true;
+  if (panelEl?.open) panelEl.close();
 }
 
 function clearList(el: HTMLElement | null, emptyText: string): void {
@@ -96,6 +193,10 @@ function clearList(el: HTMLElement | null, emptyText: string): void {
 }
 
 function resetLiveUi(): void {
+  recoveredSessionId = null;
+  endedReason = null;
+  lastLiveError = null;
+  captionIds = new Set<string>();
   showPanel();
   clearList(transcriptListEl, 'Waiting for speech...');
   clearList(translationListEl, 'Waiting for transcript...');
@@ -263,12 +364,15 @@ function renderSegment(segment: LiveTranscriptSegment): void {
     );
   }
   hasTranscript = true;
+  captionIds.add(segment.id);
   updateAskEnabled();
+  renderIndicator();
 }
 
 function updateAskEnabled(): void {
   const enabled =
     !!activeSessionId &&
+    !finalizingCapture &&
     (hasTranscript || hasInterimTranscript || hasInterimTranslation) &&
     !askBusy;
   if (chatInputEl) chatInputEl.disabled = !enabled;
@@ -328,6 +432,8 @@ function reportRealtimeError(error: unknown, details?: unknown): void {
   });
   setStatus(message);
   appendChatMessage('error', message);
+  lastLiveError = message;
+  renderIndicator();
 }
 
 function getRealtimeErrorDetails(error: unknown): RealtimeCallErrorDetails | undefined {
@@ -428,6 +534,10 @@ async function startRealtimeWebRtc(
   preferredMimeType: string,
 ): Promise<void> {
   await stopRealtimeWebRtc();
+  // Stop Live or a recording stop can land during any await below; a peer
+  // created for a session that is no longer running must not keep the mic.
+  const superseded = () => activeSessionId !== sessionId || finalizingCapture;
+  if (superseded()) return;
   resetRealtimeState();
   realtimeFailureHandled = false;
   const track = stream.getAudioTracks()[0];
@@ -471,8 +581,17 @@ async function startRealtimeWebRtc(
     };
   }
 
+  const abandon = (): void => {
+    if (realtimePeer === peer) {
+      realtimePeer = null;
+      realtimeDataChannel = null;
+      resetRealtimeState();
+    }
+    peer.close();
+  };
   const offer = await peer.createOffer();
   await peer.setLocalDescription(offer);
+  if (superseded()) return abandon();
   const callsUrl =
     client.endpoint === 'translation'
       ? 'https://api.openai.com/v1/realtime/translations/calls'
@@ -486,6 +605,7 @@ async function startRealtimeWebRtc(
     body: offer.sdp || '',
   });
   const answerSdp = await response.text();
+  if (superseded()) return abandon();
   if (!response.ok) {
     const details: RealtimeCallErrorDetails = {
       endpoint: client.endpoint,
@@ -506,6 +626,7 @@ async function startRealtimeWebRtc(
     throw error;
   }
   await peer.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+  if (superseded()) return abandon();
   setStatus('Listening with OpenAI Realtime...');
 }
 
@@ -591,6 +712,7 @@ async function fallbackFromRealtimeFailure(
   if (activeSessionId !== sessionId) return;
   if (fallback.success) {
     captureMode = fallback.session.mode;
+    lastLiveError = null;
     setStatus(
       fallback.session.mode === 'streaming'
         ? `Listening with ${fallback.session.provider}...`
@@ -600,6 +722,7 @@ async function fallbackFromRealtimeFailure(
       startFallbackWindow(fallbackStream, preferredMimeType);
     }
     updateAskEnabled();
+    renderIndicator();
     return;
   }
   reportRealtimeError(fallback.error);
@@ -607,8 +730,11 @@ async function fallbackFromRealtimeFailure(
   if (activeSessionId === sessionId) {
     activeSessionId = null;
     captureMode = null;
+    endedReason = 'failed';
+    lastLiveError = fallback.error;
   }
   updateAskEnabled();
+  renderIndicator();
 }
 
 function queueFallbackBlob(
@@ -637,15 +763,21 @@ function queueFallbackBlob(
       if (stoppingCapture || activeSessionId !== sessionId) return;
       if (activeSessionId !== sessionId) return;
       if (result.success) {
+        lastLiveError = null;
         if (result.segment) renderSegment(result.segment);
         setStatus(stoppingCapture ? 'Finalizing live transcript...' : 'Listening with fallback...');
+        renderIndicator();
         return;
       }
       setStatus(result.error || 'Live transcript failed.');
+      lastLiveError = result.error || 'Live transcript failed.';
+      renderIndicator();
     })
     .catch((err) => {
       if (stoppingCapture || activeSessionId !== sessionId) return;
       setStatus(err instanceof Error ? err.message : String(err));
+      lastLiveError = err instanceof Error ? err.message : String(err);
+      renderIndicator();
     });
 }
 
@@ -751,6 +883,23 @@ export async function startLiveSession(
   preferredMimeType: string,
   expectedStartVersion = startCancellationVersion,
 ): Promise<void> {
+  const token = ++startToken;
+  startingSession = true;
+  renderIndicator();
+  try {
+    await startLiveSessionNow(title, fallbackStream, preferredMimeType, expectedStartVersion);
+  } finally {
+    if (startToken === token) startingSession = false;
+    renderIndicator();
+  }
+}
+
+async function startLiveSessionNow(
+  title: string,
+  fallbackStream: MediaStream,
+  preferredMimeType: string,
+  expectedStartVersion: number,
+): Promise<void> {
   let startVersion = expectedStartVersion;
   if (activeSessionId) {
     const oldSessionId = activeSessionId;
@@ -769,6 +918,10 @@ export async function startLiveSession(
   if (!result.success) {
     activeSessionId = null;
     captureMode = null;
+    if (startVersion === startCancellationVersion) {
+      endedReason = 'failed';
+      lastLiveError = result.error || 'Live session unavailable.';
+    }
     setStatus(result.error || 'Live session unavailable.');
     updateAskEnabled();
     return;
@@ -777,6 +930,7 @@ export async function startLiveSession(
     await window.electronAPI.stopLiveSession(result.session.sessionId).catch(() => {});
     activeSessionId = null;
     captureMode = null;
+    endedReason = 'user';
     setStatus('Live session stopped.');
     updateAskEnabled();
     return;
@@ -805,6 +959,7 @@ export async function startLiveSession(
   if (result.session.mode === 'chunked') {
     if (typeof MediaRecorder === 'undefined') {
       setStatus('Live fallback is unavailable in this browser.');
+      lastLiveError = 'Live fallback is unavailable in this browser.';
       return;
     }
     startFallbackWindow(fallbackStream, preferredMimeType);
@@ -819,21 +974,13 @@ export function configureLiveSessionLauncher(
 ): void {
   startCancellationVersion++;
   launcher = { title, fallbackStream, preferredMimeType, startVersion: startCancellationVersion };
-  if (startButtonEl) {
-    startButtonEl.hidden = false;
-    startButtonEl.disabled = false;
-    startButtonEl.textContent = activeSessionId ? 'Open Live Transcript' : 'Live Transcript';
-  }
+  renderIndicator();
 }
 
 export function clearLiveSessionLauncher(): void {
   startCancellationVersion++;
   launcher = null;
-  if (startButtonEl) {
-    startButtonEl.hidden = true;
-    startButtonEl.disabled = true;
-    startButtonEl.textContent = 'Live Transcript';
-  }
+  renderIndicator();
 }
 
 export function handleLivePcmFrame(frame: LivePcmFrame): void {
@@ -857,6 +1004,7 @@ export async function stopLiveSessionCapture(opts: { hidePanel?: boolean } = {})
   if (launcher) launcher.startVersion = startCancellationVersion;
   if (!activeSessionId || finalizingCapture) {
     if (opts.hidePanel) hidePanel();
+    renderIndicator();
     return;
   }
   finalizingCapture = true;
@@ -864,7 +1012,7 @@ export async function stopLiveSessionCapture(opts: { hidePanel?: boolean } = {})
   const mode = captureMode;
   setStatus('Finalizing live transcript...');
   updateAskEnabled();
-  if (startButtonEl) startButtonEl.textContent = 'Live Transcript';
+  renderIndicator();
   try {
     await stopRealtimeWebRtc(sessionId);
     if (mode === 'chunked') {
@@ -880,10 +1028,17 @@ export async function stopLiveSessionCapture(opts: { hidePanel?: boolean } = {})
     // provider in main flushes its final `segment` events, and
     // handleLiveSessionEvent drops any event whose sessionId != activeSessionId.
     await finalizeStoppedSession(sessionId, Promise.resolve(), opts);
-    activeSessionId = null;
+    if (activeSessionId === sessionId) {
+      activeSessionId = null;
+      endedReason = 'user';
+    }
   } finally {
     finalizingCapture = false;
+    updateAskEnabled();
+    renderIndicator();
   }
+  // Stop hides itself; keep keyboard focus inside the open dialog.
+  if (panelEl?.open && focusIsInPanelOrLost()) focusInsidePanel();
 }
 
 async function submitLiveQuestion(question: string): Promise<void> {
@@ -915,30 +1070,81 @@ async function submitLiveQuestion(question: string): Promise<void> {
   } finally {
     askBusy = false;
     updateAskEnabled();
-    chatInputEl?.focus();
+    if (panelEl?.open) chatInputEl?.focus();
   }
 }
 
 function handleLiveSessionEvent(event: LiveSessionEvent): void {
+  if (
+    recoveredSessionId &&
+    event.sessionId === recoveredSessionId &&
+    !activeSessionId &&
+    event.type === 'segment'
+  ) {
+    // Finals flushed while main closed the provider after the reload. The
+    // first one can arrive after an empty snapshot.
+    renderSegment(event.segment);
+    setStatus(RECOVERED_STATUS);
+    return;
+  }
   if (event.sessionId !== activeSessionId) return;
   if (event.type === 'status') {
+    lastLiveError = null;
     setStatus(event.status);
+    renderIndicator();
   } else if (event.type === 'interim') {
     renderInterim(event.text, event.offsetMs);
   } else if (event.type === 'translationInterim') {
     renderTranslationInterim(event.text, event.offsetMs);
   } else if (event.type === 'segment') {
+    lastLiveError = null;
     renderSegment(event.segment);
   } else {
+    // Update the indicator only: a minimized dialog stays closed and focus
+    // stays where the user left it.
+    lastLiveError = event.error;
     setStatus(event.error);
     appendChatMessage('error', event.error);
+    renderIndicator();
   }
 }
 
+// After a reload, main has already ended the session the previous page was
+// capturing (endedReason 'renderer-lost'). Offer what it kept, read-only.
+async function restoreRendererLostSession(): Promise<void> {
+  let response: Awaited<ReturnType<typeof window.electronAPI.getLiveSessionSnapshot>>;
+  try {
+    response = await window.electronAPI.getLiveSessionSnapshot();
+  } catch {
+    return;
+  }
+  const snapshot = response?.snapshot;
+  if (!snapshot || snapshot.active || snapshot.endedReason !== 'renderer-lost') return;
+  // The user may have started a new session while the snapshot was in flight.
+  if (activeSessionId || startingSession || finalizingCapture || captionIds.size > 0) return;
+  // Claim the session even when it has no segments yet: main may still flush
+  // finals while it closes the provider. An empty recovery stays hidden (see
+  // describeLiveIndicator) until a segment arrives.
+  recoveredSessionId = snapshot.sessionId;
+  endedReason = 'renderer-lost';
+  lastLiveError = null;
+  for (const segment of snapshot.segments) renderSegment(segment);
+  if (snapshot.segments.length > 0) setStatus(RECOVERED_STATUS);
+  renderIndicator();
+}
+
 export function setupLiveSession(): void {
-  panelEl = document.getElementById('liveSessionPanel');
+  panelEl = document.getElementById('liveSessionPanel') as HTMLDialogElement | null;
+  launcherEl = document.getElementById('liveSessionLauncher');
   startButtonEl = document.getElementById('liveSessionStartButton') as HTMLButtonElement | null;
+  indicatorEl = document.getElementById('liveSessionIndicator');
+  indicatorStatusEl = document.getElementById('liveSessionIndicatorStatus');
+  indicatorDetailEl = document.getElementById('liveSessionIndicatorDetail');
   closeButtonEl = document.getElementById('liveSessionCloseButton') as HTMLButtonElement | null;
+  minimizeButtonEl = document.getElementById(
+    'liveSessionMinimizeButton',
+  ) as HTMLButtonElement | null;
+  restartButtonEl = document.getElementById('liveSessionRestartButton') as HTMLButtonElement | null;
   statusEl = document.getElementById('liveSessionStatus');
   translateToggleEl = document.getElementById('liveTranslateToggle') as HTMLInputElement | null;
   translationColumnEl = document.getElementById('liveTranslationColumn');
@@ -953,31 +1159,40 @@ export function setupLiveSession(): void {
   updateTranslationVisibility();
 
   startButtonEl?.addEventListener('click', () => {
-    const button = startButtonEl;
-    if (!button) return;
-    if (activeSessionId) {
+    if (currentIndicatorView().opensDialog) {
       showPanel();
       return;
     }
     if (!launcher) {
       showPanel();
-      setStatus('Start recording before opening live transcript.');
+      setStatus('Start recording before opening live captions.');
       return;
     }
-    const currentLauncher = launcher;
-    button.disabled = true;
-    void startLiveSession(
-      currentLauncher.title,
-      currentLauncher.fallbackStream,
-      currentLauncher.preferredMimeType,
-      currentLauncher.startVersion,
-    ).finally(() => {
-      button.disabled = false;
-      button.textContent = activeSessionId ? 'Open Live Transcript' : 'Live Transcript';
-    });
+    startFromLauncher();
   });
+  restartButtonEl?.addEventListener('click', startFromLauncher);
+  // Stop ends captions but keeps the dialog open on the final transcript;
+  // Minimize (or Escape) only hides the dialog.
   closeButtonEl?.addEventListener('click', () => {
-    void stopLiveSessionCapture({ hidePanel: true });
+    void stopLiveSessionCapture();
+  });
+  minimizeButtonEl?.addEventListener('click', minimizePanel);
+  panelEl?.addEventListener('keydown', (event) => {
+    // Escape while composing Hangul cancels the composition, not the dialog.
+    if (event.key === 'Escape' && (event.isComposing || askInputComposing)) {
+      event.preventDefault();
+    }
+  });
+  panelEl?.addEventListener('cancel', (event) => {
+    // Escape minimizes; the default close would skip focus return.
+    event.preventDefault();
+    if (askInputComposing) return;
+    minimizePanel();
+  });
+  panelEl?.addEventListener('close', () => {
+    // Also covers a close the browser forces without a cancel event.
+    if (focusIsInPanelOrLost()) returnFocusToLauncher();
+    renderIndicator();
   });
 
   chatInputEl?.addEventListener('compositionstart', () => {
@@ -998,4 +1213,17 @@ export function setupLiveSession(): void {
   });
   window.electronAPI.onLiveSessionEvent(handleLiveSessionEvent);
   updateAskEnabled();
+  renderIndicator();
+  void restoreRendererLostSession();
+}
+
+function startFromLauncher(): void {
+  const current = launcher;
+  if (!current || startingSession || finalizingCapture) return;
+  void startLiveSession(
+    current.title,
+    current.fallbackStream,
+    current.preferredMimeType,
+    current.startVersion,
+  );
 }

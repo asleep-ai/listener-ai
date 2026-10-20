@@ -48,9 +48,21 @@
 
       <div id="recordingTime" class="recording-time">00:00</div>
 
-      <button id="liveSessionStartButton" class="live-session-start-button" type="button" hidden>
-        Live Transcript
-      </button>
+      <div id="liveSessionLauncher" class="live-session-launcher" hidden>
+        <button
+          id="liveSessionStartButton"
+          class="live-session-start-button"
+          type="button"
+          aria-describedby="liveSessionIndicatorStatus liveSessionIndicatorDetail"
+        >
+          Live captions
+        </button>
+        <p id="liveSessionIndicator" class="live-session-indicator" data-tone="none">
+          <span class="live-session-indicator-mark" aria-hidden="true"></span>
+          <span id="liveSessionIndicatorStatus" role="status"></span>
+          <span id="liveSessionIndicatorDetail" class="live-session-indicator-detail"></span>
+        </p>
+      </div>
 
       <div id="liveNotesPanel" class="live-notes-panel" style="display: none;">
         <div class="live-notes-header">
@@ -71,7 +83,7 @@
         />
       </div>
 
-      <div id="liveSessionPanel" class="live-session-modal" role="dialog" aria-modal="true" aria-labelledby="liveSessionHeading" hidden>
+      <dialog id="liveSessionPanel" class="live-session-modal" aria-labelledby="liveSessionHeading" aria-describedby="liveSessionStatus">
         <div class="live-session-card">
           <div class="live-session-header">
             <div>
@@ -83,8 +95,19 @@
                 <input type="checkbox" id="liveTranslateToggle" checked>
                 <span>Translation</span>
               </label>
-              <button type="button" id="liveSessionCloseButton" class="live-session-close-button">
-                Stop Live
+              <button type="button" id="liveSessionRestartButton" class="live-session-close-button" hidden>
+                Start live captions again
+              </button>
+              <button type="button" id="liveSessionCloseButton" class="live-session-close-button live-session-stop-button">
+                Stop live captions
+              </button>
+              <button
+                type="button"
+                id="liveSessionMinimizeButton"
+                class="live-session-close-button"
+                aria-keyshortcuts="Escape"
+              >
+                Minimize
               </button>
             </div>
           </div>
@@ -115,7 +138,7 @@
             </form>
           </div>
         </div>
-      </div>
+      </dialog>
 
       <div class="auto-mode-container">
         <label class="toggle-container">
