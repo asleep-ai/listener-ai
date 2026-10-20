@@ -9,3 +9,10 @@ playwright-report/
 recordings/
 *.wav
 *.mp3
+# Published separately as verified landing media release assets.
+docs/assets/demos/*.mp4
+docs/assets/demos/*.jpg
+docs/assets/demos/*.vtt
+docs/assets/demos/*.download
+tools/landing-video/out/
+tools/landing-video/captures/

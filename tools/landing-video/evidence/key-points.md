@@ -1,0 +1,2 @@
+- The project focuses on designing a remote control through a three-stage iterative process combining individual work and group meetings.
+- The team began the session with an interactive whiteboard exercise to share favorite animal characteristics.

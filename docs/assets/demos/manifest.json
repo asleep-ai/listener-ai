@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "baseUrl": "https://github.com/asleep-ai/listener-ai/releases/download/landing-media-v1/",
+  "assets": [
+    {
+      "name": "listener-demo.mp4",
+      "bytes": 1558819,
+      "sha256": "08bf5c6def26008f1a104cb3aabb7fc6eed18d9ddba339c5c61e4db2bcfcca6a"
+    },
+    {
+      "name": "listener-demo.jpg",
+      "bytes": 146768,
+      "sha256": "07dc5f383128b9e66177ef6b08cd4da2da13c98c53a6beccf4ea7fa03113900d"
+    },
+    {
+      "name": "listener-demo.ko.vtt",
+      "bytes": 907,
+      "sha256": "12b848a37044cbdd600a87c599ab6db63120b147727ad7f4dba54f0e0ad1dd5c"
+    }
+  ]
+}
