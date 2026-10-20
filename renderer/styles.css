@@ -346,9 +346,16 @@ h1 {
   box-shadow: none;
 }
 
+.live-session-launcher {
+  margin-top: 10px;
+}
+
+.live-session-launcher[hidden] {
+  display: none;
+}
+
 .live-session-start-button {
   width: 100%;
-  margin-top: 10px;
   padding: 10px 14px;
   font-size: 13px;
   font-weight: 600;
@@ -375,7 +382,84 @@ h1 {
   cursor: not-allowed;
 }
 
-.live-session-start-button[hidden] {
+.live-session-start-button:focus-visible,
+.live-session-close-button:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+/* Status line under the launcher. Every state has a text label; the mark's
+   shape differs per state too, so meaning never rests on colour alone. */
+.live-session-indicator {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 2px 0;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.live-session-indicator[data-tone='none'] {
+  display: none;
+}
+
+.live-session-indicator-mark {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.live-session-indicator[data-tone='listening'] {
+  color: #0f766e;
+}
+
+.live-session-indicator[data-tone='connecting'] .live-session-indicator-mark {
+  background: transparent;
+  border: 2px solid currentColor;
+  width: 5px;
+  height: 5px;
+}
+
+.live-session-indicator[data-tone='connecting'],
+.live-session-indicator[data-tone='finalizing'] {
+  color: #92400e;
+}
+
+.live-session-indicator[data-tone='finalizing'] .live-session-indicator-mark {
+  background: linear-gradient(90deg, currentColor 50%, transparent 50%);
+  border: 1px solid currentColor;
+  width: 7px;
+  height: 7px;
+}
+
+.live-session-indicator[data-tone='error'] {
+  color: #b91c1c;
+}
+
+.live-session-indicator[data-tone='error'] .live-session-indicator-mark {
+  border-radius: 0;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  width: 10px;
+  height: 10px;
+}
+
+.live-session-indicator[data-tone='ended'] {
+  color: #475569;
+}
+
+.live-session-indicator[data-tone='ended'] .live-session-indicator-mark {
+  border-radius: 1px;
+}
+
+.live-session-indicator-detail {
+  color: #475569;
+}
+
+.live-session-indicator-detail:empty {
   display: none;
 }
 
@@ -511,19 +595,31 @@ h1 {
   box-shadow: var(--focus-ring);
 }
 
+/* Native <dialog>: the scrim lives on ::backdrop and the dialog fills the
+   viewport so the card can be centred. Only the [open] state sets display, or
+   the UA's closed-dialog `display: none` would be overridden. */
 .live-session-modal {
-  position: fixed;
+  border: none;
+  margin: 0;
+  padding: 24px;
+  background: transparent;
+  color: inherit;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
   inset: 0;
-  z-index: 1200;
+  overflow: auto;
+}
+
+.live-session-modal[open] {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  background: rgba(15, 23, 42, 0.38);
 }
 
-.live-session-modal[hidden] {
-  display: none;
+.live-session-modal::backdrop {
+  background: rgba(15, 23, 42, 0.38);
 }
 
 .live-session-card {
@@ -583,6 +679,15 @@ h1 {
 .live-session-close-button:hover {
   background: #f1f5f9;
   border-color: #cbd5e1;
+}
+
+.live-session-close-button[hidden] {
+  display: none;
+}
+
+.live-session-stop-button {
+  color: #b91c1c;
+  border-color: #fecaca;
 }
 
 .live-translate-toggle {
@@ -690,7 +795,7 @@ h1 {
 }
 
 @media (max-width: 760px) {
-  .live-session-modal {
+  .live-session-modal[open] {
     align-items: stretch;
     padding: 12px;
   }

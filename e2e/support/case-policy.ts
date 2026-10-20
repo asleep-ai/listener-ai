@@ -25,6 +25,12 @@ export function classifyCase(file: string, title: string): CasePolicy {
         kind: 'shared',
         reason: 'Saved-note fixtures reset between warm transcript cases.',
       };
+    case 'live-session.spec.ts':
+      return {
+        group: 'live',
+        kind: 'shared',
+        reason: 'Synthetic live capture and provider fixtures reset in one warm app.',
+      };
     case 'transcription-reload.spec.ts':
       return {
         group: 'reload',

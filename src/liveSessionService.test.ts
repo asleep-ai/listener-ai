@@ -10,6 +10,7 @@ import {
 } from './geminiService';
 import {
   LiveChunkedCaptionsUnavailableError,
+  LiveSessionEndedError,
   LiveSessionService,
   type LiveSessionEvent,
 } from './liveSessionService';
@@ -1006,6 +1007,7 @@ describe('LiveSessionService chunked captions without text-provider credentials'
 
   it('ends the session instead of announcing chunked captions after Realtime fails with no usable batch backend', async () => {
     const events: LiveSessionEvent[] = [];
+    const activeChanges: boolean[] = [];
     let transcribeCalls = 0;
     const service = new LiveSessionService({
       getDataPath: () => workDir,
@@ -1020,6 +1022,7 @@ describe('LiveSessionService chunked captions without text-provider credentials'
       // OpenAI key only: the realtime fallbacks are all OpenAI and fail.
       getLiveSttConfig: () => ({ provider: 'auto', openaiApiKey: 'sk-openai' }),
       emitEvent: (event) => events.push(event),
+      onActiveChange: (active) => activeChanges.push(active),
       createRealtimeClientConfig: async () => ({
         transport: 'webrtc',
         endpoint: 'realtime',
@@ -1040,6 +1043,7 @@ describe('LiveSessionService chunked captions without text-provider credentials'
     );
 
     assert.equal(service.snapshot()?.active, false);
+    assert.deepEqual(activeChanges, [true, false]);
     assert.equal(
       events.some((event) => event.type === 'status' && /chunked fallback/i.test(event.status)),
       false,
@@ -1206,5 +1210,367 @@ describe('GeminiService live snippets', () => {
     } finally {
       service.transcribeAudio = originalTranscribeAudio;
     }
+  });
+});
+
+describe('LiveSessionService renderer-lost teardown', () => {
+  function makeStreamingService(opts: {
+    close?: () => Promise<void>;
+    onCallbacks?: (callbacks: LiveSttCallbacks) => void;
+    now?: () => number;
+    usage?: RecordInput[];
+    activeChanges?: boolean[];
+  }) {
+    let closeCalls = 0;
+    const fakeStream: LiveSttSession = {
+      provider: 'gemini',
+      kind: 'translation',
+      sendPcm() {},
+      async close() {
+        closeCalls++;
+        await opts.close?.();
+      },
+    };
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'gemini', geminiApiKey: 'gemini-key' }),
+      now: opts.now,
+      recordUsage: (input) => opts.usage?.push(input),
+      onActiveChange: (active) => opts.activeChanges?.push(active),
+      createLiveSttSession: async (_config, callbacks) => {
+        opts.onCallbacks?.(callbacks);
+        return fakeStream;
+      },
+    });
+    return { service, closeCalls: () => closeCalls };
+  }
+
+  it('closes the provider while active, keeps the flushed final, and records usage once', async () => {
+    let now = Date.parse('2026-10-20T01:00:00.000Z');
+    let callbacks: LiveSttCallbacks | undefined;
+    const usage: RecordInput[] = [];
+    const activeChanges: boolean[] = [];
+    const { service, closeCalls } = makeStreamingService({
+      now: () => now,
+      usage,
+      activeChanges,
+      onCallbacks: (cbs) => {
+        callbacks = cbs;
+      },
+      // The provider flushes its last final while closing.
+      close: async () => {
+        callbacks?.onFinal({ text: 'Speaker: last words.', offsetMs: 2_000, durationMs: 500 });
+      },
+    });
+
+    const session = await service.start({ title: 'Live', translate: false });
+    assert.equal(service.isActive(), true);
+    now += 30_000;
+    const snapshot = await service.stopActive('renderer-lost');
+
+    assert.equal(closeCalls(), 1);
+    assert.equal(snapshot?.sessionId, session.sessionId);
+    assert.equal(snapshot?.active, false);
+    assert.equal(snapshot?.endedReason, 'renderer-lost');
+    assert.match(snapshot?.transcript ?? '', /last words/);
+    assert.equal(usage.length, 1);
+    assert.equal(usage[0].usage.audioSeconds, 30);
+    assert.deepEqual(activeChanges, [true, false]);
+    assert.equal(service.isActive(), false);
+
+    // A late renderer stop for the same id neither closes again nor re-bills.
+    await service.stop(session.sessionId);
+    assert.equal(closeCalls(), 1);
+    assert.equal(usage.length, 1);
+    assert.equal(service.snapshot()?.endedReason, 'renderer-lost');
+  });
+
+  it('reports the session inactive as soon as a stop begins', async () => {
+    let releaseClose: () => void = () => {};
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const { service } = makeStreamingService({ close: () => closeGate });
+
+    await service.start({ title: 'Live' });
+    const stopping = service.stopActive('renderer-lost');
+    // A reloaded page fetching the snapshot now must not see a running session.
+    assert.equal(service.snapshot()?.active, false);
+    assert.equal(service.snapshot()?.endedReason, 'renderer-lost');
+    assert.equal(service.isActive(), false);
+    releaseClose();
+    await stopping;
+  });
+
+  it('shares one close between a renderer stop and a renderer-lost teardown', async () => {
+    let releaseClose: () => void = () => {};
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const usage: RecordInput[] = [];
+    let now = Date.parse('2026-10-20T01:00:00.000Z');
+    const { service, closeCalls } = makeStreamingService({
+      close: () => closeGate,
+      usage,
+      now: () => now,
+    });
+
+    const session = await service.start({ title: 'Live' });
+    now += 10_000;
+    const userStop = service.stop(session.sessionId);
+    const lostStop = service.stopActive('renderer-lost');
+    releaseClose();
+    const [userSnapshot, lostSnapshot] = await Promise.all([userStop, lostStop]);
+
+    assert.equal(closeCalls(), 1);
+    assert.equal(usage.length, 1);
+    // Renderer loss during the drain retains finals for reload recovery.
+    assert.equal(userSnapshot?.endedReason, 'renderer-lost');
+    assert.equal(lostSnapshot?.endedReason, 'renderer-lost');
+  });
+
+  it('is a no-op with no session or after the session stopped', async () => {
+    const { service, closeCalls } = makeStreamingService({});
+    assert.equal(await service.stopActive('renderer-lost'), null);
+
+    const session = await service.start({ title: 'Live' });
+    const stopped = await service.stop(session.sessionId);
+    assert.equal(stopped?.endedReason, 'user');
+    assert.equal(await service.stopActive('renderer-lost'), null);
+    assert.equal(closeCalls(), 1);
+    assert.equal(service.snapshot()?.endedReason, 'user');
+  });
+
+  it('leaves endedReason absent while a session runs', async () => {
+    const { service } = makeStreamingService({});
+    await service.start({ title: 'Live' });
+    const snapshot = service.snapshot();
+    assert.equal(snapshot?.active, true);
+    assert.equal('endedReason' in (snapshot ?? {}), false);
+  });
+
+  it('closes a provider that finishes connecting after the renderer was lost', async () => {
+    let releaseCreate: () => void = () => {};
+    const createGate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    let createCalls = 0;
+    let closeCalls = 0;
+    const activeChanges: boolean[] = [];
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'gemini', geminiApiKey: 'gemini-key' }),
+      onActiveChange: (active) => activeChanges.push(active),
+      createLiveSttSession: async () => {
+        createCalls++;
+        await createGate;
+        return {
+          provider: 'gemini',
+          kind: 'translation',
+          sendPcm() {},
+          async close() {
+            closeCalls++;
+          },
+        };
+      },
+    });
+
+    const starting = service.start({ title: 'Live' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const sessionId = service.snapshot()?.sessionId;
+    // The window reloads while the provider is still connecting.
+    const lost = await service.stopActive('renderer-lost');
+    assert.equal(lost?.sessionId, sessionId);
+    assert.equal(lost?.active, false);
+    releaseCreate();
+
+    await assert.rejects(starting, LiveSessionEndedError);
+    // Adopted nowhere and closed, and no fallback provider was tried.
+    assert.equal(createCalls, 1);
+    assert.equal(closeCalls, 1);
+    assert.equal(service.isActive(), false);
+    assert.equal(service.snapshot()?.endedReason, 'renderer-lost');
+    assert.deepEqual(activeChanges, []);
+  });
+
+  it('ends a start quietly when the provider fails after the renderer was lost', async () => {
+    let failCreate: (error: Error) => void = () => {};
+    const createGate = new Promise<never>((_resolve, reject) => {
+      failCreate = reject;
+    });
+    const events: LiveSessionEvent[] = [];
+    let createCalls = 0;
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'gemini', geminiApiKey: 'gemini-key' }),
+      emitEvent: (event) => events.push(event),
+      createLiveSttSession: async () => {
+        createCalls++;
+        if (createCalls === 1) return createGate;
+        throw new Error('Unexpected fallback attempt');
+      },
+    });
+
+    const starting = service.start({ title: 'Live' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await service.stopActive('renderer-lost');
+    failCreate(new Error('socket closed'));
+
+    // Expected, not a provider failure to report.
+    await assert.rejects(starting, LiveSessionEndedError);
+    assert.equal(createCalls, 1);
+    assert.equal(service.isActive(), false);
+    assert.equal(service.snapshot()?.endedReason, 'renderer-lost');
+    assert.ok(
+      !events.some((event) => event.type === 'status' && /Listening/.test(event.status)),
+      'a stopped session must not announce captions',
+    );
+  });
+
+  it('replaces a session through its in-flight stop without a second close', async () => {
+    let releaseClose: () => void = () => {};
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    let gateNextClose = true;
+    let closeCalls = 0;
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'gemini', geminiApiKey: 'gemini-key' }),
+      createLiveSttSession: async () => ({
+        provider: 'gemini',
+        kind: 'translation',
+        sendPcm() {},
+        async close() {
+          closeCalls++;
+          if (gateNextClose) {
+            gateNextClose = false;
+            await closeGate;
+          }
+        },
+      }),
+    });
+
+    const first = await service.start({ title: 'First' });
+    const stopping = service.stopActive('renderer-lost');
+    const replacing = service.start({ title: 'Second' });
+    releaseClose();
+    const [stopped, second] = await Promise.all([stopping, replacing]);
+
+    assert.equal(closeCalls, 1);
+    // The stop reports its own session, not the replacement.
+    assert.equal(stopped?.sessionId, first.sessionId);
+    assert.equal(stopped?.endedReason, 'renderer-lost');
+    assert.notEqual(second.sessionId, first.sessionId);
+    assert.equal(service.snapshot()?.sessionId, second.sessionId);
+    assert.equal(service.snapshot()?.active, true);
+    assert.equal(service.isActive(), true);
+  });
+
+  it('invalidates a replacement waiting on an old stop when its renderer is lost', async () => {
+    let releaseClose: () => void = () => {};
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const { service, closeCalls } = makeStreamingService({ close: () => closeGate });
+    const first = await service.start({ title: 'First' });
+    const replacing = service.start({ title: 'Owner lost during drain' });
+    const lost = service.stopActive('renderer-lost');
+    releaseClose();
+    await assert.rejects(replacing, LiveSessionEndedError);
+    const snapshot = await lost;
+    assert.equal(closeCalls(), 1);
+    assert.equal(snapshot?.sessionId, first.sessionId);
+    assert.equal(snapshot?.endedReason, 'renderer-lost');
+    assert.equal(service.isActive(), false);
+    assert.equal(service.snapshot()?.sessionId, first.sessionId);
+  });
+
+  it('refuses Realtime fallback while its session is draining', async () => {
+    let releaseClose: () => void = () => {};
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const { service, closeCalls } = makeStreamingService({ close: () => closeGate });
+    const session = await service.start();
+    const stopping = service.stop(session.sessionId);
+    await assert.rejects(
+      service.fallbackFromRealtime({ sessionId: session.sessionId }),
+      LiveSessionEndedError,
+    );
+    releaseClose();
+    await stopping;
+    assert.equal(closeCalls(), 1);
+  });
+
+  it('does not continue Realtime fallback after its pending provider fails following stop', async () => {
+    let failCreate: (error: Error) => void = () => {};
+    const gate = new Promise<never>((_resolve, reject) => {
+      failCreate = reject;
+    });
+    let createCalls = 0;
+    const events: LiveSessionEvent[] = [];
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'auto', openaiApiKey: 'key', geminiApiKey: 'key' }),
+      emitEvent: (event) => events.push(event),
+      createRealtimeClientConfig: async () => ({
+        transport: 'webrtc',
+        endpoint: 'realtime',
+        clientSecret: 'test',
+      }),
+      createLiveSttSession: async () => {
+        createCalls++;
+        if (createCalls === 1) return gate;
+        return null;
+      },
+    });
+    const session = await service.start();
+    const fallingBack = service.fallbackFromRealtime({ sessionId: session.sessionId });
+    await service.stopActive('renderer-lost');
+    failCreate(new Error('Provider failed after stop'));
+    await assert.rejects(fallingBack, LiveSessionEndedError);
+    assert.equal(createCalls, 1);
+    assert.equal(
+      events.some((event) => event.type === 'status' && /using/.test(event.status)),
+      false,
+    );
+    await assert.rejects(
+      service.fallbackFromRealtime({ sessionId: session.sessionId }),
+      LiveSessionEndedError,
+    );
+  });
+
+  it('does not report a session that failed to start as active', async () => {
+    const activeChanges: boolean[] = [];
+    const service = new LiveSessionService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'soniox' }),
+      onActiveChange: (active) => activeChanges.push(active),
+    });
+
+    await assert.rejects(() => service.start({ title: 'Live' }), /Soniox API key/);
+    assert.equal(service.isActive(), false);
+    assert.equal(service.snapshot()?.active, false);
+    assert.deepEqual(activeChanges, []);
+    assert.equal(await service.stopActive('renderer-lost'), null);
   });
 });

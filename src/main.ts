@@ -35,7 +35,11 @@ import { registerAllIpc } from './ipc/register';
 import { pathKeys } from './transcriptionJobs';
 import { DisplayDetectorService } from './displayDetectorService';
 import { GeminiService, TranscriptionError, type TranscriptionErrorPayload } from './geminiService';
-import { LiveChunkedCaptionsUnavailableError, LiveSessionService } from './liveSessionService';
+import {
+  LiveChunkedCaptionsUnavailableError,
+  LiveSessionEndedError,
+  LiveSessionService,
+} from './liveSessionService';
 import type { LiveSttProviderConfig } from './liveSttProvider';
 import { MeetingDetectorService } from './meetingDetectorService';
 import { MenuBarManager } from './menuBarManager';
@@ -465,7 +469,29 @@ const liveSessionService = new LiveSessionService({
       mainWindow.webContents.send('live-session-event', event);
     }
   },
+  onActiveChange: () => applyLiveCaptureThrottling(),
 });
+
+// Live captions keep running while the dialog is minimized or the window is
+// hidden (Cmd+W hides on macOS), so the renderer that captures their audio must
+// not be throttled then. Throttling is lifted only while a session runs, and
+// background test mode never throttles.
+function applyLiveCaptureThrottling(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.setBackgroundThrottling(
+    !backgroundTestMode && !liveSessionService.isActive(),
+  );
+}
+
+// The renderer captures a live session's audio, so a session cannot outlive
+// it: after a reload or crash the provider would stay connected with nothing
+// to send. Finals already received stay in the snapshot for the next page.
+function endLiveSessionForRendererLoss(): void {
+  void liveSessionService.stopActive('renderer-lost').catch((err) => {
+    console.error('Failed to end live session after renderer loss:', err);
+    reportError(err, { operation: 'live.renderer-lost', severity: 'warning' });
+  });
+}
 
 function registerGlobalShortcut() {
   if (backgroundTestMode) return;
@@ -682,13 +708,17 @@ function createWindow() {
 
   mainWindow.on('closed', () => {
     rejectAllPendingConfirms();
+    endLiveSessionForRendererLoss();
     mainWindow = null;
   });
 
   // Reload or crash drops the renderer that would answer a confirm prompt;
   // unblock any waiting agent call so it returns cleanly instead of hanging.
   mainWindow.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
-    if (isMainFrame && !isInPlace) rejectAllPendingConfirms();
+    if (isMainFrame && !isInPlace) {
+      rejectAllPendingConfirms();
+      endLiveSessionForRendererLoss();
+    }
   });
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     reportError(new Error(`Renderer process gone: ${details.reason}`), {
@@ -697,6 +727,7 @@ function createWindow() {
       extra: { reason: details.reason, exitCode: details.exitCode },
     });
     rejectAllPendingConfirms();
+    endLiveSessionForRendererLoss();
     // Close the recording file handle so the partial file is flushed and left on disk
     // instead of corrupted or locked open. User keeps whatever audio was streamed so far.
     if (audioRecorder.isRecording()) {
@@ -2057,7 +2088,11 @@ ipcMain.handle('live-session-start', async (_, opts?: { title?: string; translat
     return { success: true, session };
   } catch (error) {
     console.error('live-session-start failed:', error);
-    if (!(error instanceof LiveChunkedCaptionsUnavailableError)) {
+    // An ended-while-starting session (stopped or its window lost) is expected.
+    if (
+      !(error instanceof LiveChunkedCaptionsUnavailableError) &&
+      !(error instanceof LiveSessionEndedError)
+    ) {
       reportError(error, { operation: 'liveSession.start', severity: 'error' });
     }
     return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -2076,7 +2111,10 @@ ipcMain.handle(
       return { success: true, session };
     } catch (error) {
       console.error('live-session-realtime-failed failed:', error);
-      if (!(error instanceof LiveChunkedCaptionsUnavailableError)) {
+      if (
+        !(error instanceof LiveChunkedCaptionsUnavailableError) &&
+        !(error instanceof LiveSessionEndedError)
+      ) {
         reportError(error, { operation: 'liveSession.realtimeFallback', severity: 'warning' });
       }
       return { success: false, error: error instanceof Error ? error.message : String(error) };

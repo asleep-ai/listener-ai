@@ -79,6 +79,8 @@ export type LiveSessionSnapshot = {
   title: string;
   startedAt: string;
   active: boolean;
+  /** Why the session ended; absent while it runs (see liveSessionService.ts). */
+  endedReason?: 'user' | 'renderer-lost';
   translate: boolean;
   mode: 'streaming' | 'chunked';
   provider: StreamingLiveSttProvider | 'chunked';
