@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import type { Dialog, ElectronApplication, Page } from 'playwright';
 import { existsSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { ROOT } from './support/launch';
 import { answerConfirm, scriptDialogs, scriptedDialogs, visibleWindows } from './support/dialogs';
 import { ReusableApp } from './support/reusable-app';
@@ -807,6 +807,107 @@ test('with two row jobs and a merge pending, the modal only follows its own job 
     failure = { error };
     throw error;
   } finally {
+    await close(fx, dataDir, failure);
+  }
+});
+
+// Records the scope of every Ask request in main and answers with a fixed
+// reply, so no provider is called. The original `run` is restored by the test.
+const stubAgent = (app: ElectronApplication) =>
+  app.evaluate(({ app }) => {
+    const require = (process as any).mainModule.require.bind((process as any).mainModule);
+    const { AgentService } = require(`${app.getAppPath()}/dist/agentService.js`);
+    const g = globalThis as any;
+    g.__agentOriginalRun ??= AgentService.prototype.run;
+    g.__agentScopes = [];
+    AgentService.prototype.run = async (opts: { scope: unknown }) => {
+      g.__agentScopes.push(opts.scope);
+      return { answer: 'Fixture Ask answer', history: [], appliedActions: [] };
+    };
+  });
+
+const restoreAgent = (app: ElectronApplication) =>
+  app.evaluate(({ app }) => {
+    const require = (process as any).mainModule.require.bind((process as any).mainModule);
+    const { AgentService } = require(`${app.getAppPath()}/dist/agentService.js`);
+    const g = globalThis as any;
+    if (g.__agentOriginalRun) AgentService.prototype.run = g.__agentOriginalRun;
+    delete g.__agentOriginalRun;
+    delete g.__agentScopes;
+  });
+
+const agentScopes = (app: ElectronApplication) =>
+  app.evaluate(() => (globalThis as any).__agentScopes as unknown[]);
+
+async function askInModal(page: Page, question: string): Promise<void> {
+  await page.locator('#transcriptionModal [data-tab="ask"]').click();
+  await expect(page.locator('#modalChatInput')).toBeEnabled();
+  await expect(page.locator('#modalChatSend')).toBeEnabled();
+  await page.locator('#modalChatInput').fill(question);
+  await page.locator('#modalChatSend').click();
+}
+
+test('a completed merge scopes Ask to its saved note at once, and a later merge never takes over another note', async () => {
+  const dataDir = seed();
+  const partTwo = seedRecording(dataDir, 'Part_Two');
+  seedRecording(dataDir, 'Part_One');
+  seedSavedNote(dataDir, 'Saved_Note', 'Saved note summary only.');
+  const [savedFolder] = noteMetas(dataDir);
+  let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
+  try {
+    fx = await launch(dataDir);
+    const { app, page } = fx;
+    await stubAgent(app);
+
+    // Merge through the real dialog and let it finish while the modal shows it.
+    await page.getByRole('button', { name: 'More actions for Part_One' }).click();
+    await page.getByRole('menuitem', { name: 'Merge with other recordings…' }).click();
+    await page.locator(`#mergeList li[data-path="${partTwo}"]`).click();
+    await page.locator('#mergeTitleInput').fill('Combined Review');
+    await page.locator('#mergeConfirmBtn').click();
+    await expect.poll(async () => (await stats(app)).calls.length).toBe(1);
+    await expect(page.locator('#modalChatInput')).toBeDisabled();
+    await resolveCall(app, 0, 'Combined Review Notes');
+    await expect(page.locator('#transcriptionTitle')).toHaveText('Transcription - Combined Review');
+    await expect(page.locator('#summary')).toContainText('Combined Review Notes fixture summary.');
+    const mergedFolder = noteMetas(dataDir).find((note) => note !== savedFolder);
+    expect(mergedFolder).toBeTruthy();
+
+    // No reopen: Ask works on the merged note straight away.
+    await askInModal(page, 'What did the merged meeting decide?');
+    await expect(page.locator('#modalChatMessages')).toContainText('Fixture Ask answer');
+    expect(await agentScopes(app)).toEqual([
+      { kind: 'single', folderName: basename(mergedFolder!) },
+    ]);
+
+    // A second merge finishes after the user moved to another saved note: its
+    // completion must not take over that note's Ask scope.
+    await page.locator('#transcriptionModal .close').click();
+    await page.getByRole('button', { name: 'More actions for Part_One' }).click();
+    await page.getByRole('menuitem', { name: 'Merge with other recordings…' }).click();
+    await page.locator(`#mergeList li[data-path="${partTwo}"]`).click();
+    await page.locator('#mergeTitleInput').fill('Second Review');
+    await page.locator('#mergeConfirmBtn').click();
+    await expect.poll(async () => (await stats(app)).calls.length).toBe(2);
+    await page.locator('#transcriptionModal .close').click();
+    await page.getByRole('button', { name: 'Open transcript for Saved_Note' }).click();
+    await expectSavedNoteShown(page);
+    await resolveCall(app, 1, 'Second Review Notes');
+    await expect.poll(() => noteMetas(dataDir).length).toBe(3);
+    await expect(page.getByText('Merge complete')).toBeVisible();
+    await expectSavedNoteShown(page);
+    await askInModal(page, 'What did the saved note say?');
+    await expect(page.locator('#modalChatMessages')).toContainText('Fixture Ask answer');
+    expect((await agentScopes(app)).at(-1)).toEqual({
+      kind: 'single',
+      folderName: basename(savedFolder),
+    });
+  } catch (error) {
+    failure = { error };
+    throw error;
+  } finally {
+    if (fx) await restoreAgent(fx.app).catch(() => {});
     await close(fx, dataDir, failure);
   }
 });

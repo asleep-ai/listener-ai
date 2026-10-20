@@ -28,6 +28,7 @@ describe('transcription modal session ownership', () => {
   let recoveries: number;
   let setupReady: boolean;
   let setupChecks: unknown[];
+  let chatScopes: (string | null)[];
 
   before(async () => {
     const { build } = require('vite');
@@ -72,9 +73,12 @@ describe('transcription modal session ownership', () => {
     recoveries = 0;
     setupReady = true;
     setupChecks = [];
+    chatScopes = [];
     const dependencies = {
       getDom: () => ({ progressContainer: elements.progressContainer }),
-      resetModalChatFor() {},
+      resetModalChatFor(folderName: string | null) {
+        chatScopes.push(folderName);
+      },
       requireAiSetup: async (options: unknown) => {
         setupChecks.push(options);
         return setupReady;
@@ -128,7 +132,12 @@ describe('transcription modal session ownership', () => {
     return { pending };
   }
   function selectSavedNote() {
-    modal.showSavedTranscript('/saved.wav', 'Saved B', { summary: 'Saved B content' });
+    modal.showSavedTranscript(
+      '/saved.wav',
+      'Saved B',
+      { summary: 'Saved B content' },
+      'saved-b-folder',
+    );
   }
   function assertSavedNote() {
     assert.equal(elements.transcriptionTitle.textContent, 'Transcription - Saved B');
@@ -136,6 +145,7 @@ describe('transcription modal session ownership', () => {
     assert.equal(button.disabled, false);
     assert.equal(button.textContent, 'Transcribe');
     assert.deepEqual(errors, []);
+    assert.equal(chatScopes.at(-1), 'saved-b-folder');
   }
 
   it('sends nothing when the AI or transcription setup is missing', async () => {
@@ -226,5 +236,62 @@ describe('transcription modal session ownership', () => {
     await pending;
     assertSavedNote();
     assert.equal(refreshes, 1);
+  });
+
+  it('scopes Ask to the saved folder once a fresh transcription completes', async () => {
+    const { pending } = await start();
+    assert.equal(chatScopes.at(-1), null, 'Ask stays unavailable while transcribing');
+    response.resolve({
+      success: true,
+      data: { summary: 'Fresh result' },
+      transcriptionPath: '/data/transcriptions/2025-07-10T01-34-07-679Z_Fresh',
+      folderName: '2025-07-10T01-34-07-679Z_Fresh',
+      generationId: 'gen-1',
+    });
+    await pending;
+    assert.match(elements.summary.innerHTML, /Fresh result/);
+    assert.equal(chatScopes.at(-1), '2025-07-10T01-34-07-679Z_Fresh');
+  });
+  it('keeps Ask unavailable when a fresh transcription was not saved', async () => {
+    const { pending } = await start();
+    response.resolve({ success: true, data: { summary: 'Unsaved result' } });
+    await pending;
+    assert.match(elements.summary.innerHTML, /Unsaved result/);
+    assert.equal(chatScopes.at(-1), null);
+  });
+  it('does not let a stale success take over Ask for the saved note', async () => {
+    const { pending } = await start();
+    selectSavedNote();
+    response.resolve({
+      success: true,
+      data: { summary: 'Old result' },
+      transcriptionPath: '/data/transcriptions/old-folder',
+      folderName: 'old-folder',
+    });
+    await pending;
+    assertSavedNote();
+    assert.ok(!chatScopes.includes('old-folder'));
+  });
+  it('scopes Ask to the merged note when the merge result is shown', () => {
+    modal.prepareTranscriptionModal('Merging - M', 'Preparing merge...', undefined, {
+      kind: 'merge',
+    });
+    assert.equal(chatScopes.at(-1), null);
+    modal._setCurrentTranscription({
+      transcriptionData: { summary: 'Merged' },
+      title: 'M',
+      filePath: '/recordings/merged.webm',
+      transcriptionPath: '/data/transcriptions/merged-folder',
+      generationId: 'gen-m',
+      folderName: 'merged-folder',
+    });
+    assert.equal(chatScopes.at(-1), 'merged-folder');
+    modal._setCurrentTranscription({
+      transcriptionData: { summary: 'Unsaved' },
+      title: 'M',
+      filePath: null,
+      folderName: undefined,
+    });
+    assert.equal(chatScopes.at(-1), null);
   });
 });

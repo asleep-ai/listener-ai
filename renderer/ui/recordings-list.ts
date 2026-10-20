@@ -58,6 +58,7 @@ type MergeRecordingsResult = {
   data?: Record<string, unknown>;
   mergedAudioPath?: string;
   transcriptionPath?: string;
+  folderName?: string;
   generationId?: string | null;
 };
 
@@ -723,6 +724,7 @@ async function performMerge(paths: string[], title: string): Promise<void> {
       filePath: result.mergedAudioPath || null,
       transcriptionPath: result.transcriptionPath ?? null,
       generationId: result.generationId,
+      folderName: result.folderName,
     });
     populateTranscriptionUI((result.data || {}) as never);
 

@@ -188,6 +188,7 @@ const api = {
     data?: any;
     newFilePath?: string;
     transcriptionPath?: string;
+    folderName?: string;
     generationId?: string | null;
     error?: string;
     errorDetails?: TranscriptionErrorPayload;

@@ -29,6 +29,7 @@ type TranscribeResponse = {
   success: boolean;
   newFilePath?: string;
   transcriptionPath?: string;
+  folderName?: string;
   error?: string;
 };
 
@@ -131,6 +132,8 @@ describe('transcribe-audio save/rename ordering', () => {
     assert.equal(res.success, true);
     assert.equal(res.newFilePath, renamed);
     assert.ok(res.transcriptionPath);
+    // The modal's Ask scope uses the same folder-name contract as get-metadata.
+    assert.equal(res.folderName, path.basename(res.transcriptionPath));
     assert.ok(!fs.existsSync(untitled), 'untitled recording is renamed');
     assert.equal(fs.readFileSync(renamed, 'utf-8'), 'audio-bytes');
 
@@ -211,6 +214,7 @@ describe('transcribe-audio save/rename ordering', () => {
     assert.equal(res.newFilePath, undefined);
     assert.ok(res.transcriptionPath);
     assert.ok(fs.existsSync(named));
+    assert.equal(res.folderName, path.basename(res.transcriptionPath));
     assert.equal(readMeta(res.transcriptionPath).audioFile, named);
     const sidecar = JSON.parse(
       fs.readFileSync(path.join(metadataDir, `Standup_${TS}.json`), 'utf-8'),

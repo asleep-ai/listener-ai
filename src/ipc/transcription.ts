@@ -448,12 +448,16 @@ async function runTranscription(
       handle.update({ newFilePath: audioFilePath });
     }
 
+    // Same folder-name contract as get-metadata, so the modal can scope Ask
+    // to the saved note without re-reading it.
+    const folderName = transcriptionPath ? path.basename(transcriptionPath) : undefined;
     if (renameTitle) {
       return {
         success: true,
         data: result,
         newFilePath: audioFilePath,
         transcriptionPath,
+        folderName,
         generationId,
       };
     }
@@ -462,6 +466,7 @@ async function runTranscription(
       success: true,
       data: result,
       transcriptionPath,
+      folderName,
       generationId,
     };
   } catch (error) {
