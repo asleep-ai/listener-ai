@@ -1278,7 +1278,13 @@ describe('listener google upload privacy', () => {
     try {
       const folderPath = saveTranscription({
         title: 'Upload privacy',
-        result: { transcript: 'Speech', summary: 'Summary', keyPoints: [], actionItems: [], emoji: '' },
+        result: {
+          transcript: 'Speech',
+          summary: 'Summary',
+          keyPoints: [],
+          actionItems: [],
+          emoji: '',
+        },
         dataPath: uploadDataPath,
       });
       fs.writeFileSync(path.join(folderPath, 'live-hints.json'), 'private hint evidence');
@@ -1287,7 +1293,9 @@ describe('listener google upload privacy', () => {
       fs.mkdirSync(path.join(folderPath, 'nested'));
       const capturedPath = path.join(uploadDataPath, 'uploaded.json');
       const preloadPath = path.join(uploadDataPath, 'stub-drive.js');
-      fs.writeFileSync(preloadPath, `
+      fs.writeFileSync(
+        preloadPath,
+        `
 const fs = require('fs');
 global.fetch = async () => { throw new Error('Network forbidden in CLI upload test'); };
 const { ConfigService } = require(${JSON.stringify(path.join(__dirname, 'configService.js'))});
@@ -1297,16 +1305,33 @@ drive.uploadMeetingFolder = async ({ files }) => {
   fs.writeFileSync(${JSON.stringify(capturedPath)}, JSON.stringify(files.map(f => ({ name: f.name, content: f.content.toString() }))));
   return { uploaded: files.map(f => ({ name: f.name, id: 'stub' })) };
 };
-`);
-      await execFileAsync('node', ['--require', preloadPath, cliPath, 'google', 'upload', path.basename(folderPath)], {
-        env: { ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: uploadDataPath },
-      });
-      const uploaded = JSON.parse(fs.readFileSync(capturedPath, 'utf-8')) as { name: string; content: string }[];
-      assert.deepEqual(uploaded.map(f => f.name).sort(), [
-        'attachment.txt', 'meta.json', 'summary.md', 'transcript.md',
+`,
+      );
+      await execFileAsync(
+        'node',
+        ['--require', preloadPath, cliPath, 'google', 'upload', path.basename(folderPath)],
+        {
+          env: { ...process.env, NODE_ENV: 'test', LISTENER_DATA_PATH: uploadDataPath },
+        },
+      );
+      const uploaded = JSON.parse(fs.readFileSync(capturedPath, 'utf-8')) as {
+        name: string;
+        content: string;
+      }[];
+      assert.deepEqual(uploaded.map((f) => f.name).sort(), [
+        'attachment.txt',
+        'meta.json',
+        'summary.md',
+        'transcript.md',
       ]);
-      assert.equal(uploaded.find(f => f.name === 'attachment.txt')?.content, 'meeting attachment');
-      assert.equal(fs.readFileSync(path.join(folderPath, 'live-hints.json'), 'utf-8'), 'private hint evidence');
+      assert.equal(
+        uploaded.find((f) => f.name === 'attachment.txt')?.content,
+        'meeting attachment',
+      );
+      assert.equal(
+        fs.readFileSync(path.join(folderPath, 'live-hints.json'), 'utf-8'),
+        'private hint evidence',
+      );
     } finally {
       rmDir(uploadDataPath);
     }

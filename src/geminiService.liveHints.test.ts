@@ -147,11 +147,18 @@ describe('GeminiService.generateLiveHints', () => {
     restore = await swapProviderForTest(faux.provider);
     const seen: { model: string; key: string | undefined }[] = [];
     faux.setResponses(
-      ['{"hints":[]}', 'translated'].map((text) =>
-        (_context: unknown, options: { apiKey?: string } | undefined, _state: unknown, model: { id: string }) => {
-          seen.push({ model: model.id, key: options?.apiKey });
-          return Object.assign(pi.fauxAssistantMessage(text), { rawStopReason: 'completed' });
-        }),
+      ['{"hints":[]}', 'translated'].map(
+        (text) =>
+          (
+            _context: unknown,
+            options: { apiKey?: string } | undefined,
+            _state: unknown,
+            model: { id: string },
+          ) => {
+            seen.push({ model: model.id, key: options?.apiKey });
+            return Object.assign(pi.fauxAssistantMessage(text), { rawStopReason: 'completed' });
+          },
+      ),
     );
     let opened = 0;
     const auth: ChatGPTAuthLike = {
@@ -162,7 +169,10 @@ describe('GeminiService.generateLiveHints', () => {
         return {
           profileId,
           getAccessToken: async () => 'siwc-access-token',
-          listModels: async () => [{ slug: 'gpt-account-model', display_name: 'Configured model' }, { slug: 'gpt-6-luna', display_name: 'Luna' }],
+          listModels: async () => [
+            { slug: 'gpt-account-model', display_name: 'Configured model' },
+            { slug: 'gpt-6-luna', display_name: 'Luna' },
+          ],
           isActive: () => true,
           endRejectedSession: async () => false,
         };

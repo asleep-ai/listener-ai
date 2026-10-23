@@ -301,7 +301,8 @@ async function loadRecordingHints(filePath: string, session: number): Promise<vo
     const result = await window.electronAPI.readRecordingLiveHints(filePath);
     if (session !== modalSession || !ensureTranscriptionModal()?.open) return;
     savedHintsStatus = result.success ? 'idle' : 'failed';
-    if (result.success && currentTranscriptionData) currentTranscriptionData.liveHints = result.liveHints;
+    if (result.success && currentTranscriptionData)
+      currentTranscriptionData.liveHints = result.liveHints;
     const wasActive = document.getElementById('recordingHints')?.classList.contains('active');
     renderRecordingHints(
       result.success ? result.liveHints : undefined,

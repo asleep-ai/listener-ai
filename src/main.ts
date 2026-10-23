@@ -493,7 +493,6 @@ const liveSessionService = new LiveSessionService({
 });
 onTextRouteChanged = () => liveSessionService.onTextRouteChanged();
 
-
 // Live captions keep running while the dialog is minimized or the window is
 // hidden (Cmd+W hides on macOS), so the renderer that captures their audio must
 // not be throttled then. Throttling is lifted only while a session runs, and

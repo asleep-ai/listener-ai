@@ -94,7 +94,10 @@ test('note history round-trips, remains separate from report, and survives regen
     } finally {
       fs.promises.stat = originalStat;
     }
-    assert.deepEqual((await readTranscription(folder, { includeLiveHints: true }))?.liveHints, history());
+    assert.deepEqual(
+      (await readTranscription(folder, { includeLiveHints: true }))?.liveHints,
+      history(),
+    );
     assert.equal(
       fs.readFileSync(path.join(folder, 'summary.md'), 'utf8').includes('Grounded hint'),
       false,
@@ -105,11 +108,20 @@ test('note history round-trips, remains separate from report, and survives regen
       dataPath,
       previousFolderPath: folder,
     });
-    assert.deepEqual((await readTranscription(folder, { includeLiveHints: true }))?.liveHints, history());
+    assert.deepEqual(
+      (await readTranscription(folder, { includeLiveHints: true }))?.liveHints,
+      history(),
+    );
     fs.writeFileSync(path.join(folder, LIVE_HINTS_FILE), '{broken');
-    assert.equal((await readTranscription(folder, { includeLiveHints: true }))?.liveHints, undefined);
+    assert.equal(
+      (await readTranscription(folder, { includeLiveHints: true }))?.liveHints,
+      undefined,
+    );
     fs.unlinkSync(path.join(folder, LIVE_HINTS_FILE));
-    assert.equal((await readTranscription(folder, { includeLiveHints: true }))?.liveHints, undefined);
+    assert.equal(
+      (await readTranscription(folder, { includeLiveHints: true }))?.liveHints,
+      undefined,
+    );
   } finally {
     fs.rmSync(dataPath, { recursive: true, force: true });
   }

@@ -93,7 +93,12 @@ describe('saved recording hints view', () => {
     render(undefined, 'Loading saved AI hints...');
     assert.equal(tabs.children[0], button);
     assert.equal(tabs.children.length, 1);
-    assert.match(descendants(panes).map((node) => node.textContent).join(' '), /불러오는 중/);
+    assert.match(
+      descendants(panes)
+        .map((node) => node.textContent)
+        .join(' '),
+      /불러오는 중/,
+    );
   });
   it('orders across sessions in recording time and keeps unsafe text literal with source and prior-version warnings', () => {
     const { panes, render } = fixture();

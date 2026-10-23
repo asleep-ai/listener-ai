@@ -165,12 +165,14 @@ describe('LiveHintEngine revised real-time defaults', () => {
     const saved = parseRecordingLiveHints({
       version: 1,
       recordingId: 'audio.webm',
-      sessions: [{
-        sessionId: 'live_test',
-        startedAt: new Date(1_700_000_000_000).toISOString(),
-        recordingOffsetMs: 0,
-        hints: [...archive.values()],
-      }],
+      sessions: [
+        {
+          sessionId: 'live_test',
+          startedAt: new Date(1_700_000_000_000).toISOString(),
+          recordingOffsetMs: 0,
+          hints: [...archive.values()],
+        },
+      ],
     });
     assert.ok(saved);
     const reconciled = saved.sessions[0].hints.find((hint) => hint.id === first.id);

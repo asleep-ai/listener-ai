@@ -24,12 +24,18 @@ function time(offset: number): string {
 }
 
 function bulb(): HTMLElement {
-  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg') as unknown as HTMLElement;
+  const icon = document.createElementNS(
+    'http://www.w3.org/2000/svg',
+    'svg',
+  ) as unknown as HTMLElement;
   icon.classList.add('recording-hint-icon');
   icon.setAttribute('viewBox', '0 0 24 24');
   icon.setAttribute('aria-hidden', 'true');
   const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  path.setAttribute('d', 'M9 18h6m-5 3h4m-2-20a7 7 0 0 0-4 12.75c.7.48 1 1.2 1 2.25h6c0-1.05.3-1.77 1-2.25A7 7 0 0 0 12 1Z');
+  path.setAttribute(
+    'd',
+    'M9 18h6m-5 3h4m-2-20a7 7 0 0 0-4 12.75c.7.48 1 1.2 1 2.25h6c0-1.05.3-1.77 1-2.25A7 7 0 0 0 12 1Z',
+  );
   path.setAttribute('fill', 'none');
   path.setAttribute('stroke', 'currentColor');
   path.setAttribute('stroke-width', '1.5');
@@ -110,7 +116,9 @@ export function renderRecordingHints(
     )
     .sort((a, b) => a.anchor - b.anchor);
   if (!cues.length) {
-    const emptyMessage = message ? messages[message] ?? message : '이 녹음에는 저장된 AI 힌트가 없습니다.';
+    const emptyMessage = message
+      ? (messages[message] ?? message)
+      : '이 녹음에는 저장된 AI 힌트가 없습니다.';
     const empty = text('p', emptyMessage);
     empty.className = 'recording-hints-empty';
     pane.append(empty);

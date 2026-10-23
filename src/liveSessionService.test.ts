@@ -22,7 +22,9 @@ import { makeTempDir, rmDir } from './test-helpers';
 let workDir: string;
 const ownedServices = new Set<LiveSessionService>();
 
-function createOwnedService(options: ConstructorParameters<typeof LiveSessionService>[0]): LiveSessionService {
+function createOwnedService(
+  options: ConstructorParameters<typeof LiveSessionService>[0],
+): LiveSessionService {
   const service = new LiveSessionService(options);
   ownedServices.add(service);
   return service;

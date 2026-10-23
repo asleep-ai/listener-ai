@@ -112,7 +112,8 @@ export function setupLiveHints(actions: {
       next = cues.find((cue) => cue.id === id && !cue.retracted);
     }
     if (!next) return;
-    previewReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    previewReturnFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
     previewId = next.id;
     preview.hidden = false;
     updatePreview(next);
@@ -146,10 +147,14 @@ export function setupLiveHints(actions: {
     const previous = previewReturnFocus;
     clearPreview(false);
     const canFocus = (node: HTMLElement | null | undefined): node is HTMLElement =>
-      !!node?.isConnected && node !== document.body && !node.closest('[inert], [hidden], dialog:not([open])') && node.checkVisibility();
+      !!node?.isConnected &&
+      node !== document.body &&
+      !node.closest('[inert], [hidden], dialog:not([open])') &&
+      node.checkVisibility();
     const fallback = cards.get(id || '')?.querySelector<HTMLElement>('summary');
-    const control = Array.from(document.querySelectorAll<HTMLElement>('#liveSessionPanel button, #liveSessionLauncher'))
-      .find(canFocus);
+    const control = Array.from(
+      document.querySelectorAll<HTMLElement>('#liveSessionPanel button, #liveSessionLauncher'),
+    ).find(canFocus);
     if (canFocus(previous)) previous.focus({ preventScroll: true });
     else if (canFocus(fallback)) fallback.focus({ preventScroll: true });
     else control?.focus({ preventScroll: true });
@@ -206,7 +211,10 @@ export function setupLiveHints(actions: {
       icon.setAttribute('aria-hidden', 'true');
       icon.classList.add('live-hint-icon');
       const bulb = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      bulb.setAttribute('d', 'M9 18h6m-5 3h4m-5.8-6.2A7 7 0 1 1 15.8 15.8c-.9.7-1.3 1.3-1.5 2.2h-4.6c-.2-.9-.6-1.5-1.5-2.2Z');
+      bulb.setAttribute(
+        'd',
+        'M9 18h6m-5 3h4m-5.8-6.2A7 7 0 1 1 15.8 15.8c-.9.7-1.3 1.3-1.5 2.2h-4.6c-.2-.9-.6-1.5-1.5-2.2Z',
+      );
       icon.append(bulb);
       const title = document.createElement('span');
       title.className = 'live-hint-title';
@@ -304,10 +312,7 @@ export function setupLiveHints(actions: {
     reconcile(sourceContainer, sourceButtons);
     const versions = details.querySelector<HTMLDetailsElement>('[data-hint-versions]')!;
     versions.hidden = !cue.history?.length;
-    text(
-      versions.firstElementChild as HTMLElement,
-      `이전 내용 (${cue.history?.length || 0})`,
-    );
+    text(versions.firstElementChild as HTMLElement, `이전 내용 (${cue.history?.length || 0})`);
     const versionList = versions.lastElementChild as HTMLOListElement;
     const previousVersions = new Map(
       Array.from(versionList.children).map((node) => [
@@ -429,8 +434,16 @@ export function setupLiveHints(actions: {
         ?.querySelector<HTMLElement>('summary')
         ?.focus({ preventScroll: true });
     const textControlFocused = focused?.matches('input, textarea') || focused?.isContentEditable;
-    const selectionRegion = selectionState?.anchor.parentElement?.closest('.live-hints-rail, #liveTranscriptList');
-    if (!textControlFocused && selectionRegion?.contains(selectionState?.focus || null) && selection && selectionState?.anchor.isConnected && selectionState.focus.isConnected) {
+    const selectionRegion = selectionState?.anchor.parentElement?.closest(
+      '.live-hints-rail, #liveTranscriptList',
+    );
+    if (
+      !textControlFocused &&
+      selectionRegion?.contains(selectionState?.focus || null) &&
+      selection &&
+      selectionState?.anchor.isConnected &&
+      selectionState.focus.isConnected
+    ) {
       selection.setBaseAndExtent(
         selectionState.anchor,
         selectionState.anchorOffset,

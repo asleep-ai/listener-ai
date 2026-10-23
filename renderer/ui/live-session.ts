@@ -1059,7 +1059,10 @@ export async function stopLiveSessionCapture(opts: { hidePanel?: boolean } = {})
   }
 }
 
-async function finishLiveSessionCapture(sessionId: string, opts: { hidePanel?: boolean }): Promise<void> {
+async function finishLiveSessionCapture(
+  sessionId: string,
+  opts: { hidePanel?: boolean },
+): Promise<void> {
   const mode = captureMode;
   setStatus('Finalizing live transcript...');
   updateAskEnabled();
@@ -1204,7 +1207,13 @@ function renderHintSnapshot(snapshot: LiveHintsSnapshot, readOnly = false): void
 
 function renderHintStatus(status: LiveHintsSnapshot['status'], readOnly = false): void {
   if (!readOnly) hintModeReady = true;
-  if (!readOnly && activeSessionId && !stoppingCapture && !finalizingCapture && status.state !== 'stopped')
+  if (
+    !readOnly &&
+    activeSessionId &&
+    !stoppingCapture &&
+    !finalizingCapture &&
+    status.state !== 'stopped'
+  )
     hints?.active(true);
   const labels = {
     off: '자동 생성 꺼짐',
