@@ -1,7 +1,7 @@
 import type {} from '../renderer/electronAPI';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { ReusableApp } from './support/reusable-app';
 import { visibleWindows } from './support/dialogs';
 
@@ -79,6 +79,28 @@ test('note-only meetings open by keyboard and refresh without audio actions', as
       (await page.evaluate(async (folder) => window.electronAPI.getSavedNote(folder), escaped))
         .success,
     ).toBe(false);
+    // A symlinked data root must still return the configured spelling the
+    // lexical export/cutoff guards compare against.
+    const aliasRoot = join(dataDir, 'linked-data-root');
+    symlinkSync(dataDir, aliasRoot, 'dir');
+    const aliasFolder = join(aliasRoot, 'transcriptions', basename(remote));
+    const aliased = await app.evaluate(
+      async ({ app, ipcMain }, { root, folder }) => {
+        const original = app.getPath('userData');
+        app.setPath('userData', root);
+        try {
+          return (await (ipcMain as any)._invokeHandlers.get('get-saved-note')({}, folder)) as {
+            success: boolean;
+            data?: { transcriptionPath: string };
+          };
+        } finally {
+          app.setPath('userData', original);
+        }
+      },
+      { root: aliasRoot, folder: aliasFolder },
+    );
+    expect(aliased.success).toBe(true);
+    expect(aliased.data?.transcriptionPath).toBe(aliasFolder);
     await page.evaluate(() =>
       (document.querySelector('dialog[open]') as HTMLDialogElement)?.close(),
     );
@@ -131,8 +153,11 @@ test('saved meetings remain available without a recordings directory', async () 
     // Simulate the missing-directory branch without replacing the shared
     // process's watched directory inode.
     const result = await app.evaluate(async ({ app, ipcMain }) => {
-      const fs = require('node:fs') as typeof import('node:fs');
-      const recordings = require('node:path').join(app.getPath('userData'), 'recordings');
+      // Playwright evaluates this outside a CommonJS scope, so require is undefined.
+      const fs = process.getBuiltinModule('node:fs');
+      const recordings = process
+        .getBuiltinModule('node:path')
+        .join(app.getPath('userData'), 'recordings');
       const original = fs.existsSync;
       fs.existsSync = (candidate) => (candidate === recordings ? false : original(candidate));
       try {

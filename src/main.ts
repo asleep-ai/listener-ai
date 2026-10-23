@@ -1816,14 +1816,17 @@ ipcMain.handle('get-saved-note', async (_, folderPath: string) => {
     return { success: false, error: 'Invalid transcription path' };
   }
   try {
-    const root = await fs.promises.realpath(getTranscriptionsDir(app.getPath('userData')));
+    const transcriptionsDir = getTranscriptionsDir(app.getPath('userData'));
+    const root = await fs.promises.realpath(transcriptionsDir);
     const canonicalPath = await fs.promises.realpath(folderPath);
     if (path.dirname(canonicalPath) !== root) {
       return { success: false, error: 'Invalid transcription path' };
     }
     const transcription = await readTranscription(canonicalPath);
     if (!transcription) return { success: false, error: 'Saved note is unavailable' };
-    return { success: true, data: savedNoteData(canonicalPath, transcription) };
+    // Return the configured-root spelling so the lexical export/cutoff guards accept it.
+    const notePath = path.join(transcriptionsDir, path.basename(canonicalPath));
+    return { success: true, data: savedNoteData(notePath, transcription) };
   } catch (error) {
     reportError(error, { operation: 'note.get', severity: 'warning' });
     return { success: false, error: 'Unable to read saved note' };
