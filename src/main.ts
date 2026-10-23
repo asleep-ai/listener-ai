@@ -1,3 +1,8 @@
+import {
+  finishRecordingWithHints,
+  parseRecordingLiveHints,
+  recordingHintsBelongToAudio,
+} from './recordingLiveHints';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -242,6 +247,15 @@ const meetingDetector = new MeetingDetectorService();
 const displayDetector = new DisplayDetectorService();
 let meetingAutoStartedRecording = false;
 let geminiService: GeminiService | null = null;
+// Live-hint fence for the text route: bumped whenever the text service is
+// rebuilt (provider, account, model or credentials). A hint result started
+// under an older epoch is discarded, so nothing from the former route leaks.
+let textRouteEpoch = 0;
+let onTextRouteChanged: (() => void) | null = null;
+function textRouteReplaced(): void {
+  textRouteEpoch += 1;
+  onTextRouteChanged?.();
+}
 let notionService: NotionService | null = null;
 let slackService: SlackService | null = null;
 let agentService: AgentService | null = null;
@@ -321,6 +335,7 @@ function applyChatGPTStatus(next: ChatGPTStatusPayload): void {
   configService.setChatGPTStatus(next);
   if (chatGPTBindingChanged(before, configService.getChatGPTStatus())) {
     geminiService = createGeminiService();
+    textRouteReplaced();
     agentService = null;
     broadcastConfigChanged();
   }
@@ -397,6 +412,7 @@ function ensureGeminiService(): GeminiService | null {
   syncChatGPTStatusForNewWork();
   if (geminiService) return geminiService;
   geminiService = createGeminiService();
+  textRouteReplaced();
   return geminiService;
 }
 
@@ -466,6 +482,8 @@ const liveSessionService = new LiveSessionService({
     knownWords: configService.getKnownWords(),
   }),
   createRealtimeClientConfig: createOpenAiRealtimeClientConfigForLive,
+  getTextRouteEpoch: () => textRouteEpoch,
+  getActiveRecording: () => audioRecorder.getActiveRecording(),
   emitEvent: (event) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('live-session-event', event);
@@ -473,6 +491,8 @@ const liveSessionService = new LiveSessionService({
   },
   onActiveChange: () => applyLiveCaptureThrottling(),
 });
+onTextRouteChanged = () => liveSessionService.onTextRouteChanged();
+
 
 // Live captions keep running while the dialog is minimized or the window is
 // hidden (Cmd+W hides on macOS), so the renderer that captures their audio must
@@ -488,11 +508,15 @@ function applyLiveCaptureThrottling(): void {
 // The renderer captures a live session's audio, so a session cannot outlive
 // it: after a reload or crash the provider would stay connected with nothing
 // to send. Finals already received stay in the snapshot for the next page.
-function endLiveSessionForRendererLoss(): void {
-  void liveSessionService.stopActive('renderer-lost').catch((err) => {
-    console.error('Failed to end live session after renderer loss:', err);
-    reportError(err, { operation: 'live.renderer-lost', severity: 'warning' });
-  });
+// Resolves once the provider drained, so a crash finalizer can wait for them.
+function endLiveSessionForRendererLoss(): Promise<void> {
+  return liveSessionService.stopActive('renderer-lost').then(
+    () => {},
+    (err) => {
+      console.error('Failed to end live session after renderer loss:', err);
+      reportError(err, { operation: 'live.renderer-lost', severity: 'warning' });
+    },
+  );
 }
 
 function registerGlobalShortcut() {
@@ -710,7 +734,7 @@ function createWindow() {
 
   mainWindow.on('closed', () => {
     rejectAllPendingConfirms();
-    endLiveSessionForRendererLoss();
+    void endLiveSessionForRendererLoss();
     mainWindow = null;
   });
 
@@ -719,7 +743,7 @@ function createWindow() {
   mainWindow.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
     if (isMainFrame && !isInPlace) {
       rejectAllPendingConfirms();
-      endLiveSessionForRendererLoss();
+      void endLiveSessionForRendererLoss();
     }
   });
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
@@ -729,7 +753,7 @@ function createWindow() {
       extra: { reason: details.reason, exitCode: details.exitCode },
     });
     rejectAllPendingConfirms();
-    endLiveSessionForRendererLoss();
+    const liveDrain = endLiveSessionForRendererLoss();
     // Close the recording file handle so the partial file is flushed and left on disk
     // instead of corrupted or locked open. User keeps whatever audio was streamed so far.
     if (audioRecorder.isRecording()) {
@@ -741,7 +765,8 @@ function createWindow() {
       trackFinalize(
         (async () => {
           try {
-            const r = await audioRecorder.stopRecording();
+            // The audio closes at once; hints wait for the live stop's late finals.
+            const r = await stopRecordingWithHints(liveDrain);
             if (r.success && r.filePath) {
               fireStoppedNotificationOnce();
               console.log(`Partial recording saved: ${r.filePath}`);
@@ -1072,7 +1097,7 @@ app.on('before-quit', async (event) => {
     console.warn('Quit requested during recording; finalizing partial file before exit');
     finalizeRecordingSession();
     try {
-      const r = await audioRecorder.stopRecording();
+      const r = await stopRecordingWithHints();
       if (r.success && r.filePath) {
         console.log(`Partial recording saved on quit: ${r.filePath}`);
         await remuxRecordingHeader(r.filePath);
@@ -1223,8 +1248,7 @@ ipcMain.handle('start-recording', async (_, payload: { title: string; mimeType: 
             if (!audioRecorder.isRecording()) return;
             console.warn('Renderer did not stop after auto-stop signal; finalizing partial file');
             finalizeRecordingSession();
-            audioRecorder
-              .stopRecording()
+            stopRecordingWithHints()
               .then((r) => {
                 if (r.success) fireStoppedNotificationOnce();
               })
@@ -1277,10 +1301,39 @@ ipcMain.on('recording-chunk', (_event, data: ArrayBuffer | Uint8Array) => {
   }
 });
 
+async function stopRecordingWithHints(liveDrain?: Promise<void>) {
+  return finishRecordingWithHints({
+    activeFilePath: audioRecorder.getActiveRecording()?.filePath,
+    stop: () => audioRecorder.stopRecording(),
+    hints: liveSessionService,
+    save: (filePath, liveHints) => metadataService.saveMetadata(filePath, { liveHints }),
+    onSaveError: (error) => {
+      console.error('Failed to persist recording hints:', error);
+      reportError(error, { operation: 'recording.saveLiveHints', severity: 'warning' });
+    },
+    liveDrain,
+  });
+}
+
+ipcMain.handle('read-recording-live-hints', async (_, filePath: string) => {
+  if (typeof filePath !== 'string' || !filePath || filePath.includes('\0'))
+    return { success: false, error: 'Invalid recording path' };
+  const metadata = await metadataService.getMetadata(filePath);
+  if (metadata && !recordingHintsBelongToAudio(filePath, metadata))
+    return { success: false, error: 'Recording metadata does not match this audio file' };
+  const note = metadata?.transcriptionPath
+    ? await readTranscription(metadata.transcriptionPath, { includeLiveHints: true })
+    : null;
+  return {
+    success: true,
+    liveHints: note?.liveHints ?? parseRecordingLiveHints(metadata?.liveHints),
+  };
+});
+
 ipcMain.handle('stop-recording', async (_, opts?: { liveNotes?: unknown }) => {
   try {
     finalizeRecordingSession();
-    const result = await audioRecorder.stopRecording();
+    const result = await stopRecordingWithHints();
     if (result.success) {
       fireStoppedNotificationOnce();
       if (result.filePath) {
@@ -1340,6 +1393,8 @@ async function remuxRecordingHeader(filePath: string): Promise<void> {
 ipcMain.handle('abort-recording', async () => {
   try {
     finalizeRecordingSession();
+    const recording = audioRecorder.getActiveRecording();
+    if (recording) liveSessionService.takeRecordingHints(recording.filePath);
     await audioRecorder.abortRecording();
     return { success: true };
   } catch (error) {
@@ -1369,6 +1424,7 @@ function applyConfigSideEffects(changed: Partial<AppConfig>): void {
     changed.sonioxApiKey !== undefined
   ) {
     geminiService = createGeminiService();
+    textRouteReplaced();
     liveTranscriptionService = null;
     agentService = null;
   }
@@ -1784,8 +1840,10 @@ function savedNoteData(
   transcription: NonNullable<Awaited<ReturnType<typeof readTranscription>>>,
   metadata: Record<string, any> = {},
 ) {
+  const reportMetadata = { ...metadata };
+  delete reportMetadata.liveHints;
   return {
-    ...metadata,
+    ...reportMetadata,
     transcriptionPath: folderPath,
     folderName: path.basename(folderPath),
     reportTitle: transcription.title,
@@ -1852,7 +1910,9 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
     }
 
     // Old format or missing folder fallback: inline data in metadata
-    return { success: true, data: metadata };
+    const reportMetadata = { ...metadata };
+    delete reportMetadata.liveHints;
+    return { success: true, data: reportMetadata };
   } catch (error) {
     reportError(error, { operation: 'metadata.get', severity: 'warning' });
     return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -1954,6 +2014,7 @@ ipcMain.handle(
           customFields: h.data.customFields ?? {},
           emoji: h.data.emoji,
           liveNotes: h.data.liveNotes,
+          liveHints: h.data.liveHints,
           highlights: h.data.highlights,
           notionPageUrl: h.data.notionPageUrl,
           supersededNotionPageUrl: h.data.supersededNotionPageUrl,
@@ -2234,6 +2295,7 @@ ipcMain.handle(
       offsetMs?: number;
       durationMs?: number;
       translation?: string;
+      sourceMissing?: boolean;
     },
   ) => {
     try {
@@ -2246,6 +2308,7 @@ ipcMain.handle(
         offsetMs: Number.isFinite(opts.offsetMs) ? Number(opts.offsetMs) : undefined,
         durationMs: Number.isFinite(opts.durationMs) ? Number(opts.durationMs) : undefined,
         translation: typeof opts.translation === 'string' ? opts.translation : undefined,
+        sourceMissing: opts.sourceMissing === true,
       });
       return { success: true };
     } catch (error) {
@@ -2301,6 +2364,15 @@ ipcMain.handle('live-session-stop', async (_, sessionId?: string) => {
     reportError(error, { operation: 'liveSession.stop', severity: 'warning' });
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
+});
+
+ipcMain.handle('live-session-begin-stop', async (_, sessionId?: string) => {
+  if (typeof sessionId !== 'string' || !sessionId) {
+    return { success: false, error: 'Missing live session id.' };
+  }
+  // A session that is already gone has nothing to fence.
+  liveSessionService.beginStop(sessionId);
+  return { success: true };
 });
 
 ipcMain.handle('live-session-snapshot', async () => ({

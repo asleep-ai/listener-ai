@@ -1401,3 +1401,37 @@ describe('SyncEngine: download atomicity (meta.json sentinel safety)', () => {
     assert.equal(audioEntry.cloudOnly, true);
   });
 });
+
+describe('SyncEngine: recording hint privacy', () => {
+  it('never uploads local hint evidence even with custom exclusions', async () => {
+    makeMeeting('private-hints', {
+      'summary.md': 'Ordinary report',
+      'live-hints.json': '{"private":"hint evidence"}',
+    });
+    const engine = new SyncEngine({
+      driveClient: mockClient.asDriveClient(),
+      transcriptionsDir,
+      syncStatePath,
+      excludeFilePatterns: [],
+    });
+    const result = await engine.syncOnce();
+    assert.ok(result.uploaded.includes('private-hints/summary.md'));
+    assert.ok(!result.uploaded.includes('private-hints/live-hints.json'));
+    assert.ok(mockClient.uploads.every((upload) => upload.name !== 'live-hints.json'));
+  });
+
+  it('never downloads remote hint evidence', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    mockClient.seedRemoteMeeting('remote-private-hints', appFolder.id, [
+      { name: 'summary.md', content: 'Ordinary report' },
+      { name: 'live-hints.json', content: '{"private":"hint evidence"}' },
+    ]);
+    const result = await makeEngine().syncOnce();
+    assert.ok(result.downloaded.includes('remote-private-hints/summary.md'));
+    assert.ok(!result.downloaded.includes('remote-private-hints/live-hints.json'));
+    assert.equal(
+      fs.existsSync(path.join(transcriptionsDir, 'remote-private-hints', 'live-hints.json')),
+      false,
+    );
+  });
+});

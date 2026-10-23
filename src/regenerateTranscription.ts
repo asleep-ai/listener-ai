@@ -32,6 +32,7 @@ import type { LostSegment } from './transcriptQuality';
 // Content files swapped by a regenerate, in `writeV2Files` order. meta.json is
 // handled separately and always swapped LAST so a folder only reports the new
 // note once every content file has landed.
+// live-hints.json belongs to the recording and is intentionally untouched by regeneration.
 const NOTE_CONTENT_FILES = [
   SUMMARY_FILE,
   KEY_POINTS_FILE,

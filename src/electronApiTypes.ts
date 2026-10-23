@@ -8,6 +8,7 @@ import type { ConfigValues, PayloadConfigKey } from './configKeys';
 import type { StreamingLiveSttProvider } from './liveSttProvider';
 import type { HighlightEntry } from './geminiService';
 import type { ActionItemGroup, SummarySection } from './meetingRecord';
+import type { LiveHintEvent, LiveHintsSnapshot } from './liveHintTypes';
 import type { LiveNote } from './outputService';
 import type { TranscriptCutoff } from './transcriptCutoff';
 import type {
@@ -18,6 +19,21 @@ import type {
 
 // Main-owned batch transcription/merge jobs, readable after a renderer reload.
 export type { TranscriptionJobExports, TranscriptionJobSnapshot, TranscriptionJobsList };
+
+// Live AI hints (additive; session memory only).
+export type {
+  LiveHint,
+  LiveHintApiStopResult,
+  LiveHintBasis,
+  LiveHintEvent,
+  LiveHintKind,
+  LiveHintSource,
+  LiveHintSourceCapability,
+  LiveHintSourceState,
+  LiveHintState,
+  LiveHintStatus,
+  LiveHintsSnapshot,
+} from './liveHintTypes';
 
 export interface TranscriptionErrorPayload {
   userMessage: string;
@@ -58,6 +74,9 @@ export type LiveTranscriptSegment = {
   translationError?: string;
   final: boolean;
   createdAt: string;
+  quality?: { flagged: boolean; reasons: string[] };
+  /** No original-language text arrived; `transcript` holds the translation. */
+  sourceMissing?: true;
 };
 
 export type LiveSessionStartResult = {
@@ -89,6 +108,7 @@ export type LiveSessionSnapshot = {
   interimTranslation: string;
   transcript: string;
   translation: string;
+  hints?: LiveHintsSnapshot;
 };
 
 export type LiveSessionEvent =
@@ -102,7 +122,8 @@ export type LiveSessionEvent =
   | { type: 'interim'; sessionId: string; text: string; offsetMs?: number }
   | { type: 'translationInterim'; sessionId: string; text: string; offsetMs?: number }
   | { type: 'segment'; sessionId: string; segment: LiveTranscriptSegment }
-  | { type: 'error'; sessionId: string; error: string };
+  | { type: 'error'; sessionId: string; error: string }
+  | LiveHintEvent;
 
 export type AgentConfirmRequest = {
   id: string;
@@ -168,6 +189,7 @@ export interface TranscriptCutoffNotePayload {
   actionItemGroups?: ActionItemGroup[];
   customFields?: Record<string, unknown>;
   emoji?: string;
+  liveHints?: import('./liveHintTypes').RecordingLiveHintsV1;
   liveNotes?: LiveNote[];
   highlights?: HighlightEntry[];
   notionPageUrl?: string;

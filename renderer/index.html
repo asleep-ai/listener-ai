@@ -64,6 +64,7 @@
         </p>
       </div>
 
+
       <div id="liveNotesPanel" class="live-notes-panel" style="display: none;">
         <div class="live-notes-header">
           <span class="live-notes-title">🗒️ Highlights</span>
@@ -111,32 +112,96 @@
               </button>
             </div>
           </div>
-          <div class="live-session-columns">
-            <section class="live-session-column" aria-labelledby="liveTranscriptHeading">
-              <h3 id="liveTranscriptHeading">Transcript</h3>
-              <div id="liveTranscriptList" class="live-session-list" aria-live="polite">
-                <p class="live-session-empty">Waiting for speech...</p>
+          <nav class="live-session-mobile-tabs" role="tablist" aria-label="실시간 화면">
+            <button
+              id="liveSessionHintsTab"
+              type="button"
+              role="tab"
+              aria-controls="liveSessionHints"
+              aria-selected="true"
+            >힌트</button>
+            <button
+              id="liveSessionConversationTab"
+              type="button"
+              role="tab"
+              aria-controls="liveSessionConversation"
+              aria-selected="false"
+            >대화</button>
+          </nav>
+          <div id="liveSessionWorkspace" class="live-session-workspace">
+            <section id="liveSessionConversation" class="live-session-conversation" aria-label="실시간 대화">
+              <div class="live-caption-tabs" role="tablist" aria-label="자막 보기">
+                <button
+                  id="liveCaptionTranscriptTab"
+                  type="button"
+                  role="tab"
+                  aria-controls="liveTranscriptColumn"
+                  aria-selected="true"
+                >Transcript</button>
+                <button
+                  id="liveCaptionTranslationTab"
+                  type="button"
+                  role="tab"
+                  aria-controls="liveTranslationColumn"
+                  aria-selected="false"
+                >Translation</button>
+              </div>
+              <div class="live-session-columns">
+                <section
+                  class="live-session-column"
+                  id="liveTranscriptColumn"
+                  role="tabpanel"
+                  aria-labelledby="liveCaptionTranscriptTab"
+                >
+                  <div id="liveTranscriptList" class="live-session-list" aria-live="polite">
+                    <p class="live-session-empty">Waiting for speech...</p>
+                  </div>
+                </section>
+                <section
+                  class="live-session-column"
+                  id="liveTranslationColumn"
+                  role="tabpanel"
+                  aria-labelledby="liveCaptionTranslationTab"
+                  hidden
+                >
+                  <div id="liveTranslationList" class="live-session-list" aria-live="polite">
+                    <p class="live-session-empty">Waiting for transcript...</p>
+                  </div>
+                </section>
               </div>
             </section>
-            <section class="live-session-column" id="liveTranslationColumn" aria-labelledby="liveTranslationHeading">
-              <h3 id="liveTranslationHeading">Translation</h3>
-              <div id="liveTranslationList" class="live-session-list" aria-live="polite">
-                <p class="live-session-empty">Waiting for transcript...</p>
+            <aside id="liveSessionHints" class="live-hints-rail" aria-label="실시간 힌트">
+              <p id="liveHintsError" class="live-hint-error" role="alert" hidden></p>
+              <p id="liveHintsStatus" class="live-hint-sr-only" role="status" aria-live="polite">대화를 기다리고 있습니다.</p>
+              <p id="liveHintsEvidenceStatus" class="live-hint-sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+              <p id="liveHintsActionStatus" class="live-hint-sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+              <p id="liveHintsCount" class="live-hint-sr-only" role="status" aria-live="polite">아직 힌트가 없습니다.</p>
+              <ol id="liveHintsCurrent" class="live-hints-list" aria-label="힌트 목록"></ol>
+            </aside>
+          </div>
+          <details id="liveSessionAsk" class="live-ask-panel">
+            <summary class="live-ask-summary">Ask about this session</summary>
+            <div class="live-ask-content">
+              <div class="live-ask-header">
+                <h3>Ask</h3>
               </div>
-            </section>
-          </div>
-          <div class="live-ask-panel">
-            <div class="live-ask-header">
-              <h3>Ask</h3>
+              <div class="chat-messages" id="liveChatMessages" role="log" aria-live="polite">
+                <p class="chat-empty">Ask about what has been heard so far.</p>
+              </div>
+              <form class="chat-input-row" id="liveChatForm">
+                <input
+                  type="text"
+                  id="liveChatInput"
+                  class="chat-input"
+                  placeholder="Ask about the live session..."
+                  autocomplete="off"
+                  spellcheck="false"
+                  disabled
+                />
+                <button type="submit" id="liveChatSend" class="chat-send-button" disabled>Send</button>
+              </form>
             </div>
-            <div class="chat-messages" id="liveChatMessages" role="log" aria-live="polite">
-              <p class="chat-empty">Ask about what has been heard so far.</p>
-            </div>
-            <form class="chat-input-row" id="liveChatForm">
-              <input type="text" id="liveChatInput" class="chat-input" placeholder="Ask about the live session..." autocomplete="off" spellcheck="false" disabled />
-              <button type="submit" id="liveChatSend" class="chat-send-button" disabled>Send</button>
-            </form>
-          </div>
+          </details>
         </div>
       </dialog>
 
@@ -741,6 +806,18 @@
       </div>
     </div>
   </dialog>
+
+  <p id="liveHintPreviewAnnouncement" class="live-hint-announcement" role="status" aria-live="polite" aria-atomic="true"></p>
+  <aside id="liveHintPreview" class="live-hint-preview" aria-label="새 힌트 미리보기" popover="manual" role="status" hidden>
+    <div id="liveHintPreviewContent">
+      <p id="liveHintPreviewMeta"></p>
+      <h4 id="liveHintPreviewTitle"></h4>
+      <p id="liveHintPreviewText"></p>
+    </div>
+    <div class="live-hint-preview-actions">
+      <button type="button" id="liveHintPreviewDismiss" aria-label="힌트 미리보기 닫기">닫기</button>
+    </div>
+  </aside>
 
   <script type="module" src="./main.ts"></script>
 </body>

@@ -127,6 +127,12 @@ export interface UsageContext {
   kind: UsageKind;
   session?: CostSession;
   transcriptionRef?: string;
+  /**
+   * The request carries live meeting speech (live hints) that an upstream
+   * error message may quote back: log and throw only codes and counts, never
+   * the provider's error text.
+   */
+  privateText?: boolean;
 }
 
 // Gemini only: ChatGPT models are account-discovered (ChatGPTBinding.model()
@@ -210,6 +216,11 @@ function adjustOptionsForModel(
   };
   return {
     ...rest,
+    // Only the hint-specific Luna clone opts into its verified low effort.
+    // Other account models retain the existing SIWC reasoning defaults.
+    ...(model.id === 'gpt-6-luna' && model.reasoning && _reasoning === 'low'
+      ? { reasoning: 'low' }
+      : {}),
     // The OpenAI SDK adds OpenAI-Organization / OpenAI-Project from the
     // OPENAI_ORG_ID / OPENAI_PROJECT_ID environment. Those select API-platform
     // billing scopes and do not belong on a ChatGPT plan request; a null
@@ -256,6 +267,12 @@ function assertChatGPTCompleted(response: AssistantMessage): void {
   }
 }
 
+function isAbortError(error: unknown): boolean {
+  return (
+    !!error && typeof error === 'object' && (error as { name?: unknown }).name === 'AbortError'
+  );
+}
+
 // Shared instrumentation + error/abort promotion for both `complete()` and
 // `completeSimple()`. pi-ai surfaces upstream failures via stopReason='error'
 // rather than throwing, and 'aborted' returns a partial message; both must be
@@ -271,16 +288,38 @@ async function runPiAiCall(
 ): Promise<AssistantMessage> {
   const tag = `[pi-ai ${model.provider}/${model.id}]`;
   const startedAt = Date.now();
+  const privateText = usageContext?.privateText === true;
   console.log(`${tag} -> ${summarizeContextSize(context)}`);
-  const response = await call();
+  let response: AssistantMessage;
+  try {
+    response = await call();
+  } catch (error) {
+    if (!privateText || isAbortError(error)) throw error;
+    console.log(`${tag} <- threw (${error instanceof Error ? error.name : typeof error})`);
+    throw new Error(`Pi-ai ${model.provider}/${model.id} failed (provider error).`);
+  }
   const elapsed = Date.now() - startedAt;
   const stop = response.stopReason ?? 'unknown';
   const textChars = extractFinalText(response).length;
+  const errorNote = !response.errorMessage
+    ? ''
+    : privateText
+      ? ` errorChars=${response.errorMessage.length}`
+      : ` errorMessage=${response.errorMessage.slice(0, 300)}`;
   console.log(
-    `${tag} <- ${elapsed}ms stop=${stop} textChars=${textChars} usage=in:${response.usage?.input ?? '?'}/out:${response.usage?.output ?? '?'}${response.errorMessage ? ` errorMessage=${response.errorMessage.slice(0, 300)}` : ''}`,
+    `${tag} <- ${elapsed}ms stop=${stop} textChars=${textChars} usage=in:${response.usage?.input ?? '?'}/out:${response.usage?.output ?? '?'}${errorNote}`,
   );
   if (isChatGPTModel(model) && response.stopReason !== 'aborted') {
-    assertChatGPTCompleted(response);
+    try {
+      assertChatGPTCompleted(response);
+    } catch (error) {
+      if (!privateText || !(error instanceof ChatGPTInferenceError)) throw error;
+      // Same code and user message, without the raw upstream text.
+      throw new ChatGPTInferenceError(error.code, error.userMessage, {
+        manageUsage: error.manageUsageUrl !== undefined,
+        status: error.status,
+      });
+    }
   }
   // Record cost only on successful turns -- error/aborted paths throw below
   // (a ChatGPT turn that did not complete was rejected just above).
@@ -311,7 +350,9 @@ async function runPiAiCall(
   }
   if (response.stopReason === 'error') {
     throw new Error(
-      `Pi-ai ${model.provider}/${model.id} failed: ${response.errorMessage ?? 'no errorMessage'}`,
+      privateText
+        ? `Pi-ai ${model.provider}/${model.id} failed (provider error).`
+        : `Pi-ai ${model.provider}/${model.id} failed: ${response.errorMessage ?? 'no errorMessage'}`,
     );
   }
   if (response.stopReason === 'aborted') {

@@ -133,7 +133,7 @@ export class ChatGPTBinding {
   private readonly authOverride?: ChatGPTAuthLike;
   private readonly sessionPollMs: number;
   private bound?: Promise<ChatGPTAuthSession>;
-  private resolvedModel?: Promise<PiAiModel>;
+  private readonly resolvedModels = new Map<string, Promise<PiAiModel>>();
   // The bearer each in-flight `run()` last fetched, keyed by the signal that
   // run hands its call, so a 401 ends the session that sent that exact token.
   private readonly runTokens = new WeakMap<AbortSignal, string | undefined>();
@@ -304,14 +304,17 @@ export class ChatGPTBinding {
   }
 
   /**
-   * The account-discovered model, resolved once per binding. A configured
-   * slug the account does not list is an error, never a substitution. The
+   * The account-discovered model, resolved once per slug on the same binding.
+   * A configured slug the account does not list is an error, never a substitution. The
    * discovery is shared and runs under no caller's signal; `signal` only
    * ends this caller's wait.
    */
-  model(signal?: AbortSignal): Promise<PiAiModel> {
+  model(signal?: AbortSignal, modelOverride?: string): Promise<PiAiModel> {
     if (signal?.aborted) return Promise.reject(abortReason(signal));
-    if (!this.resolvedModel) {
+    const requestedModel = modelOverride?.trim() || this.configuredModel;
+    const cacheKey = requestedModel ?? '';
+    let resolvedModel = this.resolvedModels.get(cacheKey);
+    if (!resolvedModel) {
       const resolving = (async () => {
         const listed = await this.listModels();
         if (listed.length === 0) {
@@ -320,12 +323,12 @@ export class ChatGPTBinding {
             'This ChatGPT account lists no models available for plan usage.',
           );
         }
-        if (!this.configuredModel) return buildChatGPTModel(listed[0]);
-        const match = listed.find((entry) => entry.slug === this.configuredModel);
+        if (!requestedModel) return buildChatGPTModel(listed[0]);
+        const match = listed.find((entry) => entry.slug === requestedModel);
         if (!match) {
           throw new ChatGPTBindingError(
             'model_unavailable',
-            `ChatGPT model "${this.configuredModel}" is not available to this account. Choose one of: ${listed
+            `ChatGPT model "${requestedModel}" is not available to this account. Choose one of: ${listed
               .map((entry) => entry.slug)
               .join(', ')} (Settings, or \`listener chatgpt models\`).`,
           );
@@ -333,10 +336,11 @@ export class ChatGPTBinding {
         return buildChatGPTModel(match);
       })();
       resolving.catch(() => {
-        if (this.resolvedModel === resolving) this.resolvedModel = undefined;
+        if (this.resolvedModels.get(cacheKey) === resolving) this.resolvedModels.delete(cacheKey);
       });
-      this.resolvedModel = resolving;
+      this.resolvedModels.set(cacheKey, resolving);
+      resolvedModel = resolving;
     }
-    return untilAborted(this.resolvedModel, signal);
+    return untilAborted(resolvedModel, signal);
   }
 }

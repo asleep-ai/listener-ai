@@ -121,3 +121,106 @@ describe('piAiClient.getModel', () => {
     await assert.rejects(getModel('chatgpt', 'gpt-anything'), /signed-in account/);
   });
 });
+
+// Live hints send meeting speech as the prompt; an upstream error message can
+// quote that prompt back. With `privateText` the wrapper must log and throw
+// only codes and counts, never the provider's error text.
+describe('piAiClient private request text', () => {
+  const ECHO = 'SECRET-MEETING-SPEECH the acquisition closes on Friday';
+
+  async function captureLogs<T>(
+    fn: () => Promise<T>,
+  ): Promise<{ lines: string[]; error: unknown }> {
+    const lines: string[] = [];
+    const original = { log: console.log, warn: console.warn, error: console.error };
+    const sink = (...args: unknown[]) => lines.push(args.map(String).join(' '));
+    console.log = sink;
+    console.warn = sink;
+    console.error = sink;
+    let error: unknown;
+    try {
+      await fn();
+    } catch (e) {
+      error = e;
+    } finally {
+      Object.assign(console, original);
+    }
+    return { lines, error };
+  }
+
+  it('redacts a Gemini error message that echoes the prompt', async () => {
+    const { pi, faux } = await installFaux({
+      api: 'google-generative-ai',
+      provider: 'google',
+      models: [{ id: 'gemini-3.5-flash' }],
+    });
+    faux.setResponses([
+      pi.fauxAssistantMessage('', { stopReason: 'error', errorMessage: `400 bad input: ${ECHO}` }),
+    ]);
+    const model = await getModel('gemini', 'gemini-3.5-flash');
+    const { lines, error } = await captureLogs(() =>
+      completeSimple(
+        model,
+        { messages: [{ role: 'user', content: ECHO, timestamp: Date.now() }] },
+        { apiKey: 'unused-for-faux' },
+        { kind: 'live-hints', privateText: true },
+      ),
+    );
+    assert.ok(error instanceof Error, 'the failure still throws');
+    assert.ok(!error.message.includes('SECRET-MEETING-SPEECH'), error.message);
+    assert.ok(lines.length > 0, 'the call is still logged');
+    for (const line of lines) assert.ok(!line.includes('SECRET-MEETING-SPEECH'), line);
+    assert.ok(
+      lines.some((l) => /errorChars=\d+/.test(l)),
+      'logs the error length instead',
+    );
+  });
+
+  it('redacts a ChatGPT error message that echoes the prompt, keeping its code', async () => {
+    const { pi, faux } = await installFaux({
+      api: 'openai-responses',
+      provider: 'chatgpt',
+      models: [{ id: 'gpt-test' }],
+    });
+    faux.setResponses([
+      pi.fauxAssistantMessage('', {
+        stopReason: 'error',
+        errorMessage: `(429): subscription_sharing_usage_limit_exceeded ${ECHO}`,
+      }),
+    ]);
+    const model = faux.getModel('gpt-test')!;
+    const { lines, error } = await captureLogs(() =>
+      completeSimple(
+        model,
+        { messages: [{ role: 'user', content: ECHO, timestamp: Date.now() }] },
+        { apiKey: 'unused-for-faux' },
+        { kind: 'live-hints', privateText: true },
+      ),
+    );
+    assert.ok(error instanceof Error);
+    assert.equal((error as { code?: string }).code, 'usage_limit_exceeded');
+    assert.ok(!error.message.includes('SECRET-MEETING-SPEECH'), error.message);
+    for (const line of lines) assert.ok(!line.includes('SECRET-MEETING-SPEECH'), line);
+  });
+
+  it('keeps the provider error text for other tasks', async () => {
+    const { pi, faux } = await installFaux({
+      api: 'google-generative-ai',
+      provider: 'google',
+      models: [{ id: 'gemini-3.5-flash' }],
+    });
+    faux.setResponses([
+      pi.fauxAssistantMessage('', { stopReason: 'error', errorMessage: 'quota exhausted' }),
+    ]);
+    const model = await getModel('gemini', 'gemini-3.5-flash');
+    const { error } = await captureLogs(() =>
+      completeSimple(
+        model,
+        { messages: [{ role: 'user', content: 'hi', timestamp: Date.now() }] },
+        { apiKey: 'unused-for-faux' },
+        { kind: 'summary' },
+      ),
+    );
+    assert.match((error as Error).message, /quota exhausted/);
+  });
+});

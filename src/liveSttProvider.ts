@@ -53,6 +53,8 @@ export interface LiveSttCallbacks {
     offsetMs?: number;
     durationMs?: number;
     translation?: string;
+    /** No original-language text arrived; `text` carries the translation instead. */
+    sourceMissing?: boolean;
   }): void;
   onError(error: Error): void;
 }
@@ -414,6 +416,7 @@ class OpenAiRealtimeTranslationSession implements LiveSttSession {
       callbacks.onFinal({
         text: text || translation,
         translation: translation || undefined,
+        sourceMissing: !text || undefined,
       });
     }
   }
@@ -698,6 +701,7 @@ export class GeminiLiveSession implements LiveSttSession {
     this.callbacks.onFinal({
       text: text || translation,
       translation: translation || undefined,
+      sourceMissing: !text || undefined,
     });
     this.inputTranscript = '';
     this.outputTranscript = '';

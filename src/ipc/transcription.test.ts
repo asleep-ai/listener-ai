@@ -111,6 +111,65 @@ describe('transcribe-audio save/rename ordering', () => {
     return JSON.parse(fs.readFileSync(path.join(folderPath, META_JSON), 'utf-8'));
   }
 
+  function hintHistory() {
+    return {
+      version: 1,
+      recordingId: 'original',
+      sessions: [
+        {
+          sessionId: 's1',
+          startedAt: '2025-07-10T01:34:07.679Z',
+          recordingOffsetMs: 0,
+          hints: [
+            {
+              id: 'h1',
+              sessionId: 's1',
+              kind: 'term',
+              text: 'Meeting term',
+              basis: ['transcript'],
+              sourceState: 'final',
+              sourceSegmentIds: ['source'],
+              sources: [{ ref: 'source', state: 'final', text: 'Meeting source', offsetMs: 1000 }],
+              trigger: 'auto',
+              revision: 1,
+              createdAt: '2025-07-10T01:34:09.679Z',
+              offsetMs: 2000,
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  for (const owned of [true, false]) {
+    it(`rename ${owned ? 'preserves owned' : 'rejects foreign'} recording hints`, async () => {
+      const untitled = path.join(recordingsDir, `Untitled_Meeting_${TS}.webm`);
+      fs.writeFileSync(untitled, 'audio-bytes');
+      fs.mkdirSync(metadataDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(metadataDir, `Untitled_Meeting_${TS}.json`),
+        JSON.stringify({
+          filePath: owned ? untitled : path.join(dataPath, 'other', path.basename(untitled)),
+          liveHints: hintHistory(),
+          liveNotes: [{ offsetMs: 1000, text: 'Legacy note' }],
+        }),
+      );
+      const result = await transcribe(untitled);
+      assert.equal(result.success, true);
+      const renamed = path.join(recordingsDir, `Weekly_Sync_${TS}.webm`);
+      const sidecar = JSON.parse(
+        fs.readFileSync(path.join(metadataDir, `Weekly_Sync_${TS}.json`), 'utf8'),
+      );
+      assert.equal(sidecar.filePath, renamed);
+      assert.deepEqual(sidecar.liveHints, owned ? hintHistory() : undefined);
+      assert.deepEqual(sidecar.liveNotes, [{ offsetMs: 1000, text: 'Legacy note' }]);
+      assert.deepEqual(
+        (await readTranscription(result.transcriptionPath!, { includeLiveHints: true }))?.liveHints,
+        owned ? hintHistory() : undefined,
+      );
+    });
+  }
+
   it('saves meta.audioFile as the renamed recording path', async () => {
     const untitled = path.join(recordingsDir, `Untitled_Meeting_${TS}.webm`);
     fs.writeFileSync(untitled, 'audio-bytes');
@@ -165,7 +224,10 @@ describe('transcribe-audio save/rename ordering', () => {
     fs.writeFileSync(untitled, 'audio-bytes');
     fs.mkdirSync(metadataDir);
     const oldSidecar = path.join(metadataDir, `Untitled_Meeting_${TS}.json`);
-    fs.writeFileSync(oldSidecar, JSON.stringify({ filePath: untitled, title: 'Untitled' }));
+    fs.writeFileSync(
+      oldSidecar,
+      JSON.stringify({ filePath: untitled, title: 'Untitled', liveHints: hintHistory() }),
+    );
 
     const service = require('../services/metadataService').metadataService as {
       saveMetadata: (file: string, metadata: unknown) => Promise<void>;
@@ -197,6 +259,7 @@ describe('transcribe-audio save/rename ordering', () => {
       assert.ok(fs.existsSync(untitled));
       assert.ok(!fs.existsSync(renamed));
       assert.ok(fs.existsSync(oldSidecar));
+      assert.deepEqual(JSON.parse(fs.readFileSync(oldSidecar, 'utf8')).liveHints, hintHistory());
       const notesDir = path.join(dataPath, 'transcriptions');
       assert.ok(!fs.existsSync(notesDir) || fs.readdirSync(notesDir).length === 0);
     } finally {

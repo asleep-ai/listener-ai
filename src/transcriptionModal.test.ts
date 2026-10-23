@@ -29,6 +29,9 @@ describe('transcription modal session ownership', () => {
   let setupReady: boolean;
   let setupChecks: unknown[];
   let chatScopes: (string | null)[];
+  let hintReads: ReturnType<typeof deferred<any>>[];
+  let renderedHints: unknown[];
+  let renderedHintMessages: unknown[];
 
   before(async () => {
     const { build } = require('vite');
@@ -74,6 +77,9 @@ describe('transcription modal session ownership', () => {
     setupReady = true;
     setupChecks = [];
     chatScopes = [];
+    hintReads = [];
+    renderedHints = [];
+    renderedHintMessages = [];
     const dependencies = {
       getDom: () => ({ progressContainer: elements.progressContainer }),
       resetModalChatFor(folderName: string | null) {
@@ -87,6 +93,10 @@ describe('transcription modal session ownership', () => {
       structuredToMarkdown: (data: any, tab: string) => data[tab] ?? '',
       renderMarkdown: (value: string) => value,
       renderDynamicFields() {},
+      renderRecordingHints(history: unknown, message?: string) {
+        renderedHints.push(history);
+        renderedHintMessages.push(message);
+      },
       refreshRecordingsList: async () => {
         refreshes++;
       },
@@ -118,6 +128,11 @@ describe('transcription modal session ownership', () => {
             return response.promise;
           },
           getConfig: async () => ({}),
+          readRecordingLiveHints: () => {
+            const pending = deferred<any>();
+            hintReads.push(pending);
+            return pending.promise;
+          },
         },
       },
     });
@@ -147,6 +162,66 @@ describe('transcription modal session ownership', () => {
     assert.deepEqual(errors, []);
     assert.equal(chatScopes.at(-1), 'saved-b-folder');
   }
+
+  it('does not render an older recording history after selecting another note', async () => {
+    modal.showSavedTranscript('/first.wav', 'First', {});
+    modal.showSavedTranscript('/second.wav', 'Second', {});
+    assert.equal(hintReads.length, 2);
+    const history = { version: 1, recordingId: 'second', sessions: [] };
+    hintReads[1].resolve({ success: true, liveHints: history });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    hintReads[0].resolve({ success: true, liveHints: { recordingId: 'first' } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(renderedHints.at(-1), history);
+  });
+
+  it('shows empty hints for a Drive-only note without requesting a local sidecar', async () => {
+    modal.showSavedTranscript('', 'Drive note', { summary: 'Remote report' }, 'drive-folder');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(hintReads.length, 0);
+    assert.equal(renderedHints.at(-1), undefined);
+    assert.equal(renderedHintMessages.at(-1), undefined);
+    assert.deepEqual(errors, []);
+  });
+
+  it('keeps a saved note in loading state until the sidecar resolves to an empty history', async () => {
+    modal.showSavedTranscript('/legacy.wav', 'Legacy', {});
+    assert.equal(renderedHintMessages.at(-1), 'Loading saved AI hints...');
+    assert.equal(hintReads.length, 1);
+    const emptyHistory = { version: 1, recordingId: 'legacy', sessions: [] };
+    hintReads[0].resolve({ success: true, liveHints: emptyHistory });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(renderedHints.at(-1), emptyHistory);
+    assert.equal(renderedHintMessages.at(-1), undefined);
+  });
+
+  it('preserves the saved-history load error through later report re-rendering', async () => {
+    modal.showSavedTranscript('/broken.wav', 'Broken', {});
+    assert.equal(renderedHintMessages.at(-1), 'Loading saved AI hints...');
+    hintReads[0].reject(new Error('sidecar read failed'));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(renderedHintMessages.at(-1), 'Saved AI hints could not be loaded.');
+
+    modal.populateTranscriptionUI({ summary: 'Report refreshed after cutoff' });
+    assert.equal(renderedHintMessages.at(-1), 'Saved AI hints could not be loaded.');
+  });
+
+  it('does not update a closed modal when recording history arrives', async () => {
+    selectSavedNote();
+    const count = renderedHints.length;
+    elements.transcriptionModal.open = false;
+    hintReads[0].resolve({ success: true, liveHints: { recordingId: 'closed' } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(renderedHints.length, count);
+  });
+
+  it('opens saved hints without discarding the associated transcription report', () => {
+    const liveHints = { version: 1, recordingId: 'saved', sessions: [] };
+    modal.showRecordingHints('/saved.wav', 'Saved', { summary: 'Saved report content', liveHints });
+    assert.match(elements.summary.innerHTML, /Saved report content/);
+    assert.equal(renderedHints.at(-1), liveHints);
+    assert.equal(hintReads.length, 0);
+  });
 
   it('sends nothing when the AI or transcription setup is missing', async () => {
     setupReady = false;

@@ -114,6 +114,24 @@ function summaryContext(): Context {
 }
 
 describe('ChatGPT route: outgoing request contract', () => {
+  it('sends low reasoning for the hint-only Luna clone through the SIWC allowlist', async () => {
+    const captured: Captured = {};
+    const luna = buildChatGPTModel({ slug: 'gpt-6-luna', display_name: 'Luna' });
+    await completeSimple({ ...luna, reasoning: true }, summaryContext(), {
+      apiKey: 'siwc-access-token',
+      reasoning: 'low',
+      temperature: 0.2,
+      maxTokens: 4096,
+      fetch: fakeFetch(textEvents('done', completed), captured),
+    } as never);
+    assert.equal(captured.body?.model, 'gpt-6-luna');
+    assert.equal((captured.body?.reasoning as { effort?: string } | undefined)?.effort, 'low');
+    for (const field of FORBIDDEN_FIELDS) {
+      assert.ok(!(field in captured.body!), `forbidden field ${field} must not be sent`);
+    }
+    assert.equal(luna.reasoning, false, 'the cached/default model stays unchanged');
+  });
+
   it('posts to the public /v1/responses with the bearer and a SIWC-clean body', async () => {
     const captured: Captured = {};
     const response = await completeSimple(model, summaryContext(), {

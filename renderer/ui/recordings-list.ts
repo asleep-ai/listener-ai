@@ -20,6 +20,7 @@ import {
   prepareTranscriptionModal,
   setModalProgress,
   showSavedTranscript,
+  showRecordingHints,
   transcribeWithFfmpegRetry,
 } from './transcription-modal';
 import { activeJobForPath, activeMergeJob, onTranscriptionJobChange } from './transcription-jobs';
@@ -256,6 +257,7 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   // the whole-row click). The primary CTA (Transcribe / chevron entry) sits
   // last at the right edge.
   const menuItems = [
+    createMenuItem('view-hints-btn', 'View AI hints'),
     createMenuItem('merge-btn', 'Merge with other recordings…'),
     createMenuItem('reveal-btn', 'Show in Finder'),
     createMenuItem('export-m4a-btn', 'Export as M4A'),
@@ -265,6 +267,14 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
     menuItems.unshift(createMenuItem('regenerate-btn', 'Regenerate transcript'));
   }
   actions.append(...createMoreActionsMenu(recording.title, menuItems));
+  actions.querySelector('.view-hints-btn')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    showRecordingHints(
+      recording.path,
+      recording.title,
+      hasTranscript ? metadataResult?.data : undefined,
+    );
+  });
 
   if (hasTranscript) {
     const chevron = document.createElement('span');

@@ -1,3 +1,5 @@
+import { LIVE_HINTS_FILE, parseRecordingLiveHints } from './recordingLiveHints';
+import type { RecordingLiveHintsV1 } from './liveHintTypes';
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'node:crypto';
@@ -319,6 +321,7 @@ interface SummaryFrontmatter {
   transcribedAt: string;
   emoji?: string;
   mergedFrom?: string[];
+  liveHints?: RecordingLiveHintsV1;
   liveNotes?: LiveNote[];
   highlights?: HighlightEntry[];
   notionPageUrl?: string;
@@ -525,6 +528,7 @@ export interface SaveTranscriptionOptions {
   outputDir?: string; // override parent dir (for CLI --output)
   dataPath: string; // app data path (default location)
   mergedFrom?: string[]; // source folder names when this note was created by merging others
+  liveHints?: RecordingLiveHintsV1;
   liveNotes?: LiveNote[]; // timestamped notes captured during recording
   now?: Date; // test hook for deterministic v2 folder timestamps
 }
@@ -574,6 +578,7 @@ export function saveTranscription(opts: SaveTranscriptionOptions): string {
     audioFilePath: opts.audioFilePath,
     mergedFrom: opts.mergedFrom,
     liveNotes: opts.liveNotes,
+    liveHints: opts.liveHints,
   });
 
   return folderPath;
@@ -588,6 +593,7 @@ interface V2WriteInputs {
   result: TranscriptionResult;
   audioFilePath?: string;
   mergedFrom?: string[];
+  liveHints?: RecordingLiveHintsV1;
   liveNotes?: LiveNote[];
   /** Optional pre-existing exports (carried over by migration). */
   exports?: MeetingMetaV2['exports'];
@@ -596,6 +602,13 @@ interface V2WriteInputs {
 /** Write the full v2 file set into an existing folder. Overwrites whatever's there. */
 function writeV2Files(folderPath: string, inputs: V2WriteInputs): void {
   const highlights = getResultHighlights(inputs.result);
+  const liveHints = parseRecordingLiveHints(inputs.liveHints);
+  if (liveHints)
+    fs.writeFileSync(
+      path.join(folderPath, LIVE_HINTS_FILE),
+      JSON.stringify(liveHints, null, 2) + '\n',
+      'utf8',
+    );
 
   const meta: MeetingMetaV2 = {
     schemaVersion: META_SCHEMA_VERSION,
@@ -712,6 +725,7 @@ export function __saveTranscriptionLegacyV1ForTests(opts: SaveTranscriptionOptio
     emoji: opts.result.emoji,
     mergedFrom: opts.mergedFrom,
     liveNotes: opts.liveNotes,
+    liveHints: opts.liveHints,
     highlights,
     cost: opts.result.cost,
   });
@@ -826,6 +840,7 @@ export interface ReadTranscriptionResult {
   transcribedAt?: string;
   emoji?: string;
   mergedFrom?: string[];
+  liveHints?: RecordingLiveHintsV1;
   liveNotes?: LiveNote[];
   highlights?: HighlightEntry[];
   notionPageUrl?: string;
@@ -855,6 +870,8 @@ export interface ReadTranscriptionOptions {
    * file in the folder. The returned `transcript` field will be an empty
    * string. */
   skipTranscript?: boolean;
+  /** Load the recording hint archive only for explicit history requests. */
+  includeLiveHints?: boolean;
 }
 
 /**
@@ -984,6 +1001,7 @@ async function readTranscriptionUnlocked(
       emoji: meta.emoji,
       mergedFrom: meta.merge?.sourceIds,
       liveNotes,
+      liveHints: opts.includeLiveHints ? await readRecordingHintsFile(folderPath) : undefined,
       highlights,
       notionPageUrl: meta.exports?.notion?.pageUrl,
       supersededNotionPageUrl: meta.exports?.notionSuperseded?.pageUrl,
@@ -1667,5 +1685,18 @@ function readMetaJsonOrNull(folderPath: string): MeetingMetaV2 | null {
     return meta as MeetingMetaV2;
   } catch {
     return null;
+  }
+}
+
+async function readRecordingHintsFile(
+  folderPath: string,
+): Promise<RecordingLiveHintsV1 | undefined> {
+  try {
+    const filePath = path.join(folderPath, LIVE_HINTS_FILE);
+    const stat = await fs.promises.stat(filePath);
+    if (stat.size > 32 * 1024 * 1024) return;
+    return parseRecordingLiveHints(JSON.parse(await fs.promises.readFile(filePath, 'utf8')));
+  } catch {
+    return undefined;
   }
 }
