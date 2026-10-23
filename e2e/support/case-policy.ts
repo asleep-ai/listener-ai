@@ -19,6 +19,12 @@ export function classifyCase(file: string, title: string): CasePolicy {
             kind: 'shared',
             reason: 'Settings behavior uses isolated fixtures in one warm app.',
           };
+    case 'meeting-list.spec.ts':
+      return {
+        group: 'meeting-list',
+        kind: 'shared',
+        reason: 'Saved meeting fixtures reset within one hidden app.',
+      };
     case 'transcript-cutoff.spec.ts':
       return {
         group: 'cutoff',

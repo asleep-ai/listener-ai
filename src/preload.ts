@@ -438,6 +438,8 @@ const api = {
   getFileInfo: (filePath: string): Promise<FileInfoResult> => invoke('get-file-info', filePath),
 
   // Metadata handling
+  getSavedNote: (folderPath: string): Promise<Record<string, any>> =>
+    invoke('get-saved-note', folderPath),
   getMetadata: (filePath: string): Promise<Record<string, any> | null> =>
     invoke('get-metadata', filePath),
   saveMetadata: (filePath: string, metadata: any): Promise<{ success: boolean }> =>
