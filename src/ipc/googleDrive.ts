@@ -5,6 +5,7 @@ import {
   loginGoogleOAuth,
   resolveGoogleAccessToken,
 } from '../googleOAuth';
+import { syncChangedLocalNotes } from '../meetingList';
 import { getTranscriptionsDir } from '../outputService';
 import { reportError } from '../sentry';
 import { GoogleDriveClient, isTransientDriveError } from '../services/googleDriveService';
@@ -113,6 +114,10 @@ async function runGoogleSync(): Promise<SyncResult | undefined> {
       configSync: configService,
     });
     const result = await engine.syncOnce();
+    if (syncChangedLocalNotes(result)) {
+      const window = requireCtx().getMainWindow();
+      if (window && !window.isDestroyed()) window.webContents.send('recordings-changed');
+    }
     googleLastSyncedAt = new Date().toISOString();
     googleLastSyncResult = result;
     broadcastGoogleSyncStatus(result.errors.length > 0 ? 'error' : 'success', { result });

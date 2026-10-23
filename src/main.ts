@@ -33,6 +33,7 @@ import { getDataPath } from './dataPath';
 import { maybeAutoSync, refreshGoogleSyncTimer } from './ipc/googleDrive';
 import { registerAllIpc } from './ipc/register';
 import { pathKeys } from './transcriptionJobs';
+import { unlinkedNotes } from './meetingList';
 import { DisplayDetectorService } from './displayDetectorService';
 import { GeminiService, TranscriptionError, type TranscriptionErrorPayload } from './geminiService';
 import {
@@ -47,6 +48,7 @@ import { NotionService } from './notionService';
 import {
   autoMigrateLegacyOnStartup,
   gcLegacyBackups,
+  listTranscriptions,
   getTranscriptionsDir,
   type LiveNote,
   readTranscription,
@@ -1777,6 +1779,57 @@ ipcMain.handle('open-external', async (_, url: string) => {
 });
 
 // Metadata handlers
+function savedNoteData(
+  folderPath: string,
+  transcription: NonNullable<Awaited<ReturnType<typeof readTranscription>>>,
+  metadata: Record<string, any> = {},
+) {
+  return {
+    ...metadata,
+    transcriptionPath: folderPath,
+    folderName: path.basename(folderPath),
+    reportTitle: transcription.title,
+    reportSuggestedTitle: transcription.suggestedTitle,
+    generationId: transcription.generationId,
+    transcript: transcription.transcript,
+    summary: transcription.summary,
+    keyPoints: transcription.keyPoints,
+    actionItems: transcription.actionItems,
+    summarySections: transcription.summarySections,
+    actionItemGroups: transcription.actionItemGroups,
+    customFields: reportCustomFields(transcription, metadata.customFields),
+    emoji: transcription.emoji,
+    liveNotes: transcription.liveNotes ?? metadata.liveNotes,
+    highlights: transcription.highlights,
+    notionPageUrl: transcription.notionPageUrl,
+    supersededNotionPageUrl: transcription.supersededNotionPageUrl,
+    slackSentAt: transcription.slackSentAt,
+    slackError: transcription.slackError,
+    cost: transcription.cost,
+    transcriptCutoff: transcription.transcriptCutoff,
+    transcriptCutoffMismatch: transcription.transcriptCutoffMismatch,
+  };
+}
+
+ipcMain.handle('get-saved-note', async (_, folderPath: string) => {
+  if (typeof folderPath !== 'string') {
+    return { success: false, error: 'Invalid transcription path' };
+  }
+  try {
+    const root = await fs.promises.realpath(getTranscriptionsDir(app.getPath('userData')));
+    const canonicalPath = await fs.promises.realpath(folderPath);
+    if (path.dirname(canonicalPath) !== root) {
+      return { success: false, error: 'Invalid transcription path' };
+    }
+    const transcription = await readTranscription(canonicalPath);
+    if (!transcription) return { success: false, error: 'Saved note is unavailable' };
+    return { success: true, data: savedNoteData(canonicalPath, transcription) };
+  } catch (error) {
+    reportError(error, { operation: 'note.get', severity: 'warning' });
+    return { success: false, error: 'Unable to read saved note' };
+  }
+});
+
 ipcMain.handle('get-metadata', async (_, filePath: string) => {
   try {
     const metadata = await metadataService.getMetadata(filePath);
@@ -1788,30 +1841,7 @@ ipcMain.handle('get-metadata', async (_, filePath: string) => {
       if (transcription) {
         return {
           success: true,
-          data: {
-            ...metadata,
-            folderName: path.basename(metadata.transcriptionPath),
-            reportTitle: transcription.title,
-            reportSuggestedTitle: transcription.suggestedTitle,
-            generationId: transcription.generationId,
-            transcript: transcription.transcript,
-            summary: transcription.summary,
-            keyPoints: transcription.keyPoints,
-            actionItems: transcription.actionItems,
-            summarySections: transcription.summarySections,
-            actionItemGroups: transcription.actionItemGroups,
-            customFields: reportCustomFields(transcription, metadata.customFields),
-            emoji: transcription.emoji,
-            liveNotes: transcription.liveNotes ?? metadata.liveNotes,
-            highlights: transcription.highlights,
-            notionPageUrl: transcription.notionPageUrl,
-            supersededNotionPageUrl: transcription.supersededNotionPageUrl,
-            slackSentAt: transcription.slackSentAt,
-            slackError: transcription.slackError,
-            cost: transcription.cost,
-            transcriptCutoff: transcription.transcriptCutoff,
-            transcriptCutoffMismatch: transcription.transcriptCutoffMismatch,
-          },
+          data: savedNoteData(metadata.transcriptionPath, transcription, metadata),
         };
       }
       console.warn('Transcription folder missing or unreadable:', metadata.transcriptionPath);
@@ -1942,13 +1972,8 @@ ipcMain.handle('get-recordings', async () => {
   try {
     const recordingsDir = path.join(app.getPath('userData'), 'recordings');
 
-    // Ensure directory exists
-    if (!fs.existsSync(recordingsDir)) {
-      return { success: true, recordings: [] };
-    }
-
-    // Read all files in the recordings directory
-    const files = fs.readdirSync(recordingsDir);
+    // Notes can exist even when this device has never recorded audio.
+    const files = fs.existsSync(recordingsDir) ? fs.readdirSync(recordingsDir) : [];
 
     // Filter for audio files and get their stats. Skip per-file races so one
     // deleted recording does not make the whole list fail.
@@ -1997,7 +2022,17 @@ ipcMain.handle('get-recordings', async () => {
 
     recordings.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()); // Sort by newest first
 
-    return { success: true, recordings };
+    let notes: Awaited<ReturnType<typeof unlinkedNotes>> = [];
+    try {
+      notes = await unlinkedNotes({
+        notes: await listTranscriptions(app.getPath('userData'), 0),
+        recordings,
+        sidecarFor: (filePath) => metadataService.getMetadata(filePath),
+      });
+    } catch (error) {
+      reportError(error, { operation: 'notes.list', severity: 'warning' });
+    }
+    return { success: true, recordings, notes };
   } catch (error) {
     console.error('Error getting recordings:', error);
     reportError(error, { operation: 'recordings.list', severity: 'warning' });

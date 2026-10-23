@@ -7,15 +7,17 @@ packaged artifacts never share a process.
 | Project         |     Cases | Process lifetime                | State reset                                                                                         |
 | --------------- | --------: | ------------------------------- | --------------------------------------------------------------------------------------------------- |
 | settings        |         5 | One development process         | Raw config, client caches, renderer, synthetic files                                                |
+| meeting-list    |         2 | One development process         | Saved-note fixtures, config, renderer                                                               |
 | cutoff          |         2 | One development process         | Saved-note fixtures, config, renderer                                                               |
-| reload          |        22 | One development process         | Deferred jobs and exports, reservations, locks, IPC and provider overrides, renderer                |
+| reload          |        23 | One development process         | Deferred jobs and exports, reservations, locks, IPC and provider overrides, renderer                |
+| live            |         6 | One development process         | Synthetic live capture, providers, config, renderer                                                 |
 | chatgpt         |        22 | One packaged process            | Pending sign-in/preflight, auth and agent overrides, global fetch, IPC, raw config, synthetic files |
 | chatgpt-startup |         4 | Fresh packaged process per case | Independent startup configuration                                                                   |
 | hidden-startup  |         1 | Fresh development process       | Hidden construction contract                                                                        |
 | package-smoke   |         1 | Fresh packaged process          | Packaged boot contract                                                                              |
 | settings-shots  | 1, opt-in | Fresh development process       | Independent screenshot evidence                                                                     |
 
-The normal run discovers 58 cases and expects 10 process launches, with the
+The normal run discovers 67 cases and expects 12 process launches, with the
 optional screenshot case skipped. Enabling `LISTENER_E2E_SHOTS` adds one launch.
 These are expected budgets, not execution evidence.
 
@@ -119,3 +121,11 @@ it. The final PASS does not reclassify the earlier failure or prove that the
 previous input interference has been fixed.
 
 Execution evidence and review results are recorded in the pull request.
+
+## Saved-meeting list limits
+
+Only a recording sidecar's linked transcription is suppressed from saved-note
+rows. Independent reports sharing an audio file remain reachable, including old
+or transient duplicate reports. Note-only rows do not add deletion or audio
+hydration, and these tests do not establish real Drive or assistive-technology
+behavior.

@@ -6,6 +6,7 @@
 // list. Both use a monotonic token so a slow per-item metadata read can't
 // overwrite a fresher snapshot.
 
+import type { NoteListEntry } from '../../src/meetingList';
 import { getDom } from '../state';
 import { formatUsd } from '../../src/usageFormat';
 import { isActiveJob, jobMatchesPath } from '../../src/transcriptionJobView';
@@ -40,7 +41,7 @@ function keysForRow(item: HTMLElement): string[] {
 
 type CostSnapshotShape = { usd: number; modelUnknown?: boolean };
 
-type GetRecordingsResult = { success: boolean; recordings: Recording[] };
+type GetRecordingsResult = { success: boolean; recordings: Recording[]; notes?: NoteListEntry[] };
 type GetMetadataResult = {
   success: boolean;
   data?: Record<string, unknown> & { transcript?: unknown; cost?: CostSnapshotShape };
@@ -65,6 +66,8 @@ type MergeRecordingsResult = {
 // Monotonic token so a slow loadRecordings (per-item async metadata reads)
 // can't overwrite a fresher snapshot's render. Mirrors lastSearchToken.
 let lastLoadRecordingsToken = 0;
+let noteMetaId = 0;
+let noteOpenToken = 0;
 
 export async function loadRecordings(): Promise<void> {
   const { recordingsList } = getDom();
@@ -72,14 +75,36 @@ export async function loadRecordings(): Promise<void> {
   try {
     const result = (await window.electronAPI.getRecordings()) as unknown as GetRecordingsResult;
 
-    if (result.success && result.recordings.length > 0) {
+    if (result.success && (result.recordings.length > 0 || result.notes?.length)) {
       const items = await Promise.all(
-        result.recordings.map((recording) => createRecordingItem(recording)),
+        [
+          ...result.recordings.map((recording) => ({
+            date: new Date(recording.createdAt).getTime(),
+            create: () => createRecordingItem(recording),
+          })),
+          ...(result.notes ?? []).map((note) => ({
+            date: new Date(note.transcribedAt).getTime(),
+            create: () => createNoteItem(note),
+          })),
+        ]
+          .sort((a, b) => (b.date || 0) - (a.date || 0))
+          .map((entry) => entry.create()),
       );
       // Drop if a newer load started while we were awaiting metadata.
       if (myToken !== lastLoadRecordingsToken) return;
+      const focused = document.activeElement as HTMLElement | null;
+      const focusedRow = focused?.closest<HTMLElement>('.recording-item');
+      const focusIdentity =
+        focusedRow && recordingsList.contains(focusedRow)
+          ? (focusedRow.dataset.notePath ?? focusedRow.dataset.filepath)
+          : undefined;
       recordingsList.innerHTML = '';
       items.forEach((item) => recordingsList.appendChild(item));
+      if (focusIdentity) {
+        items
+          .find((item) => (item.dataset.notePath ?? item.dataset.filepath) === focusIdentity)
+          ?.focus();
+      }
     } else {
       if (myToken !== lastLoadRecordingsToken) return;
       recordingsList.innerHTML = '<p class="no-recordings">No recordings yet</p>';
@@ -89,6 +114,75 @@ export async function loadRecordings(): Promise<void> {
     console.error('Error loading recordings:', error);
     recordingsList.innerHTML = '<p class="no-recordings">Error loading recordings</p>';
   }
+}
+
+function createNoteItem(note: NoteListEntry): HTMLElement {
+  const item = document.createElement('div');
+  item.className = 'recording-item';
+  item.dataset.notePath = note.folderPath;
+  item.dataset.hasTranscript = 'true';
+  const status = document.createElement('span');
+  status.className = 'recording-status';
+  status.setAttribute('aria-hidden', 'true');
+  item.setAttribute('role', 'button');
+  item.tabIndex = 0;
+  item.setAttribute('aria-label', `Open transcript for ${note.title}`);
+  const info = document.createElement('div');
+  info.className = 'recording-info';
+  const title = document.createElement('h3');
+  title.textContent = note.title;
+  const meta = document.createElement('p');
+  meta.className = 'recording-meta';
+  meta.id = `saved-note-meta-${++noteMetaId}`;
+  item.setAttribute('aria-describedby', meta.id);
+  const date = new Date(note.transcribedAt);
+  meta.textContent = [
+    Number.isNaN(date.getTime()) ? '' : date.toLocaleString(),
+    note.audioAvailable ? '' : 'Audio not on this device',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  info.append(title, meta);
+  const chevron = document.createElement('span');
+  chevron.className = 'recording-chevron';
+  chevron.setAttribute('aria-hidden', 'true');
+  chevron.textContent = '›';
+  const actions = document.createElement('div');
+  actions.className = 'recording-actions';
+  actions.append(chevron);
+  item.append(status, info, actions);
+  let opening = false;
+  const open = async () => {
+    if (opening) return;
+    opening = true;
+    const request = ++noteOpenToken;
+    const listToken = lastLoadRecordingsToken;
+    const session = getModalSession();
+    try {
+      const result = await window.electronAPI.getSavedNote(note.folderPath);
+      if (
+        request !== noteOpenToken ||
+        listToken !== lastLoadRecordingsToken ||
+        session !== getModalSession()
+      )
+        return;
+      if (!result.success || !result.data) throw new Error('Saved note is unavailable');
+      showSavedTranscript('', note.title, result.data, note.folderName);
+    } catch {
+      showToast('Unable to open saved meeting', 'error');
+    } finally {
+      opening = false;
+    }
+  };
+  item.addEventListener('click', () => void open());
+  item.addEventListener('keydown', (event) => {
+    if (event.target !== item || event.isComposing) return;
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      void open();
+    }
+  });
+  return item;
 }
 
 // Function to create a recording item element

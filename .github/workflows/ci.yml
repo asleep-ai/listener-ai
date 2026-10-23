@@ -95,8 +95,11 @@ jobs:
           sudo apt-get install -y xvfb
           pnpm exec playwright install-deps chromium
 
+      - name: Validate Electron harness and types before native execution
+        run: pnpm run test:e2e:harness && pnpm run test:e2e:types
+
       - name: Smoke-test that the packaged app launches
-        run: xvfb-run --auto-servernum -- pnpm exec playwright test e2e/smoke.spec.ts
+        run: xvfb-run --auto-servernum -- pnpm exec playwright test e2e/smoke.spec.ts e2e/meeting-list.spec.ts e2e/transcription-reload.spec.ts
         env:
           LISTENER_SMOKE_BUILD_DIR: ${{ runner.temp }}/smoke-build
 

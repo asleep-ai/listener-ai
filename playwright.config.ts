@@ -23,6 +23,7 @@ export default defineConfig({
       testMatch: 'settings.spec.ts',
       grep: /captures every Settings tab for visual review$/,
     },
+    { name: 'meeting-list', testMatch: 'meeting-list.spec.ts' },
     { name: 'cutoff', testMatch: 'transcript-cutoff.spec.ts' },
     { name: 'reload', testMatch: 'transcription-reload.spec.ts' },
     { name: 'live', testMatch: 'live-session.spec.ts' },

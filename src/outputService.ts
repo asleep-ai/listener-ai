@@ -737,6 +737,7 @@ export function __saveTranscriptionLegacyV1ForTests(opts: SaveTranscriptionOptio
 }
 
 export interface TranscriptionEntry {
+  audioFile?: string;
   folderPath: string;
   folderName: string;
   title: string;
@@ -786,6 +787,7 @@ async function listEntryFromV2Meta(
       folderPath,
       folderName,
       title: meta.title || folderName,
+      audioFile: typeof meta.audioFile === 'string' ? meta.audioFile : undefined,
       transcribedAt: meta.transcribedAt || folderNameToTimestamp(folderName),
     };
   } catch (err) {
