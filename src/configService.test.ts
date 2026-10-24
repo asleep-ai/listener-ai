@@ -568,6 +568,17 @@ describe('ConfigService: updateConfig validation for aiProvider', () => {
 });
 
 describe('ConfigService: live STT config', () => {
+  it('ignores an obsolete hint preference while preserving unknown stored configuration', () => {
+    const dataPath = freshDataPath('obsolete-live-hints-preference');
+    const configPath = path.join(dataPath, 'config.json');
+    fs.mkdirSync(dataPath, { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify({ liveHintsAutoEnabled: false }));
+    const config = new ConfigService(dataPath);
+    assert.equal(Object.hasOwn(config.getAllConfig(), 'liveHintsAutoEnabled'), false);
+    config.setLiveSttProvider('chunked');
+    assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).liveHintsAutoEnabled, false);
+  });
+
   it('returns env live STT keys when config has none', () => {
     process.env.OPENAI_API_KEY = 'env-openai';
 

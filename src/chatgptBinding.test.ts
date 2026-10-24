@@ -109,3 +109,34 @@ describe('ChatGPTBinding.run session watch', () => {
     await assert.rejects(binding.assertActive(), isSignedOut);
   });
 });
+
+describe('ChatGPTBinding task model override', () => {
+  it('evicts an unavailable override without changing the configured model or bound account', async () => {
+    let available = false;
+    let opened = 0;
+    const auth: ChatGPTAuthLike = {
+      getStatus: async () => ({ connected: true, planEnabled: true, profileId: 'p1' }),
+      openSession: async (profileId) => {
+        opened++;
+        assert.equal(profileId, 'p1');
+        return {
+          profileId: 'p1',
+          getAccessToken: async () => 'tok',
+          listModels: async () => [
+            { slug: 'configured', display_name: 'Configured' },
+            ...(available ? [{ slug: 'gpt-6-luna', display_name: 'Luna' }] : []),
+          ],
+          isActive: () => true,
+          endRejectedSession: async () => false,
+        };
+      },
+    };
+    const binding = new ChatGPTBinding({ model: 'configured', auth });
+    const configured = await binding.model();
+    await assert.rejects(binding.model(undefined, 'gpt-6-luna'), /not available/);
+    available = true;
+    assert.equal((await binding.model(undefined, 'gpt-6-luna')).id, 'gpt-6-luna');
+    assert.equal(await binding.model(), configured, 'configured task cache is preserved');
+    assert.equal(opened, 1, 'model discovery stays on the pinned account');
+  });
+});

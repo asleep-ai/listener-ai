@@ -72,7 +72,7 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   'stt-async-v5': { audioPerMinute: 0.1 / 60 },
 };
 
-export type UsageKind = 'summary' | 'transcription' | 'agent' | 'realtime';
+export type UsageKind = 'summary' | 'transcription' | 'agent' | 'realtime' | 'live-hints';
 
 /**
  * Who pays for a call when it is not the user's own API key. `chatgpt-plan`

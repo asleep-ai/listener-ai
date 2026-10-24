@@ -649,11 +649,11 @@ async function handleGoogleUpload(
 
   // Gather every regular file in the meeting folder. Drive mirrors the local
   // layout, so anything in the folder (summary, transcript, audio, optional
-  // attachments) goes up. Hidden files (.DS_Store etc.) are skipped.
+  // attachments) goes up. Hidden files and local-only hint evidence are skipped.
   const files = await withMeetingLock(folderPath, () => {
     const entries = fs.readdirSync(folderPath, { withFileTypes: true });
     return entries
-      .filter((e) => e.isFile() && !e.name.startsWith('.'))
+      .filter((e) => e.isFile() && !e.name.startsWith('.') && !/^live-hints\.json$/i.test(e.name))
       .map((e) => {
         const filePath = path.join(folderPath, e.name);
         const content = fs.readFileSync(filePath);

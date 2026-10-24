@@ -10,6 +10,7 @@ import type {
   GoogleSyncProgress,
   GoogleSyncResult,
   GoogleSyncStatus,
+  LiveHintApiStopResult,
   LiveSessionEvent,
   LiveSessionSnapshot,
   LiveSessionStartResult,
@@ -71,6 +72,7 @@ const api = {
     liveNotes?: LiveNote[];
   }): Promise<{
     success: boolean;
+    liveHintsSaveError?: string;
     filePath?: string;
     durationMs?: number;
     reason?: string;
@@ -234,6 +236,10 @@ const api = {
   openExternal: (url: string): Promise<void> => invoke('open-external', url),
   openRecordingsFolder: (): Promise<void> => invoke('open-recordings-folder'),
   showInFinder: (filePath: string): Promise<void> => invoke('show-in-finder', filePath),
+  readRecordingLiveHints: (
+    filePath: string,
+  ): Promise<import('./liveHintTypes').RecordingLiveHintsReadResult> =>
+    invoke('read-recording-live-hints', filePath),
   getRecordings: (): Promise<Array<Record<string, any>>> => invoke('get-recordings'),
   searchTranscriptions: (opts: {
     query: string;
@@ -284,6 +290,8 @@ const api = {
     offsetMs?: number;
     durationMs?: number;
     translation?: string;
+    /** True when `text` is the translation because no source text arrived. */
+    sourceMissing?: boolean;
   }): Promise<{ success: boolean; error?: string }> => invoke('live-session-final', opts),
   stopLiveSession: (
     sessionId: string,
@@ -309,6 +317,10 @@ const api = {
   onLiveSessionEvent: (callback: (event: LiveSessionEvent) => void) => {
     ipcRenderer.on('live-session-event', (_event, payload) => callback(payload));
   },
+  // First step of a user stop, awaited BEFORE the renderer flushes WebRTC or
+  // chunked capture. Not used for a realtime-failure fallback.
+  beginLiveSessionStop: (sessionId: string): Promise<LiveHintApiStopResult> =>
+    invoke('live-session-begin-stop', sessionId),
   agentChat: (opts: {
     question: string;
     history?: AgentChatMessage[];

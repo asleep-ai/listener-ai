@@ -12,6 +12,9 @@ import {
   type LiveIndicatorPhase,
   type LiveIndicatorView,
 } from '../../src/liveSessionView';
+import { setupLiveHints } from './live-hints';
+import { setupLiveSessionLayout } from './live-session-layout';
+import type { LiveHint, LiveHintSource, LiveHintsSnapshot } from '../../src/liveHintTypes';
 
 const FALLBACK_SNIPPET_MS = 12_000;
 const MIN_LIVE_BLOB_BYTES = 1024;
@@ -27,7 +30,6 @@ let minimizeButtonEl: HTMLButtonElement | null = null;
 let restartButtonEl: HTMLButtonElement | null = null;
 let statusEl: HTMLElement | null = null;
 let translateToggleEl: HTMLInputElement | null = null;
-let translationColumnEl: HTMLElement | null = null;
 let transcriptListEl: HTMLElement | null = null;
 let translationListEl: HTMLElement | null = null;
 let chatMessagesEl: HTMLElement | null = null;
@@ -35,6 +37,10 @@ let chatFormEl: HTMLFormElement | null = null;
 let chatInputEl: HTMLInputElement | null = null;
 let chatSendEl: HTMLButtonElement | null = null;
 
+let hints: ReturnType<typeof setupLiveHints> | null = null;
+let hintModeReady = false;
+const hintSources = new Map<string, LiveHintSource>();
+let layout: ReturnType<typeof setupLiveSessionLayout> | null = null;
 let activeSessionId: string | null = null;
 let captureMode: 'streaming' | 'chunked' | null = null;
 let liveRecorder: MediaRecorder | null = null;
@@ -44,6 +50,7 @@ let liveWindowStartedAt = 0;
 let liveWindowChunks: Blob[] = [];
 let stoppingCapture = false;
 let finalizingCapture = false;
+let finalizeCapturePromise: Promise<void> | null = null;
 let processingChain: Promise<void> = Promise.resolve();
 let launcher: {
   title: string;
@@ -197,7 +204,15 @@ function resetLiveUi(): void {
   endedReason = null;
   lastLiveError = null;
   captionIds = new Set<string>();
+  hintModeReady = false;
+  // A new session starts on the hints view with Ask collapsed; minimize and
+  // reopen keep whatever the user chose.
+  layout?.reset();
   showPanel();
+  hints?.reset(false);
+  hintSources.clear();
+  hints?.active(false);
+  if (closeButtonEl) closeButtonEl.textContent = 'Stop live captions';
   clearList(transcriptListEl, 'Waiting for speech...');
   clearList(translationListEl, 'Waiting for transcript...');
   interimEl = null;
@@ -209,6 +224,7 @@ function resetLiveUi(): void {
     chatMessagesEl.appendChild(empty);
   }
   liveHistory = [];
+  askBusy = false;
   hasTranscript = false;
   hasInterimTranscript = false;
   hasInterimTranslation = false;
@@ -218,7 +234,8 @@ function resetLiveUi(): void {
 
 function updateTranslationVisibility(): void {
   const enabled = translateToggleEl?.checked !== false;
-  if (translationColumnEl) translationColumnEl.hidden = !enabled;
+  // The layout owns caption-tab visibility; hiding the column here would fight it.
+  layout?.setTranslationEnabled(enabled);
   if (activeSessionId) {
     window.electronAPI
       .setLiveSessionTranslate({ sessionId: activeSessionId, translate: enabled })
@@ -245,6 +262,7 @@ function makeLiveTextItem(
   id?: string,
 ): HTMLElement {
   const item = document.createElement('article');
+  item.tabIndex = -1;
   item.className = `live-session-item ${className}`;
   if (id) item.dataset.liveSegmentId = id;
   const time = document.createElement('span');
@@ -293,6 +311,11 @@ function renderInterim(text: string, offsetMs = Math.max(0, Date.now() - liveSta
   removeEmpty(transcriptListEl);
   if (!interimEl) {
     interimEl = makeLiveTextItem(offsetMs, text, 'live-session-item-interim');
+    interimEl.setAttribute('aria-label', '인식 중…');
+    const draft = document.createElement('span');
+    draft.className = 'live-source-draft-label';
+    draft.textContent = '인식 중…';
+    interimEl.prepend(draft);
     transcriptListEl.appendChild(interimEl);
   } else {
     const time = interimEl.querySelector<HTMLElement>('.live-session-time');
@@ -343,7 +366,7 @@ function renderSegment(segment: LiveTranscriptSegment): void {
     transcriptListEl,
     segment.id,
     segment.offsetMs,
-    segment.transcript,
+    segment.sourceMissing ? `원문 없음 · 번역 결과\n${segment.transcript}` : segment.transcript,
     'live-session-item-source',
   );
   if (segment.translation) {
@@ -468,6 +491,7 @@ async function sendRealtimeFinal(
   await window.electronAPI.completeLiveSessionSegment({
     sessionId,
     text: transcript || translated,
+    sourceMissing: !transcript,
     translation: translated || undefined,
     offsetMs: realtimeOffsetMs(),
     durationMs: 0,
@@ -937,6 +961,19 @@ async function startLiveSessionNow(
   }
   activeSessionId = result.session.sessionId;
   captureMode = result.session.mode;
+  const startedSessionId = activeSessionId;
+  hints?.pending();
+  try {
+    const { snapshot } = await window.electronAPI.getLiveSessionSnapshot();
+    if (activeSessionId !== startedSessionId || startVersion !== startCancellationVersion) return;
+    if (snapshot?.sessionId === startedSessionId && snapshot.hints)
+      renderHintSnapshot(snapshot.hints);
+  } catch {
+    // Normal hint status events keep the panel current if the initial snapshot fails.
+  }
+  if (activeSessionId !== startedSessionId || startVersion !== startCancellationVersion) return;
+  hints?.active(hintModeReady);
+  if (!hintModeReady) hints?.pending();
   setStatus(
     result.session.mode === 'streaming'
       ? `Listening with ${result.session.provider}...`
@@ -1002,18 +1039,42 @@ export function handleLivePcmFrame(frame: LivePcmFrame): void {
 export async function stopLiveSessionCapture(opts: { hidePanel?: boolean } = {}): Promise<void> {
   startCancellationVersion++;
   if (launcher) launcher.startVersion = startCancellationVersion;
-  if (!activeSessionId || finalizingCapture) {
+  if (finalizeCapturePromise) {
+    if (opts.hidePanel) hidePanel();
+    renderIndicator();
+    await finalizeCapturePromise;
+    return;
+  }
+  if (!activeSessionId) {
     if (opts.hidePanel) hidePanel();
     renderIndicator();
     return;
   }
   finalizingCapture = true;
-  const sessionId = activeSessionId;
+  finalizeCapturePromise = finishLiveSessionCapture(activeSessionId, opts);
+  try {
+    await finalizeCapturePromise;
+  } finally {
+    finalizeCapturePromise = null;
+  }
+}
+
+async function finishLiveSessionCapture(
+  sessionId: string,
+  opts: { hidePanel?: boolean },
+): Promise<void> {
   const mode = captureMode;
   setStatus('Finalizing live transcript...');
   updateAskEnabled();
   renderIndicator();
   try {
+    hints?.active(false);
+    try {
+      const stopped = await window.electronAPI.beginLiveSessionStop(sessionId);
+      if (!stopped.success) hints?.status(stopped.error);
+    } catch (error) {
+      hints?.status(error instanceof Error ? error.message : String(error));
+    }
     await stopRealtimeWebRtc(sessionId);
     if (mode === 'chunked') {
       // Flush the in-progress window and let any queued/in-flight fallback work
@@ -1031,6 +1092,7 @@ export async function stopLiveSessionCapture(opts: { hidePanel?: boolean } = {})
     if (activeSessionId === sessionId) {
       activeSessionId = null;
       endedReason = 'user';
+      hints?.active(false);
     }
   } finally {
     finalizingCapture = false;
@@ -1068,27 +1130,171 @@ async function submitLiveQuestion(question: string): Promise<void> {
     pending?.remove();
     appendChatMessage('error', err instanceof Error ? err.message : String(err));
   } finally {
-    askBusy = false;
-    updateAskEnabled();
-    if (panelEl?.open) chatInputEl?.focus();
+    if (activeSessionId === sessionId) {
+      askBusy = false;
+      updateAskEnabled();
+      const askPanel = document.getElementById('liveSessionAsk') as HTMLDetailsElement | null;
+      if (panelEl?.open && askPanel?.open) chatInputEl?.focus();
+    }
   }
 }
 
-function handleLiveSessionEvent(event: LiveSessionEvent): void {
+function renderHint(hint: LiveHint, replay = false): void {
+  hint.sources.forEach((source) => hintSources.set(source.ref, source));
+  for (const ref of hintSources.keys()) {
+    if (ref.startsWith(`${hint.id}:revision:`)) hintSources.delete(ref);
+  }
+  const kinds = {
+    term: '용어',
+    answer: '답변 참고',
+    question: '확인 질문',
+    action: '할 일 후보',
+    'catch-up': '놓친 내용',
+  };
+  const bases = {
+    transcript: '대화 내용을 참고했습니다.',
+    'model-knowledge': '대화 밖의 설명이 포함되어 있으니 확인해 주세요.',
+    suggestion: '아직 결정되지 않은 제안입니다.',
+  };
+  hints?.add(
+    {
+      id: hint.id,
+      title: hint.title,
+      topicId: hint.topic?.id,
+      topicLabel: hint.topic?.label,
+      anchorOffsetMs: hint.anchorOffsetMs,
+      offsetMs: hint.offsetMs,
+      updatedOffsetMs: hint.updatedOffsetMs,
+      history: hint.history?.map((entry) => ({
+        ...entry,
+        sources: entry.sources?.map((source) => {
+          const id = `${hint.id}:revision:${entry.revision}:${source.ref}`;
+          hintSources.set(id, source);
+          return {
+            id,
+            offsetMs: source.offsetMs,
+            label: `${source.uncertain ? '불확실 원문 · ' : ''}${formatOffset(source.offsetMs)} ${Array.from(source.text).slice(0, 45).join('')}`,
+            draft: source.state === 'draft',
+          };
+        }),
+      })),
+      text: hint.text,
+      detail: hint.detail,
+      kind: kinds[hint.kind],
+      suggestion: hint.basis.includes('suggestion'),
+      basis: hint.basis.map((basis) => bases[basis]).join(' · '),
+      retracted: hint.sourceState === 'retracted',
+      draft: hint.sourceState === 'draft',
+      simulated: hint.example,
+      sources: hint.sources.map((source) => ({
+        id: source.ref,
+        offsetMs: source.offsetMs,
+        label: `${source.uncertain ? '불확실 원문 · ' : ''}${formatOffset(source.offsetMs)} ${Array.from(source.text).slice(0, 45).join('')}`,
+        draft: source.state === 'draft',
+      })),
+    },
+    { replay },
+  );
+}
+
+// readOnly: a renderer-lost session recovered after a reload. Its hints only
+// update the retained history; controls, launcher status and retry prompts
+// belong to the next live session.
+function renderHintSnapshot(snapshot: LiveHintsSnapshot, readOnly = false): void {
+  for (const hint of snapshot.hints) renderHint(hint, true);
+  renderHintStatus(snapshot.status, readOnly);
+}
+
+function renderHintStatus(status: LiveHintsSnapshot['status'], readOnly = false): void {
+  if (!readOnly) hintModeReady = true;
   if (
-    recoveredSessionId &&
-    event.sessionId === recoveredSessionId &&
-    !activeSessionId &&
-    event.type === 'segment'
-  ) {
+    !readOnly &&
+    activeSessionId &&
+    !stoppingCapture &&
+    !finalizingCapture &&
+    status.state !== 'stopped'
+  )
+    hints?.active(true);
+  const labels = {
+    off: '자동 생성 꺼짐',
+    listening: '대화 듣는 중',
+    generating: '힌트 생성 중 · 자막은 계속 표시됩니다',
+    paused: '자동 생성 대기',
+    limited: '요청 한도 도달',
+    unavailable: '힌트 사용 불가 · 자막은 계속 표시됩니다',
+    stopped: '힌트 생성 종료',
+  };
+  hints?.mode(status.mode === 'auto');
+  hints?.status(
+    `${status.example ? '모의 응답 · ' : ''}${labels[status.state]}${status.reason ? ` · ${status.reason}` : ''} · 요청 ${status.callsLastHour}/${status.callsPerHourLimit}`,
+    readOnly
+      ? ''
+      : status.state === 'unavailable'
+        ? '힌트를 불러오지 못했습니다. AI 연결이 복구되면 자동으로 다시 시도합니다.'
+        : status.state === 'limited'
+          ? '힌트 요청 한도에 도달했습니다. 잠시 후 자동으로 다시 시작합니다.'
+          : status.state === 'paused' && status.reason
+            ? '원문 자막을 사용할 수 없어 힌트 생성을 기다리고 있습니다.'
+            : '',
+  );
+}
+
+function jumpToHintSource(id: string, returnToHint?: () => void): void {
+  if (!transcriptListEl) return;
+  let item = transcriptListEl.querySelector<HTMLElement>(
+    `[data-live-segment-id="${CSS.escape(id)}"]`,
+  );
+  const source = hintSources.get(id);
+  if (!item && source) {
+    item = makeLiveTextItem(
+      source.offsetMs,
+      `${source.state === 'draft' ? '인식 중이던 자막' : '인용 원문'}\n${source.text}`,
+      'live-session-item-source',
+      id,
+    );
+    transcriptListEl.append(item);
+  }
+  transcriptListEl.querySelectorAll('[data-hint-return]').forEach((button) => button.remove());
+  if (item && returnToHint) {
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.dataset.hintReturn = '';
+    back.textContent = '힌트로 돌아가기';
+    back.addEventListener('click', () => {
+      // Reveal the hints tab before live-hints moves focus back to the card.
+      layout?.showHints();
+      returnToHint();
+    });
+    item.append(back);
+  }
+  if (!item) return;
+  // A hidden tab panel can neither scroll nor take focus.
+  layout?.showSource();
+  item.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  item.focus({ preventScroll: true });
+}
+
+function handleLiveSessionEvent(event: LiveSessionEvent): void {
+  if (recoveredSessionId && event.sessionId === recoveredSessionId && !activeSessionId) {
     // Finals flushed while main closed the provider after the reload. The
     // first one can arrive after an empty snapshot.
-    renderSegment(event.segment);
-    setStatus(RECOVERED_STATUS);
+    if (event.type === 'segment') {
+      renderSegment(event.segment);
+      setStatus(RECOVERED_STATUS);
+    } else if (event.type === 'hint' || event.type === 'hintUpdated') {
+      // Late hints only update the retained history: no preview, no controls.
+      renderHint(event.hint, true);
+    } else if (event.type === 'hintStatus') {
+      renderHintStatus(event.status, true);
+    }
     return;
   }
   if (event.sessionId !== activeSessionId) return;
-  if (event.type === 'status') {
+  if (event.type === 'hint' || event.type === 'hintUpdated') {
+    renderHint(event.hint);
+  } else if (event.type === 'hintStatus') {
+    renderHintStatus(event.status);
+  } else if (event.type === 'status') {
     lastLiveError = null;
     setStatus(event.status);
     renderIndicator();
@@ -1099,7 +1305,7 @@ function handleLiveSessionEvent(event: LiveSessionEvent): void {
   } else if (event.type === 'segment') {
     lastLiveError = null;
     renderSegment(event.segment);
-  } else {
+  } else if (event.type === 'error') {
     // Update the indicator only: a minimized dialog stays closed and focus
     // stays where the user left it.
     lastLiveError = event.error;
@@ -1129,6 +1335,8 @@ async function restoreRendererLostSession(): Promise<void> {
   endedReason = 'renderer-lost';
   lastLiveError = null;
   for (const segment of snapshot.segments) renderSegment(segment);
+  // Retained hints replay silently; the hint controls stay disabled.
+  if (snapshot.hints) renderHintSnapshot(snapshot.hints, true);
   if (snapshot.segments.length > 0) setStatus(RECOVERED_STATUS);
   renderIndicator();
 }
@@ -1147,14 +1355,18 @@ export function setupLiveSession(): void {
   restartButtonEl = document.getElementById('liveSessionRestartButton') as HTMLButtonElement | null;
   statusEl = document.getElementById('liveSessionStatus');
   translateToggleEl = document.getElementById('liveTranslateToggle') as HTMLInputElement | null;
-  translationColumnEl = document.getElementById('liveTranslationColumn');
   transcriptListEl = document.getElementById('liveTranscriptList');
   translationListEl = document.getElementById('liveTranslationList');
   chatMessagesEl = document.getElementById('liveChatMessages');
   chatFormEl = document.getElementById('liveChatForm') as HTMLFormElement | null;
   chatInputEl = document.getElementById('liveChatInput') as HTMLInputElement | null;
   chatSendEl = document.getElementById('liveChatSend') as HTMLButtonElement | null;
+  layout = setupLiveSessionLayout();
 
+  hints = setupLiveHints({
+    source: jumpToHintSource,
+  });
+  hints.active(false);
   translateToggleEl?.addEventListener('change', updateTranslationVisibility);
   updateTranslationVisibility();
 

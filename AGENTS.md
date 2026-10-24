@@ -197,6 +197,7 @@ Files inside the folder (each holds exactly one semantic field, so there is no i
 - `action-items.md` — same shape as `key-points.md`.
 - `transcript.md` — plain transcript text, no `# title` heading. Always the full transcript, even when `meta.transcriptCutoff` leaves a tail out of the report.
 - `notes.json` (optional) — live notes captured during recording.
+- `live-hints.json` (optional) — versioned recording-bound AI cue history, including cited source snapshots, revisions and retraction state. Main owns recording/session association; sessions without an active recording remain session-only. It is separate from confirmed action items and manual notes, survives report regeneration, and is not copied into merged meetings or report exports. Bounded archives expose incomplete-history warnings instead of silently claiming complete coverage.
 - `highlights.json` (optional) — AI-enriched highlights.
 - Original audio file (optional, path lives in `meta.audioFile`). For GUI recordings this is the final path: `transcribe-audio` renames an `Untitled_Meeting_*` recording to its suggested title BEFORE `saveTranscription`, and writes the `metadata/` sidecar once at that path.
 
@@ -218,6 +219,8 @@ Pre-v2 folders use `<sanitized-title>_<timestamp>/` with `summary.md` (YAML fron
 - **`LISTENER_SKIP_AUTO_MIGRATE`** disables the startup migration. Used only by CLI tests that need to drive `listener migrate` against an un-migrated fixture; do not set this in production.
 
 ## Google Drive Sync
+
+- **Local hint evidence.** `live-hints.json` is always excluded from upload and download enumeration, including when custom exclusion patterns are supplied. It contains source snapshots and is local recording history, not an automatic cloud export.
 
 - **State file:** `getDataPath()/sync-state.json`, mode 0600. Schema is versioned (`version: 1`) -- unknown version means start fresh (treat as a hint to re-upload, not an error). Atomic writes via temp + `fs.renameSync` so concurrent readers (Electron app + CLI both running) never see a partial write.
 - **Idempotency invariants.** `GoogleDriveClient.uploadFile` PATCHes on name collision in the target Drive folder, and `drive.file` scope means we only collide with our own previous uploads. The sync engine tracks per-file `localMtimeMs + driveFileId + driveModifiedTime` so it skips unchanged files on both sides; the engine + Drive client together guarantee re-runs never duplicate content, even if `sync-state.json` gets wiped.

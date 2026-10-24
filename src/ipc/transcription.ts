@@ -1,3 +1,4 @@
+import { parseRecordingLiveHints, recordingHintsBelongToAudio } from '../recordingLiveHints';
 import * as fs from 'fs';
 import * as path from 'path';
 import { app, ipcMain } from 'electron';
@@ -307,7 +308,12 @@ async function runTranscription(
         try {
           const existingMetadata = await metadataService.getMetadata(filePath);
           if (existingMetadata) {
-            await metadataService.saveMetadata(audioFilePath, existingMetadata);
+            await metadataService.saveMetadata(audioFilePath, {
+              ...existingMetadata,
+              liveHints: recordingHintsBelongToAudio(filePath, existingMetadata)
+                ? existingMetadata.liveHints
+                : undefined,
+            });
             await metadataService.deleteMetadata(filePath);
           }
         } catch (error) {
@@ -347,6 +353,9 @@ async function runTranscription(
           audioFilePath,
           dataPath: app.getPath('userData'),
           liveNotes,
+          liveHints: recordingHintsBelongToAudio(filePath, existing)
+            ? parseRecordingLiveHints(existing?.liveHints)
+            : undefined,
           previousFolderPath: existing?.transcriptionPath,
         });
         // Commit boundary: the note is on disk, so a cancel from here on is
@@ -487,7 +496,12 @@ async function runTranscription(
           renamedAudioPath = undefined;
           const movedMetadata = await metadataService.getMetadata(restoredFrom);
           if (movedMetadata) {
-            await metadataService.saveMetadata(filePath, movedMetadata);
+            await metadataService.saveMetadata(filePath, {
+              ...movedMetadata,
+              liveHints: recordingHintsBelongToAudio(restoredFrom, movedMetadata)
+                ? movedMetadata.liveHints
+                : undefined,
+            });
             await metadataService.deleteMetadata(restoredFrom);
           }
         } catch (rollbackError) {

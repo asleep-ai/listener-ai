@@ -20,6 +20,8 @@ function defaultRecordingsDir(): string {
 export type StopReason = 'empty';
 
 export interface StopResult {
+  /** Recording may be intact while its AI hint history could not be saved. */
+  liveHintsSaveError?: string;
   success: boolean;
   filePath?: string;
   durationMs?: number;
@@ -89,6 +91,12 @@ export class SimpleAudioRecorder {
       this.fileHandle = null;
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  getActiveRecording(): { filePath: string; startedAtMs: number } | null {
+    return this.recordingActive && this.outputPath && this.startTime !== null
+      ? { filePath: this.outputPath, startedAtMs: this.startTime }
+      : null;
   }
 
   isRecording(): boolean {

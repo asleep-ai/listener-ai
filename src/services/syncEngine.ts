@@ -206,7 +206,11 @@ export class SyncEngine {
     this.conflictsDir =
       opts.conflictsDir ?? path.join(path.dirname(opts.syncStatePath), '.listener-conflicts');
     this.appFolderName = opts.appFolderName ?? LISTENER_DRIVE_FOLDER_NAME;
-    this.excludePatterns = opts.excludeFilePatterns ?? DEFAULT_EXCLUDES;
+    // Recording hint evidence stays local, even with custom sync filters.
+    this.excludePatterns = [
+      /^live-hints\.json$/i,
+      ...(opts.excludeFilePatterns ?? DEFAULT_EXCLUDES),
+    ];
     this.logger = opts.logger ?? (() => {});
     this.configSync = opts.configSync;
     const userProgress = opts.onProgress;

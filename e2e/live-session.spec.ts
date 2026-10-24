@@ -163,6 +163,7 @@ test('minimize and Escape retain captions, translation and chat while PCM keeps 
     await start(page);
     await final(app, '첫 번째 결정입니다.', 'This is the first decision.');
     await expect(page.locator('#liveTranscriptList')).toContainText('첫 번째 결정입니다.');
+    await page.locator('#liveSessionAsk > summary').click();
     await page.locator('#liveChatInput').fill('What was decided?');
     await page.locator('#liveChatSend').click();
     await expect(page.locator('#liveChatMessages')).toContainText('The fixture decision is recorded.');
@@ -177,7 +178,11 @@ test('minimize and Escape retain captions, translation and chat while PCM keeps 
     await page.screenshot({ path: test.info().outputPath('live-minimized.png') });
     await page.locator('#liveSessionStartButton').click();
     await expect(page.locator('#liveTranscriptList')).toContainText('최소화한 동안 이어진 발언입니다.');
+    if (await page.locator('#liveSessionConversationTab').isVisible())
+      await page.locator('#liveSessionConversationTab').click();
+    await page.locator('#liveCaptionTranslationTab').click();
     await expect(page.locator('#liveTranslationList')).toContainText('Speech continued while minimized.');
+    await page.locator('#liveCaptionTranscriptTab').click();
     await expect(page.locator('#liveChatMessages')).toContainText('What was decided?');
     await expect(page.locator('#liveChatMessages')).toContainText('The fixture decision is recorded.');
     await page.locator('#liveSessionMinimizeButton').press('Escape');
@@ -232,7 +237,11 @@ test('renderer reload tears down a minimized provider and retains its captions w
     expect(snapshot.snapshot?.active).not.toBe(true);
     await page.locator('#liveSessionStartButton').click();
     await expect(page.locator('#liveTranscriptList')).toContainText('다시 열어도 남아야 하는 발언입니다.');
+    if (await page.locator('#liveSessionConversationTab').isVisible())
+      await page.locator('#liveSessionConversationTab').click();
+    await page.locator('#liveCaptionTranslationTab').click();
     await expect(page.locator('#liveTranslationList')).toContainText('This caption must survive reopening.');
+    await page.locator('#liveCaptionTranscriptTab').click();
     await expect(page.locator('#liveChatInput')).toBeDisabled();
     expect((await stats(app)).starts).toBe(1);
   } catch (error) { failure = error; throw error; }
@@ -250,7 +259,11 @@ test('Stop Live retains captions and translation with disabled Ask while recordi
     await expect(page.locator('#liveSessionStatus')).toHaveText('Live transcript ready.');
     await expect(page.locator('#liveSessionPanel')).toBeVisible();
     await expect(page.locator('#liveTranscriptList')).toContainText('중지해도 남아야 하는 발언입니다.');
+    if (await page.locator('#liveSessionConversationTab').isVisible())
+      await page.locator('#liveSessionConversationTab').click();
+    await page.locator('#liveCaptionTranslationTab').click();
     await expect(page.locator('#liveTranslationList')).toContainText('This caption must survive stopping.');
+    await page.locator('#liveCaptionTranscriptTab').click();
     await expect(page.locator('#liveChatInput')).toBeDisabled();
     await expect(page.locator('#liveChatSend')).toBeDisabled();
     await expect(page.locator('#recordButton')).toHaveText('Stop Recording');
@@ -288,8 +301,16 @@ test('reload during a draining user stop retains existing and late captions as a
     await page.locator('#liveSessionStartButton').click();
     await expect(page.locator('#liveTranscriptList')).toContainText('중지 전에 도착한 발언입니다.');
     await expect(page.locator('#liveTranscriptList')).toContainText('종료 중 추가된 발언입니다.');
+    if (await page.locator('#liveSessionConversationTab').isVisible())
+      await page.locator('#liveSessionConversationTab').click();
+    await page.locator('#liveCaptionTranslationTab').click();
     await expect(page.locator('#liveTranslationList')).toContainText('This caption arrived before stopping.');
+    await page.locator('#liveCaptionTranscriptTab').click();
+    if (await page.locator('#liveSessionConversationTab').isVisible())
+      await page.locator('#liveSessionConversationTab').click();
+    await page.locator('#liveCaptionTranslationTab').click();
     await expect(page.locator('#liveTranslationList')).toContainText('This caption arrived during shutdown.');
+    await page.locator('#liveCaptionTranscriptTab').click();
     await expect(page.locator('#liveChatInput')).toBeDisabled();
     await expect(page.locator('#liveChatSend')).toBeDisabled();
     await expect(page.locator('#liveSessionCloseButton')).toBeHidden();
@@ -321,7 +342,11 @@ test('the first final flushed after reload recovers a read-only caption from an 
     await app.evaluate(() => (globalThis as any).__liveFixture.releaseClose());
     await page.locator('#liveSessionStartButton').click();
     await expect(page.locator('#liveTranscriptList')).toContainText('종료 중 도착한 첫 번째 발언입니다.');
+    if (await page.locator('#liveSessionConversationTab').isVisible())
+      await page.locator('#liveSessionConversationTab').click();
+    await page.locator('#liveCaptionTranslationTab').click();
     await expect(page.locator('#liveTranslationList')).toContainText('The first caption arrived during shutdown.');
+    await page.locator('#liveCaptionTranscriptTab').click();
     await expect(page.locator('#liveChatInput')).toBeDisabled();
     expect(await stats(app)).toMatchObject({ starts: 1, closes: 1 });
   } catch (error) { failure = error; throw error; }

@@ -1,3 +1,5 @@
+import { parseRecordingLiveHints } from './recordingLiveHints';
+import type { RecordingLiveHintsV1 } from './liveHintTypes';
 import * as fs from 'fs';
 import * as path from 'path';
 import { extensionForMimeType } from './audioFormats';
@@ -17,6 +19,14 @@ import {
   type LiveSttSession,
   type StreamingLiveSttProvider,
 } from './liveSttProvider';
+import { LiveHintAllowance, LiveHintEngine } from './liveHintEngine';
+import type {
+  LiveHintEvent,
+  LiveHintIntent,
+  LiveHintSourceCapability,
+  LiveHintsMode,
+  LiveHintsSnapshot,
+} from './liveHintTypes';
 import { recordUsage, type RecordInput } from './services/usageTracker';
 import {
   analyzeTranscriptQuality,
@@ -39,6 +49,11 @@ export interface LiveTranscriptSegment {
    * unsafe -- but consumers can render or weigh it as uncertain.
    */
   quality?: { flagged: boolean; reasons: string[] };
+  /**
+   * The provider sent no original-language text for this final, so
+   * `transcript` holds the translation instead. Never source evidence.
+   */
+  sourceMissing?: true;
 }
 
 export interface LiveSessionStartResult {
@@ -73,6 +88,8 @@ export interface LiveSessionSnapshot {
   interimTranslation: string;
   transcript: string;
   translation: string;
+  /** Live hints of this session; recording-bound snapshots may be saved separately. */
+  hints?: LiveHintsSnapshot;
 }
 
 export type LiveSessionEvent =
@@ -86,7 +103,8 @@ export type LiveSessionEvent =
   | { type: 'interim'; sessionId: string; text: string; offsetMs?: number }
   | { type: 'translationInterim'; sessionId: string; text: string; offsetMs?: number }
   | { type: 'segment'; sessionId: string; segment: LiveTranscriptSegment }
-  | { type: 'error'; sessionId: string; error: string };
+  | { type: 'error'; sessionId: string; error: string }
+  | LiveHintEvent;
 
 export interface LiveRealtimeClientConfig {
   transport: 'webrtc';
@@ -132,6 +150,7 @@ export interface LiveSessionServiceOptions {
   getAgentService(): AgentService | null;
   formatAiCredentialsError(): string;
   getLiveSttConfig(): LiveSttProviderConfig;
+  /** Omitted by legacy callers, which retain their explicit per-session opt-in. */
   emitEvent?(event: LiveSessionEvent): void;
   /**
    * Called when whether a live session is running changes. Main uses it to keep
@@ -147,6 +166,17 @@ export interface LiveSessionServiceOptions {
   ): Promise<LiveRealtimeClientConfig | null>;
   recordUsage?(input: RecordInput): void;
   now?(): number;
+  /** Hourly hint allowance shared by every session of the process. */
+  hintAllowance?: LiveHintAllowance;
+  /**
+   * Changes whenever the text service, provider, account or model is
+   * replaced. A hint result started under another epoch is discarded.
+   */
+  getTextRouteEpoch?(): number;
+  getActiveRecording?(): { filePath: string; startedAtMs: number } | null;
+  /** Timer seam for hint scheduling (tests). Defaults to global timers. */
+  setTimer?(fn: () => void, ms: number): unknown;
+  clearTimer?(handle: unknown): void;
 }
 
 type LiveSessionState = {
@@ -171,6 +201,7 @@ type LiveSessionState = {
   lastFinal?: { normalized: string; atMs: number };
   endedReason?: LiveSessionEndReason;
   stopping?: Promise<LiveSessionSnapshot | null>;
+  hints: LiveHintEngine;
 };
 
 // Exact-duplicate suppression for live finals (issue #182): a provider stuck
@@ -269,20 +300,77 @@ function resolveLiveTranslationTarget(language: string | undefined): string {
   return LIVE_TRANSLATION_LANGUAGE_NAMES[value.toLowerCase()] ?? value;
 }
 
+// Hint output language: the translation target when translating, else the
+// configured speech language, else whatever the speech is in.
+function resolveLiveHintLanguage(
+  config: LiveSttProviderConfig,
+  translate: boolean,
+): string | undefined {
+  if (translate) return resolveLiveTranslationTarget(config.translationLanguage);
+  const value = config.language?.trim();
+  if (!value || value.toLowerCase() === 'auto') return undefined;
+  return LIVE_TRANSLATION_LANGUAGE_NAMES[value.toLowerCase()] ?? value;
+}
+
 export class LiveSessionService {
   private readonly opts: LiveSessionServiceOptions;
   private session: LiveSessionState | null = null;
   private notifiedActive = false;
   private rendererGeneration = 0;
+  private readonly hintAllowance: LiveHintAllowance;
+
+  private truncatedRecordingHints = new Set<string>();
+  private failedRecordingHintFiles = new Set<string>();
+
+  markRecordingHintsSaveFailed(filePath: string): void {
+    if ([...this.recordingHints.values()].some((entry) => entry.recording.filePath === filePath))
+      this.failedRecordingHintFiles.add(filePath);
+  }
+  private recordingHints = new Map<
+    string,
+    {
+      recording: { filePath: string; startedAtMs: number };
+      read: () => RecordingLiveHintsV1['sessions'][number];
+      hints: Map<string, import('./liveHintTypes').LiveHint>;
+      truncated: boolean;
+      bytes: number;
+    }
+  >();
+
+  /** Freeze before recorder stop; no renderer supplied association is accepted. */
+  takeRecordingHints(filePath: string, consume = true): RecordingLiveHintsV1 | undefined {
+    const sessions: RecordingLiveHintsV1['sessions'] = [];
+    for (const [id, entry] of this.recordingHints) {
+      if (entry.recording.filePath !== filePath) continue;
+      if (this.session?.id === id) this.session.hints.beginStop();
+      sessions.push(entry.read());
+      if (consume) this.recordingHints.delete(id);
+    }
+    const truncated = this.truncatedRecordingHints.has(filePath);
+    if (consume) {
+      this.truncatedRecordingHints.delete(filePath);
+      this.failedRecordingHintFiles.delete(filePath);
+    }
+    return parseRecordingLiveHints({
+      version: 1,
+      recordingId: filePath.split(/[\\/]/).pop(),
+      sessions,
+      ...(truncated ? { truncated: true } : {}),
+    });
+  }
 
   constructor(opts: LiveSessionServiceOptions) {
     this.opts = opts;
+    this.hintAllowance = opts.hintAllowance ?? new LiveHintAllowance();
   }
 
   async start(
     input: { title?: string; translate?: boolean } = {},
   ): Promise<LiveSessionStartResult> {
     const rendererGeneration = this.rendererGeneration;
+    // Captured before any prior stop drains; re-read below so a recording
+    // stopped or replaced meanwhile never acquires this session.
+    const recording = this.opts.getActiveRecording?.();
     // Replace a running session through the same settlement as stop(), so a
     // replacement racing a renderer-lost teardown never closes a stream twice.
     // Loop: another start may have installed a session while this one waited.
@@ -291,8 +379,9 @@ export class LiveSessionService {
     }
     if (rendererGeneration !== this.rendererGeneration) throw new LiveSessionEndedError();
     const startedAt = new Date(this.opts.now?.() ?? Date.now()).toISOString();
+    const id = `live_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const session: LiveSessionState = {
-      id: `live_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      id,
       title: input.title?.trim() || 'Live Session',
       startedAt,
       active: true,
@@ -309,8 +398,38 @@ export class LiveSessionService {
       usageModelId: null,
       usageRecorded: false,
       nativeTranslation: false,
+      // Closures in the engine read `session` only after it is assigned.
+      hints: this.createHintEngine(id, startedAt, () => session),
     };
     this.session = session;
+    session.hints.setMode('auto');
+    if (
+      recording &&
+      this.opts.getActiveRecording?.()?.filePath === recording.filePath &&
+      [...this.recordingHints.values()].filter(
+        (entry) => entry.recording.filePath === recording.filePath,
+      ).length < 32 &&
+      (this.failedRecordingHintFiles.size < 8 ||
+        this.failedRecordingHintFiles.has(recording.filePath))
+    ) {
+      const hints = new Map<string, import('./liveHintTypes').LiveHint>();
+      const entry = {
+        recording,
+        hints,
+        truncated: false,
+        bytes: 0,
+        read: () => ({
+          sessionId: id,
+          startedAt,
+          recordingOffsetMs: Math.max(0, Date.parse(startedAt) - recording.startedAtMs),
+          hints: [...hints.values()],
+          ...(entry.truncated ? { truncated: true as const } : {}),
+        }),
+      };
+      this.recordingHints.set(id, entry);
+    } else if (recording && this.opts.getActiveRecording?.()?.filePath === recording.filePath) {
+      this.truncatedRecordingHints.add(recording.filePath);
+    }
     try {
       return await this.startSession(session);
     } catch (error) {
@@ -326,6 +445,7 @@ export class LiveSessionService {
         await session.stream?.close().catch(() => {});
         session.stream = null;
         this.recordLiveUsage(session);
+        this.retireHints(session);
       }
       throw error;
     } finally {
@@ -371,6 +491,7 @@ export class LiveSessionService {
     if (session.mode === 'chunked') this.assertChunkedCaptionsAvailable(session);
     // A stop during a failed provider attempt must not announce captions.
     this.assertStillStarting(session);
+    this.updateHintCapability(session);
     this.emit({
       type: 'status',
       sessionId: session.id,
@@ -405,6 +526,7 @@ export class LiveSessionService {
       try {
         await this.startStreamingProvider(session, config);
         if (session.stream) {
+          this.updateHintCapability(session);
           this.emit({
             type: 'status',
             sessionId: session.id,
@@ -426,6 +548,7 @@ export class LiveSessionService {
     session.provider = 'chunked';
     session.usageModelId = null;
     this.assertChunkedCaptionsAvailable(session);
+    this.updateHintCapability(session);
     this.emit({
       type: 'status',
       sessionId: session.id,
@@ -487,6 +610,9 @@ export class LiveSessionService {
   }
 
   private async finishStop(session: LiveSessionState): Promise<LiveSessionSnapshot | null> {
+    // No new hint work from the finals flushed below; their drafts' evidence
+    // still upgrades during the drain.
+    session.hints.beginStop();
     // Close the stream while the session is still active so streaming providers
     // (Gemini Live, OpenAI translation) can flush their final transcript via
     // onFinal -- handleFinalTranscript drops segments once active is false.
@@ -495,9 +621,22 @@ export class LiveSessionService {
     session.active = false;
     session.abortController.abort();
     this.recordLiveUsage(session);
+    this.retireHints(session);
     this.notifyActiveChange();
     // This session's snapshot, even if a replacement start installed another.
     return this.snapshotOf(session);
+  }
+
+  // After the last finals drained: freeze the recording's hint archive as it
+  // stands, then release the engine's timers and in-flight work.
+  private retireHints(session: LiveSessionState): void {
+    session.hints.beginStop();
+    const retained = this.recordingHints.get(session.id);
+    if (retained) {
+      const frozen = retained.read();
+      retained.read = () => frozen;
+    }
+    session.hints.dispose();
   }
 
   private notifyActiveChange(): void {
@@ -527,7 +666,90 @@ export class LiveSessionService {
       interimTranslation: session.interimTranslation,
       transcript: joinSegments(segments, 'transcript'),
       translation: joinSegments(segments, 'translation'),
+      hints: session.hints.snapshot(),
     };
+  }
+
+  /**
+   * First step of a user stop, before the renderer flushes WebRTC or chunked
+   * capture: closes hint admission and cancels hint work, while captions keep
+   * accepting the flushed finals. Not used for a realtime-failure fallback.
+   */
+  beginStop(sessionId: string): boolean {
+    const session = this.session;
+    if (!session || session.id !== sessionId) return false;
+    session.hints.beginStop();
+    return true;
+  }
+
+  /** Changes this session's hint mode; the application persists the user preference. */
+  setHintsMode(sessionId: string, mode: LiveHintsMode): LiveHintsSnapshot {
+    const session = this.requireSession(sessionId);
+    return session.hints.setMode(mode);
+  }
+
+  requestHint(
+    sessionId: string,
+    intent: LiveHintIntent = 'suggest',
+  ): { accepted: boolean; reason?: string; hints: LiveHintsSnapshot } {
+    const session = this.requireSession(sessionId);
+    const result = session.hints.requestNow(intent);
+    return { ...result, hints: session.hints.snapshot() };
+  }
+
+  /** The text service, provider, account or model changed. */
+  onTextRouteChanged(): void {
+    this.session?.hints.routeChanged();
+  }
+
+  private requireSession(sessionId: string): LiveSessionState {
+    const session = this.session;
+    if (!session || session.id !== sessionId) throw new Error('Live session is no longer active.');
+    return session;
+  }
+
+  private createHintEngine(
+    sessionId: string,
+    startedAt: string,
+    owner: () => LiveSessionState,
+  ): LiveHintEngine {
+    return new LiveHintEngine({
+      sessionId,
+      sessionStartMs: Date.parse(startedAt),
+      now: () => this.opts.now?.() ?? Date.now(),
+      setTimer: this.opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms)),
+      clearTimer:
+        this.opts.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)),
+      allowance: this.hintAllowance,
+      emit: (event) => {
+        if (this.session === owner()) this.emit(event);
+      },
+      resolveRoute: () => {
+        const service = this.opts.ensureGeminiService();
+        // Read after ensure: resolving can itself rebuild the service.
+        const routeEpoch = this.opts.getTextRouteEpoch?.() ?? 0;
+        if (!service) return { unavailable: this.opts.formatAiCredentialsError() };
+        return {
+          routeEpoch,
+          generate: (request, signal) => service.generateLiveHints(request, { signal }),
+        };
+      },
+      currentRouteEpoch: () => this.opts.getTextRouteEpoch?.() ?? 0,
+      language: () => resolveLiveHintLanguage(this.opts.getLiveSttConfig(), owner().translate),
+      log: (message) => console.log(message),
+    });
+  }
+
+  // OpenAI translation (WebRTC in the renderer, or the WebSocket fallback)
+  // sends its original-language text only as a growing interim and one final
+  // at close; every other path emits per-turn finals, whose interims become
+  // drafts only while a turn's final is overdue (see LiveHintEngine).
+  private updateHintCapability(session: LiveSessionState): void {
+    const sessionFinal =
+      session.realtimeClient?.endpoint === 'translation' ||
+      (session.stream?.provider === 'openai' && session.stream.kind === 'translation');
+    const capability: LiveHintSourceCapability = sessionFinal ? 'session-final' : 'turn-finals';
+    session.hints.setSourceCapability(capability);
   }
 
   appendPcm(input: {
@@ -649,6 +871,8 @@ export class LiveSessionService {
     if (!issue) return;
     session.active = false;
     session.abortController.abort();
+    // Nothing is left to drain; a later start only stops active sessions.
+    this.retireHints(session);
     this.notifyActiveChange();
     throw new LiveChunkedCaptionsUnavailableError(
       `Live captions cannot continue with chunked transcription: ${issue}`,
@@ -701,6 +925,7 @@ export class LiveSessionService {
     offsetMs?: number;
     durationMs?: number;
     translation?: string;
+    sourceMissing?: boolean;
   }): void {
     const session = this.session;
     if (!session || session.id !== input.sessionId || !session.active) return;
@@ -709,6 +934,7 @@ export class LiveSessionService {
       offsetMs: input.offsetMs,
       durationMs: input.durationMs,
       translation: input.translation,
+      sourceMissing: input.sourceMissing,
     });
   }
 
@@ -793,6 +1019,7 @@ export class LiveSessionService {
       session.segments.push(segment);
       session.segments.sort((a, b) => a.offsetMs - b.offsetMs);
       this.emit({ type: 'segment', sessionId: session.id, segment });
+      this.feedHints(session, segment);
       return segment;
     } catch (err) {
       if (isAbortError(err) || !session.active || session.abortController.signal.aborted) {
@@ -848,6 +1075,31 @@ export class LiveSessionService {
   }
 
   private emit(event: LiveSessionEvent): void {
+    if (event.type === 'hint' || event.type === 'hintUpdated') {
+      const entry = this.recordingHints.get(event.sessionId);
+      if (entry && !event.hint.example) {
+        const previous = entry.hints.get(event.hint.id);
+        const previousSize = previous ? Buffer.byteLength(JSON.stringify(previous), 'utf8') : 0;
+        const nextSize = Buffer.byteLength(JSON.stringify(event.hint), 'utf8');
+        const used = [...this.recordingHints.values()]
+          .filter((bucket) => bucket.recording.filePath === entry.recording.filePath)
+          .reduce((sum, bucket) => sum + bucket.bytes, 0);
+        if (
+          (previous || entry.hints.size < 2000) &&
+          used - previousSize + nextSize <= 8 * 1024 * 1024
+        ) {
+          entry.hints.set(event.hint.id, structuredClone(event.hint));
+          entry.bytes += nextSize - previousSize;
+        } else {
+          // Never retain an obsolete version when its newer evidence cannot fit.
+          if (previous) {
+            entry.hints.delete(event.hint.id);
+            entry.bytes -= previousSize;
+          }
+          entry.truncated = true;
+        }
+      }
+    }
     this.opts.emitEvent?.(event);
   }
 
@@ -857,6 +1109,12 @@ export class LiveSessionService {
   ): void {
     if (this.session !== session || !session.active || !event.text.trim()) return;
     session.interimTranscript = event.text.trim();
+    // Only the original input transcript, never the translation.
+    session.hints.updateSourceDraft(
+      session.interimTranscript,
+      event.offsetMs ?? this.sessionOffsetMs(session),
+      event.itemId,
+    );
     this.emit({
       type: 'interim',
       sessionId: session.id,
@@ -871,6 +1129,7 @@ export class LiveSessionService {
   ): void {
     if (this.session !== session || !session.active || !event.text.trim()) return;
     session.interimTranslation = event.text.trim();
+    session.hints.noteTranslationActivity();
     this.emit({
       type: 'translationInterim',
       sessionId: session.id,
@@ -925,13 +1184,21 @@ export class LiveSessionService {
       offsetMs?: number;
       durationMs?: number;
       translation?: string;
+      sourceMissing?: boolean;
     },
   ): Promise<void> {
     const transcript = cleanTranscript(event.text);
-    if (this.session !== session || !session.active || !transcript) return;
+    if (this.session !== session || !session.active) return;
+    if (!transcript) {
+      session.hints.discardTurn(event.itemId);
+      return;
+    }
     session.interimTranscript = '';
     session.interimTranslation = '';
-    if (this.shouldSuppressDuplicateFinal(session, transcript)) return;
+    if (this.shouldSuppressDuplicateFinal(session, transcript)) {
+      session.hints.discardTurn(event.itemId);
+      return;
+    }
     const segment: LiveTranscriptSegment = {
       id: `${session.id}_${++session.nextSegmentId}`,
       offsetMs:
@@ -945,10 +1212,13 @@ export class LiveSessionService {
       final: true,
       createdAt: new Date().toISOString(),
       quality: this.qualityForFinal(transcript),
+      ...(event.sourceMissing ? { sourceMissing: true as const } : {}),
     };
     session.segments.push(segment);
     session.segments.sort((a, b) => a.offsetMs - b.offsetMs);
     this.emit({ type: 'segment', sessionId: session.id, segment });
+    // Once per final: the translation re-emits below never reach hints.
+    this.feedHints(session, segment, event.itemId);
 
     if (!session.active || !session.translate || segment.translation) return;
     if (session.nativeTranslation) return;
@@ -973,6 +1243,25 @@ export class LiveSessionService {
       segment.translationError = err instanceof Error ? err.message : String(err);
     }
     this.emit({ type: 'segment', sessionId: session.id, segment });
+  }
+
+  private feedHints(
+    session: LiveSessionState,
+    segment: LiveTranscriptSegment,
+    turnKey?: string,
+  ): void {
+    session.hints.addFinal({
+      id: segment.id,
+      text: segment.transcript,
+      offsetMs: segment.offsetMs,
+      sourceMissing: segment.sourceMissing === true,
+      uncertain: segment.quality?.flagged === true,
+      turnKey,
+    });
+  }
+
+  private sessionOffsetMs(session: LiveSessionState): number {
+    return Math.max(0, (this.opts.now?.() ?? Date.now()) - Date.parse(session.startedAt));
   }
 
   private handleStreamError(session: LiveSessionState, error: unknown): void {

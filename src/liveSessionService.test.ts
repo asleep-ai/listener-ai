@@ -14,18 +14,33 @@ import {
   LiveSessionService,
   type LiveSessionEvent,
 } from './liveSessionService';
+import type { LiveHint } from './liveHintTypes';
 import type { LiveSttCallbacks, LiveSttSession } from './liveSttProvider';
 import type { RecordInput } from './services/usageTracker';
 import { makeTempDir, rmDir } from './test-helpers';
 
 let workDir: string;
+const ownedServices = new Set<LiveSessionService>();
+
+function createOwnedService(
+  options: ConstructorParameters<typeof LiveSessionService>[0],
+): LiveSessionService {
+  const service = new LiveSessionService(options);
+  ownedServices.add(service);
+  return service;
+}
 
 beforeEach(() => {
   workDir = makeTempDir('live-session');
 });
 
-afterEach(() => {
-  rmDir(workDir);
+afterEach(async () => {
+  try {
+    await Promise.all(Array.from(ownedServices, (service) => service.stopActive('user')));
+  } finally {
+    ownedServices.clear();
+    rmDir(workDir);
+  }
 });
 
 function makeAudioBytes(): Uint8Array {
@@ -37,6 +52,20 @@ function chunkedConfig() {
 }
 
 describe('LiveSessionService', () => {
+  it('starts automatic hints without a separate generation preference', async () => {
+    const service = createOwnedService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: chunkedConfig,
+    });
+    const session = await service.start({ translate: false });
+    assert.equal(service.snapshot()?.hints?.status.mode, 'auto');
+    assert.throws(() => service.setHintsMode('not-this-session', 'auto'), /no longer active/);
+    await service.stop(session.sessionId);
+  });
+
   it('transcribes a live audio chunk, translates it, and stores a snapshot', async () => {
     const tempPathsSeen: string[] = [];
     const fakeGemini = {
@@ -50,7 +79,7 @@ describe('LiveSessionService', () => {
         return '참가자1: 모두 안녕하세요.';
       },
     };
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => fakeGemini as unknown as GeminiService,
       getAgentService: () => null,
@@ -101,7 +130,7 @@ describe('LiveSessionService', () => {
         };
       },
     };
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => fakeGemini as unknown as GeminiService,
       getAgentService: () => fakeAgent as unknown as AgentService,
@@ -133,7 +162,7 @@ describe('LiveSessionService', () => {
   });
 
   it('rejects live questions before any transcript exists', async () => {
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -150,7 +179,7 @@ describe('LiveSessionService', () => {
 
   it('ignores tiny empty chunks', async () => {
     let called = false;
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () =>
         ({
@@ -181,7 +210,7 @@ describe('LiveSessionService', () => {
 
   it('ignores fallback chunks that arrive after the live session is stopped', async () => {
     let called = false;
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () =>
         ({
@@ -245,7 +274,7 @@ describe('LiveSessionService', () => {
         return 'should not happen';
       },
     };
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => fakeGemini as unknown as GeminiService,
       getAgentService: () => null,
@@ -288,7 +317,7 @@ describe('LiveSessionService', () => {
       },
       async close() {},
     };
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => fakeGemini as unknown as GeminiService,
       getAgentService: () => null,
@@ -346,7 +375,7 @@ describe('LiveSessionService', () => {
       sendPcm() {},
       async close() {},
     };
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -362,7 +391,7 @@ describe('LiveSessionService', () => {
   });
 
   it('starts a renderer Realtime client when a client secret config is available', async () => {
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -394,7 +423,7 @@ describe('LiveSessionService', () => {
       sendPcm() {},
       async close() {},
     };
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -422,7 +451,7 @@ describe('LiveSessionService', () => {
   it('records OpenAI Realtime usage when a renderer Realtime session stops', async () => {
     let now = Date.parse('2026-06-16T02:00:00.000Z');
     const usage: RecordInput[] = [];
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -461,7 +490,7 @@ describe('LiveSessionService', () => {
       sendPcm() {},
       async close() {},
     };
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -511,7 +540,7 @@ describe('LiveSessionService', () => {
       sendPcm() {},
       async close() {},
     };
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -543,7 +572,7 @@ describe('LiveSessionService', () => {
       sendPcm() {},
       async close() {},
     };
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -576,7 +605,7 @@ describe('LiveSessionService', () => {
       sendPcm() {},
       async close() {},
     };
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -616,7 +645,7 @@ describe('LiveSessionService', () => {
     };
     const makeService = (stream: LiveSttSession) => {
       let streamCallbacks: LiveSttCallbacks | undefined;
-      const service = new LiveSessionService({
+      const service = createOwnedService({
         getDataPath: () => workDir,
         ensureGeminiService: () => fakeGemini as unknown as GeminiService,
         getAgentService: () => null,
@@ -657,7 +686,7 @@ describe('LiveSessionService', () => {
   });
 
   it('never selects Soniox in auto mode, even when only a Soniox key is configured', async () => {
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -672,7 +701,7 @@ describe('LiveSessionService', () => {
   });
 
   it('surfaces a missing Soniox key when Soniox is explicitly selected', async () => {
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -695,7 +724,7 @@ describe('LiveSessionService', () => {
       async close() {},
     };
     const events: LiveSessionEvent[] = [];
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -724,7 +753,7 @@ describe('LiveSessionService', () => {
   });
 
   it('surfaces OpenAI WebRTC setup failure when OpenAI is explicitly selected', async () => {
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -747,7 +776,7 @@ describe('LiveSessionService', () => {
 
   it('stores renderer Realtime interim and final transcript events', async () => {
     const events: LiveSessionEvent[] = [];
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -816,7 +845,7 @@ describe('LiveSessionService duplicate suppression and quality flags', () => {
         return '번역';
       },
     };
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => fakeGemini as unknown as GeminiService,
       getAgentService: () => null,
@@ -890,7 +919,7 @@ describe('LiveSessionService duplicate suppression and quality flags', () => {
 
   it('suppresses duplicate streaming finals through receiveFinalTranscript', async () => {
     const events: LiveSessionEvent[] = [];
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -954,7 +983,7 @@ describe('LiveSessionService chunked captions without text-provider credentials'
   }
 
   it('captions with translation off through the transcription-only service', async () => {
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       ensureTranscriptionService: () => transcriptionOnlyFake('참가자1: 시작하겠습니다.'),
@@ -981,7 +1010,7 @@ describe('LiveSessionService chunked captions without text-provider credentials'
   });
 
   it('keeps the caption and names the missing text provider when translation is turned on', async () => {
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       ensureTranscriptionService: () => transcriptionOnlyFake('참가자1: 다음 안건입니다.'),
@@ -1009,7 +1038,7 @@ describe('LiveSessionService chunked captions without text-provider credentials'
     const events: LiveSessionEvent[] = [];
     const activeChanges: boolean[] = [];
     let transcribeCalls = 0;
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       ensureTranscriptionService: () => {
@@ -1061,7 +1090,7 @@ describe('LiveSessionService chunked captions without text-provider credentials'
   });
 
   it('still falls back to chunked captions after Realtime fails when the batch backend can run', async () => {
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getChunkedCaptionsIssue: () => null,
@@ -1086,7 +1115,7 @@ describe('LiveSessionService chunked captions without text-provider credentials'
 
   it('refuses to start on chunked captions when the realtime setup fails and the batch backend cannot run', async () => {
     const events: LiveSessionEvent[] = [];
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getChunkedCaptionsIssue: () => 'Choose a transcription service.',
@@ -1231,7 +1260,7 @@ describe('LiveSessionService renderer-lost teardown', () => {
         await opts.close?.();
       },
     };
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -1360,7 +1389,7 @@ describe('LiveSessionService renderer-lost teardown', () => {
     let createCalls = 0;
     let closeCalls = 0;
     const activeChanges: boolean[] = [];
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -1406,7 +1435,7 @@ describe('LiveSessionService renderer-lost teardown', () => {
     });
     const events: LiveSessionEvent[] = [];
     let createCalls = 0;
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -1443,7 +1472,7 @@ describe('LiveSessionService renderer-lost teardown', () => {
     });
     let gateNextClose = true;
     let closeCalls = 0;
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -1522,7 +1551,7 @@ describe('LiveSessionService renderer-lost teardown', () => {
     });
     let createCalls = 0;
     const events: LiveSessionEvent[] = [];
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -1558,7 +1587,7 @@ describe('LiveSessionService renderer-lost teardown', () => {
 
   it('does not report a session that failed to start as active', async () => {
     const activeChanges: boolean[] = [];
-    const service = new LiveSessionService({
+    const service = createOwnedService({
       getDataPath: () => workDir,
       ensureGeminiService: () => null,
       getAgentService: () => null,
@@ -1572,5 +1601,227 @@ describe('LiveSessionService renderer-lost teardown', () => {
     assert.equal(service.snapshot()?.active, false);
     assert.deepEqual(activeChanges, []);
     assert.equal(await service.stopActive('renderer-lost'), null);
+  });
+});
+
+describe('LiveSessionService hint lifecycle across stop and replacement', () => {
+  type Internal = {
+    emit(event: LiveSessionEvent): void;
+    session: { hints: { disposed?: boolean } } | null;
+  };
+
+  function cue(sessionId: string, revision: number, sourceState: 'draft' | 'final'): LiveHint {
+    return {
+      id: `${sessionId}_cue`,
+      sessionId,
+      kind: 'term',
+      text: `Grounded hint r${revision}`,
+      basis: ['transcript'],
+      sourceState,
+      sourceSegmentIds: ['source'],
+      sources: [{ ref: 'source', state: sourceState, text: 'Original source', offsetMs: 100 }],
+      trigger: 'auto',
+      revision,
+      createdAt: '2026-10-21T00:00:00Z',
+      offsetMs: 200,
+    };
+  }
+
+  function makeService(opts: {
+    recording: () => { filePath: string; startedAtMs: number } | null;
+    close?: (internal: Internal) => Promise<void>;
+    closeCalls?: { count: number };
+  }) {
+    const service: LiveSessionService = createOwnedService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'gemini', geminiApiKey: 'gemini-key' }),
+      getActiveRecording: opts.recording,
+      now: () => Date.parse('2026-10-21T00:00:02.000Z'),
+      createLiveSttSession: async () => ({
+        provider: 'gemini',
+        kind: 'transcription',
+        sendPcm() {},
+        async close() {
+          if (opts.closeCalls) opts.closeCalls.count++;
+          await opts.close?.(service as unknown as Internal);
+        },
+      }),
+    });
+    return service;
+  }
+
+  it('fences hint admission before a renderer-lost drain, archives drained evidence, then freezes and disposes', async () => {
+    const recording = { filePath: path.join(workDir, 'a.webm'), startedAtMs: 1000 };
+    let sessionId = '';
+    const duringDrain: { state?: string; accepted?: boolean } = {};
+    const service = makeService({
+      recording: () => recording,
+      close: async (internal) => {
+        // The engine stopped admitting work before the provider flushed.
+        duringDrain.state = service.snapshot()?.hints?.status.state;
+        duringDrain.accepted = service.requestHint(sessionId).accepted;
+        // A draft cue upgraded by the flushed final still reaches the archive.
+        internal.emit({ type: 'hintUpdated', sessionId, hint: cue(sessionId, 2, 'final') });
+      },
+    });
+    const internal = service as unknown as Internal;
+    sessionId = (await service.start({ translate: false })).sessionId;
+    internal.emit({ type: 'hint', sessionId, hint: cue(sessionId, 1, 'draft') });
+
+    const snapshot = await service.stopActive('renderer-lost');
+
+    assert.equal(duringDrain.state, 'stopped');
+    assert.equal(duringDrain.accepted, false);
+    assert.equal(snapshot?.endedReason, 'renderer-lost');
+    assert.equal(snapshot?.hints?.status.sessionId, sessionId);
+    assert.equal(internal.session?.hints.disposed, true);
+    // A stray event after the drain cannot rewrite the frozen archive.
+    internal.emit({ type: 'hintUpdated', sessionId, hint: cue(sessionId, 3, 'final') });
+    const stored = service.takeRecordingHints(recording.filePath);
+    assert.equal(stored?.sessions.length, 1);
+    assert.equal(stored?.sessions[0].hints[0].revision, 2);
+    assert.equal(stored?.sessions[0].hints[0].sourceState, 'final');
+  });
+
+  it('retires the previous hints once when a replacement joins an in-flight renderer-lost stop', async () => {
+    const recording = { filePath: path.join(workDir, 'a.webm'), startedAtMs: 1000 };
+    const closeCalls = { count: 0 };
+    let release: () => void = () => {};
+    let firstId = '';
+    const service = makeService({
+      recording: () => recording,
+      closeCalls,
+      close: async (internal) => {
+        if (closeCalls.count > 1) return;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        internal.emit({ type: 'hintUpdated', sessionId: firstId, hint: cue(firstId, 2, 'final') });
+      },
+    });
+    const internal = service as unknown as Internal;
+    firstId = (await service.start({ translate: false })).sessionId;
+    const firstHints = internal.session?.hints;
+    internal.emit({ type: 'hint', sessionId: firstId, hint: cue(firstId, 1, 'draft') });
+
+    const lost = service.stopActive('renderer-lost');
+    // The reloaded page starts again while the old provider still drains.
+    const replacement = service.start({ translate: false });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(firstHints?.disposed, false, 'not disposed before the drain ends');
+    release();
+    const [lostSnapshot, next] = await Promise.all([lost, replacement]);
+
+    assert.equal(closeCalls.count, 1);
+    assert.equal(lostSnapshot?.sessionId, firstId);
+    assert.equal(lostSnapshot?.endedReason, 'renderer-lost');
+    assert.equal(firstHints?.disposed, true);
+    assert.notEqual(next.sessionId, firstId);
+    assert.equal(service.snapshot()?.hints?.status.sessionId, next.sessionId);
+    internal.emit({
+      type: 'hint',
+      sessionId: next.sessionId,
+      hint: cue(next.sessionId, 1, 'draft'),
+    });
+
+    const stored = service.takeRecordingHints(recording.filePath);
+    assert.deepEqual(
+      stored?.sessions.map((s) => [s.sessionId, s.hints[0]?.revision]),
+      [
+        [firstId, 2],
+        [next.sessionId, 1],
+      ],
+    );
+    await service.stop(next.sessionId);
+  });
+
+  it('never binds a replacement to a recording that started while the prior stop drained', async () => {
+    let recording = { filePath: path.join(workDir, 'a.webm'), startedAtMs: 1000 };
+    let release: () => void = () => {};
+    const closeCalls = { count: 0 };
+    const service = makeService({
+      recording: () => recording,
+      closeCalls,
+      close: async () => {
+        if (closeCalls.count > 1) return;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
+    });
+    const internal = service as unknown as Internal;
+    const first = await service.start({ translate: false });
+    internal.emit({
+      type: 'hint',
+      sessionId: first.sessionId,
+      hint: cue(first.sessionId, 1, 'draft'),
+    });
+
+    const pending = service.start({ translate: false });
+    await new Promise((resolve) => setImmediate(resolve));
+    recording = { filePath: path.join(workDir, 'b.webm'), startedAtMs: 2000 };
+    release();
+    const next = await pending;
+    internal.emit({
+      type: 'hint',
+      sessionId: next.sessionId,
+      hint: cue(next.sessionId, 1, 'draft'),
+    });
+
+    assert.equal(service.takeRecordingHints(recording.filePath), undefined);
+    assert.deepEqual(
+      service.takeRecordingHints(path.join(workDir, 'a.webm'))?.sessions.map((s) => s.sessionId),
+      [first.sessionId],
+    );
+    await service.stop(next.sessionId);
+  });
+
+  it('retires hints when Realtime fallback ends on unusable chunked captions', async () => {
+    const recording = { filePath: path.join(workDir, 'a.webm'), startedAtMs: 1000 };
+    const service = createOwnedService({
+      getDataPath: () => workDir,
+      ensureGeminiService: () => null,
+      getChunkedCaptionsIssue: () => 'Choose a transcription service.',
+      getAgentService: () => null,
+      formatAiCredentialsError: () => 'missing credentials',
+      getLiveSttConfig: () => ({ provider: 'auto', openaiApiKey: 'sk-openai' }),
+      getActiveRecording: () => recording,
+      createRealtimeClientConfig: async () => ({
+        transport: 'webrtc',
+        endpoint: 'realtime',
+        clientSecret: 'ek_test',
+      }),
+      createLiveSttSession: async () => {
+        throw new Error('OpenAI WebSocket failed');
+      },
+    });
+    const internal = service as unknown as Internal;
+    const session = await service.start({ translate: false });
+    internal.emit({
+      type: 'hint',
+      sessionId: session.sessionId,
+      hint: cue(session.sessionId, 1, 'draft'),
+    });
+
+    await assert.rejects(
+      service.fallbackFromRealtime({ sessionId: session.sessionId }),
+      LiveChunkedCaptionsUnavailableError,
+    );
+
+    assert.equal(internal.session?.hints.disposed, true);
+    assert.equal(service.requestHint(session.sessionId).accepted, false);
+    internal.emit({
+      type: 'hintUpdated',
+      sessionId: session.sessionId,
+      hint: cue(session.sessionId, 2, 'final'),
+    });
+    assert.equal(service.takeRecordingHints(recording.filePath)?.sessions[0].hints[0].revision, 1);
+    // A later start has no active session to stop and replaces the retired one.
+    const next = await service.start({ translate: false });
+    assert.notEqual(next.sessionId, session.sessionId);
+    await service.stop(next.sessionId);
   });
 });

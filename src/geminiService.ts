@@ -17,6 +17,13 @@ import {
   ChatGPTBinding,
   ChatGPTBindingError,
 } from './chatgptBinding';
+import {
+  buildLiveHintPrompt,
+  LiveHintOutputError,
+  parseLiveHintResponse,
+  type LiveHintCandidates,
+  type LiveHintGenerateRequest,
+} from './liveHintEngine';
 import { DEFAULT_SUMMARY_PROMPT } from './configService';
 import {
   OPENAI_TRANSCRIPTION_EXTENSIONS,
@@ -1166,6 +1173,7 @@ export class GeminiService {
     geminiModelId: string,
     signal: AbortSignal | undefined,
     call: (model: PiAiModel, apiKey: string, signal: AbortSignal | undefined) => Promise<string>,
+    chatgptModelOverride?: string,
   ): Promise<string> {
     if (this.transcriptionOnly) {
       throw new Error(
@@ -1175,7 +1183,11 @@ export class GeminiService {
     if (this.provider === 'chatgpt') {
       const binding = this.requireChatGPTBinding();
       return await binding.run(signal, async (watched) =>
-        call(await binding.model(watched), await binding.accessToken(watched), watched),
+        call(
+          await binding.model(watched, chatgptModelOverride),
+          await binding.accessToken(watched),
+          watched,
+        ),
       );
     }
     return await call(
@@ -1564,6 +1576,49 @@ Requirements:
       throw error;
     }
     return stripNoSpeechSentinel(result.transcript);
+  }
+
+  /**
+   * Live AI hints: one text call on the selected text route (the configured
+   * Gemini model, or Luna on the pinned ChatGPT account) with no
+   * tools and no audio. Only a completed response is accepted, and it is
+   * strictly validated against the excerpts that were sent; an incomplete or
+   * malformed answer throws instead of producing partial cues.
+   */
+  async generateLiveHints(
+    request: LiveHintGenerateRequest,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<LiveHintCandidates> {
+    opts.signal?.throwIfAborted();
+    if (request.items.length === 0) return [];
+    const { systemPrompt, userPrompt } = buildLiveHintPrompt(request);
+    const context: Context = {
+      systemPrompt,
+      messages: [{ role: 'user', content: userPrompt, timestamp: Date.now() }],
+    };
+    const raw = await this.runTextCall(
+      this.proModel,
+      opts.signal,
+      async (model, apiKey, callSignal) => {
+        const response = await completeSimple(
+          // Luna supports low effort on the account-discovered plan route.
+          // Clone only for hints; the binding's default task model is unchanged.
+          this.provider === 'chatgpt' ? { ...model, reasoning: true } : model,
+          context,
+          { apiKey, temperature: 0.2, maxTokens: 4096, reasoning: 'low', signal: callSignal },
+          // Source speech is the prompt: provider errors must not echo it into logs.
+          { kind: 'live-hints', privateText: true },
+        );
+        if (response.stopReason !== 'stop') {
+          throw new LiveHintOutputError(
+            `incomplete response (${response.stopReason ?? 'unknown'})`,
+          );
+        }
+        return extractFinalText(response);
+      },
+      'gpt-6-luna',
+    );
+    return parseLiveHintResponse(raw, request);
   }
 
   async translateText(

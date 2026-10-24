@@ -35,6 +35,36 @@ test('note-only meetings open by keyboard and refresh without audio actions', as
     JSON.stringify({ filePath: audio, transcriptionPath: linked }),
   );
   const remote = save('Remote', '/other-device/missing.wav');
+  writeFileSync(
+    join(remote, 'live-hints.json'),
+    JSON.stringify({
+      version: 1,
+      recordingId: 'missing.wav',
+      sessions: [
+        {
+          sessionId: 'note-only',
+          startedAt: '2026-10-23T00:00:00Z',
+          recordingOffsetMs: 0,
+          hints: [
+            {
+              id: 'retained-cue',
+              sessionId: 'note-only',
+              kind: 'term',
+              text: 'Hint retained after audio deletion',
+              basis: ['transcript'],
+              sourceState: 'final',
+              sourceSegmentIds: [],
+              sources: [],
+              trigger: 'auto',
+              revision: 0,
+              createdAt: '2026-10-23T00:00:00Z',
+              offsetMs: 100,
+            },
+          ],
+        },
+      ],
+    }),
+  );
   const { app, page } = await meetingApp.start();
   try {
     await expect(page.locator('.recording-item')).toHaveCount(2);
@@ -63,6 +93,12 @@ test('note-only meetings open by keyboard and refresh without audio actions', as
     );
     expect(payload.data.transcriptionPath).toBe(remote);
     expect(payload.data.generationId).toBeDefined();
+    expect(payload.data.liveHints?.sessions[0].hints[0].text).toBe(
+      'Hint retained after audio deletion',
+    );
+    await expect(page.locator('#recordingHints')).toContainText(
+      'Hint retained after audio deletion',
+    );
     const outside = await page.evaluate(
       async (folder) => window.electronAPI.getSavedNote(folder),
       dataDir,

@@ -379,6 +379,7 @@ export async function stopRecording(): Promise<void> {
       cleanupAudioState();
       try {
         const result = await window.electronAPI.stopRecording(liveNotesPayload);
+        if (result.liveHintsSaveError) showNotification(result.liveHintsSaveError, 'error');
         if (result?.success) {
           await handleRecordingStopped(result.filePath, result.durationMs, liveNotesSnapshot);
           return;
@@ -407,6 +408,7 @@ export async function stopRecording(): Promise<void> {
       cleanupAudioState();
 
       const result = await window.electronAPI.stopRecording(liveNotesPayload);
+      if (result.liveHintsSaveError) showNotification(result.liveHintsSaveError, 'error');
 
       if (result.success) {
         await handleRecordingStopped(result.filePath, result.durationMs, liveNotesSnapshot);

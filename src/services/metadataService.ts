@@ -3,6 +3,8 @@ import * as path from 'path';
 import { app } from 'electron';
 import { withMeetingLock } from '../meetingLock';
 import type { ActionItemGroup, SummarySection } from '../meetingRecord';
+import { recordingHintsBelongToAudio } from '../recordingLiveHints';
+import type { RecordingLiveHintsV1 } from '../liveHintTypes';
 import type { LiveNote } from '../outputService';
 
 interface RecordingMetadata {
@@ -21,6 +23,7 @@ interface RecordingMetadata {
   transcribedAt?: string;
   customFields?: Record<string, unknown>;
   liveNotes?: LiveNote[];
+  liveHints?: RecordingLiveHintsV1;
 }
 
 export class MetadataService {
@@ -65,6 +68,16 @@ export class MetadataService {
             path.basename(audioFilePath, path.extname(audioFilePath)),
           timestamp: existingMetadata?.timestamp || new Date().toISOString(),
         };
+
+        // Basename sidecars can collide across directories or audio extensions.
+        // Only recording-owned hint evidence is cleared; preserve legacy metadata semantics.
+        if (
+          existingMetadata &&
+          !recordingHintsBelongToAudio(audioFilePath, existingMetadata) &&
+          !Object.prototype.hasOwnProperty.call(metadata, 'liveHints')
+        ) {
+          delete updatedMetadata.liveHints;
+        }
 
         await fs.writeFile(metadataPath, JSON.stringify(updatedMetadata, null, 2), 'utf8');
         console.log('Metadata written successfully to:', metadataPath);

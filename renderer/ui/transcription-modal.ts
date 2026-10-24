@@ -23,6 +23,7 @@ import { refreshRecordingsList } from './recordings-list';
 import { jobMatchesPath } from '../../src/transcriptionJobView';
 import { getTranscriptionJob } from './transcription-jobs';
 import { showTranscriptionErrorDialog } from './transcription-error-dialog';
+import { renderRecordingHints } from './recording-hints';
 import {
   clearTranscriptCutoffBusy,
   describeFlaggedNotes,
@@ -47,6 +48,7 @@ let currentNotionUrl: string | null = null;
 let supersededNotionUrl: string | null = null;
 let currentSlackSentAt: string | null = null;
 let cutoffInFlight = false;
+let savedHintsStatus: 'idle' | 'loading' | 'failed' = 'idle';
 
 // Which job the modal's progress bar and pending result belong to. Several
 // jobs can run at once (row transcriptions, a merge), so progress and results
@@ -187,7 +189,24 @@ export function populateTranscriptionUI(data: TranscriptionData): void {
     });
   }
 
+  // Keep the saved-history controls connected while dynamic report tabs refresh.
+  // This preserves keyboard focus and expanded evidence when cutoff/report data changes.
+  const hintsTab = document.getElementById('recordingHintsTab');
+  const hintsPane = document.getElementById('recordingHints');
+  const hintsActive = hintsPane?.classList.contains('active');
+  hintsTab?.classList.remove('dynamic');
+  hintsPane?.classList.remove('dynamic');
   renderDynamicFields(data);
+  hintsTab?.classList.add('dynamic');
+  hintsPane?.classList.add('dynamic');
+  const savedHintsMessage =
+    savedHintsStatus === 'loading'
+      ? 'Loading saved AI hints...'
+      : savedHintsStatus === 'failed'
+        ? 'Saved AI hints could not be loaded.'
+        : undefined;
+  renderRecordingHints(data.liveHints, savedHintsMessage);
+  if (hintsActive) showTab('recordingHints');
   setupCopyButtons(data);
 }
 
@@ -209,6 +228,9 @@ export function showSavedTranscript(
   if (modal) {
     modalJobTarget = null;
     modalSession++;
+    const loadLocalHints = !metadata.liveHints && filePath.trim().length > 0;
+    savedHintsStatus = loadLocalHints ? 'loading' : 'idle';
+    const session = modalSession;
     if (!modal.open) modal.showModal();
     const titleEl = document.getElementById('transcriptionTitle');
     const reportTitle = titleForSavedReport(
@@ -237,6 +259,7 @@ export function showSavedTranscript(
       emoji: metadata.emoji,
       liveNotes: metadata.liveNotes,
       highlights: metadata.highlights,
+      liveHints: metadata.liveHints,
       transcriptCutoff: metadata.transcriptCutoff,
       transcriptCutoffMismatch: metadata.transcriptCutoffMismatch,
     };
@@ -258,8 +281,10 @@ export function showSavedTranscript(
     resetModalChatFor(folderName || metadata?.folderName || null);
 
     populateTranscriptionUI(currentTranscriptionData);
+    if (loadLocalHints) void loadRecordingHints(filePath, modalSession);
 
     window.electronAPI.getConfig().then((config) => {
+      if (session !== modalSession || !modal.open) return;
       if (uploadToNotionBtn) {
         uploadToNotionBtn.style.display =
           config.notionApiKey && config.notionDatabaseId ? 'flex' : 'none';
@@ -269,6 +294,59 @@ export function showSavedTranscript(
       }
     });
   }
+}
+
+async function loadRecordingHints(filePath: string, session: number): Promise<void> {
+  try {
+    const result = await window.electronAPI.readRecordingLiveHints(filePath);
+    if (session !== modalSession || !ensureTranscriptionModal()?.open) return;
+    savedHintsStatus = result.success ? 'idle' : 'failed';
+    if (result.success && currentTranscriptionData)
+      currentTranscriptionData.liveHints = result.liveHints;
+    const wasActive = document.getElementById('recordingHints')?.classList.contains('active');
+    renderRecordingHints(
+      result.success ? result.liveHints : undefined,
+      result.success ? undefined : 'Saved AI hints could not be loaded.',
+    );
+    if (wasActive) showTab('recordingHints');
+  } catch {
+    if (session !== modalSession || !ensureTranscriptionModal()?.open) return;
+    savedHintsStatus = 'failed';
+    const wasActive = document.getElementById('recordingHints')?.classList.contains('active');
+    renderRecordingHints(undefined, 'Saved AI hints could not be loaded.');
+    if (wasActive) showTab('recordingHints');
+  }
+}
+
+/** Open history even before a recording has been transcribed. */
+export function showRecordingHints(
+  filePath: string,
+  title: string,
+  metadata?: TranscriptionData,
+): void {
+  if (metadata) {
+    showSavedTranscript(filePath, title, metadata);
+    showTab('recordingHints');
+    return;
+  }
+  if (!prepareTranscriptionModal(`AI hints - ${title}`, 'Loading saved AI hints...')) return;
+  savedHintsStatus = 'loading';
+  currentTranscriptionData = null;
+  currentTranscriptionPath = null;
+  currentGenerationId = undefined;
+  currentFilePath = filePath;
+  currentNotionUrl = null;
+  supersededNotionUrl = null;
+  currentSlackSentAt = null;
+  refreshNotionButtonLabel();
+  populateTranscriptionUI({});
+  const { progressContainer } = getDom();
+  if (progressContainer) progressContainer.style.display = 'none';
+  if (uploadToNotionBtn) uploadToNotionBtn.style.display = 'none';
+  if (sendToSlackBtn) sendToSlackBtn.style.display = 'none';
+  renderRecordingHints(undefined, 'Loading saved AI hints...');
+  showTab('recordingHints');
+  void loadRecordingHints(filePath, modalSession);
 }
 
 // Retry `transcribeAudio` once after the ffmpeg-missing download dialog if the
@@ -413,6 +491,7 @@ export function prepareTranscriptionModal(
   }
   modalJobTarget = target ?? null;
   modalSession++;
+  savedHintsStatus = 'idle';
   if (!modal.open) modal.showModal();
   const titleEl = document.getElementById('transcriptionTitle');
   if (titleEl) titleEl.textContent = modalTitle;
