@@ -184,6 +184,18 @@ describe('transcription modal session ownership', () => {
     assert.deepEqual(errors, []);
   });
 
+  it('shows supplied note-only history without a recording path or local sidecar request', () => {
+    const liveHints = { version: 1, recordingId: 'missing.wav', sessions: [] };
+    modal.showSavedTranscript('', 'Note without audio', {
+      summary: 'Saved report',
+      transcriptionPath: '/transcriptions/note',
+      liveHints,
+    });
+    assert.equal(renderedHints.at(-1), liveHints);
+    assert.equal(hintReads.length, 0);
+    assert.equal(renderedHintMessages.at(-1), undefined);
+  });
+
   it('keeps a saved note in loading state until the sidecar resolves to an empty history', async () => {
     modal.showSavedTranscript('/legacy.wav', 'Legacy', {});
     assert.equal(renderedHintMessages.at(-1), 'Loading saved AI hints...');

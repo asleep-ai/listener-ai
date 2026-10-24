@@ -61,7 +61,24 @@ test('history reader preserves evidence/revisions and strips unrecognized fields
   assert.deepEqual(parseRecordingLiveHints(input), history());
   assert.equal(parseRecordingLiveHints({ version: 2, sessions: [] }), undefined);
   input.sessions[0].hints[0].sessionId = 'another-session';
-  assert.equal(parseRecordingLiveHints(input), undefined);
+  assert.equal(parseRecordingLiveHints(input)?.truncated, true);
+  assert.deepEqual(parseRecordingLiveHints(input)?.sessions[0].hints, []);
+});
+
+test('rejected persisted sessions and cues retain an incomplete-history notice', () => {
+  const input = history();
+  const oversized = cue();
+  oversized.sources[0].text = 'x'.repeat(12001);
+  input.sessions[0].hints.push(oversized);
+  const partial = parseRecordingLiveHints(input);
+  assert.equal(partial?.truncated, true);
+  assert.equal(partial?.sessions[0].truncated, true);
+  assert.deepEqual(partial?.sessions[0].hints, [cue()]);
+
+  const invalidSession = { ...history().sessions[0], startedAt: 'invalid date' };
+  const rejected = parseRecordingLiveHints({ ...history(), sessions: [invalidSession] });
+  assert.equal(rejected?.truncated, true);
+  assert.deepEqual(rejected?.sessions, []);
 });
 
 test('absent, malformed, and oversized histories are tolerant', () => {

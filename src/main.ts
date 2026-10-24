@@ -1882,9 +1882,12 @@ ipcMain.handle('get-saved-note', async (_, folderPath: string) => {
     // Read and return the configured-root spelling so the meeting lock and the
     // lexical export/cutoff guards see the same path as sync and note writes.
     const notePath = path.join(transcriptionsDir, path.basename(canonicalPath));
-    const transcription = await readTranscription(notePath);
+    const transcription = await readTranscription(notePath, { includeLiveHints: true });
     if (!transcription) return { success: false, error: 'Saved note is unavailable' };
-    return { success: true, data: savedNoteData(notePath, transcription) };
+    return {
+      success: true,
+      data: { ...savedNoteData(notePath, transcription), liveHints: transcription.liveHints },
+    };
   } catch (error) {
     reportError(error, { operation: 'note.get', severity: 'warning' });
     return { success: false, error: 'Unable to read saved note' };

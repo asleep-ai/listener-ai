@@ -137,13 +137,18 @@ export function parseRecordingLiveHints(value: unknown): RecordingLiveHintsV1 | 
       !Number.isFinite(Date.parse(session.startedAt)) ||
       !offset(session.recordingOffsetMs) ||
       !Array.isArray(session.hints)
-    )
+    ) {
+      truncated = true;
       continue;
+    }
     let sessionTruncated = session.truncated === true || session.hints.length > 2000;
     const hints: LiveHint[] = [];
     for (const candidate of session.hints.slice(0, 2000)) {
       const parsed = hint(candidate, session.sessionId);
-      if (!parsed) continue;
+      if (!parsed) {
+        sessionTruncated = true;
+        continue;
+      }
       const size = Buffer.byteLength(JSON.stringify(parsed), 'utf8');
       if (size > remaining) {
         sessionTruncated = true;
