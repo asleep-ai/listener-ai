@@ -49,6 +49,11 @@ import {
   TranscriptionApiError,
 } from './transcriptionErrors';
 import {
+  isNetworkUnreachableError,
+  isProviderBillingError,
+  isProviderOverloadedError,
+} from './errorClassification';
+import {
   type BatchSttBackend,
   type BatchSttBackendId,
   type BatchSttPrepareParams,
@@ -447,7 +452,11 @@ export function annotateTranscriptionError(
   // (silent/noise-only recording), not a failure of the pipeline.
   if (error instanceof EmptyTranscriptionError) {
     return new TranscriptionError(
-      { userMessage: 'No intelligible speech was found in this recording.', rawMessage },
+      {
+        userMessage: 'No intelligible speech was found in this recording.',
+        rawMessage,
+        errorType: 'no-speech',
+      },
       { cause: error },
     );
   }
@@ -490,6 +499,14 @@ export function annotateTranscriptionError(
   // Fallback for non-API errors (Gemini SDK, file IO, ffmpeg) -- keep the
   // legacy substring heuristic so callers still get a friendlier message when
   // possible, but preserve the raw text in `rawMessage` for "Show details".
+  // Environment and provider-account states first: their raw text can contain
+  // words the substring heuristic below keys on (Gemini's 503 body says "This
+  // model is currently experiencing high demand", which used to read as
+  // "Model not available").
+  const classified = classifyEnvironmentFailure(error);
+  if (classified) {
+    return new TranscriptionError({ ...classified, rawMessage }, { cause: error });
+  }
   const lower = rawMessage.toLowerCase();
   let userMessage: string;
   if (lower.includes('api key')) {
@@ -502,6 +519,52 @@ export function annotateTranscriptionError(
     userMessage = `Failed to transcribe audio: ${rawMessage}`;
   }
   return new TranscriptionError({ userMessage, rawMessage }, { cause: error });
+}
+
+// Checked before any work so a recording that is gone (deleted, moved, or a
+// stale path) gets its own message. Only the caller's source file is judged
+// here: an ENOENT on a file the pipeline generated itself (segments, remuxed
+// copies) is an app defect and stays on the generic, reported path.
+async function assertSourceAudioExists(audioFilePath: string): Promise<void> {
+  try {
+    await fs.promises.access(audioFilePath, fs.constants.R_OK);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return;
+    throw new TranscriptionError(
+      {
+        userMessage:
+          'The recording file could not be found. It may have been moved, renamed, or deleted.',
+        rawMessage: error instanceof Error ? error.message : String(error),
+        errorType: 'file-missing',
+      },
+      { cause: error },
+    );
+  }
+}
+
+function classifyEnvironmentFailure(
+  error: unknown,
+): { userMessage: string; errorType: string } | undefined {
+  if (isProviderBillingError(error)) {
+    return {
+      userMessage:
+        'The AI provider account has no credit left. Add credits or check billing for your API key, then try again.',
+      errorType: 'provider-billing',
+    };
+  }
+  if (isProviderOverloadedError(error)) {
+    return {
+      userMessage: 'The AI service is temporarily overloaded. Please try again in a few minutes.',
+      errorType: 'provider-overloaded',
+    };
+  }
+  if (isNetworkUnreachableError(error)) {
+    return {
+      userMessage: 'Could not reach the AI service. Check your internet connection and try again.',
+      errorType: 'network',
+    };
+  }
+  return undefined;
 }
 
 // Credential copy for the non-API error path (SDK/file/ffmpeg errors whose
@@ -1494,6 +1557,7 @@ export class GeminiService {
       };
     }
 
+    await assertSourceAudioExists(audioFilePath);
     const prepared = await this.prepareAudioForProvider(audioFilePath, signal);
     try {
       signal?.throwIfAborted();

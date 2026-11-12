@@ -40,6 +40,7 @@
     "dist/meetingLock.js",
     "dist/batchSttBackend.js",
     "dist/transcriptionErrors.js",
+    "dist/errorClassification.js",
     "dist/openAiRealtimeClient.js",
     "dist/piAiClient.js",
     "dist/outputService.js",

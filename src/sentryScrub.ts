@@ -30,9 +30,24 @@ const SENSITIVE_KEY_RE =
   /(authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret|secret|webhook|password|token|dsn|cookie)/i;
 
 export function redactString(value: string): string {
-  return value
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, 'Bearer [REDACTED]')
-    .replace(/sk-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]');
+  return redactPaths(
+    value
+      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, 'Bearer [REDACTED]')
+      .replace(/sk-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]'),
+  );
+}
+
+// File system error messages (`ENOENT: ... open '<path>'`) carry the OS
+// account name in the home directory and, under recordings/ and
+// transcriptions/, a file or folder name built from the meeting title. Keep
+// the directory shape (useful for triage) and drop both.
+// Account names can contain spaces, so a segment ends only at a path
+// separator, a quote or a line break.
+const HOME_DIR_RE = /(\/Users\/|\/home\/|[A-Za-z]:\\Users\\)[^/\\'"\n]+/g;
+const MEETING_NAME_RE = /([/\\](?:recordings|transcriptions)[/\\])[^'"\n]+?(?=['"]|\s->|$)/g;
+
+function redactPaths(value: string): string {
+  return value.replace(HOME_DIR_RE, '$1[user]').replace(MEETING_NAME_RE, '$1[name]');
 }
 
 /**

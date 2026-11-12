@@ -4,9 +4,10 @@
 // and multipart upload shapes are covered by googleDriveService.test.ts.
 
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach, describe, it, mock } from 'node:test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { isDiskFullError } from '../errorClassification';
 import { withMeetingLock } from '../meetingLock';
 import { makeTempDir, rmDir } from '../test-helpers';
 import type { DriveFile, GoogleDriveClient } from './googleDriveService';
@@ -485,7 +486,7 @@ describe('SyncEngine: state persistence', () => {
 
     const tmpFiles = fs
       .readdirSync(workDir)
-      .filter((n) => n.startsWith(path.basename(syncStatePath)) && n.includes('.tmp'));
+      .filter((n) => n.includes(path.basename(syncStatePath)) && n.includes('.tmp'));
     assert.deepEqual(tmpFiles, []);
   });
 });
@@ -1433,5 +1434,135 @@ describe('SyncEngine: recording hint privacy', () => {
       fs.existsSync(path.join(transcriptionsDir, 'remote-private-hints', 'live-hints.json')),
       false,
     );
+  });
+});
+
+// Production LISTENER-AI-K/D/M/S: on a full disk every per-meeting lock mkdir
+// and every state write failed, once per meeting, every 60 seconds.
+describe('SyncEngine: full disk', () => {
+  // The engine imports `fs` through tsc's live-binding interop, so patching
+  // the real module object reaches its calls.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const realFs = require('fs') as typeof fs;
+  const enospc = (target: string) =>
+    Object.assign(new Error(`ENOSPC: no space left on device, open '${target}'`), {
+      code: 'ENOSPC',
+    });
+
+  afterEach(() => mock.restoreAll());
+
+  it('ends the cycle at the first disk-full error instead of failing every meeting', async () => {
+    makeMeeting('m1', { 'summary.md': 's1' });
+    makeMeeting('m2', { 'summary.md': 's2' });
+    makeMeeting('m3', { 'summary.md': 's3' });
+    const originalMkdir = realFs.mkdirSync;
+    let lockAttempts = 0;
+    mock.method(realFs, 'mkdirSync', ((target: fs.PathLike, options?: fs.MakeDirectoryOptions) => {
+      if (String(target).includes('.listener-meeting-locks')) {
+        lockAttempts++;
+        throw enospc(String(target));
+      }
+      return originalMkdir(target, options);
+    }) as typeof fs.mkdirSync);
+
+    await assert.rejects(
+      () => makeEngine().syncOnce(),
+      (err: unknown) => isDiskFullError(err),
+    );
+    assert.equal(lockAttempts, 1);
+    assert.deepEqual(mockClient.uploads, []);
+  });
+
+  it('keeps the existing state file and removes the temp file when a state write fails', async () => {
+    makeMeeting('m1', { 'summary.md': 's' });
+    const engine = makeEngine();
+    await engine.syncOnce();
+    const before = fs.readFileSync(syncStatePath, 'utf-8');
+
+    const originalWrite = realFs.writeFileSync;
+    mock.method(realFs, 'writeFileSync', ((target: fs.PathOrFileDescriptor, data: string) => {
+      // A real ENOSPC can leave a partially written file behind.
+      originalWrite(target, data.slice(0, 5));
+      throw enospc(String(target));
+    }) as typeof fs.writeFileSync);
+
+    const state = JSON.parse(before) as SyncState;
+    state.lastSyncedAt = '2030-01-01T00:00:00.000Z';
+    assert.throws(
+      () => engine.saveState(state),
+      (err: unknown) => isDiskFullError(err),
+    );
+    mock.restoreAll();
+
+    assert.equal(fs.readFileSync(syncStatePath, 'utf-8'), before);
+    assert.deepEqual(
+      fs.readdirSync(workDir).filter((n) => n.includes('.tmp')),
+      [],
+    );
+  });
+
+  it('never truncates a local note when downloading a newer remote copy fails', async () => {
+    makeMeeting('m1', { 'summary.md': 'original' });
+    await makeEngine().syncOnce();
+    const state = JSON.parse(fs.readFileSync(syncStatePath, 'utf-8')) as SyncState;
+    const fileId = state.meetings['m1'].files['summary.md'].driveFileId;
+    mockClient.mutateRemoteFile(fileId, 'remote edit', '2030-06-01T00:00:00.000Z');
+
+    const folder = path.join(transcriptionsDir, 'm1');
+    const originalWrite = realFs.writeFileSync;
+    mock.method(realFs, 'writeFileSync', ((
+      target: fs.PathOrFileDescriptor,
+      data: string | NodeJS.ArrayBufferView,
+      options?: fs.WriteFileOptions,
+    ) => {
+      if (path.dirname(String(target)) === folder) {
+        originalWrite(target, '');
+        throw enospc(String(target));
+      }
+      return originalWrite(target, data, options);
+    }) as typeof fs.writeFileSync);
+
+    await assert.rejects(
+      () => makeEngine().syncOnce(),
+      (err: unknown) => isDiskFullError(err),
+    );
+    mock.restoreAll();
+
+    assert.equal(fs.readFileSync(path.join(folder, 'summary.md'), 'utf-8'), 'original');
+    assert.deepEqual(fs.readdirSync(folder), ['summary.md']);
+  });
+
+  it('drops the staging copy of a remote-only meeting when the disk fills mid-download', async () => {
+    const appFolder = await mockClient.ensureFolder('Listener.AI');
+    mockClient.seedRemoteMeeting('remote-meeting', appFolder.id, [
+      { name: 'summary.md', content: '# from device 2' },
+      { name: 'transcript.md', content: 'Transcript from device 2' },
+    ]);
+    const originalWrite = realFs.writeFileSync;
+    mock.method(realFs, 'writeFileSync', ((
+      target: fs.PathOrFileDescriptor,
+      data: string | NodeJS.ArrayBufferView,
+      options?: fs.WriteFileOptions,
+    ) => {
+      if (
+        String(target).includes('.listener-partial') &&
+        String(target).endsWith('transcript.md')
+      ) {
+        throw enospc(String(target));
+      }
+      return originalWrite(target, data, options);
+    }) as typeof fs.writeFileSync);
+
+    await assert.rejects(
+      () => makeEngine().syncOnce(),
+      (err: unknown) => isDiskFullError(err),
+    );
+    mock.restoreAll();
+
+    assert.equal(
+      fs.existsSync(path.join(transcriptionsDir, '.listener-partial', 'remote-meeting')),
+      false,
+    );
+    assert.equal(fs.existsSync(path.join(transcriptionsDir, 'remote-meeting')), false);
   });
 });

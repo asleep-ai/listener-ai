@@ -28,6 +28,66 @@ describe('redactString', () => {
   });
 });
 
+// Message shapes from production events (LISTENER-AI-Q/T/S/K), with the
+// account and meeting names replaced by stand-ins.
+describe('redactString - file paths', () => {
+  it('drops the macOS account name and the recording file name', () => {
+    assert.equal(
+      redactString(
+        "ENOENT: no such file or directory, stat '/Users/alice/Library/Application Support/listener-ai/recordings/Quarterly_Plan_2026-10-29T12-32-34-850Z.webm'",
+      ),
+      "ENOENT: no such file or directory, stat '/Users/[user]/Library/Application Support/listener-ai/recordings/[name]'",
+    );
+  });
+
+  it('drops the Windows account name and a segment file name', () => {
+    assert.equal(
+      redactString(
+        "ENOENT: no such file or directory, open 'C:\\Users\\bob\\AppData\\Roaming\\listener-ai\\recordings\\Board_Review_segment_008.webm'",
+      ),
+      "ENOENT: no such file or directory, open 'C:\\Users\\[user]\\AppData\\Roaming\\listener-ai\\recordings\\[name]'",
+    );
+  });
+
+  it('redacts both sides of a rename and a transcription folder', () => {
+    assert.equal(
+      redactString(
+        "ENOSPC: no space left on device, rename '/home/carol/.config/listener-ai/transcriptions/2026-01-01T00-00-00.000Z_Hiring/meta.json.tmp' -> '/home/carol/.config/listener-ai/sync-state.json'",
+      ),
+      "ENOSPC: no space left on device, rename '/home/[user]/.config/listener-ai/transcriptions/[name]' -> '/home/[user]/.config/listener-ai/sync-state.json'",
+    );
+  });
+
+  it('drops account names that contain spaces', () => {
+    assert.equal(
+      redactString(
+        "EACCES: permission denied, open '/Users/Example Person/Library/Application Support/listener-ai/config.json'",
+      ),
+      "EACCES: permission denied, open '/Users/[user]/Library/Application Support/listener-ai/config.json'",
+    );
+    assert.equal(
+      redactString(
+        "EACCES: permission denied, open 'C:\\Users\\Example Person\\AppData\\Roaming\\listener-ai\\config.json'",
+      ),
+      "EACCES: permission denied, open 'C:\\Users\\[user]\\AppData\\Roaming\\listener-ai\\config.json'",
+    );
+  });
+
+  it('leaves text without a home path untouched', () => {
+    const text = 'Users of this app: 3 segments failed (see /tmp/listener-e2e/log.txt)';
+    assert.equal(redactString(text), text);
+  });
+
+  it('keeps app-owned paths that carry no meeting content', () => {
+    assert.equal(
+      redactString(
+        "mkdir '/Users/dana/Library/Application Support/listener-ai/.listener-meeting-locks/ab12.lock'",
+      ),
+      "mkdir '/Users/[user]/Library/Application Support/listener-ai/.listener-meeting-locks/ab12.lock'",
+    );
+  });
+});
+
 describe('scrubDeep', () => {
   it('redacts values under secret-shaped keys', () => {
     const out = scrubDeep({

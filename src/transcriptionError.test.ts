@@ -13,6 +13,7 @@ import {
   TranscriptionApiError,
 } from './transcriptionErrors';
 import { annotateTranscriptionError } from './geminiService';
+import { isExpectedTranscriptionFailure } from './errorClassification';
 
 describe('annotateTranscriptionError - TranscriptionApiError path', () => {
   it('maps insufficient_quota to an OpenAI API billing message', () => {
@@ -189,6 +190,97 @@ describe('annotateTranscriptionError - legacy fallback path', () => {
     const annotated = annotateTranscriptionError('plain string thrown', 'openai');
     assert.match(annotated.userMessage, /plain string thrown/);
     assert.equal(annotated.rawMessage, 'plain string thrown');
+  });
+});
+
+// Shapes taken from production Sentry events (LISTENER-AI-G/V/R/F/C/P/Q/H),
+// with paths and request bodies reduced to what the classifier reads.
+function fetchFailed(code: string): TypeError {
+  const cause = Object.assign(new Error(`connect ${code}`), { code });
+  return new TypeError('fetch failed', { cause });
+}
+
+describe('annotateTranscriptionError - environment and provider-account failures', () => {
+  it('labels a Gemini 503 "high demand" as overloaded, not "Model not available"', () => {
+    const upstream = new Error(
+      'Pi-ai google/gemini-2.5-pro failed: {"error":{"message":"{\\n  \\"error\\": {\\n    \\"code\\": 503,\\n    \\"message\\": \\"This model is currently experiencing high demand. Spikes in demand are usually temporary.\\",\\n    \\"status\\": \\"UNAVAILABLE\\"\\n  }\\n}\\n","code":503,"status":"Service Unavailable"}}',
+    );
+    const annotated = annotateTranscriptionError(upstream, 'gemini');
+    assert.doesNotMatch(annotated.userMessage, /Model not available/);
+    assert.match(annotated.userMessage, /temporarily overloaded/);
+    assert.equal(annotated.errorType, 'provider-overloaded');
+    assert.equal(annotated.rawMessage, upstream.message);
+    assert.equal(isExpectedTranscriptionFailure(annotated), true);
+  });
+
+  it('keeps "Model not available" for a genuinely missing model', () => {
+    const annotated = annotateTranscriptionError(
+      new Error('models/gemini-9 is not found for API version v1beta'),
+      'gemini',
+    );
+    assert.match(annotated.userMessage, /Model not available/);
+    assert.equal(isExpectedTranscriptionFailure(annotated), false);
+  });
+
+  it('maps a pi-ai "fetch failed" summary call to a network message', () => {
+    const annotated = annotateTranscriptionError(
+      new Error('Pi-ai google/gemini-3.5-flash failed: fetch failed'),
+      'gemini',
+    );
+    assert.match(annotated.userMessage, /Could not reach the AI service/);
+    assert.equal(annotated.errorType, 'network');
+    assert.equal(isExpectedTranscriptionFailure(annotated), true);
+  });
+
+  for (const code of ['ENOTFOUND', 'UND_ERR_CONNECT_TIMEOUT', 'ECONNRESET']) {
+    it(`maps an undici fetch failure caused by ${code} to a network message`, () => {
+      const annotated = annotateTranscriptionError(fetchFailed(code), 'gemini');
+      assert.equal(annotated.errorType, 'network');
+      assert.equal(isExpectedTranscriptionFailure(annotated), true);
+    });
+  }
+
+  it('maps a Gemini 402 "prepayment credits are depleted" ApiError to a billing message', () => {
+    const upstream = Object.assign(
+      new Error(
+        '{"error":{"code":402,"message":"Your prepayment credits are depleted. Please go to AI Studio to manage your project and billing.","status":"PAYMENT_REQUIRED"}}',
+      ),
+      { name: 'ApiError', status: 402 },
+    );
+    const annotated = annotateTranscriptionError(upstream, 'gemini');
+    assert.match(annotated.userMessage, /no credit left/);
+    assert.equal(annotated.errorType, 'provider-billing');
+    assert.equal(isExpectedTranscriptionFailure(annotated), true);
+  });
+
+  it('leaves ENOENT on a pipeline-generated file on the generic, reported path', () => {
+    // LISTENER-AI-T: a generated segment vanished mid-run. That is an app
+    // defect, never "the user moved the recording".
+    const upstream = Object.assign(
+      new Error("ENOENT: no such file or directory, open '/tmp/rec/Meeting_segment_008.webm'"),
+      { code: 'ENOENT', syscall: 'open' },
+    );
+    const annotated = annotateTranscriptionError(upstream, 'gemini');
+    assert.match(annotated.userMessage, /^Failed to transcribe audio: ENOENT/);
+    assert.equal(annotated.errorType, undefined);
+    assert.equal(isExpectedTranscriptionFailure(annotated), false);
+  });
+
+  it('treats no speech as expected and tags it', () => {
+    const annotated = annotateTranscriptionError(
+      new EmptyTranscriptionError('Transcription produced no speech content'),
+      'gemini',
+    );
+    assert.equal(annotated.errorType, 'no-speech');
+    assert.equal(isExpectedTranscriptionFailure(annotated), true);
+  });
+
+  it('keeps unrecognized failures reportable', () => {
+    assert.equal(isExpectedTranscriptionFailure(new Error('something weird')), false);
+    assert.equal(
+      isExpectedTranscriptionFailure(annotateTranscriptionError(new Error('boom'), 'gemini')),
+      false,
+    );
   });
 });
 

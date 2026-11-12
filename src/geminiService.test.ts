@@ -144,6 +144,31 @@ describe(
   },
 );
 
+// LISTENER-AI-Q: a recording that no longer exists at the requested path
+// used to surface as "Failed to transcribe audio: ENOENT ... <full path>".
+describe('GeminiService transcribeAudio missing source audio', () => {
+  it('fails with a file-missing message before any provider or ffmpeg work', async () => {
+    const service = new GeminiService({
+      apiKey: 'test-key',
+      dataPath: workDir,
+      proModel: 'gemini-test-pro',
+      flashModel: 'gemini-test-flash',
+    });
+    const missing = path.join(workDir, 'Untitled_Meeting_gone.webm');
+    await assert.rejects(
+      () => service.transcribeAudio(missing),
+      (err: unknown) => {
+        const e = err as TranscriptionError;
+        assert.ok(e instanceof TranscriptionError);
+        assert.equal(e.errorType, 'file-missing');
+        assert.match(e.userMessage, /recording file could not be found/);
+        assert.doesNotMatch(e.userMessage, /Untitled_Meeting_gone/);
+        return true;
+      },
+    );
+  });
+});
+
 // Abort plumbing: transcribeAudio honors `options.signal` at its very top,
 // before the LISTENER_TEST_MODE stub branch. The renderer cancel-button flow
 // depends on this -- without it, a pre-aborted signal would still return a
