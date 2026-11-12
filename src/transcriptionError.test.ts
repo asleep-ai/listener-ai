@@ -240,6 +240,16 @@ describe('annotateTranscriptionError - environment and provider-account failures
     });
   }
 
+  it('reports a fetch failure with an unknown concrete cause (write ERANGE) as a defect', () => {
+    const erange = Object.assign(new Error('write ERANGE'), { code: 'ERANGE', syscall: 'write' });
+    const annotated = annotateTranscriptionError(
+      new TypeError('fetch failed', { cause: erange }),
+      'gemini',
+    );
+    assert.notEqual(annotated.errorType, 'network');
+    assert.equal(isExpectedTranscriptionFailure(annotated), false);
+  });
+
   it('maps a Gemini 402 "prepayment credits are depleted" ApiError to a billing message', () => {
     const upstream = Object.assign(
       new Error(

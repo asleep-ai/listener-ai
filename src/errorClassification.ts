@@ -74,20 +74,45 @@ const NETWORK_CODES = new Set([
 ]);
 
 /**
- * True when the request never got an HTTP response: offline, DNS failure,
- * connect timeout, reset. pi-ai flattens these into a message string
- * (`Pi-ai google/<model> failed: fetch failed`), so the message is checked
- * too -- but only for the exact undici wording, not any text mentioning
- * "network".
+ * True when the request never got an HTTP response because the network was
+ * unreachable: offline, DNS failure, connect timeout, reset.
+ *
+ * The decision follows the concrete cause, not the wrapper: undici reports
+ * every transport failure as `TypeError: fetch failed`, including local
+ * defects such as `write ERANGE` (LISTENER-AI-R). So when the graph carries
+ * any concrete errno/undici code, every such code must be a known network
+ * code; one unknown code keeps the failure reportable. Only a bare
+ * `fetch failed` with no concrete cause at all -- pi-ai flattens the error to
+ * `Pi-ai google/<model> failed: fetch failed` -- falls back to the message.
  */
 export function isNetworkUnreachableError(error: unknown): boolean {
+  let sawNetworkCode = false;
+  let sawFetchFailed = false;
   for (const e of causeChain(error)) {
-    const code = errorCode(e);
-    if (code && NETWORK_CODES.has(code)) return true;
-    if (e instanceof Error && e.name === 'ConnectTimeoutError') return true;
-    if (/(^|: )fetch failed$/i.test(errorMessage(e))) return true;
+    const code =
+      errorCode(e) ??
+      (e instanceof Error && e.name === 'ConnectTimeoutError'
+        ? 'UND_ERR_CONNECT_TIMEOUT'
+        : undefined);
+    if (code !== undefined) {
+      if (!NETWORK_CODES.has(code)) return false;
+      sawNetworkCode = true;
+    } else if (hasSyscall(e)) {
+      // An errno-shaped error without a code we recognise (e.g. a bare
+      // "write ERANGE" with only `syscall`): concrete but unknown.
+      return false;
+    }
+    if (/(^|: )fetch failed$/i.test(errorMessage(e))) sawFetchFailed = true;
   }
-  return false;
+  return sawNetworkCode || sawFetchFailed;
+}
+
+function hasSyscall(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === 'object' &&
+    typeof (error as { syscall?: unknown }).syscall === 'string'
+  );
 }
 
 /**

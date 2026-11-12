@@ -73,6 +73,39 @@ describe('redactString - file paths', () => {
     );
   });
 
+  it('does not stop at an apostrophe inside a meeting or account name', () => {
+    assert.equal(
+      redactString(
+        "ENOENT: no such file or directory, open '/Users/dana/Library/Application Support/listener-ai/recordings/O'Brien_Private_Board_Meeting.webm'",
+      ),
+      "ENOENT: no such file or directory, open '/Users/[user]/Library/Application Support/listener-ai/recordings/[name]'",
+    );
+    assert.equal(
+      redactString(
+        "ENOENT: no such file or directory, open 'C:\\Users\\Sean O'Brien\\AppData\\Roaming\\listener-ai\\recordings\\Q3 'draft' review's notes.webm'",
+      ),
+      "ENOENT: no such file or directory, open 'C:\\Users\\[user]\\AppData\\Roaming\\listener-ai\\recordings\\[name]'",
+    );
+  });
+
+  it('redacts both quoted paths of a rename whose names contain apostrophes', () => {
+    assert.equal(
+      redactString(
+        "ENOSPC: no space left on device, rename '/home/o'neil/listener-ai/recordings/Untitled_Meeting.webm' -> '/home/o'neil/listener-ai/recordings/Kim's 1:1.webm'",
+      ),
+      "ENOSPC: no space left on device, rename '/home/[user]/listener-ai/recordings/[name]' -> '/home/[user]/listener-ai/recordings/[name]'",
+    );
+  });
+
+  it('redacts an unquoted path with an apostrophe to the end of the line', () => {
+    assert.equal(
+      redactString(
+        "Failed to delete segment file: /Users/dana/x/recordings/Ann's plan_segment_001.webm",
+      ),
+      'Failed to delete segment file: /Users/[user]/x/recordings/[name]',
+    );
+  });
+
   it('leaves text without a home path untouched', () => {
     const text = 'Users of this app: 3 segments failed (see /tmp/listener-e2e/log.txt)';
     assert.equal(redactString(text), text);

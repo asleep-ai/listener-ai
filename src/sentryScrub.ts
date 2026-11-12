@@ -41,10 +41,21 @@ export function redactString(value: string): string {
 // account name in the home directory and, under recordings/ and
 // transcriptions/, a file or folder name built from the meeting title. Keep
 // the directory shape (useful for triage) and drop both.
-// Account names can contain spaces, so a segment ends only at a path
-// separator, a quote or a line break.
-const HOME_DIR_RE = /(\/Users\/|\/home\/|[A-Za-z]:\\Users\\)[^/\\'"\n]+/g;
-const MEETING_NAME_RE = /([/\\](?:recordings|transcriptions)[/\\])[^'"\n]+?(?=['"]|\s->|$)/g;
+// Account and meeting names can contain spaces and apostrophes (sanitizers
+// keep both; only `"` is always replaced), so an apostrophe alone does not
+// end a name. Node quotes a path as `'<path>'` either at the end of the
+// message or before ` -> ` (rename/copyfile), so only those positions count
+// as the closing quote. Anything else runs to the end of the line, which can
+// over-redact but never leaves part of a name behind.
+const PATH_END = String.raw`(?='(?:$|\s+->)|"|\n|$)`;
+const HOME_DIR_RE = new RegExp(
+  String.raw`(\/Users\/|\/home\/|[A-Za-z]:\\Users\\)[^/\\"\n]+?(?=[/\\]|'(?:$|\s+->)|"|\n|$)`,
+  'g',
+);
+const MEETING_NAME_RE = new RegExp(
+  String.raw`([/\\](?:recordings|transcriptions)[/\\])[^"\n]+?${PATH_END}`,
+  'g',
+);
 
 function redactPaths(value: string): string {
   return value.replace(HOME_DIR_RE, '$1[user]').replace(MEETING_NAME_RE, '$1[name]');

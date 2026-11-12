@@ -144,6 +144,125 @@ describe(
   },
 );
 
+// LISTENER-AI-T: segments used deterministic `<base>_segment_NNN` names next
+// to the recording, so a second run on the same file (app + CLI) deleted the
+// first run's segments in its cleanup. Real ffmpeg; only the provider call is
+// replaced.
+describe(
+  'GeminiService segmented transcription isolation',
+  { skip: !ffmpegPath ? 'ffmpeg not installed' : undefined },
+  () => {
+    type SegmentResult = {
+      index: number;
+      header: string;
+      body: string;
+      empty: boolean;
+      cleaned: boolean;
+      uncertain: boolean;
+      speakerLabels: {
+        distinctIds: number;
+        normalizedLines: number;
+        exceededCap: boolean;
+        capped: boolean;
+      };
+      startTime: number;
+      endTime: number;
+    };
+    type Isolated = {
+      transcribeSingleSegment(segmentFile: string, segmentIndex: number): Promise<SegmentResult>;
+      getSegmentedTranscript(
+        audioFilePath: string,
+        duration: number,
+        progressCallback?: unknown,
+        customPrompt?: string,
+        segmentDuration?: number,
+      ): Promise<{ text: string }>;
+    };
+    const result = (segmentIndex: number): SegmentResult => ({
+      index: segmentIndex,
+      header: `[Segment ${segmentIndex + 1}]\n`,
+      body: `참가자1: 세그먼트 ${segmentIndex + 1} 발화입니다.`,
+      empty: false,
+      cleaned: false,
+      uncertain: false,
+      speakerLabels: { distinctIds: 1, normalizedLines: 0, exceededCap: false, capped: false },
+      startTime: segmentIndex,
+      endTime: segmentIndex + 1,
+    });
+    const makeIsolated = () =>
+      new GeminiService({
+        apiKey: 'test-key',
+        dataPath: workDir,
+        proModel: 'gemini-test-pro',
+        flashModel: 'gemini-test-flash',
+      }) as unknown as Isolated;
+
+    it("two concurrent runs on one recording never delete each other's segments", async () => {
+      const audioDir = makeTempDir('segment-isolation');
+      try {
+        const audioPath = await makeOpusWebm(ffmpegPath!, audioDir, 'Shared.webm', 440, 3);
+        let releaseFirst!: () => void;
+        const secondDone = new Promise<void>((resolve) => (releaseFirst = resolve));
+        const firstSeen: string[] = [];
+        const secondSeen: string[] = [];
+        const stillThere: boolean[] = [];
+
+        const first = makeIsolated();
+        first.transcribeSingleSegment = async (segmentFile, segmentIndex) => {
+          firstSeen.push(segmentFile);
+          // Hold the first run mid-upload until the second run has finished
+          // and cleaned up, then check its own segment is still readable.
+          await secondDone;
+          stillThere.push(fs.existsSync(segmentFile) && fs.statSync(segmentFile).size > 0);
+          return result(segmentIndex);
+        };
+        const second = makeIsolated();
+        second.transcribeSingleSegment = async (segmentFile, segmentIndex) => {
+          secondSeen.push(segmentFile);
+          return result(segmentIndex);
+        };
+
+        const firstRun = first.getSegmentedTranscript(audioPath, 3, undefined, undefined, 1);
+        // Let the first run finish splitting before the second starts.
+        while (firstSeen.length === 0) await new Promise((r) => setTimeout(r, 10));
+        await second.getSegmentedTranscript(audioPath, 3, undefined, undefined, 1);
+        releaseFirst();
+        await firstRun;
+
+        assert.ok(firstSeen.length > 1 && secondSeen.length > 1);
+        assert.ok(stillThere.length > 0 && stillThere.every(Boolean), 'first run lost a segment');
+        const firstDir = path.dirname(firstSeen[0]);
+        const secondDir = path.dirname(secondSeen[0]);
+        assert.notEqual(firstDir, secondDir);
+        assert.notEqual(firstDir, audioDir);
+        // Both workspaces are removed and nothing was written beside the audio.
+        assert.equal(fs.existsSync(firstDir), false);
+        assert.equal(fs.existsSync(secondDir), false);
+        assert.deepEqual(fs.readdirSync(audioDir), ['Shared.webm']);
+      } finally {
+        rmDir(audioDir);
+      }
+    });
+
+    it("leaves another run's segment files beside the recording untouched", async () => {
+      // A run from an older build writes `<base>_segment_NNN` next to the
+      // recording; the new cleanup must not sweep that directory.
+      const audioDir = makeTempDir('segment-legacy');
+      try {
+        const audioPath = await makeOpusWebm(ffmpegPath!, audioDir, 'Legacy.webm', 440, 3);
+        const foreign = path.join(audioDir, 'Legacy_segment_000.webm');
+        fs.writeFileSync(foreign, Buffer.alloc(8, 1));
+        const service = makeIsolated();
+        service.transcribeSingleSegment = async (_file, segmentIndex) => result(segmentIndex);
+        await service.getSegmentedTranscript(audioPath, 3, undefined, undefined, 1);
+        assert.equal(fs.existsSync(foreign), true);
+      } finally {
+        rmDir(audioDir);
+      }
+    });
+  },
+);
+
 // LISTENER-AI-Q: a recording that no longer exists at the requested path
 // used to surface as "Failed to transcribe audio: ENOENT ... <full path>".
 describe('GeminiService transcribeAudio missing source audio', () => {

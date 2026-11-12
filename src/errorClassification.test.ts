@@ -42,6 +42,36 @@ describe('isNetworkUnreachableError', () => {
     assert.equal(isNetworkUnreachableError(new TypeError('x', { cause: aggregate })), true);
   });
 
+  it('keeps an unknown concrete cause reportable even under "fetch failed" (LISTENER-AI-R)', () => {
+    // Production shape: TypeError fetch failed <- Error write ERANGE.
+    const erange = Object.assign(new Error('write ERANGE'), {
+      code: 'ERANGE',
+      errno: -34,
+      syscall: 'write',
+    });
+    assert.equal(
+      isNetworkUnreachableError(new TypeError('fetch failed', { cause: erange })),
+      false,
+    );
+    // Same with only `syscall` (no code) on the cause.
+    const bare = Object.assign(new Error('write ERANGE'), { syscall: 'write' });
+    assert.equal(isNetworkUnreachableError(new TypeError('fetch failed', { cause: bare })), false);
+    // One unknown member of an aggregate is enough to keep it reportable.
+    const mixed = new AggregateError([errno('ETIMEDOUT'), errno('ERANGE')]);
+    assert.equal(isNetworkUnreachableError(new TypeError('fetch failed', { cause: mixed })), false);
+    assert.equal(
+      isExpectedTranscriptionFailure(new TypeError('fetch failed', { cause: erange })),
+      false,
+    );
+  });
+
+  it('keeps the flattened pi-ai "fetch failed" with no cause as network', () => {
+    assert.equal(
+      isNetworkUnreachableError(new Error('Pi-ai google/gemini-3.5-flash failed: fetch failed')),
+      true,
+    );
+  });
+
   it('does not match text that merely mentions a network', () => {
     assert.equal(isNetworkUnreachableError(new Error('network diagram missing')), false);
     assert.equal(isNetworkUnreachableError(new Error('fetch failed to parse body later')), false);

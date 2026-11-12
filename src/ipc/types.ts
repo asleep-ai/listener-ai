@@ -60,4 +60,10 @@ export interface IpcContext {
   // Opens a URL in the user's browser. Auto-mode follow-ups that run in main
   // use it to open the uploaded Notion page, as the renderer used to.
   openExternal(url: string): void;
+  // Path of the recording main is currently writing, if any. Destructive
+  // handlers (delete) refuse it: the list shows the file while it is still
+  // being written, and deleting it loses the whole recording. A reachable
+  // cause of a missing-recording transcription (consistent with
+  // LISTENER-AI-Q's breadcrumbs, not proven by them).
+  getActiveRecordingPath(): string | undefined;
 }

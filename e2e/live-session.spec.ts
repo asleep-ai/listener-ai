@@ -409,3 +409,36 @@ test('a second start while one is in flight is ignored and the recording keeps i
     await finish(app, page, failure);
   }
 });
+
+// Deleting the row of the recording still being written unlinked the open
+// file and lost the recording. Main now refuses it until capture stops.
+test('the recording being written cannot be deleted until it stops, and still saves', async () => {
+  const { app, page } = await fixture();
+  let failure: unknown;
+  try {
+    await page.locator('#recordButton').click();
+    await expect(page.locator('#recordButton')).toHaveText('Stop Recording');
+    const filePath = await app.evaluate(() =>
+      (globalThis as any).__liveFixture.recorder.getActiveRecording()?.filePath as string | undefined);
+    expect(filePath).toBeTruthy();
+    const size = (file: string) => app.evaluate((_e, f) => {
+      const fs = process.mainModule!.require('fs');
+      return fs.existsSync(f) ? fs.statSync(f).size : -1;
+    }, file);
+    await expect.poll(() => size(filePath!)).toBeGreaterThan(0);
+
+    const refused = await page.evaluate((f) => window.electronAPI.deleteMeeting(f), filePath!);
+    expect(refused.success).toBe(false);
+    expect(await size(filePath!)).toBeGreaterThan(0);
+
+    await page.locator('#recordButton').click();
+    await expect(page.locator('#recordButton')).toHaveText('Start Recording');
+    await expect.poll(() => size(filePath!)).toBeGreaterThan(0);
+
+    const removed = await page.evaluate((f) => window.electronAPI.deleteMeeting(f), filePath!);
+    expect(removed.success).toBe(true);
+    expect(await size(filePath!)).toBe(-1);
+    expect(await scriptedDialogs(page)).toEqual([]);
+  } catch (error) { failure = error; throw error; }
+  finally { await finish(app, page, failure); }
+});
