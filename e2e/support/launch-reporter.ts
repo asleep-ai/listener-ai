@@ -76,9 +76,17 @@ export default class LaunchReporter implements Reporter {
     } catch (error) {
       errors.push(`Cannot read launch proof: ${String(error)}`);
     }
+    // A required case that never started because the run already failed and
+    // stopped early (maxFailures) plans no launch: it is reported as not run,
+    // not as a second, misleading launch failure. A run that passed still
+    // requires every planned launch.
+    const stoppedEarly = result.status !== 'passed';
+    const notRunAfterFailure = rows.filter(
+      (row) => row.required && stoppedEarly && row.status === 'not-run',
+    );
     const planned = new Set(
       rows
-        .filter((row) => row.required)
+        .filter((row) => row.required && !notRunAfterFailure.includes(row))
         .map((row) => (row.kind === 'shared' ? `shared:${row.group}` : `fresh:${row.id}`)),
     );
     const counts = new Map<string, number>();
@@ -138,6 +146,7 @@ export default class LaunchReporter implements Reporter {
           actualLaunches: [...counts.values()].reduce((sum, count) => sum + count, 0),
           launches: Object.fromEntries(counts),
           events,
+          notRunAfterFailure: notRunAfterFailure.map((row) => row.title),
           errors,
         },
         null,

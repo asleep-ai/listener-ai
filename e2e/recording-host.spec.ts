@@ -403,8 +403,24 @@ test('the host-owned OpenAI Realtime WebRTC peer keeps streaming across a UI rel
     await expect
       .poll(async () => (await realtimeEvidence(app)).openItems, { timeout: 10_000 })
       .toBeGreaterThan(0);
-    await realtimeTail(app, '녹음 정지 중의 꼬리 발언입니다.', 1_000);
-    const clickedAt = Date.now();
+    // Stop timing comes from the app itself (same machine clock), not from
+    // around Playwright's click, whose actionability waits vary by runner:
+    // the click event as dispatched in the window, and the moment the window
+    // learns main is stopping.
+    await replacement.evaluate(() => {
+      const timing: { clickAt?: number; stoppingAt?: number } = {};
+      (window as any).__stopTiming = timing;
+      document
+        .getElementById('recordButton')!
+        .addEventListener('click', () => (timing.clickAt ??= Date.now()), { capture: true });
+      window.electronAPI.onRecordingStateChanged((snapshot) => {
+        if (snapshot.phase === 'stopping') timing.stoppingAt ??= Date.now();
+      });
+    });
+    // The provider replies to the final commit only after TAIL_REPLY_MS: a stop
+    // that waits for that reply before ending capture shows it in the stages.
+    const TAIL_REPLY_MS = 1_400;
+    await realtimeTail(app, '녹음 정지 중의 꼬리 발언입니다.', TAIL_REPLY_MS);
     await replacement.locator('#recordButton').click();
     // RTP stops at once (the sender is muted before the provider replies).
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -413,9 +429,22 @@ test('the host-owned OpenAI Realtime WebRTC peer keeps streaming across a UI rel
     expect((await realtimeEvidence(app)).bytes).toBe(mutedAt);
     const done = await waitForPhase(app, 'idle');
     expect(done.lastResult).toMatchObject({ success: true, filePath: started.filePath });
-    // The recorded duration ends at the click, not after the 1s provider reply.
+    const timing = await replacement.evaluate(
+      () => (window as any).__stopTiming as { clickAt: number; stoppingAt: number },
+    );
     const recordedEnd = Number(started.startedAt) + done.lastResult.durationMs;
-    expect(recordedEnd).toBeLessThan(clickedAt + 700);
+    const stages = {
+      clickToStopping: timing.stoppingAt - timing.clickAt,
+      stoppingToRecordedEnd: recordedEnd - timing.stoppingAt,
+      tailReply: TAIL_REPLY_MS,
+    };
+    console.log(`[stop-timing] ${JSON.stringify(stages)}`);
+    // The window asks main to stop at once; waiting for live captions to stop
+    // first would put the provider's reply between the click and 'stopping'.
+    expect(stages.clickToStopping, JSON.stringify(stages)).toBeLessThan(TAIL_REPLY_MS - 400);
+    // The host ends capture (the recorded duration) without waiting for that
+    // reply; waiting for it would put it between 'stopping' and the end.
+    expect(stages.stoppingToRecordedEnd, JSON.stringify(stages)).toBeLessThan(TAIL_REPLY_MS - 400);
     const ended = (await invokeMain(app, 'live-session-snapshot')).snapshot;
     expect(ended).toMatchObject({ sessionId: second.sessionId, active: false });
     expect(ended.transcript).toContain('녹음 정지 중의 꼬리 발언입니다.');
