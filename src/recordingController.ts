@@ -112,6 +112,8 @@ type Session = {
   stopAutoMode: boolean;
   liveDrain?: Promise<unknown>;
   graceTimer?: unknown;
+  /** When the pending force-finalize fires (controller clock). */
+  graceDeadline?: number;
   resolveStart?: (result: RecordingCommandResult) => void;
   startPromise?: Promise<RecordingCommandResult>;
   /** A failed start is cleaning up (host disposed, file being aborted). */
@@ -388,21 +390,20 @@ export class RecordingController {
       return Promise.resolve(null);
     }
     if (opts.autoMode === false) s.stopAutoMode = false;
-    if (this.phase === 'stopping' && s.stopPromise) return s.stopPromise;
+    const graceMs = opts.graceMs ?? DEFAULT_STOP_GRACE_MS;
+    if (this.phase === 'stopping' && s.stopPromise) {
+      // A later request joins the stop in flight. A shorter grace (quit after
+      // a normal stop) pulls the force-finalize forward so the file, notes and
+      // hints are saved before the process exits; it never extends it.
+      this.armGrace(s, graceMs);
+      return s.stopPromise;
+    }
     s.stopReason = reason;
     this.phase = 'stopping';
     s.stopPromise = this.newStopPromise(s);
     s.liveDrain = this.deps.beginLiveDrain?.();
     this.changed();
-    const graceMs = opts.graceMs ?? DEFAULT_STOP_GRACE_MS;
-    const setTimer = this.deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
-    s.graceTimer = setTimer(() => {
-      s.graceTimer = undefined;
-      if (this.session === s && !s.finalizing) {
-        console.warn('Capture host did not finish stopping; finalizing the partial file');
-        void this.finalize(s);
-      }
-    }, graceMs);
+    this.armGrace(s, graceMs);
     try {
       this.deps.host.stop(s.id);
     } catch (error) {
@@ -410,6 +411,30 @@ export class RecordingController {
       void this.finalize(s);
     }
     return s.stopPromise;
+  }
+
+  /**
+   * Force-finalizes `s` if the host has not confirmed its stop within `ms`.
+   * Only ever moves the deadline earlier; once finalizing, nothing changes.
+   */
+  private armGrace(s: Session, ms: number): void {
+    if (s.finalizing || this.session !== s) return;
+    const deadline = this.now() + ms;
+    if (s.graceDeadline !== undefined && s.graceDeadline <= deadline) return;
+    if (s.graceTimer !== undefined) {
+      (this.deps.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>)))(
+        s.graceTimer,
+      );
+    }
+    s.graceDeadline = deadline;
+    const setTimer = this.deps.setTimer ?? ((fn, delay) => setTimeout(fn, delay));
+    s.graceTimer = setTimer(() => {
+      s.graceTimer = undefined;
+      if (this.session === s && !s.finalizing) {
+        console.warn('Capture host did not finish stopping; finalizing the partial file');
+        void this.finalize(s);
+      }
+    }, ms);
   }
 
   /** The host renderer crashed or its window was destroyed. */

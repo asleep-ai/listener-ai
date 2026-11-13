@@ -637,4 +637,47 @@ describe('RecordingController grace default', () => {
     assert.equal(h.recorder.isRecording(), false);
     assert.equal(h.controller.snapshot().phase, 'idle');
   });
+
+  // A normal stop waits up to 10s for a silent capture host; a quit within
+  // that window must not inherit it, or the process exits (bounded quit)
+  // before the force-finalize saves the file, notes and hints.
+  it('a quit after a stuck normal stop pulls the force-finalize forward on the same stop', async () => {
+    const h = harness();
+    after(() => h.cleanup());
+    await startRecording(h);
+    h.controller.addNote({ text: 'Decided before quitting' });
+    h.recorder.appendChunk(Buffer.from([1, 2]));
+    const stopping = h.controller.requestStop('user'); // the host never confirms
+    assert.equal(h.timers.length, 1);
+    assert.equal(h.timers[0].ms, 10_000);
+    h.advance(2_000);
+    const quitting = h.controller.requestStop('quit', { graceMs: 3_000, autoMode: false });
+    assert.equal(quitting, stopping, 'the quit joins the stop in flight');
+    assert.equal(h.timers[0].cleared, true, 'the 10s deadline is replaced');
+    assert.equal(h.timers.length, 2);
+    assert.equal(h.timers[1].ms, 3_000);
+    // A later, longer request never pushes the deadline back.
+    void h.controller.requestStop('user');
+    assert.equal(h.timers.length, 2);
+    assert.equal(h.timers[1].cleared, false);
+    h.timers[1].fn(); // 3s after the quit: force-finalize
+    const result = await quitting;
+    assert.equal(result?.success, true);
+    assert.equal(h.savedNotes.length, 1, 'notes saved with the forced file');
+    assert.equal(h.savedNotes[0].notes[0].text, 'Decided before quitting');
+    assert.equal(h.autoStarts.length, 0, 'quit suppresses auto mode');
+    assert.equal(h.controller.snapshot().phase, 'idle');
+  });
+
+  it('a later request with a later deadline keeps the pending earlier one', async () => {
+    const h = harness();
+    after(() => h.cleanup());
+    await startRecording(h);
+    void h.controller.requestStop('quit', { graceMs: 3_000 });
+    h.advance(1_000);
+    void h.controller.requestStop('user'); // 10s from now is later than 2s left
+    assert.equal(h.timers.length, 1);
+    assert.equal(h.timers[0].cleared, false);
+    assert.equal(h.timers[0].ms, 3_000);
+  });
 });

@@ -506,7 +506,9 @@ test('quitting during a recording with a stalled live caption tail exits within 
     const started = await startWithoutUi(app, 'Quit Case');
     const file: string = started.filePath;
     await waitForGrowth(file, 0);
-    expect(await invokeMain(app, 'recording-add-note', { text: 'Decision before quit' })).toMatchObject({
+    expect(
+      await invokeMain(app, 'recording-add-note', { text: 'Decision before quit' }),
+    ).toMatchObject({
       success: true,
     });
     await page.locator('#liveSessionStartButton').click();
@@ -546,8 +548,70 @@ test('quitting during a recording with a stalled live caption tail exits within 
       `${basename(file).replace(/\.[^.]+$/, '')}.json`,
     );
     const metadata = JSON.parse(readFileSync(sidecar, 'utf8'));
+    expect(metadata.liveNotes).toEqual([expect.objectContaining({ text: 'Decision before quit' })]);
+  } finally {
+    await owned.close();
+  }
+});
+
+// A normal stop gives a silent capture host 10s before it force-finalizes. A
+// quit within that window must pull the force-finalize inside its own
+// deadline (3s grace), or the process exits first and the recording's notes
+// are never saved. The stop command is kept from reaching the host page, so
+// the host never confirms, exactly like a hung capture renderer.
+test('quitting during a recording after a stop the capture host never confirmed saves the audio and notes', async () => {
+  const owned = new ReusableApp('recording-quit', { fresh: true, packaged });
+  try {
+    owned.seed(SEED);
+    const { app } = await owned.start();
+    await installSyntheticCapture(app);
+    const started = await startWithoutUi(app, 'Stuck Stop Case');
+    const file: string = started.filePath;
+    await waitForGrowth(file, 0);
+    expect(
+      await invokeMain(app, 'recording-add-note', { text: 'Note before the stuck stop' }),
+    ).toMatchObject({
+      success: true,
+    });
+    await app.evaluate(({ app }) => {
+      const proto = process.mainModule!.require(`${app.getAppPath()}/dist/captureHost.js`)
+        .CaptureHostWindow.prototype;
+      proto.stop = () => {}; // the host never learns of the stop, never confirms
+    });
+    // A normal stop (not awaited: it would wait for the 10s grace).
+    await app.evaluate(({ ipcMain }) => {
+      void (ipcMain as any)._invokeHandlers.get('recording-request-stop')({ sender: null });
+    });
+    await waitForPhase(app, 'stopping');
+
+    const child = app.process();
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+      child.once('exit', (code, signal) => resolve({ code, signal })),
+    );
+    const quitAt = Date.now();
+    await app.evaluate(({ app }) => {
+      setTimeout(() => app.quit(), 500);
+    });
+    const outcome = await Promise.race([
+      exited,
+      new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 30_000)),
+    ]);
+    const elapsed = Date.now() - quitAt;
+    expect(outcome).toEqual({ code: 0, signal: null });
+    // Quit's own deadline bounds it (0.5s delay + 3s grace + 5s), not the 10s grace.
+    expect(elapsed).toBeLessThan(500 + 8_000 + 4_000);
+
+    const bytes = readFileSync(file);
+    expect(bytes.length).toBeGreaterThan(0);
+    expect(bytes.subarray(0, 4).toString('hex')).toBe('1a45dfa3');
+    const sidecar = join(
+      owned.dataDir,
+      'metadata',
+      `${basename(file).replace(/\.[^.]+$/, '')}.json`,
+    );
+    const metadata = JSON.parse(readFileSync(sidecar, 'utf8'));
     expect(metadata.liveNotes).toEqual([
-      expect.objectContaining({ text: 'Decision before quit' }),
+      expect.objectContaining({ text: 'Note before the stuck stop' }),
     ]);
   } finally {
     await owned.close();

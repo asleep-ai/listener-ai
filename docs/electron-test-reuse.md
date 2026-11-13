@@ -16,14 +16,14 @@ packaged artifacts never share a process.
 | live            |         9 | One development process         | Synthetic live capture, providers, config, renderer                                                 |
 | recording       |         2 | Dev, or packaged                | Synthetic capture, recordings, config, renderer                                                     |
 | recording-window|         3 | Fresh process each, dev or pkg  | Main window destroyed and recreated: recording, OpenAI Realtime WebRTC loopback, queued Settings     |
-| recording-quit  |         1 | Fresh process, dev or packaged  | Real app.quit() with a stalled live tail; the process exits on its own                              |
+| recording-quit  |         2 | Fresh process each, dev or pkg  | Real app.quit(): with a stalled live tail, and after a stop the capture host never confirmed        |
 | chatgpt         |        22 | One packaged process            | Pending sign-in/preflight, auth and agent overrides, global fetch, IPC, raw config, synthetic files |
 | chatgpt-startup |         4 | Fresh packaged process per case | Independent startup configuration                                                                   |
 | hidden-startup  |         1 | Fresh development process       | Hidden construction contract                                                                        |
 | package-smoke   |         1 | Fresh packaged process          | Packaged boot contract                                                                              |
 | settings-shots  | 1, opt-in | Fresh development process       | Independent screenshot evidence                                                                     |
 
-The normal run discovers 81 cases and expects 17 process launches (one fewer on Windows/Linux, where the menu Settings case does not apply), with the
+The normal run discovers 82 cases and expects 18 process launches (one fewer on Windows/Linux, where the menu Settings case does not apply), with the
 optional screenshot case skipped. Enabling `LISTENER_E2E_SHOTS` adds one launch.
 These are expected budgets, not execution evidence.
 
