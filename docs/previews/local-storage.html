@@ -177,7 +177,8 @@
     const UNLINKED = { files: 1, bytes: 80 * MB };
     const NOTES = 8 * MB, OTHER = 12 * MB, EXTERNAL = 1;
     let recordings = SAMPLES.map((r) => ({ ...r }));
-    let pendingIds = null, returnFocus = null;
+    // The open confirmation; each request owns its ids and focus return target.
+    let removalRequest = null;
     const $ = (id) => document.getElementById(id);
 
     // Same wording rules as src/localStorageView.ts.
@@ -290,27 +291,31 @@
     function renderAll() { renderStorage(); renderList(); }
     function setStatus(text, tone) { const s = $('freeLocalAudioStatus'); s.textContent = text; s.className = `slack-webhook-status${tone ? ` is-${tone}` : ''}`; }
     function askRemoval(ids, trigger) {
-      closeMenus(); pendingIds = ids; returnFocus = trigger;
+      closeMenus(); removalRequest = { ids, returnFocus: trigger };
       $('confirmTitle').textContent = ids.length > 1 ? 'Free up space?' : 'Remove local copy?';
       $('confirmDescription').textContent = (ids.length > 1 ? 'Remove the local audio of every meeting backed up to Google Drive?\n\n' : 'Remove this recording’s local audio?\n\n') + 'Transcripts and notes stay on this device, and the audio stays in Google Drive. Each file is checked against its Drive copy first, and you can download any of them again.';
       $('acceptRemoval').textContent = ids.length > 1 ? 'Free up space' : 'Remove local copy';
       $('confirmRemoval').showModal();
     }
     $('freeLocalAudioNow').addEventListener('click', (e) => askRemoval(recordings.filter((r) => r.local && r.backed).map((r) => r.id), e.currentTarget));
-    $('cancelRemoval').addEventListener('click', () => $('confirmRemoval').close());
-    // The close event is queued, so focus moves there once the list has re-rendered.
-    $('confirmRemoval').addEventListener('close', () => {
-      pendingIds = null;
-      const target = returnFocus?.isConnected && !returnFocus.disabled ? returnFocus : $('audioOffloadAfterDays');
-      returnFocus = null; target.focus();
-    });
+    // Close synchronously and settle only the request being closed. The dialog's
+    // queued 'close' event is not used: after Escape and a quick reopen it would
+    // fire during the new request and clear it.
+    function finishRemoval(focusTarget) {
+      const request = removalRequest; removalRequest = null;
+      $('confirmRemoval').close();
+      const back = request?.returnFocus;
+      const target = [focusTarget, back].find((t) => t?.isConnected && !t.disabled) || $('audioOffloadAfterDays');
+      target.focus();
+    }
+    $('cancelRemoval').addEventListener('click', () => finishRemoval());
+    $('confirmRemoval').addEventListener('cancel', (e) => { e.preventDefault(); finishRemoval(); });
     $('acceptRemoval').addEventListener('click', () => {
-      const ids = pendingIds || []; const chosen = recordings.filter((r) => ids.includes(r.id) && r.local && r.backed);
+      const ids = removalRequest ? removalRequest.ids : []; const chosen = recordings.filter((r) => ids.includes(r.id) && r.local && r.backed);
       const freed = chosen.reduce((t, r) => t + r.size, 0); chosen.forEach((r) => { r.local = false; });
       renderAll();
-      if (ids.length === 1) returnFocus = document.querySelector(`[data-recording="${ids[0]}"] .action-button`);
       setStatus(chosen.length ? `Freed ${formatBytes(freed)} from ${plural(chosen.length, 'recording')}.` : 'Nothing was removed.', 'success');
-      $('confirmRemoval').close();
+      finishRemoval(ids.length === 1 ? document.querySelector(`[data-recording="${ids[0]}"] .action-button`) : null);
     });
     $('settingsForm').addEventListener('submit', (e) => { e.preventDefault(); const sel = $('audioOffloadAfterDays'); $('configStatus').textContent = `Sample setting saved: ${sel.options[sel.selectedIndex].text}. Nothing runs in this preview.`; });
     $('previewState').addEventListener('change', () => { setStatus(''); renderAll(); });
