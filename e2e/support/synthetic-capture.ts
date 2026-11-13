@@ -262,6 +262,46 @@ export async function installSyntheticRealtime(app: ElectronApplication): Promis
             openItems: fx.open.length,
           };
         };
+        // Why no RTP arrived, without addresses: each peer's states, its
+        // candidate kinds (mDNS name or raw IP), candidate-pair states and RTP
+        // counters, plus the sent track and the synthetic AudioContexts.
+        fx.diagnostics = async () => {
+          const peer = async (pc) => {
+            if (!pc) return null;
+            const candidates = (sdp) => (sdp || '').split(/\\r?\\n/)
+              .filter((line) => line.startsWith('a=candidate:'))
+              .map((line) => {
+                const f = line.split(' ');
+                return f[2].toLowerCase() + '/' + f[7] + '/' + (f[4].endsWith('.local') ? 'mdns' : f[4].includes(':') ? 'ipv6' : f[4] === '127.0.0.1' ? 'loopback' : 'ipv4');
+              });
+            const pairs = {};
+            const rtp = {};
+            const candidateStats = [];
+            (await pc.getStats()).forEach((r) => {
+              if (r.type === 'candidate-pair') pairs[r.state] = (pairs[r.state] || 0) + 1;
+              if (r.type === 'inbound-rtp' || r.type === 'outbound-rtp')
+                rtp[r.type] = { packets: r.packetsReceived ?? r.packetsSent, bytes: r.bytesReceived ?? r.bytesSent };
+              if (r.type === 'local-candidate' || r.type === 'remote-candidate')
+                candidateStats.push(r.type + ':' + r.candidateType + '/' + r.protocol + '/' + (String(r.address || '').endsWith('.local') ? 'mdns' : r.address ? 'ip' : 'none'));
+            });
+            return {
+              connection: pc.connectionState, ice: pc.iceConnectionState,
+              gathering: pc.iceGatheringState, signaling: pc.signalingState,
+              localSdp: candidates(pc.localDescription && pc.localDescription.sdp),
+              remoteSdp: candidates(pc.remoteDescription && pc.remoteDescription.sdp),
+              candidateStats, pairs, rtp,
+            };
+          };
+          const offerer = fx.offerers[fx.offerers.length - 1];
+          const sender = offerer && offerer.getSenders().find((s) => s.track && s.track.kind === 'audio');
+          return {
+            offerers: fx.offerers.length, answerers: fx.answerers.length, calls: fx.calls.length,
+            offerer: await peer(offerer),
+            answerer: await peer(fx.answerers[fx.answerers.length - 1]),
+            track: sender ? { readyState: sender.track.readyState, muted: sender.track.muted, enabled: sender.track.enabled } : null,
+            audioContexts: (window.__syntheticCapture ? window.__syntheticCapture.contexts : []).map((c) => c.state),
+          };
+        };
         fx.say = (itemId, text) => {
           const channel = fx.channels[fx.channels.length - 1];
           channel.send(JSON.stringify({ type: 'conversation.item.input_audio_transcription.delta', item_id: itemId, delta: text }));
@@ -283,6 +323,9 @@ const captureHostEval = (app: ElectronApplication, script: string) =>
 
 export const realtimeEvidence = (app: ElectronApplication) =>
   captureHostEval(app, 'window.__realtimeLoopback.evidence()');
+
+export const realtimeDiagnostics = (app: ElectronApplication) =>
+  captureHostEval(app, 'window.__realtimeLoopback.diagnostics()');
 
 // The fake provider speaks on the production data channel.
 export const realtimeSay = (app: ElectronApplication, itemId: string, text: string) =>

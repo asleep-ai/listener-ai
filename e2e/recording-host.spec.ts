@@ -1,7 +1,7 @@
 /// <reference path="../renderer/electronAPI.d.ts" />
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from 'playwright';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { caseApplies } from './support/case-policy';
 import { ReusableApp } from './support/reusable-app';
@@ -10,6 +10,7 @@ import {
   installSyntheticLiveProvider,
   installSyntheticRealtime,
   invokeMain,
+  realtimeDiagnostics,
   realtimeEvidence,
   realtimeSay,
   realtimeTail,
@@ -76,6 +77,27 @@ async function settle(app: ElectronApplication, owned: ReusableApp): Promise<voi
   });
   await owned.assertWindows('recording-settled');
   await releaseSyntheticCapture(app);
+}
+
+// The loopback must receive the production peer's RTP. When it does not, the
+// failure carries the ICE, RTP and audio-source state of both peers (no
+// addresses) and keeps it as an attachment, so a hosted run says why.
+async function expectFirstRtp(app: ElectronApplication): Promise<void> {
+  try {
+    await expect
+      .poll(async () => (await realtimeEvidence(app)).packets, { timeout: 20_000 })
+      .toBeGreaterThan(0);
+  } catch (error) {
+    const diagnostics = JSON.stringify(await realtimeDiagnostics(app), null, 2);
+    const path = test.info().outputPath('realtime-diagnostics.json');
+    writeFileSync(path, diagnostics);
+    await test
+      .info()
+      .attach('realtime-diagnostics.json', { path, contentType: 'application/json' });
+    throw new Error(`${(error as Error).message}\nRealtime loopback diagnostics:\n${diagnostics}`, {
+      cause: error,
+    });
+  }
 }
 
 async function startWithoutUi(app: ElectronApplication, title: string) {
@@ -302,9 +324,7 @@ test('the host-owned OpenAI Realtime WebRTC peer keeps streaming across a UI rel
 
     await page.locator('#liveSessionStartButton').click();
     await expect(page.locator('#liveSessionStatus')).toContainText('Listening');
-    await expect
-      .poll(async () => (await realtimeEvidence(app)).packets, { timeout: 20_000 })
-      .toBeGreaterThan(0);
+    await expectFirstRtp(app);
     let rtp = await realtimeEvidence(app);
     expect(rtp).toMatchObject({
       calls: 1,
