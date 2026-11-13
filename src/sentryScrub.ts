@@ -38,9 +38,9 @@ export function redactString(value: string): string {
 }
 
 // File system error messages (`ENOENT: ... open '<path>'`) carry the OS
-// account name in the home directory and, under recordings/ and
-// transcriptions/, a file or folder name built from the meeting title. Keep
-// the directory shape (useful for triage) and drop both.
+// account name in the home directory and, under the meeting directories
+// below, a file or folder name built from the meeting title. Keep the
+// directory shape (useful for triage) and drop both.
 // Account and meeting names can contain spaces and apostrophes (sanitizers
 // keep both; only `"` is always replaced), so an apostrophe alone does not
 // end a name. Node quotes a path as `'<path>'` either at the end of the
@@ -52,8 +52,14 @@ const HOME_DIR_RE = new RegExp(
   String.raw`(\/Users\/|\/home\/|[A-Za-z]:\\Users\\)[^/\\"\n]+?(?=[/\\]|'(?:$|\s+->)|"|\n|$)`,
   'g',
 );
+// Every directory whose children are named after a meeting: recordings/,
+// transcriptions/, the per-run segment workspace (listener-segments-*, see
+// geminiService getSegmentedTranscript), Drive conflict backups
+// (.listener-conflicts/<meeting>/), Regenerate scratch (.regenerate-*) and
+// v1 migration backups (.v1-backup-<ts>/<folder>/).
+const MEETING_DIR = String.raw`recordings|transcriptions|\.listener-conflicts|(?:listener-segments-|\.regenerate-|\.v1-backup-)[^/\\"\n]+`;
 const MEETING_NAME_RE = new RegExp(
-  String.raw`([/\\](?:recordings|transcriptions)[/\\])[^"\n]+?${PATH_END}`,
+  String.raw`([/\\](?:${MEETING_DIR})[/\\])[^"\n]+?${PATH_END}`,
   'g',
 );
 
