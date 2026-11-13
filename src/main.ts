@@ -35,7 +35,7 @@ import { CHATGPT_NOT_SIGNED_IN_MESSAGE, ChatGPTBindingError } from './chatgptBin
 import { ChatGPTAuthError, getChatGPTAuth, isExpectedSignInOutcome } from './chatgptAuth';
 import { CHATGPT_MANAGE_USAGE_URL, ChatGPTInferenceError } from './chatgptResponses';
 import { getDataPath } from './dataPath';
-import { maybeAutoSync, refreshGoogleSyncTimer } from './ipc/googleDrive';
+import { maybeAutoSync, refreshGoogleSyncTimer, restoreRecordingAudio } from './ipc/googleDrive';
 import { registerAllIpc } from './ipc/register';
 import { pathKeys, transcriptionJobs } from './transcriptionJobs';
 import {
@@ -88,6 +88,13 @@ import {
 } from './openAiRealtimeClient';
 import { SYSTEM_AUDIO_FORMAT, SystemAudioService } from './services/systemAudioService';
 import { SimpleAudioRecorder } from './simpleAudioRecorder';
+import { CaptureHostWindow, defaultCapturePagePath } from './captureHost';
+import { RecordingController } from './recordingController';
+import { LiveCaptureRouter, LiveCaptureUnavailableError } from './liveCaptureRouter';
+import type { CaptureHostEvent, CaptureHostLiveEvent, RecordingStopReason } from './recordingState';
+import { startAudioTranscription } from './ipc/transcription';
+import type { IpcContext } from './ipc/types';
+import { autoModeSkipMessage } from './aiProvider';
 import { SLACK_WEBHOOK_PREFIX, SlackService, isLikelySlackWebhookUrl } from './slackService';
 
 type AppLogLevel = 'debug' | 'log' | 'info' | 'warn' | 'error';
@@ -380,8 +387,15 @@ function fireStoppedNotificationOnce() {
 // it. Without this, main can exit while the async chain is still running and the
 // partial file ends up without a Duration header.
 let pendingFinalize: Promise<void> = Promise.resolve();
+let pendingFinalizeCount = 0;
 function trackFinalize(work: Promise<void>): void {
-  pendingFinalize = pendingFinalize.then(() => work).catch(() => {});
+  pendingFinalizeCount += 1;
+  const settled = work
+    .catch(() => {})
+    .finally(() => {
+      pendingFinalizeCount -= 1;
+    });
+  pendingFinalize = pendingFinalize.then(() => settled);
 }
 
 function createGeminiService(opts: { transcriptionOnly?: boolean } = {}): GeminiService | null {
@@ -490,38 +504,147 @@ const liveSessionService = new LiveSessionService({
   createRealtimeClientConfig: createOpenAiRealtimeClientConfigForLive,
   getTextRouteEpoch: () => textRouteEpoch,
   getActiveRecording: () => audioRecorder.getActiveRecording(),
-  emitEvent: (event) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('live-session-event', event);
-    }
-  },
-  onActiveChange: () => applyLiveCaptureThrottling(),
+  emitEvent: (event) => sendToMainWindow('live-session-event', event),
 });
 onTextRouteChanged = () => liveSessionService.onTextRouteChanged();
 
-// Live captions keep running while the dialog is minimized or the window is
-// hidden (Cmd+W hides on macOS), so the renderer that captures their audio must
-// not be throttled then. Throttling is lifted only while a session runs, and
-// background test mode never throttles.
-function applyLiveCaptureThrottling(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.webContents.setBackgroundThrottling(
-    !backgroundTestMode && !liveSessionService.isActive(),
-  );
+// Recording capture runs in an owned hidden renderer (src/captureHost.ts)
+// and RecordingController is the single authority for its state. The visible
+// window only subscribes, so reloading, hiding or destroying it never stops a
+// recording; tray, shortcut, meeting and display triggers call the
+// controller directly.
+const captureHost = new CaptureHostWindow({
+  preloadPath: path.join(__dirname, 'preload.js'),
+  pagePath: defaultCapturePagePath(__dirname),
+  backgroundTestMode,
+  onLost: (detail) => {
+    // Live captions captured in the host end with it ('renderer-lost'); the
+    // recording finalize below joins that drain.
+    const liveDrain = liveCaptureRouter.hostLost().catch((err) => {
+      console.error('Failed to end live captions after capture host loss:', err);
+      reportError(err, { operation: 'live.host-lost', severity: 'warning' });
+    });
+    // An idle host closing (app quit) loses nothing.
+    if (recordingController.isIdle()) {
+      trackFinalize(liveDrain);
+      return;
+    }
+    reportError(new Error(detail), { operation: 'recording.host-lost', severity: 'error' });
+    trackFinalize(recordingController.hostLost(detail).then(() => {}));
+  },
+  // A lost host can no longer stop the audiotee capture it started.
+  onReleased: () => {
+    systemAudioService.stop().catch((err) => console.warn('System audio stop failed:', err));
+  },
+});
+
+function sendToMainWindow(channel: string, payload?: unknown): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
 }
 
-// The renderer captures a live session's audio, so a session cannot outlive
-// it: after a reload or crash the provider would stay connected with nothing
-// to send. Finals already received stay in the snapshot for the next page.
-// Resolves once the provider drained, so a crash finalizer can wait for them.
-function endLiveSessionForRendererLoss(): Promise<void> {
-  return liveSessionService.stopActive('renderer-lost').then(
-    () => {},
-    (err) => {
-      console.error('Failed to end live session after renderer loss:', err);
-      reportError(err, { operation: 'live.renderer-lost', severity: 'warning' });
+const recordingController: RecordingController = new RecordingController({
+  host: captureHost,
+  recorder: audioRecorder,
+  finalizeFile: (liveDrain, onClosed) => stopRecordingWithHints(liveDrain, onClosed),
+  // MediaRecorder writes no Duration element to the WebM header, so players
+  // like Chrome/QuickTime show "0:00" until they scan the whole file. An
+  // ffmpeg `-c copy` remux adds Duration + Cues in ~1s without re-encoding.
+  // Silently skipped if ffmpeg isn't available.
+  afterFinalize: (filePath) => remuxRecordingHeader(filePath),
+  // Notes persist with the audio so they survive even if the user transcribes
+  // later; transcribe-audio falls back to this sidecar when its own arg is missing.
+  saveNotes: async (filePath, notes) => {
+    const liveNotes = sanitizeLiveNotes(notes);
+    if (liveNotes && liveNotes.length > 0)
+      await metadataService.saveMetadata(filePath, { liveNotes });
+  },
+  captureSettings: () => ({
+    deviceId: configService.getAudioDeviceId() || '',
+    recordSystemAudio: configService.getRecordSystemAudio(),
+  }),
+  autoMode: {
+    enabled: () => configService.getAutoMode(),
+    minSeconds: () => Number(configService.getMinRecordingSeconds()) || 0,
+    credentialIssue: () => {
+      syncChatGPTStatusForNewWork();
+      const resolution = configService.getTranscriptionResolution();
+      const check = {
+        hasAiAuth: configService.hasAiAuth(),
+        transcriptionProvider: resolution.provider ?? null,
+        transcriptionProviderIssue: resolution.message,
+      };
+      return check.hasAiAuth && configService.hasTranscriptionAuth()
+        ? null
+        : autoModeSkipMessage(check);
     },
-  );
+    start: async ({ filePath, title, notes }) => {
+      const { jobId, result } = await startAudioTranscription(ipcContext, filePath, notes, {
+        autoExport: true,
+        recordingTitle: title,
+      });
+      result.catch((err) => {
+        console.error('Auto mode transcription failed:', err);
+        reportError(err, { operation: 'recording.auto-mode', severity: 'error' });
+      });
+      return jobId;
+    },
+    isRunning: () =>
+      transcriptionJobs
+        .list()
+        .jobs.some(
+          (job) => job.status === 'running' && job.kind === 'transcribe' && job.origin === 'auto',
+        ),
+  },
+  isQuitting: () => !!global.isQuitting,
+  // Live captions ride on the recording's audio, so stopping the recording
+  // ends them (the host flushes their tail first); late finals still reach
+  // the recording's hint history.
+  beginLiveDrain: () => liveCaptureRouter.stopActive('user'),
+  onSessionStarted: ({ title }) => startRecordingSessionSideEffects(title),
+  onSessionEnded: (result) => {
+    finalizeRecordingSession();
+    if (result.success) fireStoppedNotificationOnce();
+  },
+  emit: (snapshot) => sendToMainWindow('recording-state-changed', snapshot),
+  reportError: (error, operation) => {
+    console.error(`${operation} failed:`, error);
+    reportError(error, { operation, severity: 'warning' });
+  },
+});
+
+// Live captions are captured in the same hidden host, from the recording's
+// processed audio; main routes start/stop there (src/liveCaptureRouter.ts).
+// The visible window only observes 'live-session-event' and the snapshot, so
+// reloading or destroying it never ends a live session.
+const liveCaptureRouter = new LiveCaptureRouter({
+  service: liveSessionService,
+  host: {
+    available: () =>
+      recordingController.snapshot().phase === 'recording' && !!captureHost.current(),
+    startLive: (command) => captureHost.sendLive(command),
+    stopLive: (liveSessionId) => captureHost.sendLive({ type: 'live-stop', liveSessionId }),
+    setTranslate: (liveSessionId, translate) =>
+      captureHost.sendLive({ type: 'live-translate', liveSessionId, translate }),
+  },
+  emit: (event) => sendToMainWindow('live-session-event', event),
+  reportError: (error, operation) => {
+    console.error(`${operation} failed:`, error);
+    reportError(error, { operation, severity: 'warning' });
+  },
+});
+
+// Title typed in the visible window, used when a recording starts without it
+// (tray, shortcut, meeting or display trigger) as the record button did.
+let recordingTitleDraft = '';
+function requestRecordingStart(): void {
+  void recordingController.requestStart({ title: recordingTitleDraft }).then((result) => {
+    // No session started, so a meeting end must not stop a later manual one.
+    if (!result.success) meetingAutoStartedRecording = false;
+  });
+}
+
+function requestRecordingStop(reason: RecordingStopReason): void {
+  void recordingController.requestStop(reason);
 }
 
 function registerGlobalShortcut() {
@@ -558,17 +681,9 @@ function registerGlobalShortcut() {
 }
 
 function handleGlobalShortcutTrigger() {
-  if (!mainWindow) return;
-
-  // Apply same logic as tray click
-  if (audioRecorder.isRecording()) {
-    // Stop recording
-    clearRecordingTimers();
-    menuBarManager.stopRecording();
-  } else {
-    // Start recording without bringing the window to front
-    menuBarManager.startQuickRecording();
-  }
+  // Same logic as a tray click; starts without bringing any window to front.
+  if (!recordingController.isIdle()) requestRecordingStop('shortcut');
+  else requestRecordingStart();
 }
 
 function compareSemver(a: string, b: string): number {
@@ -678,7 +793,30 @@ function startRecordingsWatcher(): void {
   }
 }
 
+// Whether the main window's page subscribed to its requests (main-ui-ready).
+// A request made before then (Settings from the tray or menu on a window being
+// recreated) waits instead of reaching a page that is not listening yet.
+let mainUiReady = false;
+let pendingOpenConfig = false;
+
+function openConfigInMainWindow(): void {
+  const win = showMainWindow();
+  if (!win) return;
+  if (mainUiReady) win.webContents.send('open-config');
+  else pendingOpenConfig = true;
+}
+
+ipcMain.on('main-ui-ready', (event) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;
+  mainUiReady = true;
+  if (pendingOpenConfig) {
+    pendingOpenConfig = false;
+    event.sender.send('open-config');
+  }
+});
+
 function createWindow() {
+  mainUiReady = false;
   mainWindow = new BrowserWindow({
     show: !backgroundTestMode,
     focusable: !backgroundTestMode,
@@ -739,7 +877,6 @@ function createWindow() {
 
   mainWindow.on('closed', () => {
     rejectAllPendingConfirms();
-    void endLiveSessionForRendererLoss();
     mainWindow = null;
   });
 
@@ -748,7 +885,7 @@ function createWindow() {
   mainWindow.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
     if (isMainFrame && !isInPlace) {
       rejectAllPendingConfirms();
-      void endLiveSessionForRendererLoss();
+      mainUiReady = false;
     }
   });
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
@@ -758,33 +895,33 @@ function createWindow() {
       extra: { reason: details.reason, exitCode: details.exitCode },
     });
     rejectAllPendingConfirms();
-    const liveDrain = endLiveSessionForRendererLoss();
-    // Close the recording file handle so the partial file is flushed and left on disk
-    // instead of corrupted or locked open. User keeps whatever audio was streamed so far.
-    if (audioRecorder.isRecording()) {
-      console.warn(
-        'Renderer process gone during recording; finalizing partial file:',
-        details.reason,
-      );
-      finalizeRecordingSession();
-      trackFinalize(
-        (async () => {
-          try {
-            // The audio closes at once; hints wait for the live stop's late finals.
-            const r = await stopRecordingWithHints(liveDrain);
-            if (r.success && r.filePath) {
-              fireStoppedNotificationOnce();
-              console.log(`Partial recording saved: ${r.filePath}`);
-              await remuxRecordingHeader(r.filePath);
-            }
-          } catch (err) {
-            console.error('Failed to finalize partial recording:', err);
-            reportError(err, { operation: 'recording.finalizeOnCrash', severity: 'error' });
-          }
-        })(),
-      );
-    }
+    // Recording and live-caption capture live in the hidden capture host, so
+    // a crash of this window leaves both running; the reloaded page reattaches.
   });
+}
+
+// Recreates the visible window when it was destroyed (Win/Linux close) and
+// rebinds the services that hold it. Returns the current window.
+function ensureMainWindow(): BrowserWindow | null {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    if (mainWindow) {
+      autoUpdaterService.setMainWindow(mainWindow);
+      notificationService.setMainWindow(mainWindow);
+    }
+  }
+  return mainWindow;
+}
+
+// Explicit user request to see the app (tray "Open", Dock click). Never used
+// by recording triggers (Background Recording Policy).
+function showMainWindow(): BrowserWindow | null {
+  const win = ensureMainWindow();
+  if (win && !backgroundTestMode) {
+    win.show();
+    win.focus();
+  }
+  return win;
 }
 
 app.whenReady().then(async () => {
@@ -932,13 +1069,7 @@ app.whenReady().then(async () => {
         {
           label: 'Settings...',
           accelerator: 'Cmd+,',
-          click: () => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              if (!backgroundTestMode && !mainWindow.isVisible()) mainWindow.show();
-              if (!backgroundTestMode) mainWindow.focus();
-              mainWindow.webContents.send('open-config');
-            }
-          },
+          click: () => openConfigInMainWindow(),
         },
         { type: 'separator' } as any,
         {
@@ -995,7 +1126,16 @@ app.whenReady().then(async () => {
 
   // Initialize menu bar manager
   if (mainWindow) {
-    if (!backgroundTestMode) menuBarManager.init(mainWindow, audioRecorder);
+    if (!backgroundTestMode)
+      menuBarManager.init({
+        isRecording: () => !recordingController.isIdle(),
+        startRecording: () => requestRecordingStart(),
+        stopRecording: () => requestRecordingStop('tray'),
+        openWindow: () => {
+          showMainWindow();
+        },
+        openPreferences: () => openConfigInMainWindow(),
+      });
     // Set main window for auto-updater and notifications
     autoUpdaterService.setMainWindow(mainWindow);
     notificationService.setMainWindow(mainWindow);
@@ -1030,12 +1170,11 @@ app.whenReady().then(async () => {
     notificationService.notifyMeetingDetected(info.app);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('meeting-status-changed', { active: true, app: info.app });
-
-      // Auto-start recording if not already recording
-      if (!audioRecorder.isRecording()) {
-        meetingAutoStartedRecording = true;
-        mainWindow.webContents.send('tray-start-recording');
-      }
+    }
+    // Auto-start recording if not already recording
+    if (recordingController.isIdle()) {
+      meetingAutoStartedRecording = true;
+      requestRecordingStart();
     }
   });
 
@@ -1043,13 +1182,11 @@ app.whenReady().then(async () => {
     notificationService.notifyMeetingEnded(info.app);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('meeting-status-changed', { active: false, app: info.app });
-
-      // Only stop recording if we auto-started it (don't interrupt manual recordings)
-      if (meetingAutoStartedRecording && audioRecorder.isRecording()) {
-        meetingAutoStartedRecording = false;
-        clearRecordingTimers();
-        mainWindow.webContents.send('tray-stop-recording');
-      }
+    }
+    // Only stop recording if we auto-started it (don't interrupt manual recordings)
+    if (meetingAutoStartedRecording && !recordingController.isIdle()) {
+      meetingAutoStartedRecording = false;
+      requestRecordingStop('meeting-end');
     }
   });
 
@@ -1059,24 +1196,17 @@ app.whenReady().then(async () => {
   }
 
   displayDetector.on('display-connected', () => {
-    if (mainWindow && !mainWindow.isDestroyed() && !audioRecorder.isRecording()) {
+    if (recordingController.isIdle()) {
       notificationService.notifyDisplayDetected(() => {
         // User clicked/allowed -- start recording silently
-        if (!audioRecorder.isRecording() && mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('tray-start-recording');
-        }
+        if (recordingController.isIdle()) requestRecordingStart();
       });
     }
   });
 
+  // The hidden capture host is a window too, so check the main window itself.
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-      if (mainWindow) {
-        autoUpdaterService.setMainWindow(mainWindow);
-        notificationService.setMainWindow(mainWindow);
-      }
-    }
+    if (!mainWindow || mainWindow.isDestroyed()) ensureMainWindow();
   });
 });
 
@@ -1089,42 +1219,65 @@ app.on('window-all-closed', () => {
   // On other platforms, the app continues running in tray
 });
 
-// Handle app quit
-app.on('before-quit', async (event) => {
+// Handle app quit. A recording is flushed by the capture host (short grace,
+// no auto mode) and finalized before the app exits; finalize work already in
+// flight (a lost capture host) is awaited, bounded. Quit is deferred with
+// preventDefault and re-issued once, so this handler cannot loop.
+const QUIT_STOP_GRACE_MS = 3_000;
+const QUIT_FINALIZE_WAIT_MS = 5_000;
+let quitPreparation: Promise<void> | null = null;
+let quitPrepared = false;
+app.on('before-quit', (event) => {
   meetingDetector.stop();
   displayDetector.stop();
   autoUpdaterService.stopPeriodicCheck();
   global.isQuitting = true;
 
-  // Flush and close any open recording handle so the partial file survives the quit.
-  if (audioRecorder.isRecording()) {
+  if (quitPrepared) return;
+  if (quitPreparation) {
     event.preventDefault();
-    console.warn('Quit requested during recording; finalizing partial file before exit');
-    finalizeRecordingSession();
-    try {
-      const r = await stopRecordingWithHints();
-      if (r.success && r.filePath) {
-        console.log(`Partial recording saved on quit: ${r.filePath}`);
-        await remuxRecordingHeader(r.filePath);
-      }
-    } catch (err) {
-      console.error('Failed to finalize recording on quit:', err);
-      reportError(err, { operation: 'recording.finalizeOnQuit', severity: 'error' });
-    }
-    app.quit();
     return;
   }
-
-  // Wait for any async finalize started by render-process-gone to complete so
-  // the remux isn't killed mid-spawn when the app exits.
-  try {
-    await Promise.race([
-      pendingFinalize,
-      new Promise<void>((resolve) => setTimeout(resolve, 5000)),
-    ]);
-  } catch {
-    // swallow — we're quitting
-  }
+  if (recordingController.isIdle() && pendingFinalizeCount === 0) return;
+  event.preventDefault();
+  // One deadline for the whole quit. Capture stops at once and the audio file
+  // is closed (by the host's stop, or by force after QUIT_STOP_GRACE_MS)
+  // before a live-caption drain is awaited, so the remaining waits (late live
+  // finals into the hint history, a provider's reply, the header remux) are
+  // cut off at the deadline rather than holding quit for up to the 15s flush
+  // cap: the recording survives, a late hint or caption may not.
+  const deadline = Date.now() + QUIT_STOP_GRACE_MS + QUIT_FINALIZE_WAIT_MS;
+  const untilDeadline = () =>
+    new Promise<'deadline'>((resolve) =>
+      setTimeout(() => resolve('deadline'), Math.max(0, deadline - Date.now())),
+    );
+  quitPreparation = (async () => {
+    if (!recordingController.isIdle()) {
+      console.warn('Quit requested during recording; finalizing the file before exit');
+      try {
+        const r = await Promise.race([
+          recordingController.requestStop('quit', {
+            graceMs: QUIT_STOP_GRACE_MS,
+            autoMode: false,
+          }),
+          untilDeadline(),
+        ]);
+        if (r === 'deadline') {
+          console.warn('Quit: stopped waiting for the recording drain (live captions or hints).');
+        } else if (r?.success && r.filePath) {
+          console.log(`Recording saved on quit: ${r.filePath}`);
+        }
+      } catch (err) {
+        console.error('Failed to finalize recording on quit:', err);
+        reportError(err, { operation: 'recording.finalizeOnQuit', severity: 'error' });
+      }
+    }
+    // Remux etc. of a finalize started elsewhere must not be killed mid-spawn.
+    await Promise.race([pendingFinalize, untilDeadline()]).catch(() => {});
+  })().finally(() => {
+    quitPrepared = true;
+    app.quit();
+  });
 });
 
 // Unregister all shortcuts when app quits
@@ -1202,13 +1355,14 @@ ipcMain.handle('cancel-ffmpeg-download', async () => {
 // / google-drive-sync-*) live under src/ipc/. Each domain registers itself in
 // src/ipc/register.ts; main keeps owning the singletons and exposes them
 // through this one ctx object.
-registerAllIpc({
+const ipcContext: IpcContext = {
   getMainWindow: () => mainWindow,
   configService,
   notificationService,
   ffmpegManager,
   ensureGeminiService,
   maybeAutoSync,
+  restoreCloudAudio: restoreRecordingAudio,
   isContainedTranscriptionPath,
   formatAiCredentialsError,
   serializeTranscriptionError,
@@ -1220,7 +1374,8 @@ registerAllIpc({
   openExternal: (url) => void shell.openExternal(url),
   isAudioInUse,
   getActiveRecordingPath: () => audioRecorder.getActiveRecording()?.filePath,
-});
+};
+registerAllIpc(ipcContext);
 
 // Paths whose header remux is rewriting the file right now.
 const remuxingPaths = new Set<string>();
@@ -1248,80 +1403,107 @@ function isAudioInUse(audioPath: string): boolean {
   return false;
 }
 
-// Audio capture runs in the renderer via MediaRecorder; chunks stream over IPC as
-// they're encoded so the renderer never accumulates hours of audio in memory. Main
-// opens a FileHandle on start, appends each chunk on arrival, and closes on stop.
-// A renderer crash mid-session leaves a truncated-but-valid WebM/Opus file on disk.
-ipcMain.handle('start-recording', async (_, payload: { title: string; mimeType: string }) => {
-  try {
-    const meetingTitle = payload?.title ?? 'Untitled_Meeting';
-    const mimeType = payload?.mimeType ?? 'audio/webm';
-    const result = await audioRecorder.startRecording(meetingTitle, mimeType);
-    if (!result.success) return result;
+// Main-side session effects of a recording the controller started: tray
+// state, max-duration auto stop and reminders. Cleared by
+// finalizeRecordingSession when the controller finalizes.
+function startRecordingSessionSideEffects(title: string): void {
+  clearRecordingTimers();
+  recordingNotificationFired = false;
+  menuBarManager.updateRecordingState(true, title);
 
-    recordingNotificationFired = false;
-    menuBarManager.updateRecordingState(true, meetingTitle);
-
-    const maxMinutes = configService.getMaxRecordingMinutes();
-    if (maxMinutes > 0) {
-      recordingMaxTimer = setTimeout(
-        () => {
-          if (!audioRecorder.isRecording()) return;
-          notificationService.notifyRecordingAutoStopped(maxMinutes);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('recording-auto-stopped', {
-              reason: 'maxDuration',
-              maxMinutes,
-            });
-          }
-          // Grace window: if the renderer is hung and never calls stop-recording,
-          // force-finalize so main state unblocks and the partial file is saved.
-          recordingAutoStopAbortTimer = setTimeout(() => {
-            recordingAutoStopAbortTimer = null;
-            if (!audioRecorder.isRecording()) return;
-            console.warn('Renderer did not stop after auto-stop signal; finalizing partial file');
-            finalizeRecordingSession();
-            stopRecordingWithHints()
-              .then((r) => {
-                if (r.success) fireStoppedNotificationOnce();
-              })
-              .catch((err) => {
-                console.error('Force-stop failed:', err);
-                reportError(err, { operation: 'recording.forceStop', severity: 'warning' });
-              });
-          }, 10_000);
-        },
-        maxMinutes * 60 * 1000,
-      );
-    }
-
-    const reminderMinutes = configService.getRecordingReminderMinutes();
-    if (reminderMinutes > 0) {
-      let elapsed = 0;
-      recordingReminderTimer = setInterval(
-        () => {
-          elapsed += reminderMinutes;
-          if (audioRecorder.isRecording()) {
-            notificationService.notifyRecordingReminder(elapsed);
-          }
-        },
-        reminderMinutes * 60 * 1000,
-      );
-    }
-
-    return result;
-  } catch (error) {
-    console.error('Error starting recording:', error);
-    reportError(error, { operation: 'recording.start', severity: 'error' });
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    return { success: false, error: errorMessage };
+  const maxMinutes = configService.getMaxRecordingMinutes();
+  if (maxMinutes > 0) {
+    recordingMaxTimer = setTimeout(
+      () => {
+        recordingMaxTimer = null;
+        if (recordingController.isIdle()) return;
+        notificationService.notifyRecordingAutoStopped(maxMinutes);
+        sendToMainWindow('recording-auto-stopped', { reason: 'maxDuration', maxMinutes });
+        // requestStop force-finalizes after its grace window if the capture
+        // host is hung and never reports stopped.
+        requestRecordingStop('max-duration');
+      },
+      maxMinutes * 60 * 1000,
+    );
   }
+
+  const reminderMinutes = configService.getRecordingReminderMinutes();
+  if (reminderMinutes > 0) {
+    let elapsed = 0;
+    recordingReminderTimer = setInterval(
+      () => {
+        elapsed += reminderMinutes;
+        if (!recordingController.isIdle()) {
+          notificationService.notifyRecordingReminder(elapsed);
+        }
+      },
+      reminderMinutes * 60 * 1000,
+    );
+  }
+}
+
+// Recording state for the visible window. It reads the snapshot on load (so a
+// reload or a recreated window reattaches) and follows 'recording-state-changed'.
+ipcMain.handle('recording-get-state', () => recordingController.snapshot());
+
+ipcMain.on('recording-title-draft', (_event, title: unknown) => {
+  recordingTitleDraft = typeof title === 'string' ? title.slice(0, 500) : '';
 });
 
-// Fire-and-forget chunk append. IPC preserves order per channel, so sequential
-// appendChunk calls land on disk in the order MediaRecorder emitted them.
-ipcMain.on('recording-chunk', (_event, data: ArrayBuffer | Uint8Array) => {
-  if (!data) return;
+ipcMain.handle('recording-request-start', (_event, opts?: { title?: unknown }) =>
+  recordingController.requestStart({
+    title: typeof opts?.title === 'string' ? opts.title.slice(0, 500) : undefined,
+  }),
+);
+
+ipcMain.handle('recording-request-stop', async () => {
+  const result = await recordingController.requestStop('user');
+  return result
+    ? { success: result.success, result }
+    : { success: false, error: 'No recording in progress' };
+});
+
+ipcMain.handle('recording-add-note', (_event, note?: { text?: unknown; offsetMs?: unknown }) =>
+  recordingController.addNote(note ?? {}),
+);
+
+ipcMain.handle('recording-switch-mic', async (_event, deviceId: unknown) => ({
+  success: await recordingController.switchMic(typeof deviceId === 'string' ? deviceId : ''),
+}));
+
+// Capture host protocol. Every message must come from the current host.
+ipcMain.on('capture-host-ready', (event) => captureHost.markReady(event.sender));
+
+ipcMain.handle(
+  'capture-host-open',
+  async (event, payload?: { sessionId?: unknown; mimeType?: unknown }) => {
+    if (!captureHost.owns(event.sender)) return { success: false, error: 'Not the capture host' };
+    return recordingController.hostOpen(
+      Number(payload?.sessionId),
+      typeof payload?.mimeType === 'string' ? payload.mimeType : 'audio/webm',
+    );
+  },
+);
+
+ipcMain.on('capture-host-event', (event, payload: CaptureHostEvent) => {
+  if (!captureHost.owns(event.sender) || !payload || typeof payload !== 'object') return;
+  if (payload.type === 'mic-fallback') {
+    sendToMainWindow('recording-notice', { kind: 'mic-fallback' });
+    return;
+  }
+  recordingController.hostEvent(payload);
+});
+
+ipcMain.on('capture-host-live-event', (event, payload: CaptureHostLiveEvent) => {
+  if (!captureHost.owns(event.sender) || !payload || typeof payload !== 'object') return;
+  liveCaptureRouter.hostEvent(payload);
+});
+
+// Fire-and-forget chunk append from the capture host. IPC preserves order per
+// sender, so chunks land on disk in the order MediaRecorder emitted them, and
+// before the host's 'stopped' event.
+ipcMain.on('recording-chunk', (event, data: ArrayBuffer | Uint8Array) => {
+  if (!data || !captureHost.owns(event.sender)) return;
   try {
     audioRecorder.appendChunk(Buffer.from(data as ArrayBuffer));
   } catch (error) {
@@ -1334,7 +1516,10 @@ ipcMain.on('recording-chunk', (_event, data: ArrayBuffer | Uint8Array) => {
   }
 });
 
-async function stopRecordingWithHints(liveDrain?: Promise<void>) {
+async function stopRecordingWithHints(
+  liveDrain?: Promise<unknown>,
+  onClosed?: (filePath: string) => Promise<void>,
+) {
   return finishRecordingWithHints({
     activeFilePath: audioRecorder.getActiveRecording()?.filePath,
     stop: () => audioRecorder.stopRecording(),
@@ -1345,6 +1530,7 @@ async function stopRecordingWithHints(liveDrain?: Promise<void>) {
       reportError(error, { operation: 'recording.saveLiveHints', severity: 'warning' });
     },
     liveDrain,
+    onClosed,
   });
 }
 
@@ -1361,42 +1547,6 @@ ipcMain.handle('read-recording-live-hints', async (_, filePath: string) => {
     success: true,
     liveHints: note?.liveHints ?? parseRecordingLiveHints(metadata?.liveHints),
   };
-});
-
-ipcMain.handle('stop-recording', async (_, opts?: { liveNotes?: unknown }) => {
-  try {
-    finalizeRecordingSession();
-    const result = await stopRecordingWithHints();
-    if (result.success) {
-      fireStoppedNotificationOnce();
-      if (result.filePath) {
-        // MediaRecorder writes no Duration element to the WebM header, so players
-        // like Chrome/QuickTime show "0:00" until they scan the whole file. An
-        // ffmpeg `-c copy` remux adds Duration + Cues in ~1s without re-encoding.
-        // Silently skip if ffmpeg isn't available — file still plays, transcription
-        // pipeline is unaffected.
-        await remuxRecordingHeader(result.filePath);
-
-        // Persist live notes alongside the audio so they survive even if the
-        // user transcribes later (auto-mode off). transcribe-audio falls back
-        // to this when its own arg is missing.
-        const liveNotes = sanitizeLiveNotes(opts?.liveNotes);
-        if (liveNotes && liveNotes.length > 0) {
-          try {
-            await metadataService.saveMetadata(result.filePath, { liveNotes });
-          } catch (err) {
-            console.error('Failed to persist live notes to metadata:', err);
-            reportError(err, { operation: 'recording.saveLiveNotes', severity: 'warning' });
-          }
-        }
-      }
-    }
-    return result;
-  } catch (error) {
-    console.error('Error stopping recording:', error);
-    reportError(error, { operation: 'recording.stop', severity: 'error' });
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
-  }
 });
 
 async function remuxRecordingHeader(filePath: string): Promise<void> {
@@ -1423,22 +1573,6 @@ async function remuxRecordingHeader(filePath: string): Promise<void> {
     remuxingPaths.delete(filePath);
   }
 }
-
-// Explicit cancel path: discard the in-progress file (used when renderer fails to
-// construct MediaRecorder after main already opened the stream).
-ipcMain.handle('abort-recording', async () => {
-  try {
-    finalizeRecordingSession();
-    const recording = audioRecorder.getActiveRecording();
-    if (recording) liveSessionService.takeRecordingHints(recording.filePath);
-    await audioRecorder.abortRecording();
-    return { success: true };
-  } catch (error) {
-    console.error('Error aborting recording:', error);
-    reportError(error, { operation: 'recording.abort', severity: 'warning' });
-    return { success: false, error: error instanceof Error ? error.message : String(error) };
-  }
-});
 
 // Configuration handlers
 
@@ -2292,17 +2426,20 @@ ipcMain.handle('live-session-start', async (_, opts?: { title?: string; translat
         error: `Live transcription auth is not configured, and fallback is unavailable: ${chunkedIssue}`,
       };
     }
-    const session = await liveSessionService.start({
+    // Main hands capture to the hidden host; the visible result carries no
+    // realtime client secret.
+    const session = await liveCaptureRouter.start({
       title: typeof opts?.title === 'string' ? opts.title : undefined,
       translate,
     });
     return { success: true, session };
   } catch (error) {
     console.error('live-session-start failed:', error);
-    // An ended-while-starting session (stopped or its window lost) is expected.
+    // An ended-while-starting session (stopped or its host lost) is expected.
     if (
       !(error instanceof LiveChunkedCaptionsUnavailableError) &&
-      !(error instanceof LiveSessionEndedError)
+      !(error instanceof LiveSessionEndedError) &&
+      !(error instanceof LiveCaptureUnavailableError)
     ) {
       reportError(error, { operation: 'liveSession.start', severity: 'error' });
     }
@@ -2310,10 +2447,13 @@ ipcMain.handle('live-session-start', async (_, opts?: { title?: string; translat
   }
 });
 
+// Live-caption transport below comes from the hidden capture host only: it
+// owns the PCM tap, the OpenAI Realtime peer and the chunked uploads.
 ipcMain.handle(
   'live-session-realtime-failed',
-  async (_, opts?: { sessionId?: string; error?: string }) => {
+  async (event, opts?: { sessionId?: string; error?: string }) => {
     try {
+      if (!captureHost.owns(event.sender)) return { success: false, error: 'Not the capture host' };
       if (!opts?.sessionId) return { success: false, error: 'Missing live session id.' };
       const session = await liveSessionService.fallbackFromRealtime({
         sessionId: opts.sessionId,
@@ -2336,7 +2476,7 @@ ipcMain.handle(
 ipcMain.handle(
   'live-session-process-chunk',
   async (
-    _event,
+    event,
     opts?: {
       sessionId?: string;
       audioData?: ArrayBuffer | Uint8Array;
@@ -2347,6 +2487,7 @@ ipcMain.handle(
     },
   ) => {
     try {
+      if (!captureHost.owns(event.sender)) return { success: false, error: 'Not the capture host' };
       if (!opts?.sessionId || !opts.audioData) {
         return { success: false, error: 'Missing live session audio payload.' };
       }
@@ -2374,7 +2515,7 @@ ipcMain.handle(
 ipcMain.on(
   'live-session-interim',
   (
-    _event,
+    event,
     opts?: {
       sessionId?: string;
       text?: string;
@@ -2383,6 +2524,7 @@ ipcMain.on(
     },
   ) => {
     try {
+      if (!captureHost.owns(event.sender)) return;
       if (!opts?.sessionId || typeof opts.text !== 'string') return;
       liveSessionService.receiveInterim({
         sessionId: opts.sessionId,
@@ -2399,7 +2541,7 @@ ipcMain.on(
 ipcMain.handle(
   'live-session-final',
   (
-    _event,
+    event,
     opts?: {
       sessionId?: string;
       text?: string;
@@ -2410,6 +2552,7 @@ ipcMain.handle(
     },
   ) => {
     try {
+      if (!captureHost.owns(event.sender)) return { success: false, error: 'Not the capture host' };
       if (!opts?.sessionId || typeof opts.text !== 'string') {
         return { success: false, error: 'Missing live transcript payload.' };
       }
@@ -2433,7 +2576,7 @@ ipcMain.handle(
 ipcMain.on(
   'live-session-pcm-chunk',
   (
-    _event,
+    event,
     opts?: {
       sessionId?: string;
       audioData?: ArrayBuffer | Uint8Array;
@@ -2445,6 +2588,7 @@ ipcMain.on(
     },
   ) => {
     try {
+      if (!captureHost.owns(event.sender)) return;
       if (!opts?.sessionId || !opts.audioData) return;
       liveSessionService.appendPcm({
         sessionId: opts.sessionId,
@@ -2469,7 +2613,8 @@ ipcMain.on(
 ipcMain.handle('live-session-stop', async (_, sessionId?: string) => {
   try {
     if (!sessionId) return { success: false, error: 'Missing live session id.' };
-    return { success: true, snapshot: await liveSessionService.stop(sessionId) };
+    // The host flushes its capture tail before the provider closes.
+    return { success: true, snapshot: await liveCaptureRouter.stop(sessionId) };
   } catch (error) {
     console.error('live-session-stop failed:', error);
     reportError(error, { operation: 'liveSession.stop', severity: 'warning' });
@@ -2498,7 +2643,7 @@ ipcMain.handle(
       if (!opts?.sessionId) return { success: false, error: 'Missing live session id.' };
       return {
         success: true,
-        snapshot: liveSessionService.setTranslate(opts.sessionId, opts.translate !== false),
+        snapshot: liveCaptureRouter.setTranslate(opts.sessionId, opts.translate !== false),
       };
     } catch (error) {
       console.error('live-session-set-translate failed:', error);

@@ -82,6 +82,7 @@
           autocomplete="off"
           spellcheck="false"
         />
+        <p id="liveNotesStatus" class="live-notes-status" role="status"></p>
       </div>
 
       <dialog id="liveSessionPanel" class="live-session-modal" aria-labelledby="liveSessionHeading" aria-describedby="liveSessionStatus">
@@ -259,6 +260,7 @@
           📁
         </button>
       </div>
+      <p id="driveSyncStatus" class="drive-sync-status" hidden></p>
       <div class="search-row">
         <input type="search" id="searchInput" class="search-input" placeholder="Search past meetings (title, summary, notes, transcript)" autocomplete="off" spellcheck="false" />
       </div>
@@ -685,6 +687,7 @@
           </div>
         </div>
         <p id="notionSupersededNotice" class="export-notice" hidden></p>
+        <p id="noteExportStatus" class="note-export-status" role="status"></p>
         <div class="transcription-body">
           <div class="tab-content">
             <div id="all" class="tab-pane active">

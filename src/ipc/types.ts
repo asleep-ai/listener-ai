@@ -65,6 +65,13 @@ export interface IpcContext {
   // Local audio removal skips such files. Optional so handler tests that do
   // not exercise storage can omit it.
   isAudioInUse?(audioPath: string): boolean;
+  // Downloads a recording kept only in Google Drive back to its local path
+  // (joined with any download of it already running). Main-owned work whose
+  // audio is cloud-only (transcribe, regenerate, merge, M4A export) runs this
+  // as its first step, so the request survives the window that made it.
+  restoreCloudAudio?(
+    audioPath: string,
+  ): Promise<{ success: true; path: string } | { success: false; error: string; code?: string }>;
   // Path of the recording main is currently writing, if any. Destructive
   // handlers (delete) refuse it: the list shows the file while it is still
   // being written, and deleting it loses the whole recording. A reachable

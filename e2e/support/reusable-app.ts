@@ -24,7 +24,8 @@ import { classifyCase } from './case-policy';
 import { scriptDialogs } from './dialogs';
 import {
   assertCleanReset,
-  assertSingleHiddenWindow,
+  assertHiddenWindowRoles,
+  type WindowRoles,
   bounded,
   clearOwnedFixtureData,
   OwnedSession,
@@ -80,8 +81,18 @@ async function resetConfiguration(
   );
 }
 
-async function closeOwnedElectron(app: ElectronApplication): Promise<void> {
-  const child = app.process();
+async function closeOwnedElectron(app: ElectronApplication, pid?: number): Promise<void> {
+  let child: ReturnType<ElectronApplication['process']>;
+  try {
+    child = app.process();
+  } catch {
+    // The app already ended its own process (a case that ran app.quit());
+    // Playwright then disposes the handle. Confirm the owned PID is gone
+    // (signal 0 only probes) instead of assuming it.
+    if (pid !== undefined && isAlive(pid))
+      throw new Error('Owned Electron closed its connection but is still alive.');
+    return;
+  }
   const exited = () => child.exitCode !== null || child.signalCode !== null;
   const wait = (milliseconds: number) =>
     bounded(
@@ -103,6 +114,34 @@ async function closeOwnedElectron(app: ElectronApplication): Promise<void> {
   if (!exited()) throw new Error('Owned Electron is still alive; retaining its fixture data.');
 }
 
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+// TEST-ONLY Chromium switch for every owned launch. The WebRTC loopback case
+// connects two peers in one hidden page, and with Chromium's default each peer
+// advertises only an mDNS .local name for its host candidates, which the other
+// must resolve over multicast. A hosted macOS run had no remote candidates or
+// pairs, with ICE still "new"; remove that dependency from this loopback.
+// With this feature off the peers
+// advertise their numeric host addresses; the case asserts that it did.
+export const OWNED_DISABLED_FEATURES = ['WebRtcHideLocalIpsWithMdns'];
+
+// Merges `features` into the args' --disable-features switch (Chromium keeps
+// only one value per switch), keeping any features already listed.
+export function withDisabledFeatures(args: string[], features: string[]): string[] {
+  const prefix = '--disable-features=';
+  const index = args.findIndex((arg) => arg.startsWith(prefix));
+  const existing = index < 0 ? [] : args[index].slice(prefix.length).split(',').filter(Boolean);
+  const merged = `${prefix}${[...new Set([...existing, ...features])].join(',')}`;
+  return index < 0 ? [...args, merged] : args.map((arg, i) => (i === index ? merged : arg));
+}
+
 // Each suite owns one data root for the entire lifetime of its main-process
 // singletons. Only synthetic app data is reset; Chromium's live profile stays.
 export class ReusableApp {
@@ -117,7 +156,7 @@ export class ReusableApp {
   private application: ElectronApplication | undefined;
   private window: Page | undefined;
   private pid: number | undefined;
-  private windowId: number | undefined;
+  private windowRoles: Partial<WindowRoles> = {};
   private active = false;
   private prepared = false;
   private cases = 0;
@@ -184,19 +223,19 @@ export class ReusableApp {
             .digest('hex');
           app = await electron.launch({
             executablePath: artifact.executable,
-            args: ['--no-sandbox'],
+            args: withDisabledFeatures(['--no-sandbox'], OWNED_DISABLED_FEATURES),
             cwd: this.dataDir,
             env,
           });
         } else {
-          app = await launchApp(env);
+          app = await launchApp(env, withDisabledFeatures([], OWNED_DISABLED_FEATURES));
         }
         this.application = app;
         this.pid = app.process().pid;
         return app;
       },
       async (app) => {
-        await closeOwnedElectron(app);
+        await closeOwnedElectron(app, this.pid);
         this.application = undefined;
         this.window = undefined;
       },
@@ -355,6 +394,7 @@ export class ReusableApp {
             'services/audioConcatService.js',
             'services/metadataService.js',
             'meetingLock.js',
+            'captureHost.js',
           ]) {
             const module = load(file);
             snapshot(module, file, 'module');
@@ -552,13 +592,60 @@ export class ReusableApp {
       (globalThis as any).__listenerReusableBaseline.checks++;
       return BrowserWindow.getAllWindows().map((w) => ({
         id: w.id,
+        url: w.webContents.getURL(),
         visible: w.isVisible(),
         focused: w.isFocused(),
         focusable: w.isFocusable(),
         devTools: w.webContents.isDevToolsOpened(),
       }));
     }, stage);
-    this.windowId = assertSingleHiddenWindow(windows, this.windowId);
+    this.windowRoles = assertHiddenWindowRoles(windows, this.windowRoles);
+  }
+
+  /** Mid-case window check: hidden main window plus at most one hidden capture host. */
+  async assertWindows(stage: string): Promise<WindowRoles> {
+    await this.assertIdentity(stage);
+    return { ...(this.windowRoles as WindowRoles) };
+  }
+
+  /**
+   * A case that deliberately destroyed the capture host (crash scenario)
+   * releases its pinned ID; the next host is pinned when first observed.
+   */
+  async releaseCaptureHost(): Promise<void> {
+    delete this.windowRoles.capture;
+    if (this.packaged)
+      await this.application!.evaluate(() =>
+        (globalThis as any).__listenerPackagedGuards.releaseCaptureHost(),
+      );
+  }
+
+  /**
+   * A fresh case that deliberately destroyed and recreated the main window
+   * adopts the replacement page. Shared sessions keep the boot window identity
+   * and refuse this; packaged runs also re-pin the guards' main window, which
+   * refuses unless the old one is gone and exactly one hidden main replaced it.
+   */
+  async adoptReplacedMainWindow(previous: Page): Promise<Page> {
+    if (!this.fresh || !this.application)
+      throw new Error('Only fresh cases may replace the main window.');
+    let replacement: Page | undefined;
+    await expect
+      .poll(() => {
+        replacement = this.application!.windows().find(
+          (w) => w !== previous && w.url().endsWith('/renderer/index.html'),
+        );
+        return !!replacement;
+      })
+      .toBe(true);
+    this.window = replacement;
+    delete this.windowRoles.main;
+    if (this.packaged)
+      await this.application.evaluate(() =>
+        (globalThis as any).__listenerPackagedGuards.adoptMainWindow(),
+      );
+    await this.assertIdentity('main-window-adopted');
+    return replacement!;
   }
 
   async finish(release?: () => Promise<void>): Promise<void> {
@@ -714,7 +801,7 @@ export class ReusableApp {
     this.closed = true;
     await this.owner.close();
     if (this.application) {
-      await closeOwnedElectron(this.application);
+      await closeOwnedElectron(this.application, this.pid);
       this.application = undefined;
       this.window = undefined;
     }

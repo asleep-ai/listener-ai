@@ -57,6 +57,13 @@ describe('note export and transcript cutoff coordination', () => {
   const handlers = new Map<string, Handler>();
 
   let notionCalls: Array<{ title: string; data: any }>;
+  // The configured Notion destination; part of an upload's join identity.
+  // Sentinels that cannot occur in a UUID, path or timestamp of a snapshot
+  // (underscores and non-hex letters), so finding one proves a leak.
+  const NOTION_KEY = 'secret_NOTION_KEY_SENTINEL';
+  const NOTION_DB = 'NOTION_DB_SENTINEL_one';
+  const SLACK_WEBHOOK = 'https://hooks.slack.com/services/T/B/SLACK_WEBHOOK_SENTINEL';
+  const notionDestination = { key: NOTION_KEY, db: NOTION_DB };
   let notionGate: Gate | null;
   let slackCalls: Array<{ title: string; result: any }>;
   let slackGate: Gate | null;
@@ -85,7 +92,12 @@ describe('note export and transcript cutoff coordination', () => {
 
     let url = 0;
     const ctx = {
-      configService: { getSummaryPrompt: () => 'PROMPT' },
+      configService: {
+        getSummaryPrompt: () => 'PROMPT',
+        getNotionApiKey: () => notionDestination.key,
+        getNotionDatabaseId: () => notionDestination.db,
+        getSlackWebhookUrl: () => SLACK_WEBHOOK,
+      },
       notificationService: { notifyUploadComplete: () => {}, notifyUploadFailed: () => {} },
       getNotionService: () => ({
         createMeetingNote: async (title: string, _date: Date, data: any) => {
@@ -410,5 +422,152 @@ describe('note export and transcript cutoff coordination', () => {
     });
     assert.equal(res.success, true);
     assert.deepEqual(notionCalls[0].data.customFields, legacy);
+  });
+
+  // Joined repeats: a click after a reload or a second window action while
+  // main is still exporting must not publish twice.
+  it('joins a repeated Notion upload of a saved note instead of creating a second page', async () => {
+    const { backgroundOperations } =
+      require('./backgroundOperations') as typeof import('./backgroundOperations');
+    const { folder, generationId } = makeNote();
+    notionGate = gate();
+    const request = {
+      title: 'Sync',
+      transcriptionData: { transcript },
+      transcriptionPath: folder,
+      expectedGenerationId: generationId,
+    };
+    const first = invoke('upload-to-notion', request);
+    await waitFor(() => notionCalls.length === 1, 'the Notion request');
+    const running = backgroundOperations
+      .snapshot()
+      .operations.filter((op) => op.kind === 'notion-upload' && op.status === 'running');
+    assert.deepEqual(
+      running.map((op) => op.target),
+      [path.resolve(folder)],
+      'a reloaded window can see the upload',
+    );
+    assert.doesNotMatch(
+      JSON.stringify(backgroundOperations.snapshot()),
+      /NOTION_KEY_SENTINEL|NOTION_DB_SENTINEL|SLACK_WEBHOOK_SENTINEL|hooks\.slack/,
+    );
+    const second = invoke('upload-to-notion', request);
+    await settle();
+    assert.equal(notionCalls.length, 1);
+    notionGate.open();
+    assert.deepEqual(await second, await first);
+    assert.equal(readMeta(folder).exports.notion.pageUrl, (await first).url);
+  });
+
+  it('does not join an upload to a different Notion database', async () => {
+    const { folder, generationId } = makeNote();
+    notionGate = gate();
+    const request = {
+      title: 'Sync',
+      transcriptionData: { transcript },
+      transcriptionPath: folder,
+      expectedGenerationId: generationId,
+    };
+    const first = invoke('upload-to-notion', request);
+    await waitFor(() => notionCalls.length === 1, 'the Notion request');
+    notionDestination.db = 'NOTION_DB_SENTINEL_two';
+    try {
+      const second = invoke('upload-to-notion', request);
+      notionGate.open();
+      await first;
+      await second;
+      assert.equal(notionCalls.length, 2);
+    } finally {
+      notionDestination.db = NOTION_DB;
+    }
+  });
+
+  it('joins a repeated Slack send of a saved note so the channel gets one message', async () => {
+    const { folder, generationId } = makeNote();
+    slackGate = gate();
+    const request = {
+      title: 'Sync',
+      transcriptionData: {},
+      transcriptionPath: folder,
+      expectedGenerationId: generationId,
+    };
+    const first = invoke('send-to-slack', request);
+    await waitFor(() => slackCalls.length === 1, 'the Slack request');
+    const second = invoke('send-to-slack', request);
+    await settle();
+    slackGate.open();
+    assert.deepEqual(await second, await first);
+    assert.equal(slackCalls.length, 1);
+  });
+
+  it('joins an identical cutoff request and refuses a conflicting one', async () => {
+    const { folder, generationId } = makeNote();
+    summaryGate = gate();
+    const request = {
+      transcriptionPath: folder,
+      expectedGenerationId: generationId,
+      cutoffOffset: cutAt,
+    };
+    const first = apply(request);
+    await waitFor(() => summarized.length === 1, 'the summary call');
+    const repeat = apply(request);
+    const conflicting = await apply({ ...request, cutoffOffset: null });
+    assert.deepEqual(conflicting, {
+      success: false,
+      error: 'The report for this note is already being regenerated.',
+    });
+    summaryGate.open();
+    const [a, b] = await Promise.all([first, repeat]);
+    assert.equal(a.success, true);
+    assert.deepEqual(b, a);
+    assert.equal(summarized.length, 1, 'one regeneration ran');
+  });
+
+  it('does not join a request with no generation expectation to one expecting a legacy note', async () => {
+    const { folder } = makeNote();
+    notionGate = gate();
+    const base = { title: 'Sync', transcriptionData: { transcript }, transcriptionPath: folder };
+    const unguarded = invoke('upload-to-notion', base);
+    await waitFor(() => notionCalls.length === 1, 'the Notion request');
+    const expectsLegacy = invoke('upload-to-notion', { ...base, expectedGenerationId: null });
+    notionGate.open();
+    assert.equal((await unguarded).success, true);
+    assert.equal((await expectsLegacy).success, false, 'refused on its own, not joined');
+    assert.equal(notionCalls.length, 1);
+  });
+
+  it('does not join Slack sends that carry different Notion annotations', async () => {
+    const { folder, generationId } = makeNote();
+    slackGate = gate();
+    const base = {
+      title: 'Sync',
+      transcriptionData: {},
+      transcriptionPath: folder,
+      expectedGenerationId: generationId,
+    };
+    const first = invoke('send-to-slack', { ...base, notionUrl: 'https://notion.so/a' });
+    await waitFor(() => slackCalls.length === 1, 'the Slack request');
+    const second = invoke('send-to-slack', { ...base, notionError: 'Notion failed' });
+    slackGate.open();
+    await first;
+    await second;
+    assert.equal(slackCalls.length, 2);
+  });
+
+  it('does not join uploads published under different titles', async () => {
+    const { folder, generationId } = makeNote();
+    notionGate = gate();
+    const base = {
+      transcriptionData: { transcript },
+      transcriptionPath: folder,
+      expectedGenerationId: generationId,
+    };
+    const first = invoke('upload-to-notion', { ...base, title: 'Sync' });
+    await waitFor(() => notionCalls.length === 1, 'the Notion request');
+    const second = invoke('upload-to-notion', { ...base, title: 'Custom Title' });
+    notionGate.open();
+    await first;
+    await second;
+    assert.equal(notionCalls.length, 2);
   });
 });

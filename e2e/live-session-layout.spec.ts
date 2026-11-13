@@ -8,6 +8,7 @@ import {
   assertHidden, captureNative, EVIDENCE, closeIntegratedHints, launchIntegratedHints,
   preserveFirstFailure, resizeNative,
 } from './integrated-hints-fixture';
+import { installSyntheticCapture, releaseSyntheticCapture } from './support/synthetic-capture';
 
 const korean = '장시간 한국어 회의에서는 서비스 전환 일정과 접근성 검증 결과를 확인하고 담당자별 다음 실행 항목을 정리합니다. ';
 const hint = (sessionId: string, index: number): LiveHint => ({
@@ -43,10 +44,10 @@ async function startSyntheticSession(app: ElectronApplication, page: Page) {
       };
       return start.call(this, input);
     };
-    const stopRecording = (ipcMain as any)._invokeHandlers.get('stop-recording');
+    const stopRecording = (ipcMain as any)._invokeHandlers.get('recording-request-stop');
     (globalThis as any).__layoutRecordingStops = 0;
-    ipcMain.removeHandler('stop-recording');
-    ipcMain.handle('stop-recording', (...args: unknown[]) => {
+    ipcMain.removeHandler('recording-request-stop');
+    ipcMain.handle('recording-request-stop', (...args: unknown[]) => {
       (globalThis as any).__layoutRecordingStops++;
       return stopRecording(...args);
     });
@@ -55,35 +56,8 @@ async function startSyntheticSession(app: ElectronApplication, page: Page) {
       (globalThis as any).__layoutResolveAsk = (answer = 'Owned delayed answer') => resolve({ success: true, result: { answer, history: [] } });
     }));
   });
-  await page.evaluate(() => {
-    const NativeRecorder = window.MediaRecorder;
-    window.MediaRecorder = class extends NativeRecorder {
-      constructor(stream: MediaStream, options?: MediaRecorderOptions) {
-        super(stream, options);
-        this.addEventListener('stop', () => { (window as any).__layoutRecorderStopped = true; });
-      }
-    };
-    const arrayBuffer = Blob.prototype.arrayBuffer;
-    (window as any).__layoutBlobReads = [];
-    Blob.prototype.arrayBuffer = function () {
-      const pending = arrayBuffer.call(this);
-      (window as any).__layoutBlobReads.push(pending);
-      return pending;
-    };
-    Object.defineProperty(navigator.mediaDevices, 'getUserMedia', {
-      configurable: true, value: async () => {
-        const context = new AudioContext();
-        const oscillator = context.createOscillator();
-        const destination = context.createMediaStreamDestination();
-        const gain = context.createGain();
-        gain.gain.value = 0.001;
-        oscillator.connect(gain).connect(destination);
-        oscillator.start();
-        (window as any).__layoutAudioContext = context;
-        return destination.stream;
-      },
-    });
-  });
+  // Recording capture runs in the hidden capture host; its mic is synthetic.
+  await installSyntheticCapture(app);
   await page.locator('#recordButton').click();
   await expect(page.locator('#recordButton')).toHaveText('Stop Recording');
   await page.locator('#liveSessionStartButton').click();
@@ -137,7 +111,7 @@ test('compiled live session shows automatic top popup and retains chronological 
     await page.locator('#liveSessionMinimizeButton').click();
     await page.locator('#recordButton').click();
     await expect(page.locator('#recordButton')).toHaveText('Start Recording');
-    await page.evaluate(async () => (window as any).__layoutAudioContext.close());
+    await releaseSyntheticCapture(app);
     await assertHidden(app, page, 'automatic-layout-end');
   } catch (error) { await retainFailure(app, page, error, true); throw error; }
   finally { await closeIntegratedHints(app, dataDir); }
@@ -163,7 +137,7 @@ test('renderer-lost snapshot and late hint revisions stay silent and read-only',
       ipcMain.handle('live-session-snapshot', () => ({ success: true, snapshot }));
     }, snapshot);
     await page.reload();
-    await expect(page.locator('#liveSessionIndicatorStatus')).toHaveText('Live captions ended when the window reloaded');
+    await expect(page.locator('#liveSessionIndicatorStatus')).toHaveText('Live captions ended when audio capture stopped');
     await expect(page.locator('#liveSessionPanel')).toBeHidden();
     const late = { ...hint(sessionId, 0), revision: 2, text: '종료 후 원문 정정으로 업데이트된 내용', history: [{ revision: 1, text: '보존한 이전 문구', producedOffsetMs: 1000 }] };
     for (const event of [

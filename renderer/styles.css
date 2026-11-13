@@ -564,6 +564,16 @@ h1 {
   color: #64748b;
 }
 
+.live-notes-status {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #b91c1c;
+}
+
+.live-notes-status:empty {
+  margin: 0;
+}
+
 .live-notes-empty {
   margin: 4px 0 0;
   padding: 6px 4px;
@@ -851,6 +861,16 @@ h1 {
 
 .recordings-header h2 {
   margin-bottom: 0;
+}
+
+.drive-sync-status {
+  margin: -8px 0 12px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.drive-sync-status[data-tone='error'] {
+  color: #b91c1c;
 }
 
 .folder-button {
@@ -2164,6 +2184,20 @@ h1 {
 
 .export-notice[hidden] {
   display: none;
+}
+
+/* Outcome of an export finished while this note was open. A neutral line;
+   it stays in the layout (empty, with no box) so the live region keeps
+   announcing. */
+.note-export-status {
+  margin: 6px 0 0;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.note-export-status:empty {
+  margin: 0;
 }
 
 .export-notice .link-button {

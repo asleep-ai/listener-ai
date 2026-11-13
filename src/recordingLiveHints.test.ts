@@ -493,15 +493,15 @@ test('crash finalizer closes audio first, then saves late finals drained by the 
     liveDrain,
   });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(
-    order,
-    ['audio-stop'],
-    'audio closes first and hints wait for the live stop drain',
-  );
+  // Audio closes first; the hints held now are saved before the drain (a
+  // bounded quit may cut it short), still in their draft state.
+  assert.deepEqual(order, ['audio-stop', 'save'], 'audio first, then the pre-drain snapshot');
+  assert.equal(saved?.history.sessions[0].hints[0].sourceState, 'draft');
   release();
   const result = await finishing;
   assert.equal(result.success, true);
-  assert.deepEqual(order, ['audio-stop', 'late-final', 'save']);
+  // The save after the drain replaces it with the late finals' revision.
+  assert.deepEqual(order, ['audio-stop', 'save', 'late-final', 'save']);
   assert.equal(saved?.filePath, '/audio/a.webm');
   assert.equal(saved?.history.recordingId, 'a.webm');
   assert.equal(saved?.history.sessions[0].sessionId, session.sessionId);
@@ -532,4 +532,37 @@ test('normal stop without a live drain saves right after the audio stop', async 
     onSaveError: () => assert.fail('unexpected failure'),
   });
   assert.deepEqual(order, ['take', 'audio-stop', 'take', 'save', 'consume']);
+});
+
+test('notes and current hints are persisted before a live drain that may never finish', async () => {
+  const events: string[] = [];
+  let releaseDrain!: () => void;
+  const drain = new Promise<void>((resolve) => {
+    releaseDrain = resolve;
+  });
+  const finishing = finishRecordingWithHints({
+    activeFilePath: '/audio/a.webm',
+    stop: async () => {
+      events.push('audio-closed');
+      return { success: true, filePath: '/audio/a.webm' };
+    },
+    hints: {
+      takeRecordingHints: () => history(),
+      markRecordingHintsSaveFailed: () => assert.fail('unexpected failure'),
+    },
+    save: async () => {
+      events.push('hints-saved');
+    },
+    onSaveError: () => assert.fail('unexpected failure'),
+    onClosed: async () => {
+      events.push('notes-saved');
+    },
+    liveDrain: drain,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  // A bounded quit can end the process here; notes and hints are already on disk.
+  assert.deepEqual(events, ['audio-closed', 'notes-saved', 'hints-saved']);
+  releaseDrain();
+  await finishing;
+  assert.deepEqual(events, ['audio-closed', 'notes-saved', 'hints-saved', 'hints-saved']);
 });

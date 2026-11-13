@@ -49,7 +49,11 @@ export default defineConfig({
     sourcemap: true,
     target: 'chrome120',
     rollupOptions: {
-      input: resolve(configDir, 'renderer/index.html'),
+      // capture.html is the hidden recording capture host (src/captureHost.ts).
+      input: {
+        main: resolve(configDir, 'renderer/index.html'),
+        capture: resolve(configDir, 'renderer/capture.html'),
+      },
     },
   },
   // Electron renderer reads files via file:// in production. Keep dev server

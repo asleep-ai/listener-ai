@@ -1,3 +1,4 @@
+import * as backgroundOperationsIpc from './backgroundOperations';
 import * as googleDriveIpc from './googleDrive';
 import * as meetingsManagementIpc from './meetingsManagement';
 import * as noteExportsIpc from './noteExports';
@@ -12,6 +13,7 @@ import type { IpcContext } from './types';
 // New domain modules added in follow-up PRs append themselves here -- main.ts
 // stays touched only when the context surface changes.
 export function registerAllIpc(ctx: IpcContext): void {
+  backgroundOperationsIpc.register(ctx);
   meetingsManagementIpc.register(ctx);
   transcriptionIpc.register(ctx);
   transcriptCutoffIpc.register(ctx);

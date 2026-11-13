@@ -4,6 +4,8 @@
 // Behavior preserved verbatim.
 
 import { getDom } from '../state';
+import type { BackgroundOperationSnapshot } from '../electronAPI';
+import { isOperationRunning, onBackgroundOperation } from './background-operations';
 import { resetModalChatFor } from './chat-panel';
 import { requireAiSetup } from './config-modal';
 import { camelToLabel } from '../../src/meetingRecord';
@@ -48,6 +50,13 @@ let currentNotionUrl: string | null = null;
 let supersededNotionUrl: string | null = null;
 let currentSlackSentAt: string | null = null;
 let cutoffInFlight = false;
+// Note operations this page requested and is awaiting itself, keyed by kind
+// and note (see opKey). Others (started before a reload, or by auto mode)
+// are followed through main's background operations instead.
+const localNoteOperations = new Set<string>();
+// The cutoff busy state is currently shown for a regeneration this page did
+// not start.
+let reflectedCutoff = false;
 let savedHintsStatus: 'idle' | 'loading' | 'failed' = 'idle';
 
 // Which job the modal's progress bar and pending result belong to. Several
@@ -150,6 +159,8 @@ function ensureTranscriptionModal(): HTMLDialogElement | null {
 
 // Populate all transcription tabs with data and set up copy handlers
 export function populateTranscriptionUI(data: TranscriptionData): void {
+  // The transcript pane is rebuilt below, without any busy state.
+  reflectedCutoff = false;
   // All tab
   const allMd = structuredToMarkdown(data, 'all');
   const allDiv = document.getElementById('all');
@@ -228,6 +239,7 @@ export function showSavedTranscript(
   if (modal) {
     modalJobTarget = null;
     modalSession++;
+    setNoteExportStatus('');
     const loadLocalHints = !metadata.liveHints && filePath.trim().length > 0;
     savedHintsStatus = loadLocalHints ? 'loading' : 'idle';
     const session = modalSession;
@@ -281,6 +293,7 @@ export function showSavedTranscript(
     resetModalChatFor(folderName || metadata?.folderName || null);
 
     populateTranscriptionUI(currentTranscriptionData);
+    refreshExportControls();
     if (loadLocalHints) void loadRecordingHints(filePath, modalSession);
 
     window.electronAPI.getConfig().then((config) => {
@@ -338,7 +351,7 @@ export function showRecordingHints(
   currentNotionUrl = null;
   supersededNotionUrl = null;
   currentSlackSentAt = null;
-  refreshNotionButtonLabel();
+  refreshExportControls();
   populateTranscriptionUI({});
   const { progressContainer } = getDom();
   if (progressContainer) progressContainer.style.display = 'none';
@@ -438,8 +451,7 @@ export async function handleTranscribe(filePath: string, title: string): Promise
       currentNotionUrl = null;
       supersededNotionUrl = null;
       currentSlackSentAt = null;
-      refreshSlackButtonLabel();
-      refreshNotionButtonLabel();
+      refreshExportControls();
       resetModalChatFor(result.folderName ?? null);
 
       populateTranscriptionUI(result.data);
@@ -564,6 +576,208 @@ export function setupCopyButtons(transcriptionData: TranscriptionData): void {
   });
 }
 
+function opKey(kind: string, target: string | null): string {
+  return `${kind}\n${target ?? ''}`;
+}
+
+// Busy for the note the modal shows: started here, or running in main
+// (started before a reload, or by auto mode).
+function noteOperationBusy(kind: string): boolean {
+  const target = currentTranscriptionPath;
+  return (
+    localNoteOperations.has(opKey(kind, target)) || (!!target && isOperationRunning(kind, target))
+  );
+}
+
+// The export buttons and the cutoff busy state, derived from the open note's
+// operations. Called whenever the note shown or any operation changes, so a
+// button never stays disabled after its operation ended or for another note.
+function refreshExportControls(): void {
+  const cutoffBusy = cutoffInFlight || noteOperationBusy('transcript-cutoff');
+  const notionBusy = noteOperationBusy('notion-upload');
+  const slackBusy = noteOperationBusy('slack-send');
+  if (uploadToNotionBtn) uploadToNotionBtn.disabled = notionBusy || cutoffBusy;
+  if (sendToSlackBtn) sendToSlackBtn.disabled = slackBusy || cutoffBusy;
+  if (notionBusy) {
+    if (notionButtonLabel) notionButtonLabel.textContent = 'Uploading...';
+  } else {
+    refreshNotionButtonLabel();
+  }
+  if (slackBusy) {
+    if (slackButtonLabel) slackButtonLabel.textContent = 'Sending…';
+  } else {
+    refreshSlackButtonLabel();
+  }
+  const remoteCutoff = !cutoffInFlight && noteOperationBusy('transcript-cutoff');
+  if (remoteCutoff && !reflectedCutoff) {
+    reflectedCutoff = true;
+    setTranscriptCutoffBusy(true, 'Regenerating the report...');
+  } else if (!remoteCutoff && reflectedCutoff) {
+    reflectedCutoff = false;
+    clearTranscriptCutoffBusy();
+  }
+}
+
+// A cutoff this page requested reported failure (or its request was lost):
+// main may still have saved the new report before failing (its final
+// read-back), so the saved generation decides what to say. "Not changed" only
+// when the saved generation is verified to be the one the request started
+// from; an unreadable note is an unknown outcome.
+async function reconcileFailedCutoff(
+  transcriptionPath: string,
+  generationBefore: string | null | undefined,
+  error: string,
+): Promise<void> {
+  setTranscriptCutoffBusy(
+    true,
+    'The report regeneration did not finish. Checking the saved report...',
+  );
+  const session = modalSession;
+  let saved: Record<string, any> | null = null;
+  try {
+    const result = await window.electronAPI.getSavedNote(transcriptionPath);
+    if (result.success && result.data) saved = result.data;
+  } catch {
+    saved = null;
+  }
+  // The modal may show another note by now; its state is not ours to touch.
+  if (session !== modalSession || currentTranscriptionPath !== transcriptionPath) return;
+  setTranscriptCutoffBusy(false);
+  if (!saved) {
+    showTranscriptCutoffMessage(
+      `The report regeneration did not finish (${error}), and the saved report could not be read. Reopen the note to see whether it changed.`,
+      true,
+    );
+  } else if (saved.generationId !== generationBefore) {
+    applySavedNote(saved, true);
+    showTranscriptCutoffMessage(
+      `A newer saved report is shown. The request reported an error: ${error}`,
+      true,
+    );
+  } else {
+    showTranscriptCutoffMessage(`The report was not changed: ${error}`, true);
+  }
+}
+
+function setNoteExportStatus(text: string): void {
+  const el = document.getElementById('noteExportStatus');
+  if (el) el.textContent = text;
+}
+
+// The regeneration ended but the saved note could not be read back: say so
+// instead of leaving a "Regenerating..." line, a stale report or a guess.
+function readbackFailed(failed: boolean): void {
+  showTranscriptCutoffMessage(
+    failed
+      ? 'The report regeneration did not finish, and the saved report could not be read. Reopen the note to see whether it changed.'
+      : 'The report was regenerated, but it could not be shown here. Reopen the note to see it.',
+  );
+}
+
+const NOTE_OPERATION_KINDS = new Set(['notion-upload', 'slack-send', 'transcript-cutoff']);
+
+// The open note's report, title and export state as main saved them, without
+// resetting the modal (chat, tab, pending cutoff selection).
+function applySavedNote(note: Record<string, any>, reportChanged: boolean): boolean {
+  let titleWasUpdated = false;
+  if (reportChanged && currentTranscriptionData) {
+    const nextTitle = titleForSavedReport(
+      currentMeetingTitle,
+      currentTranscriptionData.suggestedTitle,
+      note.title,
+    );
+    titleWasUpdated = nextTitle !== currentMeetingTitle;
+    currentMeetingTitle = nextTitle;
+    const titleEl = document.getElementById('transcriptionTitle');
+    if (titleEl) titleEl.textContent = `Transcription - ${nextTitle}`;
+    currentTranscriptionData = {
+      ...currentTranscriptionData,
+      suggestedTitle: note.suggestedTitle,
+      transcript: note.transcript,
+      summary: note.summary,
+      summarySections: note.summarySections,
+      keyPoints: note.keyPoints || [],
+      actionItems: note.actionItems || [],
+      actionItemGroups: note.actionItemGroups,
+      customFields: note.customFields,
+      emoji: note.emoji,
+      liveNotes: note.liveNotes,
+      highlights: note.highlights,
+      transcriptCutoff: note.transcriptCutoff,
+      transcriptCutoffMismatch: undefined,
+    };
+  }
+  currentGenerationId = note.generationId;
+  currentNotionUrl = note.notionPageUrl ?? null;
+  supersededNotionUrl = note.supersededNotionPageUrl ?? null;
+  currentSlackSentAt = note.slackSentAt ?? null;
+  if (reportChanged && currentTranscriptionData) populateTranscriptionUI(currentTranscriptionData);
+  refreshExportControls();
+  return titleWasUpdated;
+}
+
+// When an operation this page did not start ends for the open note, say how
+// it ended and show the note as main saved it.
+function followNoteOperation(op: BackgroundOperationSnapshot): void {
+  refreshExportControls();
+  if (!NOTE_OPERATION_KINDS.has(op.kind) || op.status === 'running') return;
+  if (op.target !== currentTranscriptionPath || !transcriptionModal?.open) return;
+  if (localNoteOperations.has(opKey(op.kind, op.target))) return;
+  if (op.kind === 'transcript-cutoff' && cutoffInFlight) return;
+  const failed = op.status === 'failed';
+  // Outcomes go to a status line inside the dialog: a toast outside the
+  // modal dialog would be inert and unannounced.
+  if (op.kind === 'notion-upload') {
+    setNoteExportStatus(failed ? 'The Notion upload did not finish.' : 'Uploaded to Notion.');
+  } else if (op.kind === 'slack-send') {
+    setNoteExportStatus(failed ? 'The Slack send did not finish.' : 'Sent to Slack.');
+  } else if (failed) {
+    // A regeneration can save the new report and fail afterwards (reading it
+    // back): whether the report changed is known only after the readback.
+    showTranscriptCutoffMessage(
+      'The report regeneration did not finish. Checking the saved report...',
+    );
+  }
+  const folderPath = op.target;
+  const generationBefore = currentGenerationId;
+  const session = modalSession;
+  void window.electronAPI
+    .getSavedNote(folderPath)
+    .then((result) => {
+      // A modal closed (or showing something else) meanwhile stays as it is.
+      if (session !== modalSession || currentTranscriptionPath !== folderPath) return;
+      if (!transcriptionModal?.open) return;
+      const cutoff = op.kind === 'transcript-cutoff';
+      if (!result.success || !result.data) {
+        if (cutoff) readbackFailed(failed);
+        return;
+      }
+      // The saved generation says whether the report was replaced, whatever
+      // the operation reported.
+      const reportChanged = cutoff && result.data.generationId !== generationBefore;
+      applySavedNote(result.data, reportChanged);
+      if (!cutoff) return;
+      if (reportChanged) {
+        showTranscriptCutoffMessage(
+          failed
+            ? 'A newer saved report is shown. The request reported an error.'
+            : 'Report regenerated.',
+        );
+      } else if (failed) {
+        showTranscriptCutoffMessage('The report was not changed.');
+      }
+    })
+    .catch(() => {
+      if (
+        op.kind === 'transcript-cutoff' &&
+        session === modalSession &&
+        currentTranscriptionPath === folderPath
+      ) {
+        readbackFailed(failed);
+      }
+    });
+}
+
 export function setupTranscriptionModal(): void {
   transcriptionModal = document.getElementById('transcriptionModal') as HTMLDialogElement | null;
   closeTranscriptionBtn = document.querySelector('#transcriptionModal .close');
@@ -571,6 +785,7 @@ export function setupTranscriptionModal(): void {
   notionButtonLabel = document.getElementById('notionButtonLabel');
   sendToSlackBtn = document.getElementById('sendToSlack') as HTMLButtonElement | null;
   slackButtonLabel = document.getElementById('slackButtonLabel');
+  onBackgroundOperation(followNoteOperation);
 
   if (closeTranscriptionBtn) {
     closeTranscriptionBtn.addEventListener('click', () => {
@@ -609,8 +824,9 @@ export function setupTranscriptionModal(): void {
       }
       if (!uploadToNotionBtn || uploadToNotionBtn.disabled || cutoffInFlight) return;
 
-      uploadToNotionBtn.disabled = true;
-      if (notionButtonLabel) notionButtonLabel.textContent = 'Uploading...';
+      const notionKey = opKey('notion-upload', currentTranscriptionPath);
+      localNoteOperations.add(notionKey);
+      refreshExportControls();
 
       try {
         const result = await window.electronAPI.uploadToNotion({
@@ -637,8 +853,8 @@ export function setupTranscriptionModal(): void {
         const message = error instanceof Error ? error.message : String(error);
         alert(`Error uploading to Notion: ${message}`);
       } finally {
-        if (uploadToNotionBtn) uploadToNotionBtn.disabled = false;
-        refreshNotionButtonLabel();
+        localNoteOperations.delete(notionKey);
+        refreshExportControls();
       }
     });
   }
@@ -651,18 +867,19 @@ export function setupTranscriptionModal(): void {
       }
       if (!sendToSlackBtn || sendToSlackBtn.disabled || cutoffInFlight) return;
 
-      // Disable before confirm() to block double-clicks during the prompt.
-      sendToSlackBtn.disabled = true;
+      // Busy before confirm() to block double-clicks during the prompt.
+      const slackKey = opKey('slack-send', currentTranscriptionPath);
+      localNoteOperations.add(slackKey);
+      refreshExportControls();
 
       if (currentSlackSentAt) {
         const when = new Date(currentSlackSentAt).toLocaleString();
         if (!confirm(`Already sent to Slack on ${when}. Send again?`)) {
-          sendToSlackBtn.disabled = false;
+          localNoteOperations.delete(slackKey);
+          refreshExportControls();
           return;
         }
       }
-
-      if (slackButtonLabel) slackButtonLabel.textContent = 'Sending…';
 
       try {
         const result = await window.electronAPI.sendToSlack({
@@ -677,7 +894,8 @@ export function setupTranscriptionModal(): void {
 
         if (result.success) {
           currentSlackSentAt = result.sentAt;
-          showToast('Sent to Slack');
+          // Inside the dialog: a toast outside the modal is inert and unannounced.
+          setNoteExportStatus('Sent to Slack.');
         } else {
           alert(`Failed to send to Slack: ${result.error}`);
         }
@@ -685,8 +903,8 @@ export function setupTranscriptionModal(): void {
         const message = error instanceof Error ? error.message : String(error);
         alert(`Error sending to Slack: ${message}`);
       } finally {
-        if (sendToSlackBtn) sendToSlackBtn.disabled = false;
-        refreshSlackButtonLabel();
+        localNoteOperations.delete(slackKey);
+        refreshExportControls();
       }
     });
   }
@@ -711,8 +929,7 @@ export function _setCurrentTranscription(data: {
   currentNotionUrl = null;
   supersededNotionUrl = null;
   currentSlackSentAt = null;
-  refreshSlackButtonLabel();
-  refreshNotionButtonLabel();
+  refreshExportControls();
   resetModalChatFor(data.folderName ?? null);
 }
 
@@ -727,6 +944,10 @@ async function applyTranscriptCutoff(offset: number | null): Promise<void> {
   // not a transcription backend.
   if (!(await requireAiSetup({ transcription: false }))) return;
   if (currentTranscriptionPath !== transcriptionPath || cutoffInFlight) return;
+  if (isOperationRunning('transcript-cutoff', transcriptionPath)) {
+    showTranscriptCutoffMessage('The report for this note is already being regenerated.', true);
+    return;
+  }
   if (uploadToNotionBtn?.disabled || sendToSlackBtn?.disabled) {
     showTranscriptCutoffMessage(
       'Wait for the Notion upload or Slack send to finish, then try again.',
@@ -744,7 +965,7 @@ async function applyTranscriptCutoff(offset: number | null): Promise<void> {
   }
 
   cutoffInFlight = true;
-  setExportButtonsDisabled(true);
+  refreshExportControls();
   setTranscriptCutoffBusy(
     true,
     offset === null
@@ -763,45 +984,12 @@ async function applyTranscriptCutoff(offset: number | null): Promise<void> {
       return;
     }
     if (!result.success) {
-      setTranscriptCutoffBusy(false);
-      showTranscriptCutoffMessage(`The report was not changed: ${result.error}`, true);
+      await reconcileFailedCutoff(transcriptionPath, generationId, result.error);
       return;
     }
 
     const note = result.data;
-    const nextTitle = titleForSavedReport(
-      currentMeetingTitle,
-      currentTranscriptionData.suggestedTitle,
-      note.title,
-    );
-    const titleWasUpdated = nextTitle !== currentMeetingTitle;
-    currentMeetingTitle = nextTitle;
-    const titleEl = document.getElementById('transcriptionTitle');
-    if (titleEl) titleEl.textContent = `Transcription - ${nextTitle}`;
-    currentTranscriptionData = {
-      ...currentTranscriptionData,
-      suggestedTitle: note.suggestedTitle,
-      transcript: note.transcript,
-      summary: note.summary,
-      summarySections: note.summarySections,
-      keyPoints: note.keyPoints || [],
-      actionItems: note.actionItems || [],
-      actionItemGroups: note.actionItemGroups,
-      customFields: note.customFields,
-      emoji: note.emoji,
-      liveNotes: note.liveNotes,
-      highlights: note.highlights,
-      transcriptCutoff: note.transcriptCutoff,
-      transcriptCutoffMismatch: undefined,
-    };
-    currentGenerationId = note.generationId;
-    currentNotionUrl = note.notionPageUrl ?? null;
-    supersededNotionUrl = note.supersededNotionPageUrl ?? null;
-    currentSlackSentAt = note.slackSentAt ?? null;
-    refreshSlackButtonLabel();
-    refreshNotionButtonLabel();
-
-    populateTranscriptionUI(currentTranscriptionData);
+    const titleWasUpdated = applySavedNote(note, true);
     showTab('transcript');
     showTranscriptCutoffMessage(
       note.transcriptCutoff
@@ -812,22 +1000,16 @@ async function applyTranscriptCutoff(offset: number | null): Promise<void> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (currentTranscriptionPath === transcriptionPath) {
-      setTranscriptCutoffBusy(false);
-      showTranscriptCutoffMessage(`The report was not changed: ${message}`, true);
+      await reconcileFailedCutoff(transcriptionPath, generationId, message);
     }
   } finally {
     cutoffInFlight = false;
-    setExportButtonsDisabled(false);
+    refreshExportControls();
     // Every exit, including success and a modal that now shows another note,
     // must end the busy state or assistive technology keeps the whole modal
     // body marked as loading.
     clearTranscriptCutoffBusy();
   }
-}
-
-function setExportButtonsDisabled(disabled: boolean): void {
-  if (uploadToNotionBtn) uploadToNotionBtn.disabled = disabled;
-  if (sendToSlackBtn) sendToSlackBtn.disabled = disabled;
 }
 
 function showTab(tab: string): void {

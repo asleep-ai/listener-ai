@@ -423,17 +423,15 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
           'Are you sure you want to regenerate the transcript? This will overwrite the existing one.',
         )
       ) {
-        void localAudioPath(recording.path).then((p) => {
-          if (p) void runInlineTranscription(item, p);
-        });
+        // Main downloads cloud-only audio inside the job.
+        void runInlineTranscription(item, recording.path);
       }
     });
   } else {
     const transcribeBtn = item.querySelector('.transcribe-btn') as HTMLButtonElement | null;
     transcribeBtn?.addEventListener('click', () => {
-      void localAudioPath(recording.path).then((p) => {
-        if (p) void runInlineTranscription(item, p);
-      });
+      // Main downloads cloud-only audio inside the job.
+      void runInlineTranscription(item, recording.path);
     });
   }
 
@@ -456,9 +454,8 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   const exportBtn = item.querySelector('.export-m4a-btn') as HTMLButtonElement | null;
   if (exportBtn) {
     exportBtn.addEventListener('click', () => {
-      void localAudioPath(recording.path).then((p) => {
-        if (p) void handleExportM4A(p, exportBtn);
-      });
+      // Main asks for the destination, then downloads cloud-only audio.
+      void handleExportM4A(recording.path, exportBtn);
     });
   }
 
@@ -910,19 +907,10 @@ async function performMerge(paths: string[], title: string): Promise<void> {
 
   localMerges++;
   try {
-    // Recordings kept only in Google Drive are downloaded first.
-    const localPaths: string[] = [];
-    for (const p of paths) {
-      if (cloudOnlyPaths.has(p)) setModalProgress(0, 'Downloading audio from Google Drive...');
-      const local = await localAudioPath(p);
-      if (!local) {
-        transcriptionModal?.close();
-        return;
-      }
-      localPaths.push(local);
-    }
+    // Main downloads recordings kept only in Google Drive inside the merge
+    // job, so the merge continues if this window reloads.
     const result = (await window.electronAPI.mergeRecordings({
-      paths: localPaths,
+      paths,
       title,
     })) as unknown as MergeRecordingsResult;
     // The modal moved on to another note: don't overwrite what it shows.

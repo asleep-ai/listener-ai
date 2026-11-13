@@ -1,8 +1,8 @@
 // In-recording notes panel (Plaud-style highlights). Visible only while
-// recording. Holds an append-only list of {offsetMs, text} captured from the
-// user; the flag button records the moment with empty text, the text input
-// records the moment with the typed text. Notes leave the renderer when
-// transcribeAudio forwards them to main at the end of the recording.
+// recording. The flag button records the moment with empty text, the text
+// input records the moment with the typed text. Notes live in main's
+// recording state (so a reload keeps them); this panel renders that list and
+// main persists it with the recording.
 
 import { type LiveNote, state } from '../state';
 
@@ -14,6 +14,14 @@ let listEl: HTMLElement | null = null;
 let inputEl: HTMLInputElement | null = null;
 let flagButtonEl: HTMLButtonElement | null = null;
 let emptyHintEl: HTMLElement | null = null;
+let statusEl: HTMLElement | null = null;
+// Main accepts notes only while the recording phase is 'recording'; once it
+// is stopping (Stop, tray, shortcut, max duration, quit) the panel stops
+// taking them instead of sending notes main would refuse.
+let accepting = false;
+// A typed note is on its way to main; further Enters wait for its answer
+// instead of sending the same text again.
+let submitting = false;
 
 function formatTimestamp(offsetMs: number): string {
   const totalSeconds = Math.max(0, Math.floor(offsetMs / 1000));
@@ -58,23 +66,69 @@ function renderList(): void {
   }
 }
 
-function appendNote(note: LiveNote): void {
-  if (state.liveNotes.length >= NOTE_MAX_COUNT) return;
-  state.liveNotes.push(note);
+function setStatus(text: string): void {
+  if (statusEl) statusEl.textContent = text;
+}
+
+// Resolves true once main recorded the note. A refusal (the recording began
+// stopping meanwhile) or a failed request is reported in the panel's status
+// line instead of disappearing.
+async function appendNote(note: LiveNote): Promise<boolean> {
+  if (state.liveNotes.length >= NOTE_MAX_COUNT) {
+    setStatus(`Note not added: the limit of ${NOTE_MAX_COUNT} notes was reached.`);
+    return false;
+  }
+  try {
+    const result = await window.electronAPI.addRecordingNote(note);
+    if (result.success) {
+      setStatus('');
+      return true;
+    }
+    setStatus(`Note not added: ${result.error || 'the recording is not taking notes.'}`);
+  } catch (error) {
+    console.warn('Could not add note:', error);
+    setStatus('Note not added: the recording could not be reached.');
+  }
+  return false;
+}
+
+/** Whether the panel takes notes; follows the recording phase from main. */
+export function setLiveNotesAccepting(value: boolean): void {
+  accepting = value;
+  if (inputEl) inputEl.disabled = !value;
+  if (flagButtonEl) flagButtonEl.disabled = !value;
+}
+
+/** Replaces the rendered notes with main's recording state. */
+export function setLiveNotes(notes: LiveNote[]): void {
+  state.liveNotes = notes.map((note) => ({ ...note }));
   renderList();
 }
 
 function addFlag(): void {
-  if (!state.isRecording) return;
-  appendNote({ offsetMs: currentOffsetMs(), text: '' });
+  if (!state.isRecording || !accepting) return;
+  void appendNote({ offsetMs: currentOffsetMs(), text: '' });
 }
 
-function commitTextInput(): void {
-  if (!state.isRecording || !inputEl) return;
-  const text = inputEl.value.trim();
+async function commitTextInput(): Promise<void> {
+  if (!state.isRecording || !accepting || !inputEl || submitting) return;
+  const typed = inputEl.value;
+  const text = typed.trim();
   if (!text) return;
-  appendNote({ offsetMs: currentOffsetMs(), text: text.slice(0, NOTE_MAX_TEXT) });
-  inputEl.value = '';
+  const input = inputEl;
+  submitting = true;
+  try {
+    const added = await appendNote({
+      offsetMs: currentOffsetMs(),
+      text: text.slice(0, NOTE_MAX_TEXT),
+    });
+    // Cleared only once main has the note, and only if the field still holds
+    // what was sent (typing may have continued meanwhile); otherwise the text
+    // stays for the user.
+    if (added && input.value === typed) input.value = '';
+  } finally {
+    submitting = false;
+  }
 }
 
 export function showLiveNotesPanel(): void {
@@ -87,6 +141,7 @@ export function showLiveNotesPanel(): void {
 export function hideLiveNotesPanel(): void {
   if (panelEl) panelEl.style.display = 'none';
   if (inputEl) inputEl.value = '';
+  setStatus('');
   state.liveNotes = [];
   renderList();
 }
@@ -97,6 +152,7 @@ export function setupLiveNotes(): void {
   inputEl = document.getElementById('liveNoteInput') as HTMLInputElement | null;
   flagButtonEl = document.getElementById('liveNoteFlagButton') as HTMLButtonElement | null;
   emptyHintEl = document.getElementById('liveNotesEmpty');
+  statusEl = document.getElementById('liveNotesStatus');
 
   if (!panelEl || !listEl || !inputEl || !flagButtonEl) return;
 
@@ -116,7 +172,7 @@ export function setupLiveNotes(): void {
     // that doesn't set isComposing.
     if (event.isComposing || event.keyCode === 229) return;
     event.preventDefault();
-    commitTextInput();
+    void commitTextInput();
   });
 
   renderList();

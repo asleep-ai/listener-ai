@@ -68,7 +68,8 @@ export interface LiveSessionStartResult {
 
 /**
  * Why a live session ended. `renderer-lost` means main closed the provider
- * because the window that captures the session's audio reloaded or crashed.
+ * because the hidden capture host that captures the session's audio crashed
+ * or closed. A reload or loss of the visible window never ends a session.
  */
 export type LiveSessionEndReason = 'user' | 'renderer-lost';
 
@@ -104,6 +105,11 @@ export type LiveSessionEvent =
   | { type: 'translationInterim'; sessionId: string; text: string; offsetMs?: number }
   | { type: 'segment'; sessionId: string; segment: LiveTranscriptSegment }
   | { type: 'error'; sessionId: string; error: string }
+  /**
+   * The session finished stopping (finals flushed), whoever stopped it. Additive:
+   * `error` is set when capture failed rather than being stopped.
+   */
+  | { type: 'ended'; sessionId: string; reason: LiveSessionEndReason; error?: string }
   | LiveHintEvent;
 
 export interface LiveRealtimeClientConfig {

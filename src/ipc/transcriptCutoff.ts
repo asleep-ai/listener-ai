@@ -1,4 +1,3 @@
-import * as path from 'path';
 import { app, ipcMain } from 'electron';
 import type { TranscriptCutoffApiResult } from '../electronApiTypes';
 import { withNoteOperation } from '../noteOperationQueue';
@@ -6,6 +5,7 @@ import { type LiveNote, readTranscription } from '../outputService';
 import { applyTranscriptCutoff } from '../regenerateTranscription';
 import { reportError } from '../sentry';
 import { metadataService } from '../services/metadataService';
+import { backgroundOperations, operationTarget } from './backgroundOperations';
 import type { IpcContext } from './types';
 
 // One report regeneration per note at a time; a second request while the
@@ -14,7 +14,9 @@ import type { IpcContext } from './types';
 // the note's operation queue, so it waits for an in-flight Notion upload or
 // Slack send of the same note (whose page it then marks superseded) and holds
 // back exports requested meanwhile until the new report is saved.
-const activeCutoffs = new Set<string>();
+// Value: the request's inputs. An identical request (same generation and
+// cutoff) joins the running regeneration; a different one is refused.
+const activeCutoffs = new Map<string, string>();
 
 export function register(ctx: IpcContext): void {
   ipcMain.handle(
@@ -35,29 +37,52 @@ export function register(ctx: IpcContext): void {
       if (cutoffOffset !== null && !Number.isInteger(cutoffOffset)) {
         return { success: false, error: 'The cutoff point is outside the transcript.' };
       }
-      const key = path.resolve(folderPath);
-      if (activeCutoffs.has(key)) {
+      const key = operationTarget(folderPath);
+      const inputs = JSON.stringify([data.expectedGenerationId ?? null, cutoffOffset]);
+      const joinKey = JSON.stringify([key, inputs]);
+      const active = activeCutoffs.get(key);
+      if (active !== undefined && active !== inputs) {
         return { success: false, error: 'The report for this note is already being regenerated.' };
       }
-      const geminiService = ctx.ensureGeminiService();
-      if (!geminiService) {
+      if (active === undefined && !ctx.ensureGeminiService()) {
         return { success: false, error: ctx.formatAiCredentialsError() };
       }
 
-      activeCutoffs.add(key);
-      try {
-        return await withNoteOperation(folderPath, () =>
-          regenerate(
-            ctx,
-            geminiService,
-            folderPath,
-            data.expectedGenerationId ?? null,
-            cutoffOffset,
-          ),
+      // Tracked so a reloaded or reopened window sees the regeneration still
+      // running, and an identical repeat (a click after a reload) joins it.
+      if (active !== undefined) {
+        return backgroundOperations.run(
+          'transcript-cutoff',
+          key,
+          () => ({ success: false as const, error: 'The report was already regenerated.' }),
+          undefined,
+          joinKey,
         );
-      } finally {
-        activeCutoffs.delete(key);
       }
+      activeCutoffs.set(key, inputs);
+      return backgroundOperations
+        .run(
+          'transcript-cutoff',
+          key,
+          () => {
+            const geminiService = ctx.ensureGeminiService();
+            if (!geminiService) {
+              return { success: false as const, error: ctx.formatAiCredentialsError() };
+            }
+            return withNoteOperation(folderPath, () =>
+              regenerate(
+                ctx,
+                geminiService,
+                folderPath,
+                data.expectedGenerationId ?? null,
+                cutoffOffset,
+              ),
+            );
+          },
+          undefined,
+          joinKey,
+        )
+        .finally(() => activeCutoffs.delete(key));
     },
   );
 }

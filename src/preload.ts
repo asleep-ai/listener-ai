@@ -5,6 +5,8 @@ import type { ChatGPTStatusPayload } from './configService';
 import type {
   AgentChatMessage,
   AgentConfirmRequest,
+  BackgroundOperationChange,
+  BackgroundOperationsSnapshot,
   AgentScope,
   ConfigPayload,
   GoogleSyncProgress,
@@ -28,6 +30,14 @@ import type {
   LocalStorageReportResult,
 } from './electronApiTypes';
 import type { LiveNote } from './outputService';
+import type {
+  CaptureHostCommand,
+  CaptureHostEvent,
+  CaptureHostLiveEvent,
+  RecordingCommandResult,
+  RecordingResult,
+  RecordingStateSnapshot,
+} from './recordingState';
 import type { FileInfoResult } from './services/fileInfoTypes';
 import type { SyncProgressEvent } from './services/syncEngine';
 
@@ -65,23 +75,41 @@ const invoke = <T>(channel: string, ...args: unknown[]): Promise<T> =>
 const api = {
   platform: process.platform,
   logRenderer: (payload: RendererLogPayload) => ipcRenderer.send('renderer-log', payload),
-  startRecording: (payload: {
-    title: string;
-    mimeType: string;
-  }): Promise<{ success: boolean; error?: string; filePath?: string }> =>
-    invoke('start-recording', payload),
-  sendRecordingChunk: (data: ArrayBuffer) => ipcRenderer.send('recording-chunk', data),
-  stopRecording: (opts?: {
-    liveNotes?: LiveNote[];
-  }): Promise<{
+  // Recording is owned by main (RecordingController) and captured by a hidden
+  // host window. The visible window reads the snapshot on load, follows
+  // 'recording-state-changed' (ignoring revisions it already applied) and
+  // sends requests; it never captures recording audio itself.
+  getRecordingState: (): Promise<RecordingStateSnapshot> => invoke('recording-get-state'),
+  onRecordingStateChanged: (callback: (snapshot: RecordingStateSnapshot) => void) => {
+    ipcRenderer.on('recording-state-changed', (_event, snapshot) => callback(snapshot));
+  },
+  requestRecordingStart: (opts: { title: string }): Promise<RecordingCommandResult> =>
+    invoke('recording-request-start', opts),
+  requestRecordingStop: (): Promise<{
     success: boolean;
-    liveHintsSaveError?: string;
-    filePath?: string;
-    durationMs?: number;
-    reason?: string;
+    result?: RecordingResult;
     error?: string;
-  }> => invoke('stop-recording', opts),
-  abortRecording: (): Promise<{ success: boolean; error?: string }> => invoke('abort-recording'),
+  }> => invoke('recording-request-stop'),
+  setRecordingTitleDraft: (title: string) => ipcRenderer.send('recording-title-draft', title),
+  addRecordingNote: (note: { text: string; offsetMs?: number }): Promise<RecordingCommandResult> =>
+    invoke('recording-add-note', note),
+  switchRecordingMic: (deviceId: string): Promise<{ success: boolean }> =>
+    invoke('recording-switch-mic', deviceId),
+  onRecordingNotice: (callback: (notice: { kind: 'mic-fallback' }) => void) => {
+    ipcRenderer.on('recording-notice', (_event, notice) => callback(notice));
+  },
+  // Hidden capture host only (main ignores these from any other sender).
+  captureHost: {
+    ready: () => ipcRenderer.send('capture-host-ready'),
+    onCommand: (callback: (command: CaptureHostCommand) => void) => {
+      ipcRenderer.on('capture-command', (_event, command) => callback(command));
+    },
+    open: (payload: { sessionId: number; mimeType: string }): Promise<RecordingCommandResult> =>
+      invoke('capture-host-open', payload),
+    sendChunk: (data: ArrayBuffer) => ipcRenderer.send('recording-chunk', data),
+    report: (event: CaptureHostEvent) => ipcRenderer.send('capture-host-event', event),
+    reportLive: (event: CaptureHostLiveEvent) => ipcRenderer.send('capture-host-live-event', event),
+  },
   onRecordingStatus: (callback: (status: string) => void) => {
     ipcRenderer.on('recording-status', (_, status) => callback(status));
   },
@@ -171,6 +199,8 @@ const api = {
     inFlight: boolean;
     lastSyncedAt: string | null;
     lastResult: GoogleSyncResult | null;
+    // The last cycle's failure until a later cycle succeeds.
+    lastError: string | null;
     progress: GoogleSyncProgress | null;
     enabled: boolean;
     authenticated: boolean;
@@ -180,6 +210,14 @@ const api = {
   },
   onGoogleSyncProgress: (callback: (event: SyncProgressEvent) => void) => {
     ipcRenderer.on('google-sync-progress', (_, event) => callback(event));
+  },
+
+  // Main-owned exports, report regeneration and local-audio work. Subscribe
+  // before reading the snapshot and ignore revisions already applied.
+  getBackgroundOperations: (): Promise<BackgroundOperationsSnapshot> =>
+    invoke('get-background-operations'),
+  onBackgroundOperationChanged: (callback: (change: BackgroundOperationChange) => void) => {
+    ipcRenderer.on('background-operation-changed', (_, change) => callback(change));
   },
 
   // Local storage: totals, freeing local audio backed up to Drive, and
@@ -268,6 +306,8 @@ const api = {
   }): Promise<
     { success: true; session: LiveSessionStartResult } | { success: false; error: string }
   > => invoke('live-session-start', opts),
+  // Live-caption transport (realtime fallback, chunk uploads, PCM, realtime
+  // interim/final): the hidden capture host only; main ignores other senders.
   handleLiveRealtimeFailure: (opts: {
     sessionId: string;
     error?: string;
@@ -431,16 +471,12 @@ const api = {
   validateShortcut: (shortcut: string): Promise<{ valid: boolean; error?: string }> =>
     invoke('validate-shortcut', shortcut),
 
-  // Tray icon events
-  onTrayStartRecording: (callback: () => void) => {
-    ipcRenderer.on('tray-start-recording', () => callback());
-  },
-  onTrayStopRecording: (callback: () => void) => {
-    ipcRenderer.on('tray-stop-recording', () => callback());
-  },
   onOpenConfig: (callback: () => void) => {
     ipcRenderer.on('open-config', () => callback());
   },
+  // The page subscribed to main's requests (open-config); main holds such a
+  // request for a window that is still loading until this arrives.
+  signalUiReady: () => ipcRenderer.send('main-ui-ready'),
   onRecordingAutoStopped: (callback: (data: unknown) => void) => {
     ipcRenderer.on('recording-auto-stopped', (_event, data) => callback(data));
   },

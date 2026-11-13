@@ -63,9 +63,13 @@ Recordings without a saved meeting have no Drive copy and always stay.
 
 Cloud-only recordings stay in the list marked "In Google Drive, not on this
 device". "Download audio", and any action that needs the file (regenerate,
-merge, export as M4A, show in Finder), downloads it first. The CLI's
-`listener storage restore <ref>` does the same, and `listener merge`
-downloads cloud-only sources automatically.
+merge, export as M4A, show in Finder), downloads it first. For regenerate,
+merge and M4A export the download is the first step of the main-process job
+itself (export asks for the destination first), so the action continues if
+the window reloads or closes; a second request for the same recording joins
+the download already running. The CLI's `listener storage restore <ref>`
+does the same, and `listener merge` downloads cloud-only sources
+automatically.
 
 A download is written to a hidden temp file, checked against Drive's size and
 md5, and only then given its name with `link()`, which never replaces an

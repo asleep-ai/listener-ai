@@ -32,6 +32,15 @@ describe('transcription modal session ownership', () => {
   let hintReads: ReturnType<typeof deferred<any>>[];
   let renderedHints: unknown[];
   let renderedHintMessages: unknown[];
+  // Main's background operations as the store reports them.
+  let running: Set<string>;
+  let opListeners: Array<(op: any) => void>;
+  let toasts: Array<{ message: string; type?: string }>;
+  let cutoffUi: string[];
+  // The transcript pane's "Apply" callback, and main's reply to it.
+  let applyCutoff: ((offset: number | null) => void) | undefined;
+  let cutoffResponse: () => Promise<any>;
+  let savedNoteReads: ReturnType<typeof deferred<any>>[];
 
   before(async () => {
     const { build } = require('vite');
@@ -80,6 +89,13 @@ describe('transcription modal session ownership', () => {
     hintReads = [];
     renderedHints = [];
     renderedHintMessages = [];
+    running = new Set();
+    opListeners = [];
+    toasts = [];
+    cutoffUi = [];
+    applyCutoff = undefined;
+    cutoffResponse = async () => ({ success: false, error: 'Readback failed' });
+    savedNoteReads = [];
     const dependencies = {
       getDom: () => ({ progressContainer: elements.progressContainer }),
       resetModalChatFor(folderName: string | null) {
@@ -90,6 +106,23 @@ describe('transcription modal session ownership', () => {
         return setupReady;
       },
       titleForSavedReport: (title: string) => title,
+      isOperationRunning: (kind: string, target: string) => running.has(`${kind}|${target}`),
+      onBackgroundOperation: (listener: (op: any) => void) => {
+        opListeners.push(listener);
+        return () => {};
+      },
+      showToast: (message: string, type?: string) => toasts.push({ message, type }),
+      setTranscriptCutoffBusy: (value: boolean, text: string) =>
+        cutoffUi.push(`busy:${value}:${text}`),
+      clearTranscriptCutoffBusy: () => cutoffUi.push('clear'),
+      showTranscriptCutoffMessage: (text: string) => cutoffUi.push(`message:${text}`),
+      resolveTranscriptCutoff: () => null,
+      renderTranscriptPane: (
+        _el: unknown,
+        options: { onApply: (offset: number | null) => void },
+      ) => {
+        applyCutoff = options.onApply;
+      },
       structuredToMarkdown: (data: any, tab: string) => data[tab] ?? '',
       renderMarkdown: (value: string) => value,
       renderDynamicFields() {},
@@ -119,6 +152,7 @@ describe('transcription modal session ownership', () => {
         querySelector: (selector: string) =>
           selector.startsWith('[data-filepath=') ? button : null,
         querySelectorAll: () => [],
+        addEventListener() {},
       },
       window: {
         electronAPI: {
@@ -128,6 +162,13 @@ describe('transcription modal session ownership', () => {
             return response.promise;
           },
           getConfig: async () => ({}),
+          sendToSlack: async () => ({ success: true, sentAt: '2026-11-13T00:00:00.000Z' }),
+          applyTranscriptCutoff: () => cutoffResponse(),
+          getSavedNote: () => {
+            const pending = deferred<any>();
+            savedNoteReads.push(pending);
+            return pending.promise;
+          },
           readRecordingLiveHints: () => {
             const pending = deferred<any>();
             hintReads.push(pending);
@@ -380,5 +421,215 @@ describe('transcription modal session ownership', () => {
       folderName: undefined,
     });
     assert.equal(chatScopes.at(-1), null);
+  });
+
+  // Export controls follow the open note's operations, whoever started them
+  // (this page, a page before a reload, or auto mode).
+  function setupExports() {
+    for (const id of ['uploadToNotion', 'sendToSlack']) {
+      elements[id] = {
+        disabled: false,
+        style: {},
+        classList: { add() {}, remove() {} },
+        listeners: {} as Record<string, () => Promise<void>>,
+        addEventListener(type: string, fn: () => Promise<void>) {
+          this.listeners[type] = fn;
+        },
+      };
+    }
+    for (const id of ['notionButtonLabel', 'slackButtonLabel', 'noteExportStatus'])
+      elements[id] = { textContent: '' };
+    elements.transcriptionModal.close = function () {
+      this.open = false;
+    };
+    modal.setupTranscriptionModal();
+  }
+  const openNote = (folder: string) =>
+    modal.showSavedTranscript('', folder, {
+      summary: folder,
+      transcriptionPath: folder,
+      generationId: 'g1',
+    });
+  const op = (kind: string, target: string, status: string) => {
+    if (status === 'running') running.add(`${kind}|${target}`);
+    else running.delete(`${kind}|${target}`);
+    for (const listener of opListeners)
+      listener({ id: kind + target, kind, target, status, revision: 1 });
+  };
+
+  it('re-enables a reflected upload that ends while the modal is closed', () => {
+    setupExports();
+    op('notion-upload', '/n/x', 'running');
+    openNote('/n/x');
+    assert.equal(elements.uploadToNotion.disabled, true);
+    assert.equal(elements.notionButtonLabel.textContent, 'Uploading...');
+    elements.transcriptionModal.close();
+    op('notion-upload', '/n/x', 'succeeded');
+    openNote('/n/x');
+    assert.equal(elements.uploadToNotion.disabled, false);
+    assert.equal(elements.notionButtonLabel.textContent, 'Upload to Notion');
+  });
+
+  it('a note switched to does not inherit another note busy export', () => {
+    setupExports();
+    op('slack-send', '/n/x', 'running');
+    openNote('/n/x');
+    assert.equal(elements.sendToSlack.disabled, true);
+    openNote('/n/y');
+    assert.equal(elements.sendToSlack.disabled, false);
+    assert.equal(elements.slackButtonLabel.textContent, 'Send to Slack');
+  });
+
+  it('re-enables controls even when the readback after the operation fails', async () => {
+    setupExports();
+    op('notion-upload', '/n/x', 'running');
+    openNote('/n/x');
+    op('notion-upload', '/n/x', 'failed');
+    assert.equal(elements.uploadToNotion.disabled, false);
+    assert.equal(elements.noteExportStatus.textContent, 'The Notion upload did not finish.');
+    savedNoteReads.at(-1)!.resolve({ success: false });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(elements.uploadToNotion.disabled, false);
+  });
+
+  it('keeps one kind busy while another kind for the same note ends', () => {
+    setupExports();
+    op('notion-upload', '/n/x', 'running');
+    op('slack-send', '/n/x', 'running');
+    openNote('/n/x');
+    op('slack-send', '/n/x', 'succeeded');
+    assert.equal(elements.sendToSlack.disabled, false);
+    assert.equal(elements.uploadToNotion.disabled, true);
+    assert.equal(elements.notionButtonLabel.textContent, 'Uploading...');
+  });
+
+  it('a reattached upload updates the export state without resetting the modal', async () => {
+    setupExports();
+    op('notion-upload', '/n/x', 'running');
+    openNote('/n/x');
+    const scopes = chatScopes.length;
+    op('notion-upload', '/n/x', 'succeeded');
+    savedNoteReads.at(-1)!.resolve({
+      success: true,
+      data: { notionPageUrl: 'https://notion.so/x', generationId: 'g1' },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(elements.notionButtonLabel.textContent, 'View in Notion');
+    assert.equal(chatScopes.length, scopes, 'Ask was not reset');
+    assert.equal(elements.noteExportStatus.textContent, 'Uploaded to Notion.');
+  });
+
+  it('reapplies a running cutoff busy state after the same note is reopened', () => {
+    setupExports();
+    op('transcript-cutoff', '/n/x', 'running');
+    openNote('/n/x');
+    assert.equal(cutoffUi.filter((e) => e.startsWith('busy:true')).length, 1);
+    openNote('/n/x'); // rebuilds the transcript pane
+    assert.equal(cutoffUi.filter((e) => e.startsWith('busy:true')).length, 2);
+    assert.equal(elements.uploadToNotion.disabled, true);
+  });
+
+  it('says so when a regenerated report cannot be read back', async () => {
+    setupExports();
+    op('transcript-cutoff', '/n/x', 'running');
+    openNote('/n/x');
+    op('transcript-cutoff', '/n/x', 'succeeded');
+    assert.equal(cutoffUi.at(-1), 'clear');
+    savedNoteReads.at(-1)!.resolve({ success: false });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.match(
+      cutoffUi.at(-1)!,
+      /^message:The report was regenerated, but it could not be shown/,
+    );
+    assert.equal(elements.uploadToNotion.disabled, false);
+  });
+
+  it('a reattached cutoff that failed after saving says the report did change', async () => {
+    setupExports();
+    op('transcript-cutoff', '/n/x', 'running');
+    openNote('/n/x');
+    op('transcript-cutoff', '/n/x', 'failed');
+    assert.match(cutoffUi.at(-1)!, /did not finish\. Checking the saved report/);
+    savedNoteReads.at(-1)!.resolve({ success: true, data: { summary: 'new', generationId: 'g2' } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.match(
+      cutoffUi.at(-1)!,
+      /^message:A newer saved report is shown\. The request reported an error/,
+    );
+  });
+
+  it('a reattached cutoff that failed before saving says the report was not changed', async () => {
+    setupExports();
+    op('transcript-cutoff', '/n/x', 'running');
+    openNote('/n/x');
+    op('transcript-cutoff', '/n/x', 'failed');
+    savedNoteReads.at(-1)!.resolve({ success: true, data: { summary: 'x', generationId: 'g1' } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(cutoffUi.at(-1), 'message:The report was not changed.');
+  });
+
+  it('a Slack send clicked in the dialog reports success inside the dialog', async () => {
+    setupExports();
+    openNote('/n/x');
+    await elements.sendToSlack.listeners.click();
+    assert.equal(elements.noteExportStatus.textContent, 'Sent to Slack.');
+    assert.equal(elements.sendToSlack.disabled, false);
+  });
+
+  // A cutoff clicked here can fail after main already saved the new report
+  // (its final read-back failed): the saved generation decides the message.
+  async function clickCutoff(outcome: () => Promise<any>) {
+    elements.transcript = {
+      textContent: '',
+      innerHTML: '',
+      style: {},
+      classList: { add() {}, remove() {} },
+    };
+    setupExports();
+    openNote('/n/x');
+    cutoffResponse = outcome;
+    applyCutoff!(42);
+    for (let i = 0; i < 20 && savedNoteReads.length === 0; i++)
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(savedNoteReads.length, 1, 'the saved note is read back');
+  }
+  const lastMessage = () => cutoffUi.filter((e) => e.startsWith('message:')).at(-1)!;
+  const settleClick = async () => {
+    for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+
+  it('a local cutoff that failed after saving shows the saved report and says so', async () => {
+    await clickCutoff(async () => ({ success: false, error: 'Readback failed' }));
+    savedNoteReads[0].resolve({
+      success: true,
+      data: { summary: 'Regenerated summary', generationId: 'g2' },
+    });
+    await settleClick();
+    assert.match(
+      lastMessage(),
+      /^message:A newer saved report is shown\. The request reported an error: Readback failed/,
+    );
+    assert.equal(cutoffUi.at(-1), 'clear', 'the busy state ends');
+    assert.match(elements.summary.innerHTML, /Regenerated summary/);
+  });
+
+  it('a local cutoff says the report was not changed only when the saved generation is the same', async () => {
+    await clickCutoff(async () => ({ success: false, error: 'Summary failed' }));
+    savedNoteReads[0].resolve({ success: true, data: { summary: 'old', generationId: 'g1' } });
+    await settleClick();
+    assert.equal(lastMessage(), 'message:The report was not changed: Summary failed');
+  });
+
+  it('a local cutoff whose outcome cannot be read back says it is unknown', async () => {
+    await clickCutoff(async () => {
+      throw new Error('IPC lost');
+    });
+    savedNoteReads[0].resolve({ success: false });
+    await settleClick();
+    assert.match(
+      lastMessage(),
+      /did not finish \((Error: )?IPC lost\), and the saved report could not be read/,
+    );
+    assert.ok(!cutoffUi.some((e) => e.includes('was not changed')), 'no unchanged claim');
   });
 });

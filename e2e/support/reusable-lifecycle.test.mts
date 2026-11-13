@@ -20,7 +20,7 @@ import { test } from 'node:test';
 import {
   OwnedSession,
   assertCleanReset,
-  assertSingleHiddenWindow,
+  assertHiddenWindowRoles,
   bounded,
   clearOwnedFixtureData,
   storageStateResidue,
@@ -381,19 +381,46 @@ test('a drain timeout poisons the owned session and disposes it without deleting
   }
 });
 
-test('hidden window proof rejects missing, additional, visible, focused, developer-tools and replaced windows', () => {
-  const hidden = { id: 7, visible: false, focused: false, focusable: false, devTools: false };
-  assert.equal(assertSingleHiddenWindow([hidden], 7), 7);
-  for (const windows of [
-    [],
-    [hidden, { ...hidden, id: 8 }],
-    [{ ...hidden, visible: true }],
-    [{ ...hidden, focused: true }],
-    [{ ...hidden, devTools: true }],
-    [{ ...hidden, focusable: true }],
-    [{ ...hidden, id: 8 }],
-  ])
-    assert.throws(() => assertSingleHiddenWindow(windows, 7), /same single hidden/);
+test('hidden window roles reject missing, unknown, duplicate, visible, focused, developer-tools and replaced windows', () => {
+  const main = {
+    id: 7,
+    url: 'file:///app/dist/renderer/index.html',
+    visible: false,
+    focused: false,
+    focusable: false,
+    devTools: false,
+  };
+  const capture = { ...main, id: 9, url: 'file:///app/dist/renderer/capture.html' };
+  assert.deepEqual(assertHiddenWindowRoles([main], { main: 7 }), { main: 7 });
+  // The capture host is adopted on first appearance, then pinned.
+  assert.deepEqual(assertHiddenWindowRoles([main, capture], { main: 7 }), { main: 7, capture: 9 });
+  assert.deepEqual(assertHiddenWindowRoles([capture, main], { main: 7, capture: 9 }), {
+    main: 7,
+    capture: 9,
+  });
+  for (const [windows, expected] of [
+    [[], { main: 7 }],
+    [[capture], {}],
+    [[main, { ...main, id: 8 }], { main: 7 }],
+    [[main, capture, { ...capture, id: 10 }], { main: 7 }],
+    [[main, { ...main, id: 8, url: 'file:///app/dist/renderer/other.html' }], { main: 7 }],
+    [[main, { ...main, id: 8, url: '' }], { main: 7 }],
+    [[{ ...main, visible: true }], { main: 7 }],
+    [[{ ...main, focused: true }], { main: 7 }],
+    [[{ ...main, devTools: true }], { main: 7 }],
+    [[{ ...main, focusable: true }], { main: 7 }],
+    [[main, { ...capture, visible: true }], { main: 7 }],
+    [[main, { ...capture, focused: true }], { main: 7 }],
+    [[main, { ...capture, focusable: true }], { main: 7 }],
+    [[main, { ...capture, devTools: true }], { main: 7 }],
+    [[{ ...main, id: 8 }], { main: 7 }],
+    [[main, { ...capture, id: 10 }], { main: 7, capture: 9 }],
+    [[main], { main: 7, capture: 9 }],
+  ] as const)
+    assert.throws(
+      () => assertHiddenWindowRoles(windows as any, expected as any),
+      /one hidden main window and at most one hidden capture host/,
+    );
 });
 
 test('clean reset proof rejects each independent contamination and an omitted reset, then accepts restored state', () => {

@@ -33,7 +33,7 @@ import type { IpcContext } from './types';
 // Optional third `transcribe-audio` argument. `autoExport` (auto mode) makes
 // the job itself run the configured Notion upload and Slack send after the
 // note is saved, so they happen even if the renderer that asked reloads.
-interface TranscribeOptions {
+export interface TranscribeOptions {
   autoExport: boolean;
   recordingTitle?: string;
 }
@@ -158,36 +158,13 @@ export function register(ctx: IpcContext): void {
       if (typeof filePath !== 'string' || !filePath) {
         return { success: false, error: 'Invalid audio file path' };
       }
-      const options = sanitizeTranscribeOptions(optionsRaw);
-      // Admitted synchronously, so a cancel sent right after the request
-      // reaches it. A duplicate joins the running job even while its cancel is
-      // still rolling back, and gets the same cancelled result; a new run can
-      // start once the job has ended. A path still being created by another
-      // job's rename is waited out first (no-op otherwise).
-      if (transcriptionJobs.pendingReservation(filePath)) await settleReservations(filePath);
-      const { job, joined, promise } = transcriptionJobs.start(
-        {
-          kind: 'transcribe',
-          origin: options.autoExport ? 'auto' : 'manual',
-          filePath,
-          ...(options.recordingTitle ? { title: options.recordingTitle } : {}),
-        },
-        (handle) => runTranscription(ctx, filePath, liveNotesRaw, handle),
-        (result, handle) => {
-          if (!result.success || !('data' in result) || !result.data || handle.origin !== 'auto')
-            return result;
-          return runAutoExports(ctx, handle, {
-            recordingTitle: handle.requestedTitle,
-            result: result.data,
-            audioFilePath: result.newFilePath ?? filePath,
-            transcriptionPath: result.transcriptionPath,
-            generationId: result.generationId,
-          }).then((exports) => ({ ...result, exports }));
-        },
+      const { jobId, joined, result } = await startAudioTranscription(
+        ctx,
+        filePath,
+        liveNotesRaw,
+        sanitizeTranscribeOptions(optionsRaw),
       );
-      if (joined) console.log('Joining the transcription already running for:', filePath);
-      const result = await promise;
-      return { ...result, jobId: job.id, ...(joined ? { joined: true as const } : {}) };
+      return { ...(await result), jobId, ...(joined ? { joined: true as const } : {}) };
     },
   );
 
@@ -198,6 +175,46 @@ export function register(ctx: IpcContext): void {
     if (transcriptionJobs.pendingReservation(filePath)) await settleReservations(filePath);
     return transcriptionJobs.cancel(filePath);
   });
+}
+
+// Admits a transcription job (or joins the one already running for the path)
+// and resolves once admitted, with the job's eventual result. The
+// 'transcribe-audio' handler and main's own auto mode share this, so a
+// renderer request for a recording main already started joins that job.
+export async function startAudioTranscription(
+  ctx: IpcContext,
+  filePath: string,
+  liveNotesRaw: unknown,
+  options: TranscribeOptions,
+) {
+  // Admitted synchronously, so a cancel sent right after the request
+  // reaches it. A duplicate joins the running job even while its cancel is
+  // still rolling back, and gets the same cancelled result; a new run can
+  // start once the job has ended. A path still being created by another
+  // job's rename is waited out first (no-op otherwise).
+  if (transcriptionJobs.pendingReservation(filePath)) await settleReservations(filePath);
+  const { job, joined, promise } = transcriptionJobs.start(
+    {
+      kind: 'transcribe',
+      origin: options.autoExport ? 'auto' : 'manual',
+      filePath,
+      ...(options.recordingTitle ? { title: options.recordingTitle } : {}),
+    },
+    (handle) => runTranscription(ctx, filePath, liveNotesRaw, handle),
+    (result, handle) => {
+      if (!result.success || !('data' in result) || !result.data || handle.origin !== 'auto')
+        return result;
+      return runAutoExports(ctx, handle, {
+        recordingTitle: handle.requestedTitle,
+        result: result.data,
+        audioFilePath: result.newFilePath ?? filePath,
+        transcriptionPath: result.transcriptionPath,
+        generationId: result.generationId,
+      }).then((exports) => ({ ...result, exports }));
+    },
+  );
+  if (joined) console.log('Joining the transcription already running for:', filePath);
+  return { jobId: job.id, joined, result: promise };
 }
 
 // Waits while another job's rename is still creating `filePath`, so neither a
@@ -215,6 +232,31 @@ async function settleReservations(filePath: string): Promise<void> {
   }
 }
 
+// Resolves with `work`, or rejects as soon as `signal` aborts without
+// cancelling `work` itself.
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+// Restore outcomes meaning the path is not audio kept in Google Drive.
+export function notCloudAudio(code: string | undefined): boolean {
+  return code === 'no-audio' || code === 'no-drive-copy';
+}
+
 async function runTranscription(
   ctx: IpcContext,
   filePath: string,
@@ -224,6 +266,9 @@ async function runTranscription(
   const signal = handle.signal;
   let renamedAudioPath: string | undefined;
   let noteCommitted = false;
+  // The file this job reads and links: the requested path, or the verified
+  // copy a Drive restore put elsewhere (`filePath` stays the job's identity).
+  let audioPath = filePath;
 
   const sendProgress = (percent: number, message: string) => {
     handle.progress(percent, message);
@@ -241,14 +286,17 @@ async function runTranscription(
   try {
     console.log('Transcription requested for:', filePath);
     let existing: Awaited<ReturnType<typeof metadataService.getMetadata>> = null;
+    // The audio path whose sidecar `existing` was read from.
+    let existingPath = filePath;
     try {
       existing = await metadataService.getMetadata(filePath);
     } catch (err) {
       console.warn('Failed to read recording metadata:', err);
     }
-    const previousNoteWasPresent =
+    const linkedNotePresent = () =>
       !!existing?.transcriptionPath &&
       fs.existsSync(path.join(existing.transcriptionPath, META_JSON));
+    let previousNoteWasPresent = linkedNotePresent();
     let liveNotes = ctx.sanitizeLiveNotes(liveNotesRaw);
     if (!liveNotes || liveNotes.length === 0) {
       // Fall back to whatever stop-recording persisted -- covers the
@@ -269,19 +317,54 @@ async function runTranscription(
       return { success: false, error: ctx.formatAiCredentialsError() };
     }
 
+    // A recording kept only in Google Drive is downloaded as part of this
+    // job, so a transcribe or regenerate requested for it continues even if
+    // the window that asked is reloaded or closed meanwhile.
+    if (!fs.existsSync(filePath) && ctx.restoreCloudAudio) {
+      sendProgress(5, 'Downloading audio from Google Drive...');
+      // A cancel ends this job at once; the download itself is shared (a
+      // "Download audio" click or another job may be waiting on it) and keeps
+      // going.
+      const restored = await untilAborted(ctx.restoreCloudAudio(filePath), signal);
+      // Not a recording kept in Drive: carry on as before and let the
+      // transcription report the missing file.
+      if (!restored.success && !notCloudAudio(restored.code)) {
+        return { success: false, error: `Couldn't download audio: ${restored.error}` };
+      }
+      // The restore verifies the bytes it returns, and may return a different
+      // file: a copy restored earlier, or a numbered name when the preferred
+      // one holds other audio. Only that file is this note's audio; whatever
+      // now sits at `filePath` is not read or linked.
+      if (restored.success && path.resolve(restored.path) !== path.resolve(filePath)) {
+        if (!handle.addPath(restored.path)) {
+          return { success: false, error: 'This recording is already being transcribed.' };
+        }
+        audioPath = restored.path;
+        if (!existing) {
+          try {
+            existing = await metadataService.getMetadata(audioPath);
+            existingPath = audioPath;
+            previousNoteWasPresent = linkedNotePresent();
+          } catch (err) {
+            console.warn('Failed to read recording metadata:', err);
+          }
+        }
+      }
+    }
+
     sendProgress(10, 'Starting transcription...');
 
     console.log('Starting transcription...');
 
     const summaryPrompt = ctx.configService.getSummaryPrompt();
     // The read lease keeps "free up space" from removing the audio mid-read.
-    const result = await withAudioReadLease(app.getPath('userData'), filePath, () =>
-      geminiService.transcribeAudio(filePath, sendProgress, summaryPrompt, liveNotes, { signal }),
+    const result = await withAudioReadLease(app.getPath('userData'), audioPath, () =>
+      geminiService.transcribeAudio(audioPath, sendProgress, summaryPrompt, liveNotes, { signal }),
     );
     // A cancel that lands after the provider already returned must not save.
     signal.throwIfAborted();
     console.log('Transcription completed successfully');
-    console.log('Saving metadata for:', filePath);
+    console.log('Saving metadata for:', audioPath);
 
     // Attach renderer-captured notes so downstream consumers (Notion upload,
     // re-render in the modal) can read them off the result object.
@@ -294,26 +377,26 @@ async function runTranscription(
     // already has a linked note: keep its audio path stable until the note
     // replacement succeeds, including when saving fails (#213).
     const renameTitle =
-      !existing?.transcriptionPath && path.basename(filePath).includes('Untitled_Meeting')
+      !existing?.transcriptionPath && path.basename(audioPath).includes('Untitled_Meeting')
         ? result.suggestedTitle
         : undefined;
-    let audioFilePath = filePath;
+    let audioFilePath = audioPath;
     if (renameTitle) {
-      audioFilePath = await renameAudioFile(filePath, renameTitle, handle);
-      if (audioFilePath !== filePath) {
+      audioFilePath = await renameAudioFile(audioPath, renameTitle, handle);
+      if (audioFilePath !== audioPath) {
         renamedAudioPath = audioFilePath;
         // Carry the stop-recording sidecar (live notes) over to the renamed
         // audio. Delete the old one only after the copy lands.
         try {
-          const existingMetadata = await metadataService.getMetadata(filePath);
+          const existingMetadata = await metadataService.getMetadata(audioPath);
           if (existingMetadata) {
             await metadataService.saveMetadata(audioFilePath, {
               ...existingMetadata,
-              liveHints: recordingHintsBelongToAudio(filePath, existingMetadata)
+              liveHints: recordingHintsBelongToAudio(audioPath, existingMetadata)
                 ? existingMetadata.liveHints
                 : undefined,
             });
-            await metadataService.deleteMetadata(filePath);
+            await metadataService.deleteMetadata(audioPath);
           }
         } catch (error) {
           console.error('Failed to move metadata to renamed audio:', error);
@@ -352,7 +435,7 @@ async function runTranscription(
           audioFilePath,
           dataPath: app.getPath('userData'),
           liveNotes,
-          liveHints: recordingHintsBelongToAudio(filePath, existing)
+          liveHints: recordingHintsBelongToAudio(existingPath, existing)
             ? parseRecordingLiveHints(existing?.liveHints)
             : undefined,
           previousFolderPath: existing?.transcriptionPath,
@@ -491,11 +574,11 @@ async function runTranscription(
           // name meanwhile: when that fails, the audio and its sidecar both
           // stay under the renamed path and the caller gets `newFilePath`.
           const restoredFrom = renamedAudioPath;
-          await moveWithoutOverwrite(restoredFrom, filePath);
+          await moveWithoutOverwrite(restoredFrom, audioPath);
           renamedAudioPath = undefined;
           const movedMetadata = await metadataService.getMetadata(restoredFrom);
           if (movedMetadata) {
-            await metadataService.saveMetadata(filePath, {
+            await metadataService.saveMetadata(audioPath, {
               ...movedMetadata,
               liveHints: recordingHintsBelongToAudio(restoredFrom, movedMetadata)
                 ? movedMetadata.liveHints

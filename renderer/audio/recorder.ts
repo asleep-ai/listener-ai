@@ -1,13 +1,25 @@
-// Recording session orchestration: start/stop, MediaRecorder wiring, timer,
-// auto-mode post-processing. Owns the click handler on the record button.
+// Recording controls for the visible window. Main's RecordingController owns
+// recording state and a hidden capture host records the audio, so this module
+// only subscribes: it renders the controller snapshot (timer derived from
+// `startedAt`), sends start/stop requests, and on load reads the snapshot so
+// a reloaded or recreated window reattaches to a running recording.
 
-import { autoModeSkipMessage } from '../../src/aiProvider';
+import type {
+  RecordingError,
+  RecordingErrorCode,
+  RecordingResult,
+  RecordingStateSnapshot,
+} from '../../src/recordingState';
 import { getDom, state } from '../state';
-import { hideLiveNotesPanel, showLiveNotesPanel } from '../ui/live-notes';
+import {
+  hideLiveNotesPanel,
+  setLiveNotes,
+  setLiveNotesAccepting,
+  showLiveNotesPanel,
+} from '../ui/live-notes';
 import {
   clearLiveSessionLauncher,
   configureLiveSessionLauncher,
-  handleLivePcmFrame,
   stopLiveSessionCapture,
 } from '../ui/live-session';
 import { showNotification, showToast } from '../ui/notifications';
@@ -15,230 +27,44 @@ import { refreshRecordingsList } from '../ui/recordings-list';
 import { onTranscriptionJobChange } from '../ui/transcription-jobs';
 import { describeAutoExports, isActiveJob } from '../../src/transcriptionJobView';
 import type { TranscriptionJobSnapshot } from '../electronAPI';
-import { reportError } from '../sentry';
-import { buildProcessedStream, cleanupAudioState, pickRecordingMimeType } from './graph';
-import { acquireMediaStream, attachTrackEndedHandlers } from './mic';
-import { createSystemAudioSource } from './system-audio';
 
-let stopRecordingInProgress = false;
-// Start is async (mic permission, audio graph, the start-recording IPC) and
-// `state.isRecording` only flips at its end, so a second click, tray start or
-// shortcut during that window used to run a second start. Its failure path
-// (main refuses a second recording) ran cleanupAudioState, which nulled the
-// shared `state.mediaRecorder` under the first start: production saw
-// "Cannot set properties of null (setting 'ondataavailable')" (LISTENER-AI-7/E).
-let startRecordingInProgress = false;
-// ondataavailable fires ~once/sec; latch so a stuck chunk-forward failure
-// reports once per recording session instead of flooding Sentry.
-let reportedChunkForward = false;
-
-export async function startRecording(): Promise<void> {
-  if (startRecordingInProgress || state.isRecording) return;
-  startRecordingInProgress = true;
-  try {
-    await startRecordingOnce();
-  } finally {
-    startRecordingInProgress = false;
-  }
-}
-
-async function startRecordingOnce(): Promise<void> {
-  const { recordButton, statusIndicator, statusText, recordingTime, meetingTitle } = getDom();
-
-  if (state.isAutoModeProcessing) {
-    alert('Please wait for auto mode processing to complete before starting a new recording.');
-    return;
-  }
-
-  const title = meetingTitle.value.trim() || 'Untitled_Meeting';
-
-  // Acquire the mic before telling main, so permission prompts don't leave main state dangling.
-  let preferredDeviceId = '';
-  try {
-    const cfg = await window.electronAPI.getConfig();
-    preferredDeviceId = typeof cfg.audioDeviceId === 'string' ? cfg.audioDeviceId : '';
-  } catch (error) {
-    console.warn('Could not read audioDeviceId from config:', error);
-  }
-  try {
-    state.mediaStream = await acquireMediaStream(preferredDeviceId);
-  } catch (error) {
-    const name = error instanceof Error && error.name ? error.name : '';
-    if (name === 'NotAllowedError' || name === 'SecurityError') {
-      reportError(error, { operation: 'recording.start.permission-denied', severity: 'warning' });
-      if (
-        confirm(
-          'Microphone access is required to record audio.\n\nOpen System Settings to grant permission?',
-        )
-      ) {
-        await window.electronAPI.openMicrophoneSettings();
-      }
-    } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
-      reportError(error, { operation: 'recording.start.no-device', severity: 'warning' });
-      if (confirm('No microphone was detected.\n\nOpen System Settings to check input devices?')) {
-        await window.electronAPI.openMicrophoneSettings();
-      }
-    } else {
-      reportError(error, { operation: 'recording.start.getusermedia', severity: 'error' });
-      alert(
-        `Failed to access microphone: ${error instanceof Error && error.message ? error.message : String(error)}`,
-      );
-    }
-    return;
-  }
-
-  state.recordingMimeType = pickRecordingMimeType();
-
-  // Permission was validated at toggle time; start the system-audio source now so
-  // PCM chunks start flowing (audiotee on macOS, getDisplayMedia on Win/Linux).
-  const recordSystemAudioToggle = document.getElementById(
-    'recordSystemAudioToggle',
-  ) as HTMLInputElement | null;
-  const useSystemAudio = !!recordSystemAudioToggle?.checked;
-
-  // Open the output stream in main BEFORE starting MediaRecorder so the first chunk
-  // has a file handle waiting for it. Build the Web Audio graph up front (without
-  // calling start) — if construction fails we haven't touched main state yet.
-  let graph: Awaited<ReturnType<typeof buildProcessedStream>>;
-  try {
-    const addSystemAudio = useSystemAudio
-      ? async (ctx: AudioContext) => {
-          const { node, cleanup } = await createSystemAudioSource(ctx);
-          state.systemAudioCleanup = cleanup;
-          if (!node) {
-            showNotification('System audio capture failed -- recording mic only.', 'error');
-          }
-          return node;
-        }
-      : null;
-    graph = await buildProcessedStream(state.mediaStream, addSystemAudio, handleLivePcmFrame);
-    state.audioContext = graph.ctx;
-    state.processedStream = graph.stream;
-    state.sourceNode = graph.source;
-    state.graphHead = graph.head;
-    attachTrackEndedHandlers(state.mediaStream);
-    state.mediaRecorder = state.recordingMimeType
-      ? new MediaRecorder(state.processedStream, {
-          mimeType: state.recordingMimeType,
-          audioBitsPerSecond: 64000,
-        })
-      : new MediaRecorder(state.processedStream, { audioBitsPerSecond: 64000 });
-  } catch (error) {
-    cleanupAudioState();
-    reportError(error, { operation: 'recording.start.init', severity: 'error' });
-    alert(
-      `Failed to initialize recorder: ${error instanceof Error && error.message ? error.message : String(error)}`,
-    );
-    return;
-  }
-
-  try {
-    const result = await window.electronAPI.startRecording({
-      title,
-      mimeType: state.mediaRecorder.mimeType || state.recordingMimeType || 'audio/webm',
-    });
-    if (!result.success) {
-      cleanupAudioState();
-      alert(`Failed to start recording: ${result.error || 'Unknown error'}`);
-      return;
-    }
-  } catch (error) {
-    cleanupAudioState();
-    alert(`Failed to start recording: ${error instanceof Error ? error.message : String(error)}`);
-    return;
-  }
-
-  state.chunkSendChain = Promise.resolve();
-  reportedChunkForward = false;
-  state.mediaRecorder.ondataavailable = (event) => {
-    if (!event.data || event.data.size === 0) return;
-    const blob = event.data;
-    state.chunkSendChain = state.chunkSendChain.then(async () => {
-      try {
-        const buf = await blob.arrayBuffer();
-        window.electronAPI.sendRecordingChunk(buf);
-      } catch (err) {
-        console.error('Failed to forward recording chunk:', err);
-        if (!reportedChunkForward) {
-          reportedChunkForward = true;
-          reportError(err, { operation: 'recording.chunk-forward', severity: 'warning' });
-        }
-      }
-    });
-  };
-  state.mediaRecorder.onerror = (event: Event) => {
-    const err = (event as unknown as { error?: unknown }).error ?? event;
-    console.error('MediaRecorder error:', err);
-    reportError(err, { operation: 'recording.mediarecorder-error', severity: 'error' });
-    void stopLiveSessionCapture();
-    cleanupAudioState();
-    resetRecordingUI();
-    window.electronAPI.stopRecording().catch(() => {});
-    const message = err instanceof Error && err.message ? err.message : 'Unknown error';
-    alert(`Recording failed: ${message}`);
-  };
-
-  try {
-    state.mediaRecorder.start(1000);
-  } catch (error) {
-    await window.electronAPI.abortRecording().catch(() => {});
-    cleanupAudioState();
-    reportError(error, { operation: 'recording.start.recorder-start', severity: 'error' });
-    alert(
-      `Failed to start recorder: ${error instanceof Error && error.message ? error.message : String(error)}`,
-    );
-    return;
-  }
-  state.isRecording = true;
-  state.recordingStartTime = Date.now();
-  configureLiveSessionLauncher(
-    title,
-    state.processedStream,
-    state.mediaRecorder.mimeType || state.recordingMimeType || 'audio/webm',
-  );
-
-  recordButton.textContent = 'Stop Recording';
-  recordButton.classList.add('recording');
-  statusIndicator.classList.add('recording');
-  statusText.textContent = 'Recording...';
-  recordingTime.classList.add('active');
-  showLiveNotesPanel();
-
-  startTimer();
-}
-
-export function resetRecordingUI(): void {
-  const { recordButton, statusIndicator, statusText, recordingTime } = getDom();
-  state.isRecording = false;
-  stopTimer();
-  recordButton.textContent = 'Start Recording';
-  recordButton.classList.remove('recording');
-  statusIndicator.classList.remove('recording');
-  statusText.textContent = 'Ready to record';
-  recordingTime.classList.remove('active');
-  hideLiveNotesPanel();
-  clearLiveSessionLauncher();
-}
-
-// True while this renderer awaits its own auto-mode transcription. An auto job
-// seen only through job state (this window reloaded mid-run) is followed by
-// `followAutoJob` instead.
-let localAutoRunInFlight = false;
+let appliedRevision = -1;
+let snapshot: RecordingStateSnapshot | null = null;
+// Errors and results this window has already presented (by id).
+let seenErrorId = 0;
+let seenResultId = 0;
+// A start or stop this window requested presents its own outcome.
+let localRequest = false;
 let followedAutoJobId: string | null = null;
+
+const AUTO_MODE_WAIT_MESSAGE =
+  'Please wait for auto mode processing to complete before starting a new recording.';
 
 function setAutoModeProcessing(processing: boolean): void {
   const { recordButton } = getDom();
   state.isAutoModeProcessing = processing;
-  recordButton.disabled = processing;
   recordButton.style.opacity = processing ? '0.5' : '';
   recordButton.style.cursor = processing ? 'not-allowed' : '';
+  updateButtonEnabled();
 }
 
-function scheduleReadyStatus(): void {
+function updateButtonEnabled(): void {
+  const { recordButton } = getDom();
+  const phase = snapshot?.phase ?? 'idle';
+  recordButton.disabled =
+    phase === 'starting' ||
+    phase === 'stopping' ||
+    (phase === 'idle' && state.isAutoModeProcessing);
+}
+
+function scheduleReadyStatus(message?: string, ms = 5000): void {
   const { statusText } = getDom();
   setTimeout(() => {
-    statusText.textContent = 'Ready to record';
-  }, 5000);
+    if (state.isRecording) return;
+    if (message === undefined || statusText.textContent === message) {
+      statusText.textContent = 'Ready to record';
+    }
+  }, ms);
 }
 
 function autoJobOutcome(job: Pick<TranscriptionJobSnapshot, 'status' | 'exports'>): string {
@@ -248,10 +74,10 @@ function autoJobOutcome(job: Pick<TranscriptionJobSnapshot, 'status' | 'exports'
 }
 
 // Auto mode's transcription and Notion/Slack follow-ups run as one main-owned
-// job. After a reload this restores the processing state and reports the
-// outcome when the job ends.
+// job that main starts after it finalizes the recording. This restores the
+// processing state (also after a reload) and reports the outcome.
 function followAutoJob(job: TranscriptionJobSnapshot): void {
-  if (job.kind !== 'transcribe' || job.origin !== 'auto' || localAutoRunInFlight) return;
+  if (job.kind !== 'transcribe' || job.origin !== 'auto') return;
   const { statusText } = getDom();
   if (isActiveJob(job)) {
     if (followedAutoJobId && followedAutoJobId !== job.id) return;
@@ -267,195 +93,22 @@ function followAutoJob(job: TranscriptionJobSnapshot): void {
   followedAutoJobId = null;
   statusText.textContent = autoJobOutcome(job);
   setAutoModeProcessing(false);
+  if (job.status === 'succeeded') void refreshRecordingsList();
   scheduleReadyStatus();
-}
-
-export async function processAutoMode(
-  audioPath: string | undefined,
-  recordingTitle: string,
-  durationMs: number | undefined,
-  liveNotes?: Array<{ offsetMs: number; text: string }>,
-): Promise<void> {
-  const { autoModeToggle, statusText } = getDom();
-  if (!autoModeToggle.checked || !audioPath) return;
-
-  const config = await window.electronAPI.getConfig();
-  const minSeconds = Number(config.minRecordingSeconds) || 0;
-  if (minSeconds > 0 && typeof durationMs === 'number' && durationMs < minSeconds * 1000) {
-    const actualSeconds = Math.floor(durationMs / 1000);
-    const message = `Auto mode: Skipped (${actualSeconds}s < ${minSeconds}s minimum)`;
-    console.log(message);
-    statusText.textContent = message;
-    setTimeout(() => {
-      if (!state.isRecording && statusText.textContent === message) {
-        statusText.textContent = 'Ready to record';
-      }
-    }, 5000);
-    return;
-  }
-
-  // Pre-flight both credential gates. Auto mode runs unattended right after a
-  // recording stops, so a backend with no key would otherwise surface as a
-  // generic "Transcription failed" only after the upload/ffmpeg work, with
-  // nothing on screen naming the setting that has to change.
-  const configCheck = await window.electronAPI.checkConfig();
-  if (!configCheck.hasAiAuth || !configCheck.hasTranscriptionAuth) {
-    const message = autoModeSkipMessage(configCheck);
-    console.warn(message);
-    statusText.textContent = message;
-    showNotification(message, 'error');
-    setTimeout(() => {
-      if (!state.isRecording && statusText.textContent === message) {
-        statusText.textContent = 'Ready to record';
-      }
-    }, 8000);
-    return;
-  }
-
-  localAutoRunInFlight = true;
-  setAutoModeProcessing(true);
-  statusText.textContent = 'Auto mode: Processing recording...';
-
-  try {
-    console.log('Auto mode: Starting transcription...');
-    // Main runs the configured Notion upload and Slack send as part of this
-    // job (and opens the Notion page), so they still happen if this window
-    // reloads before the job ends.
-    const transcriptionResult = await window.electronAPI.transcribeAudio(audioPath, liveNotes, {
-      autoExport: true,
-      recordingTitle,
-    });
-
-    if (transcriptionResult.success) {
-      console.log('Auto mode: Transcription complete');
-      if (transcriptionResult.newFilePath) {
-        console.log('Auto mode: File renamed to:', transcriptionResult.newFilePath);
-      }
-      if (transcriptionResult.exports?.notion?.status === 'failed') {
-        console.error('Auto mode: Notion upload failed:', transcriptionResult.exports.notion.error);
-      }
-      if (transcriptionResult.exports?.slack?.status === 'failed') {
-        console.error('Auto mode: Slack send failed:', transcriptionResult.exports.slack.error);
-      }
-      statusText.textContent = describeAutoExports(transcriptionResult.exports);
-
-      await refreshRecordingsList();
-    } else {
-      statusText.textContent = autoJobOutcome({
-        status: transcriptionResult.cancelled ? 'cancelled' : 'failed',
-      });
-      console.error('Auto mode: Transcription failed:', transcriptionResult.error);
-    }
-  } catch (error) {
-    statusText.textContent = 'Auto mode: Error processing recording';
-    console.error('Auto mode error:', error);
-    if (error instanceof Error) {
-      console.error('Error details:', error.message, error.stack);
-    }
-    reportError(error, { operation: 'recording.auto-mode', severity: 'error' });
-  } finally {
-    localAutoRunInFlight = false;
-    setAutoModeProcessing(false);
-  }
-
-  scheduleReadyStatus();
-}
-
-export async function handleRecordingStopped(
-  audioPath: string | undefined,
-  durationMs: number | undefined,
-  liveNotes?: Array<{ offsetMs: number; text: string }>,
-): Promise<void> {
-  const { meetingTitle } = getDom();
-  resetRecordingUI();
-  const recordingTitle = meetingTitle.value.trim() || 'Untitled_Meeting';
-  meetingTitle.value = '';
-  await refreshRecordingsList();
-  await processAutoMode(audioPath, recordingTitle, durationMs, liveNotes);
-}
-
-export async function stopRecording(): Promise<void> {
-  if (stopRecordingInProgress) return;
-  stopRecordingInProgress = true;
-  const { recordButton } = getDom();
-  recordButton.disabled = true;
-
-  try {
-    // Snapshot live notes before they get cleared by the UI reset. Passed to
-    // main so they're persisted alongside the audio file regardless of whether
-    // auto-mode kicks off transcription right away, and forwarded into the
-    // auto-mode path so transcribe-audio gets them without re-reading state.
-    const liveNotesSnapshot = state.liveNotes.length > 0 ? state.liveNotes.slice() : undefined;
-    const liveNotesPayload = liveNotesSnapshot ? { liveNotes: liveNotesSnapshot } : undefined;
-
-    // If the recorder already transitioned to inactive on its own (e.g. USB mic
-    // unplugged, stream ended, Chromium force-stopped encoding), still unwind the
-    // session so the next recording isn't blocked by stuck state.
-    if (!state.mediaRecorder || state.mediaRecorder.state === 'inactive') {
-      await stopLiveSessionCapture({ hidePanel: true });
-      cleanupAudioState();
-      try {
-        const result = await window.electronAPI.stopRecording(liveNotesPayload);
-        if (result.liveHintsSaveError) showNotification(result.liveHintsSaveError, 'error');
-        if (result?.success) {
-          await handleRecordingStopped(result.filePath, result.durationMs, liveNotesSnapshot);
-          return;
-        }
-      } catch (error) {
-        reportError(error, { operation: 'recording.stop.finalize-inactive', severity: 'error' });
-        // fall through to UI reset
-      }
-      resetRecordingUI();
-      return;
-    }
-
-    try {
-      // MediaRecorder.stop() flushes the final chunk via ondataavailable before
-      // firing onstop. We then await chunkSendChain so every in-flight arrayBuffer()
-      // conversion lands on main's IPC queue before stop-recording invoke — Electron
-      // multiplexes all IPC over one Mojo pipe, preserving delivery order.
-      const recorder = state.mediaRecorder;
-      const stopped = new Promise<void>((resolve) => {
-        recorder.onstop = () => resolve();
-      });
-      recorder.stop();
-      await stopped;
-      await state.chunkSendChain;
-      await stopLiveSessionCapture({ hidePanel: true });
-      cleanupAudioState();
-
-      const result = await window.electronAPI.stopRecording(liveNotesPayload);
-      if (result.liveHintsSaveError) showNotification(result.liveHintsSaveError, 'error');
-
-      if (result.success) {
-        await handleRecordingStopped(result.filePath, result.durationMs, liveNotesSnapshot);
-      } else if (result.reason === 'empty') {
-        alert('No audio captured.');
-        resetRecordingUI();
-      } else {
-        alert(`Failed to save recording: ${result.error || 'Unknown error'}`);
-        resetRecordingUI();
-      }
-    } catch (error) {
-      alert(`Failed to stop recording: ${error instanceof Error ? error.message : String(error)}`);
-      cleanupAudioState();
-      resetRecordingUI();
-    }
-  } finally {
-    stopRecordingInProgress = false;
-    if (!state.isAutoModeProcessing) recordButton.disabled = false;
-  }
 }
 
 export function startTimer(): void {
   const { recordingTime } = getDom();
-  state.timerInterval = setInterval(() => {
+  if (state.timerInterval) clearInterval(state.timerInterval);
+  const tick = () => {
     if (state.recordingStartTime == null) return;
-    const elapsed = Math.floor((Date.now() - state.recordingStartTime) / 1000);
+    const elapsed = Math.max(0, Math.floor((Date.now() - state.recordingStartTime) / 1000));
     const minutes = Math.floor(elapsed / 60);
     const seconds = elapsed % 60;
     recordingTime.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-  }, 1000);
+  };
+  tick();
+  state.timerInterval = setInterval(tick, 1000);
 }
 
 export function stopTimer(): void {
@@ -467,48 +120,220 @@ export function stopTimer(): void {
   recordingTime.textContent = '00:00';
 }
 
-// Wires up the record-button click + tray IPC handlers + auto-stop notifier.
-// Called once from main.ts after initDom().
-export function setupRecorder(): void {
+function enterRecordingUi(next: RecordingStateSnapshot): void {
+  const { recordButton, statusIndicator, statusText, recordingTime } = getDom();
+  state.isRecording = true;
+  state.recordingStartTime = next.startedAt ?? Date.now();
+  recordButton.textContent = 'Stop Recording';
+  recordButton.classList.add('recording');
+  statusIndicator.classList.add('recording');
+  statusText.textContent = 'Recording...';
+  recordingTime.classList.add('active');
+  showLiveNotesPanel();
+  startTimer();
+  // Live captions ride on the recording's audio inside the capture host;
+  // this window only offers the launcher.
+  configureLiveSessionLauncher(next.title ?? 'Untitled_Meeting');
+}
+
+export function resetRecordingUI(): void {
+  const { recordButton, statusIndicator, statusText, recordingTime } = getDom();
+  state.isRecording = false;
+  state.recordingStartTime = null;
+  stopTimer();
+  recordButton.textContent = 'Start Recording';
+  recordButton.classList.remove('recording');
+  statusIndicator.classList.remove('recording');
+  statusText.textContent = 'Ready to record';
+  recordingTime.classList.remove('active');
+  hideLiveNotesPanel();
+  clearLiveSessionLauncher();
+}
+
+async function presentError(code: RecordingErrorCode, message: string): Promise<void> {
+  switch (code) {
+    case 'busy':
+    case 'cancelled':
+    case 'quitting':
+      return;
+    case 'permission-denied':
+      if (
+        confirm(
+          'Microphone access is required to record audio.\n\nOpen System Settings to grant permission?',
+        )
+      ) {
+        await window.electronAPI.openMicrophoneSettings();
+      }
+      return;
+    case 'no-device':
+      if (confirm('No microphone was detected.\n\nOpen System Settings to check input devices?')) {
+        await window.electronAPI.openMicrophoneSettings();
+      }
+      return;
+    default:
+      alert(message);
+  }
+}
+
+// An error this window did not request (tray, shortcut, meeting trigger, a
+// capture failure mid-recording) is presented interactively only while the
+// window is visible; otherwise it stays on the status line.
+function presentRemoteError(error: RecordingError): void {
+  if (error.code === 'busy' || error.code === 'cancelled' || error.code === 'quitting') return;
+  const { statusText } = getDom();
+  if (document.visibilityState === 'visible') {
+    void presentError(error.code, error.message);
+    return;
+  }
+  statusText.textContent = error.message;
+  showNotification(error.message, 'error');
+  scheduleReadyStatus(error.message, 8000);
+}
+
+function presentResult(result: RecordingResult): void {
+  const { statusText } = getDom();
+  if (result.liveHintsSaveError) showNotification(result.liveHintsSaveError, 'error');
+  const auto = result.autoMode;
+  if (auto.status === 'skipped') {
+    console.log(auto.message);
+    statusText.textContent = auto.message;
+    // A missing credential names the setting to change; the length floor is quiet.
+    const credential = !auto.message.startsWith('Auto mode: Skipped (');
+    if (credential) showNotification(auto.message, 'error');
+    scheduleReadyStatus(auto.message, credential ? 8000 : 5000);
+  } else if (auto.status === 'failed') {
+    statusText.textContent = auto.message;
+    scheduleReadyStatus(auto.message);
+  } else if (auto.status === 'started') {
+    if (!followedAutoJobId || followedAutoJobId === auto.jobId) {
+      followedAutoJobId = auto.jobId;
+      setAutoModeProcessing(true);
+      if (statusText.textContent === 'Ready to record')
+        statusText.textContent = 'Auto mode: Processing recording...';
+    }
+  }
+}
+
+function applySnapshot(next: RecordingStateSnapshot): void {
+  if (next.revision <= appliedRevision) return;
+  appliedRevision = next.revision;
+  const previous = snapshot;
+  snapshot = next;
+  const { statusText, meetingTitle } = getDom();
+
+  if ((next.phase === 'recording' || next.phase === 'stopping') && !state.isRecording) {
+    enterRecordingUi(next);
+  }
+  if (state.isRecording) setLiveNotes(next.notes);
+  // Notes are taken only while main is recording; from 'stopping' on, main
+  // refuses them, so the panel stops offering it at once.
+  setLiveNotesAccepting(next.phase === 'recording');
+  if (next.phase === 'stopping' && previous?.phase !== 'stopping') {
+    statusText.textContent = 'Saving recording...';
+    if (next.stopReason === 'track-ended')
+      showToast('Mic disconnected — stopping recording', 'error');
+    // Main ends live captions with the recording; finish this side's capture.
+    void stopLiveSessionCapture({ hidePanel: true });
+  }
+  if (next.systemAudioFallback && !previous?.systemAudioFallback && next.phase !== 'idle') {
+    showNotification('System audio capture failed -- recording mic only.', 'error');
+  }
+  if (next.phase === 'idle' && state.isRecording) {
+    resetRecordingUI();
+    meetingTitle.value = '';
+    window.electronAPI.setRecordingTitleDraft('');
+    void refreshRecordingsList();
+  }
+  if (next.lastResult && next.lastResult.id > seenResultId) {
+    const fresh = seenResultId !== 0 || previous !== null;
+    seenResultId = next.lastResult.id;
+    if (fresh) presentResult(next.lastResult);
+  }
+  if (next.lastError && next.lastError.id > seenErrorId) {
+    const fresh = seenErrorId !== 0 || previous !== null;
+    seenErrorId = next.lastError.id;
+    if (fresh && !localRequest) presentRemoteError(next.lastError);
+  }
+  updateButtonEnabled();
+}
+
+export async function startRecording(): Promise<void> {
+  if (localRequest || (snapshot && snapshot.phase !== 'idle')) return;
+  const { meetingTitle } = getDom();
+  if (state.isAutoModeProcessing) {
+    alert(AUTO_MODE_WAIT_MESSAGE);
+    return;
+  }
+  localRequest = true;
+  try {
+    const result = await window.electronAPI.requestRecordingStart({
+      title: meetingTitle.value.trim() || 'Untitled_Meeting',
+    });
+    if (!result.success && result.code) await presentError(result.code, result.error ?? '');
+  } catch (error) {
+    alert(`Failed to start recording: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    localRequest = false;
+  }
+}
+
+export async function stopRecording(): Promise<void> {
+  if (localRequest || snapshot?.phase !== 'recording') return;
+  localRequest = true;
   const { recordButton } = getDom();
+  recordButton.disabled = true;
+  try {
+    // Main stops capture at once; live captions drain their tail in main
+    // (late finals still reach the hint history) and this window follows
+    // through the 'stopping' snapshot. Awaiting the live drain here first
+    // kept recording audio after Stop, and a reload during it lost the stop.
+    const { result, error } = await window.electronAPI.requestRecordingStop();
+    if (!result) {
+      if (error) console.warn('Stop recording:', error);
+    } else if (!result.success && result.reason === 'empty') {
+      alert('No audio captured.');
+    } else if (!result.success && result.stopReason === 'user') {
+      alert(`Failed to save recording: ${result.error || 'Unknown error'}`);
+    }
+  } catch (error) {
+    alert(`Failed to stop recording: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    localRequest = false;
+    updateButtonEnabled();
+  }
+}
+
+// Wires the record button, the recording-state subscription and the
+// auto-stop notice. Called once from main.ts after initDom().
+export function setupRecorder(): void {
+  const { recordButton, meetingTitle } = getDom();
 
   onTranscriptionJobChange(({ job }) => followAutoJob(job));
 
-  // Setup record button listener
-  recordButton.addEventListener('click', async () => {
-    if (!state.isRecording) {
-      startRecording();
-    } else {
-      stopRecording();
-    }
+  recordButton.addEventListener('click', () => {
+    if (!snapshot || snapshot.phase === 'idle') void startRecording();
+    else void stopRecording();
   });
 
-  // Setup tray icon event handlers
-  window.electronAPI.onTrayStartRecording(() => {
-    // Programmatically click the record button if not recording
-    if (!state.isRecording) {
-      recordButton.click();
-    }
+  // Tray, shortcut and meeting starts use the title typed here, as before.
+  meetingTitle.addEventListener('input', () => {
+    window.electronAPI.setRecordingTitleDraft(meetingTitle.value.trim());
   });
 
-  window.electronAPI.onTrayStopRecording(() => {
-    // Programmatically click the record button if recording
-    if (state.isRecording) {
-      recordButton.click();
-    }
+  window.electronAPI.onRecordingStateChanged(applySnapshot);
+  window.electronAPI.onRecordingAutoStopped(() => {
+    showToast('Recording auto-stopped - reached time limit');
+  });
+  window.electronAPI.onRecordingNotice((notice) => {
+    if (notice.kind === 'mic-fallback')
+      showToast('Preferred mic unavailable — using system default');
   });
 
-  // Listen for recording status updates
-  window.electronAPI.onRecordingStatus((status) => {
-    console.log('Recording status:', status);
-  });
-
-  if (window.electronAPI.onRecordingAutoStopped) {
-    window.electronAPI.onRecordingAutoStopped(async () => {
-      showToast('Recording auto-stopped - reached time limit');
-      if (state.isRecording) {
-        await stopRecording();
-      }
-    });
-  }
+  // Subscribed first, so nothing between the read and the subscription is lost;
+  // revisions already applied are ignored.
+  void window.electronAPI
+    .getRecordingState()
+    .then(applySnapshot)
+    .catch((error) => console.warn('Could not read recording state:', error));
+  window.electronAPI.setRecordingTitleDraft(meetingTitle.value.trim());
 }
