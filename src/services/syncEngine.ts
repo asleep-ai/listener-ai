@@ -4,6 +4,7 @@ import { isSupportedAudioExtension, mimeTypeForFile } from '../audioFormats';
 import { createHash } from 'crypto';
 import { withMeetingLock } from '../meetingLock';
 import { reportError } from '../sentry';
+import { isDiskFullError } from '../errorClassification';
 import { telemetryHash } from '../sentryScrub';
 import {
   type DriveFile,
@@ -175,6 +176,24 @@ function safeBasename(name: string): string | null {
   return base;
 }
 
+// Write to a dot-prefixed sibling and rename over the target, so a failed
+// write (e.g. ENOSPC) leaves the existing file untouched. The temp file is
+// removed on failure so it does not keep holding disk space.
+function writeFileAtomic(
+  target: string,
+  content: string | NodeJS.ArrayBufferView,
+  options?: fs.WriteFileOptions,
+): void {
+  const tmp = path.join(path.dirname(target), `.${path.basename(target)}.tmp.${process.pid}`);
+  try {
+    fs.writeFileSync(tmp, content, options);
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+
 // Sort comparator that forces `meta.json` to the end of the iteration order
 // while leaving every other name in lexicographic position. Used by the
 // bidirectional download path to preserve the v2 sentinel invariant -- if
@@ -276,9 +295,7 @@ export class SyncEngine {
 
   saveState(state: SyncState): void {
     fs.mkdirSync(path.dirname(this.syncStatePath), { recursive: true });
-    const tmp = `${this.syncStatePath}.tmp.${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
-    fs.renameSync(tmp, this.syncStatePath);
+    writeFileAtomic(this.syncStatePath, JSON.stringify(state, null, 2), { mode: 0o600 });
   }
 
   async syncOnce(): Promise<SyncResult> {
@@ -405,6 +422,9 @@ export class SyncEngine {
         }
         this.saveState(state);
       } catch (err) {
+        // A full disk fails every remaining meeting the same way (the lock
+        // mkdir alone fails), so end the cycle instead of retrying each one.
+        if (isDiskFullError(err)) throw err;
         result.errors.push({ meeting: name, error: (err as Error).message });
         this.logger(`Failed to sync meeting "${name}": ${(err as Error).message}`);
         if (!isTransientDriveError(err)) {
@@ -480,6 +500,7 @@ export class SyncEngine {
           this.logger(`Applied remote tombstone for "${meetingName}".`);
         });
       } catch (err) {
+        if (isDiskFullError(err)) throw err;
         result.errors.push({
           meeting: meetingName,
           error: `tombstone apply: ${(err as Error).message}`,
@@ -541,6 +562,7 @@ export class SyncEngine {
       result.tombstoned.push(name);
       this.logger(`Uploaded tombstone for locally-deleted "${name}".`);
     } catch (err) {
+      if (isDiskFullError(err)) throw err;
       result.errors.push({ meeting: name, error: (err as Error).message });
       if (!isTransientDriveError(err)) {
         reportError(err, {
@@ -844,6 +866,12 @@ export class SyncEngine {
         stagedDownloads.push(`${meetingName}/${remote.name}`);
         this.logger(`Downloaded ${meetingName}/${remote.name} from ${remote.id} (staged)`);
       } catch (err) {
+        if (isDiskFullError(err)) {
+          // The staging copy only duplicates what is on Drive; drop it so the
+          // failed download does not keep holding the space it took.
+          fs.rmSync(partialPath, { recursive: true, force: true });
+          throw err;
+        }
         downloadFailed = true;
         result.errors.push({
           meeting: meetingName,
@@ -999,6 +1027,7 @@ export class SyncEngine {
           );
         }
       } catch (err) {
+        if (isDiskFullError(err)) throw err;
         result.errors.push({
           meeting: meetingName,
           file: filename,
@@ -1380,7 +1409,9 @@ export class SyncEngine {
     const content = await this.driveClient.downloadFile(remoteEntry.id);
     fs.mkdirSync(folderPath, { recursive: true });
     const target = path.join(folderPath, filename);
-    fs.writeFileSync(target, content);
+    // Replace the local copy only once the new bytes are fully on disk: an
+    // in-place write that hits a full disk would leave the note truncated.
+    writeFileAtomic(target, content);
     const stat = fs.statSync(target);
     meetingState.files[filename] = {
       driveFileId: remoteEntry.id,

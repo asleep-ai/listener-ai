@@ -7,6 +7,7 @@ import {
 } from '../googleOAuth';
 import { syncChangedLocalNotes } from '../meetingList';
 import { getTranscriptionsDir } from '../outputService';
+import { isDiskFullError } from '../errorClassification';
 import { reportError } from '../sentry';
 import { GoogleDriveClient, isTransientDriveError } from '../services/googleDriveService';
 import {
@@ -58,6 +59,16 @@ let googleLastSyncResult: SyncResult | null = null;
 // 7/12" pill after a sync error and the next modal open.
 let googleSyncProgress: SyncProgressEvent | null = null;
 const GOOGLE_SYNC_INTERVAL_MS = 60_000;
+// After a sync stops on a full disk, automatic triggers wait this long before
+// trying again; every cycle would otherwise fail the same way each minute.
+// "Sync now" still runs immediately.
+const GOOGLE_SYNC_DISK_FULL_BACKOFF_MS = 15 * 60_000;
+// A full disk is the user's machine state, not an app defect: keep one
+// warning a day for visibility instead of a report per cycle.
+const DISK_FULL_REPORT_THROTTLE_MS = 24 * 60 * 60_000;
+const GOOGLE_SYNC_DISK_FULL_MESSAGE =
+  'Not enough disk space to sync with Google Drive. Free up space on this computer; sync will try again automatically.';
+let googleSyncDiskFullUntil = 0;
 // Delay before the first sync after enable/sign-in. Short enough that users
 // see activity quickly, long enough that batched config saves (multi-key
 // settings modal commits) don't trigger multiple bursts in flight.
@@ -239,11 +250,23 @@ async function runGoogleSync(): Promise<SyncResult | undefined> {
       const window = requireCtx().getMainWindow();
       if (window && !window.isDestroyed()) window.webContents.send('recordings-changed');
     }
+    googleSyncDiskFullUntil = 0;
     googleLastSyncedAt = new Date().toISOString();
     googleLastSyncResult = result;
     broadcastGoogleSyncStatus(result.errors.length > 0 ? 'error' : 'success', { result });
     return result;
   } catch (error) {
+    if (isDiskFullError(error)) {
+      console.error('Google Drive sync stopped: disk full:', error);
+      googleSyncDiskFullUntil = Date.now() + GOOGLE_SYNC_DISK_FULL_BACKOFF_MS;
+      reportError(error, {
+        operation: 'drive.sync.disk-full',
+        severity: 'warning',
+        throttleMs: DISK_FULL_REPORT_THROTTLE_MS,
+      });
+      broadcastGoogleSyncStatus('error', { error: GOOGLE_SYNC_DISK_FULL_MESSAGE });
+      return undefined;
+    }
     const message = error instanceof Error ? error.message : String(error);
     console.error('Google Drive sync failed:', error);
     // Transient Google 5xx/429 and offline drops are noise, not actionable --
@@ -299,6 +322,7 @@ export function maybeAutoSync(): void {
   const { configService } = requireCtx();
   if (!configService.getGoogleDriveEnabled()) return;
   if (!configService.hasGoogleOAuth()) return;
+  if (Date.now() < googleSyncDiskFullUntil) return;
   void runGoogleSync();
 }
 
@@ -532,7 +556,9 @@ export function register(ctx: IpcContext): void {
         success: false as const,
         error: googleSyncInFlight
           ? 'A sync is already in progress.'
-          : 'Sync failed; see main process logs.',
+          : Date.now() < googleSyncDiskFullUntil
+            ? GOOGLE_SYNC_DISK_FULL_MESSAGE
+            : 'Sync failed; see main process logs.',
       };
     }
     return { success: true as const, result, lastSyncedAt: googleLastSyncedAt };

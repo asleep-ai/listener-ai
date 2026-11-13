@@ -65,4 +65,10 @@ export interface IpcContext {
   // Local audio removal skips such files. Optional so handler tests that do
   // not exercise storage can omit it.
   isAudioInUse?(audioPath: string): boolean;
+  // Path of the recording main is currently writing, if any. Destructive
+  // handlers (delete) refuse it: the list shows the file while it is still
+  // being written, and deleting it loses the whole recording. A reachable
+  // cause of a missing-recording transcription (consistent with
+  // LISTENER-AI-Q's breadcrumbs, not proven by them).
+  getActiveRecordingPath(): string | undefined;
 }

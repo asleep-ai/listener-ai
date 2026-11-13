@@ -1219,6 +1219,7 @@ registerAllIpc({
   getSlackService,
   openExternal: (url) => void shell.openExternal(url),
   isAudioInUse,
+  getActiveRecordingPath: () => audioRecorder.getActiveRecording()?.filePath,
 });
 
 // Paths whose header remux is rewriting the file right now.

@@ -11,7 +11,7 @@ import { reportError } from '../sentry';
 import { concatAudioFiles } from '../services/audioConcatService';
 import { withAudioReadLease } from '../services/localAudioStorage';
 import { metadataService } from '../services/metadataService';
-import { type TranscriptionJobHandle, transcriptionJobs } from '../transcriptionJobs';
+import { type TranscriptionJobHandle, pathKeys, transcriptionJobs } from '../transcriptionJobs';
 import type { IpcContext } from './types';
 
 const execFileAsync = promisify(execFile);
@@ -33,6 +33,17 @@ export function register(ctx: IpcContext): void {
       const resolved = path.resolve(audioFilePath);
       if (!resolved.startsWith(recordingsDir + path.sep)) {
         return { success: false as const, error: 'Path is outside the recordings directory' };
+      }
+
+      // The recording still being written is listed like any other file, but
+      // deleting it unlinks the open file: capture continues into nothing and
+      // the stopped recording is gone, so its transcription fails with ENOENT.
+      const activePath = ctx.getActiveRecordingPath();
+      if (activePath && pathKeys(activePath).some((key) => pathKeys(resolved).includes(key))) {
+        return {
+          success: false as const,
+          error: 'This recording is still in progress. Stop recording before deleting it.',
+        };
       }
 
       // Pull metadata first so we know whether to clean up a transcription

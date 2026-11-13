@@ -10,14 +10,14 @@ packaged artifacts never share a process.
 | meeting-list    |         2 | One development process         | Saved-note fixtures, config, renderer                                                               |
 | cutoff          |         2 | One development process         | Saved-note fixtures, config, renderer                                                               |
 | reload          |        23 | One development process         | Deferred jobs and exports, reservations, locks, IPC and provider overrides, renderer                |
-| live            |         6 | One development process         | Synthetic live capture, providers, config, renderer                                                 |
+| live            |         8 | One development process         | Synthetic live capture, providers, config, renderer                                                 |
 | chatgpt         |        22 | One packaged process            | Pending sign-in/preflight, auth and agent overrides, global fetch, IPC, raw config, synthetic files |
 | chatgpt-startup |         4 | Fresh packaged process per case | Independent startup configuration                                                                   |
 | hidden-startup  |         1 | Fresh development process       | Hidden construction contract                                                                        |
 | package-smoke   |         1 | Fresh packaged process          | Packaged boot contract                                                                              |
 | settings-shots  | 1, opt-in | Fresh development process       | Independent screenshot evidence                                                                     |
 
-The normal run discovers 67 cases and expects 12 process launches, with the
+The normal run discovers 69 cases and expects 12 process launches, with the
 optional screenshot case skipped. Enabling `LISTENER_E2E_SHOTS` adds one launch.
 These are expected budgets, not execution evidence.
 

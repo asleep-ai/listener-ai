@@ -66,9 +66,8 @@ describe('meetingsManagement.register', () => {
     registerFn = null;
   });
 
-  it('registers delete-meeting, export-recording-m4a, and merge-recordings channels', () => {
-    assert.ok(registerFn, 'register should be importable');
-    registerFn!({
+  function makeCtx(activeRecordingPath?: string): IpcContext {
+    return {
       getMainWindow: () => null,
       configService: {} as IpcContext['configService'],
       notificationService: {} as IpcContext['notificationService'],
@@ -84,7 +83,13 @@ describe('meetingsManagement.register', () => {
       getNotionService: () => null,
       getSlackService: () => null,
       openExternal: () => {},
-    });
+      getActiveRecordingPath: () => activeRecordingPath,
+    };
+  }
+
+  it('registers delete-meeting, export-recording-m4a, and merge-recordings channels', () => {
+    assert.ok(registerFn, 'register should be importable');
+    registerFn!(makeCtx());
     assert.deepEqual([...handlers.keys()].sort(), [
       'delete-meeting',
       'export-recording-m4a',
@@ -117,6 +122,41 @@ describe('meetingsManagement.register', () => {
       delete dialogStub.showSaveDialog;
       userData = '/tmp/listener-ai-test';
       rmDir(dataPath);
+    }
+  });
+
+  // Deleting the row of the recording still being written loses the
+  // recording; its transcription then hits ENOENT (a reachable cause
+  // consistent with LISTENER-AI-Q's breadcrumbs).
+  it('refuses to delete the recording that is still being written', async () => {
+    userData = makeTempDir('delete-active');
+    try {
+      const recordings = path.join(userData, 'recordings');
+      fs.mkdirSync(recordings, { recursive: true });
+      const active = path.join(recordings, 'Untitled_Meeting_2026-10-29T12-32-34-850Z.webm');
+      const finished = path.join(recordings, 'Untitled_Meeting_2026-10-29T11-58-37-967Z.webm');
+      fs.writeFileSync(active, Buffer.alloc(16, 1));
+      fs.writeFileSync(finished, Buffer.alloc(16, 1));
+      registerFn!(makeCtx(active));
+      const remove = handlers.get('delete-meeting')!;
+
+      const refused = (await remove({}, active)) as { success: boolean; error?: string };
+      assert.equal(refused.success, false);
+      assert.match(refused.error ?? '', /still in progress/);
+      assert.equal(fs.existsSync(active), true);
+
+      // Another spelling of the same path is refused too.
+      const respelled = path.join(recordings, '..', 'recordings', path.basename(active));
+      assert.equal(((await remove({}, respelled)) as { success: boolean }).success, false);
+      assert.equal(fs.existsSync(active), true);
+
+      // A finished recording still deletes while another one is recording.
+      const removed = (await remove({}, finished)) as { success: boolean };
+      assert.equal(removed.success, true);
+      assert.equal(fs.existsSync(finished), false);
+    } finally {
+      rmDir(userData);
+      userData = '/tmp/listener-ai-test';
     }
   });
 });
