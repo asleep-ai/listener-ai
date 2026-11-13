@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { LiveCaptureRouter, LiveCaptureUnavailableError } from './liveCaptureRouter';
 import {
+  LiveChunkedCaptionsUnavailableError,
   LiveSessionEndedError,
   LiveSessionService,
   type LiveSessionEvent,
@@ -37,6 +38,8 @@ function setup(
     autoAck?: boolean;
     flushTimeoutMs?: number;
     available?: () => boolean;
+    /** No streaming provider connects and chunked captions have no backend. */
+    noFallback?: boolean;
   } = {},
 ) {
   const calls: HostCall[] = [];
@@ -62,9 +65,11 @@ function setup(
         ? { provider: 'openai', openaiApiKey: 'sk-test' }
         : { provider: 'gemini', geminiApiKey: 'gemini-key' },
     createLiveSttSession: async (_config, cbs) => {
+      if (opts.noFallback) throw new Error('streaming provider refused');
       callbacks = cbs;
       return stream;
     },
+    getChunkedCaptionsIssue: opts.noFallback ? () => 'No batch transcription backend.' : undefined,
     createRealtimeClientConfig: opts.realtime
       ? async () => ({ transport: 'webrtc', endpoint: 'realtime', clientSecret: 'ek_secret' })
       : undefined,
@@ -249,6 +254,38 @@ describe('LiveCaptureRouter', () => {
         { type: 'ended', sessionId, reason: 'user', error: 'No fallback.' },
       ],
     );
+  });
+
+  // OpenAI Realtime fails in the host and neither a streaming provider nor
+  // chunked captions can take over: main ends the session while failing the
+  // fallback, then the host reports live-failed for an already-inactive
+  // session. The window must still get exactly one terminal `ended`.
+  it('publishes the end of a session main already ended when its realtime fallback had nothing to use', async () => {
+    const { router, events, service } = setup({ realtime: true, noFallback: true });
+    const { sessionId } = await router.start({ title: 'Live', translate: false });
+    assert.equal(router.capturedSessionId(), sessionId);
+    await assert.rejects(
+      service.fallbackFromRealtime({ sessionId, error: 'WebRTC failed' }),
+      LiveChunkedCaptionsUnavailableError,
+    );
+    assert.equal(service.isActive(), false);
+    const error =
+      'Live captions cannot continue with chunked transcription: No batch transcription backend.';
+    router.hostEvent({ type: 'live-failed', liveSessionId: sessionId, error });
+    assert.deepEqual(
+      events.filter((event) => event.type === 'error' || event.type === 'ended').slice(-2),
+      [
+        { type: 'error', sessionId, error },
+        { type: 'ended', sessionId, reason: 'user', error },
+      ],
+    );
+    assert.equal(router.capturedSessionId(), null, 'the host no longer captures it');
+    // A duplicate report, a stale one, and the window's own Stop afterwards
+    // publish nothing more.
+    router.hostEvent({ type: 'live-failed', liveSessionId: sessionId, error });
+    router.hostEvent({ type: 'live-failed', liveSessionId: 'live_stale', error });
+    await router.stop(sessionId);
+    assert.equal(ended(events).length, 1);
   });
 
   it('forwards host transport errors and translation changes for the current session only', async () => {

@@ -58,7 +58,12 @@ describe('note export and transcript cutoff coordination', () => {
 
   let notionCalls: Array<{ title: string; data: any }>;
   // The configured Notion destination; part of an upload's join identity.
-  const notionDestination = { key: 'secret_a', db: 'db-a' };
+  // Sentinels that cannot occur in a UUID, path or timestamp of a snapshot
+  // (underscores and non-hex letters), so finding one proves a leak.
+  const NOTION_KEY = 'secret_NOTION_KEY_SENTINEL';
+  const NOTION_DB = 'NOTION_DB_SENTINEL_one';
+  const SLACK_WEBHOOK = 'https://hooks.slack.com/services/T/B/SLACK_WEBHOOK_SENTINEL';
+  const notionDestination = { key: NOTION_KEY, db: NOTION_DB };
   let notionGate: Gate | null;
   let slackCalls: Array<{ title: string; result: any }>;
   let slackGate: Gate | null;
@@ -91,7 +96,7 @@ describe('note export and transcript cutoff coordination', () => {
         getSummaryPrompt: () => 'PROMPT',
         getNotionApiKey: () => notionDestination.key,
         getNotionDatabaseId: () => notionDestination.db,
-        getSlackWebhookUrl: () => 'https://hooks.slack.com/services/T/B/x',
+        getSlackWebhookUrl: () => SLACK_WEBHOOK,
       },
       notificationService: { notifyUploadComplete: () => {}, notifyUploadFailed: () => {} },
       getNotionService: () => ({
@@ -444,7 +449,7 @@ describe('note export and transcript cutoff coordination', () => {
     );
     assert.doesNotMatch(
       JSON.stringify(backgroundOperations.snapshot()),
-      /secret_a|db-a|hooks\.slack/,
+      /NOTION_KEY_SENTINEL|NOTION_DB_SENTINEL|SLACK_WEBHOOK_SENTINEL|hooks\.slack/,
     );
     const second = invoke('upload-to-notion', request);
     await settle();
@@ -465,7 +470,7 @@ describe('note export and transcript cutoff coordination', () => {
     };
     const first = invoke('upload-to-notion', request);
     await waitFor(() => notionCalls.length === 1, 'the Notion request');
-    notionDestination.db = 'db-b';
+    notionDestination.db = 'NOTION_DB_SENTINEL_two';
     try {
       const second = invoke('upload-to-notion', request);
       notionGate.open();
@@ -473,7 +478,7 @@ describe('note export and transcript cutoff coordination', () => {
       await second;
       assert.equal(notionCalls.length, 2);
     } finally {
-      notionDestination.db = 'db-a';
+      notionDestination.db = NOTION_DB;
     }
   });
 

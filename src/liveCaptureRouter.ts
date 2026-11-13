@@ -67,6 +67,8 @@ export class LiveCaptureRouter {
   private readonly stops = new Map<string, Promise<LiveSessionSnapshot | null>>();
   /** Capture failures reported by the host, carried on the `ended` event. */
   private readonly failures = new Map<string, string>();
+  /** Sessions whose terminal `ended` was published: each gets exactly one. */
+  private readonly ended = new Set<string>();
 
   constructor(deps: LiveCaptureRouterDeps) {
     this.deps = deps;
@@ -163,14 +165,7 @@ export class LiveCaptureRouter {
     const snapshot = await this.deps.service.stop(sessionId, reason);
     const error = this.failures.get(sessionId);
     this.failures.delete(sessionId);
-    if (snapshot) {
-      this.deps.emit({
-        type: 'ended',
-        sessionId,
-        reason: snapshot.endedReason ?? reason,
-        ...(error ? { error } : {}),
-      });
-    }
+    if (snapshot) this.emitEnded(sessionId, snapshot.endedReason ?? reason, error);
     return snapshot;
   }
 
@@ -226,11 +221,29 @@ export class LiveCaptureRouter {
         return;
       case 'live-failed': {
         const current = this.deps.service.snapshot();
-        if (current?.sessionId !== id || !current.active) return;
+        // A stale session, or one whose end was already published.
+        if (current?.sessionId !== id || this.ended.has(id)) return;
         const error = typeof event.error === 'string' ? event.error : 'Live captions failed.';
-        this.failures.set(id, error);
+        // The host stopped capturing this session.
+        if (this.hostSessionId === id) this.hostSessionId = null;
+        if (current.active) {
+          this.failures.set(id, error);
+          this.deps.emit({ type: 'error', sessionId: id, error });
+          void this.stop(id, 'user').catch((err) =>
+            this.deps.reportError?.(err, 'live.failed-stop'),
+          );
+          return;
+        }
+        // Main already ended the session while failing it (OpenAI Realtime
+        // failed and no streaming or chunked fallback is usable): nothing is
+        // left to stop, but the window must still learn it ended. A stop in
+        // flight publishes its own `ended` and carries the failure.
+        if (this.stops.has(id)) {
+          this.failures.set(id, error);
+          return;
+        }
         this.deps.emit({ type: 'error', sessionId: id, error });
-        void this.stop(id, 'user').catch((err) => this.deps.reportError?.(err, 'live.failed-stop'));
+        this.emitEnded(id, current.endedReason ?? 'user', error);
         return;
       }
       default:
@@ -251,12 +264,14 @@ export class LiveCaptureRouter {
     const snapshot = await this.deps.service.stopActive('renderer-lost');
     // A router stop in flight joins the same close and emits `ended` itself.
     if (snapshot && !joined) {
-      this.deps.emit({
-        type: 'ended',
-        sessionId: snapshot.sessionId,
-        reason: snapshot.endedReason ?? 'renderer-lost',
-      });
+      this.emitEnded(snapshot.sessionId, snapshot.endedReason ?? 'renderer-lost');
     }
     await joined?.catch(() => {});
+  }
+
+  private emitEnded(sessionId: string, reason: LiveSessionEndReason, error?: string): void {
+    if (this.ended.has(sessionId)) return;
+    this.ended.add(sessionId);
+    this.deps.emit({ type: 'ended', sessionId, reason, ...(error ? { error } : {}) });
   }
 }
