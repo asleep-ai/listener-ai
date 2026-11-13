@@ -266,6 +266,9 @@ async function runTranscription(
   const signal = handle.signal;
   let renamedAudioPath: string | undefined;
   let noteCommitted = false;
+  // The file this job reads and links: the requested path, or the verified
+  // copy a Drive restore put elsewhere (`filePath` stays the job's identity).
+  let audioPath = filePath;
 
   const sendProgress = (percent: number, message: string) => {
     handle.progress(percent, message);
@@ -283,14 +286,17 @@ async function runTranscription(
   try {
     console.log('Transcription requested for:', filePath);
     let existing: Awaited<ReturnType<typeof metadataService.getMetadata>> = null;
+    // The audio path whose sidecar `existing` was read from.
+    let existingPath = filePath;
     try {
       existing = await metadataService.getMetadata(filePath);
     } catch (err) {
       console.warn('Failed to read recording metadata:', err);
     }
-    const previousNoteWasPresent =
+    const linkedNotePresent = () =>
       !!existing?.transcriptionPath &&
       fs.existsSync(path.join(existing.transcriptionPath, META_JSON));
+    let previousNoteWasPresent = linkedNotePresent();
     let liveNotes = ctx.sanitizeLiveNotes(liveNotesRaw);
     if (!liveNotes || liveNotes.length === 0) {
       // Fall back to whatever stop-recording persisted -- covers the
@@ -325,6 +331,25 @@ async function runTranscription(
       if (!restored.success && !notCloudAudio(restored.code)) {
         return { success: false, error: `Couldn't download audio: ${restored.error}` };
       }
+      // The restore verifies the bytes it returns, and may return a different
+      // file: a copy restored earlier, or a numbered name when the preferred
+      // one holds other audio. Only that file is this note's audio; whatever
+      // now sits at `filePath` is not read or linked.
+      if (restored.success && path.resolve(restored.path) !== path.resolve(filePath)) {
+        if (!handle.addPath(restored.path)) {
+          return { success: false, error: 'This recording is already being transcribed.' };
+        }
+        audioPath = restored.path;
+        if (!existing) {
+          try {
+            existing = await metadataService.getMetadata(audioPath);
+            existingPath = audioPath;
+            previousNoteWasPresent = linkedNotePresent();
+          } catch (err) {
+            console.warn('Failed to read recording metadata:', err);
+          }
+        }
+      }
     }
 
     sendProgress(10, 'Starting transcription...');
@@ -333,13 +358,13 @@ async function runTranscription(
 
     const summaryPrompt = ctx.configService.getSummaryPrompt();
     // The read lease keeps "free up space" from removing the audio mid-read.
-    const result = await withAudioReadLease(app.getPath('userData'), filePath, () =>
-      geminiService.transcribeAudio(filePath, sendProgress, summaryPrompt, liveNotes, { signal }),
+    const result = await withAudioReadLease(app.getPath('userData'), audioPath, () =>
+      geminiService.transcribeAudio(audioPath, sendProgress, summaryPrompt, liveNotes, { signal }),
     );
     // A cancel that lands after the provider already returned must not save.
     signal.throwIfAborted();
     console.log('Transcription completed successfully');
-    console.log('Saving metadata for:', filePath);
+    console.log('Saving metadata for:', audioPath);
 
     // Attach renderer-captured notes so downstream consumers (Notion upload,
     // re-render in the modal) can read them off the result object.
@@ -352,26 +377,26 @@ async function runTranscription(
     // already has a linked note: keep its audio path stable until the note
     // replacement succeeds, including when saving fails (#213).
     const renameTitle =
-      !existing?.transcriptionPath && path.basename(filePath).includes('Untitled_Meeting')
+      !existing?.transcriptionPath && path.basename(audioPath).includes('Untitled_Meeting')
         ? result.suggestedTitle
         : undefined;
-    let audioFilePath = filePath;
+    let audioFilePath = audioPath;
     if (renameTitle) {
-      audioFilePath = await renameAudioFile(filePath, renameTitle, handle);
-      if (audioFilePath !== filePath) {
+      audioFilePath = await renameAudioFile(audioPath, renameTitle, handle);
+      if (audioFilePath !== audioPath) {
         renamedAudioPath = audioFilePath;
         // Carry the stop-recording sidecar (live notes) over to the renamed
         // audio. Delete the old one only after the copy lands.
         try {
-          const existingMetadata = await metadataService.getMetadata(filePath);
+          const existingMetadata = await metadataService.getMetadata(audioPath);
           if (existingMetadata) {
             await metadataService.saveMetadata(audioFilePath, {
               ...existingMetadata,
-              liveHints: recordingHintsBelongToAudio(filePath, existingMetadata)
+              liveHints: recordingHintsBelongToAudio(audioPath, existingMetadata)
                 ? existingMetadata.liveHints
                 : undefined,
             });
-            await metadataService.deleteMetadata(filePath);
+            await metadataService.deleteMetadata(audioPath);
           }
         } catch (error) {
           console.error('Failed to move metadata to renamed audio:', error);
@@ -410,7 +435,7 @@ async function runTranscription(
           audioFilePath,
           dataPath: app.getPath('userData'),
           liveNotes,
-          liveHints: recordingHintsBelongToAudio(filePath, existing)
+          liveHints: recordingHintsBelongToAudio(existingPath, existing)
             ? parseRecordingLiveHints(existing?.liveHints)
             : undefined,
           previousFolderPath: existing?.transcriptionPath,
@@ -549,11 +574,11 @@ async function runTranscription(
           // name meanwhile: when that fails, the audio and its sidecar both
           // stay under the renamed path and the caller gets `newFilePath`.
           const restoredFrom = renamedAudioPath;
-          await moveWithoutOverwrite(restoredFrom, filePath);
+          await moveWithoutOverwrite(restoredFrom, audioPath);
           renamedAudioPath = undefined;
           const movedMetadata = await metadataService.getMetadata(restoredFrom);
           if (movedMetadata) {
-            await metadataService.saveMetadata(filePath, {
+            await metadataService.saveMetadata(audioPath, {
               ...movedMetadata,
               liveHints: recordingHintsBelongToAudio(restoredFrom, movedMetadata)
                 ? movedMetadata.liveHints

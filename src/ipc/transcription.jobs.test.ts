@@ -5,6 +5,14 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import * as path from 'path';
 import type { TranscriptionResult } from '../geminiService';
 import { META_JSON, getTranscriptionsDir, readTranscription } from '../outputService';
+import { FakeDrive } from '../services/fakeDriveForTests';
+import {
+  liveReadLeases,
+  meetingsForAudio,
+  reclaimLocalAudio,
+  restoreLocalAudio,
+} from '../services/localAudioStorage';
+import { SyncEngine } from '../services/syncEngine';
 import { makeTempDir, rmDir } from '../test-helpers';
 import type { TranscriptionJobSnapshot, TranscriptionJobsList } from '../transcriptionJobs';
 import type { IpcContext } from './types';
@@ -95,6 +103,8 @@ describe('transcription jobs (reload-safe ownership)', () => {
   let restoreGate: Deferred<void> | null;
   let restoreFails: boolean;
   let cloudCopies: Set<string>;
+  // When set, restores go through this instead of the scripted fake.
+  let restoreImpl: ((audioPath: string) => Promise<unknown>) | null;
 
   beforeEach(() => {
     dataPath = makeTempDir('ipc-transcription-jobs');
@@ -107,6 +117,7 @@ describe('transcription jobs (reload-safe ownership)', () => {
     restoreGate = null;
     restoreFails = false;
     cloudCopies = new Set();
+    restoreImpl = null;
     notionCalls = [];
     notionGate = null;
     notionResult = null;
@@ -202,6 +213,7 @@ describe('transcription jobs (reload-safe ownership)', () => {
       maybeAutoSync: () => {},
       restoreCloudAudio: async (audioPath: string) => {
         restoreCalls.push(audioPath);
+        if (restoreImpl) return restoreImpl(audioPath);
         await restoreGate?.promise;
         if (restoreFails)
           return { success: false, error: 'No Drive copy', code: 'drive-unavailable' };
@@ -984,6 +996,125 @@ describe('transcription jobs (reload-safe ownership)', () => {
     assert.equal(a.success, true);
     assert.equal(b.joined, true);
     assert.equal(noteFolders().length, 1);
+  });
+
+  // The real restore (FakeDrive, verified md5) with its download held, so a
+  // test can put other audio at the note's path meanwhile. Restores the way
+  // main's restoreRecordingAudio does: the note linking the path, then that
+  // note's audio.
+  async function heldRealRestore() {
+    const drive = new FakeDrive();
+    const sync = await new SyncEngine({
+      driveClient: drive.asClient(),
+      transcriptionsDir: getTranscriptionsDir(dataPath),
+      syncStatePath: path.join(dataPath, 'sync-state.json'),
+      recordingsDir,
+    }).syncOnce();
+    assert.deepEqual(sync.errors, []);
+    const downloading = deferred();
+    const release = deferred();
+    const download = drive.downloadFile.bind(drive);
+    drive.downloadFile = async (...args: Parameters<FakeDrive['downloadFile']>) => {
+      downloading.resolve();
+      await release.promise;
+      return download(...args);
+    };
+    restoreImpl = async (audioPath: string) => {
+      const restored = await restoreLocalAudio({
+        dataPath,
+        driveClient: drive.asClient(),
+        meetingFolder: meetingsForAudio(dataPath, audioPath)[0],
+      });
+      return { success: true, path: restored.path };
+    };
+    const freeLocally = async (audioPath: string) => {
+      const out = await reclaimLocalAudio({
+        dataPath,
+        driveClient: drive.asClient(),
+        paths: [audioPath],
+      });
+      assert.equal(out.removed.length, 1, 'the audio is kept only in Drive');
+    };
+    return { downloading, release, freeLocally };
+  }
+
+  // Other audio took the note's file name while its download ran, so the
+  // restore claimed a numbered name. The job reads that verified file and
+  // replaces the linked note; the other file and nothing else is touched.
+  it('regenerates from the file the restore returns when other audio takes the note path meanwhile', async () => {
+    const audio = recording('Standup');
+    const first = invoke('transcribe-audio', audio);
+    await waitFor(() => calls.length === 1, 'first provider call');
+    calls[0].resolve(resultFor('First'));
+    const one = await first;
+    assert.equal(one.success, true);
+    const noteAudio = fs.readFileSync(audio);
+
+    const held = await heldRealRestore();
+    await held.freeLocally(audio);
+    const regenerate = invoke('transcribe-audio', audio);
+    await held.downloading.promise;
+    fs.writeFileSync(audio, 'unrelated audio');
+    held.release.resolve();
+    await waitFor(() => calls.length === 2, 'regenerate provider call');
+
+    const numbered = path.join(recordingsDir, `Standup_${TS} (2).webm`);
+    assert.equal(calls[1].filePath, numbered, 'the provider reads the restored file');
+    assert.deepEqual(fs.readFileSync(numbered), noteAudio);
+    assert.equal(liveReadLeases(dataPath, numbered), 1, 'the restored file is leased');
+    const running = (await jobs()).jobs.find((j) => j.status === 'running');
+    assert.ok(running?.paths.includes(numbered), 'the restored file belongs to the job');
+
+    calls[1].resolve(resultFor('Second'));
+    const two = await regenerate;
+    assert.equal(two.success, true);
+    assert.equal(two.transcriptionPath, one.transcriptionPath, 'the linked note is replaced');
+    assert.equal(noteFolders().length, 1);
+    const note = await readTranscription(two.transcriptionPath);
+    assert.equal(note?.summary, 'Second summary.');
+    const meta = JSON.parse(fs.readFileSync(path.join(two.transcriptionPath, META_JSON), 'utf-8'));
+    assert.equal(meta.audioFile, audio, 'the note keeps its source-audio identity');
+    const sidecar = JSON.parse(
+      fs.readFileSync(path.join(dataPath, 'metadata', `Standup_${TS} (2).json`), 'utf-8'),
+    );
+    assert.equal(sidecar.transcriptionPath, two.transcriptionPath);
+    assert.equal(fs.readFileSync(audio, 'utf-8'), 'unrelated audio', 'the other file is untouched');
+    assert.equal(liveReadLeases(dataPath, numbered), 0);
+  });
+
+  it('merges the file the restore returns when other audio takes the source path meanwhile', async () => {
+    const cloud = recording('Cloud');
+    const transcribed = invoke('transcribe-audio', cloud);
+    await waitFor(() => calls.length === 1, 'source provider call');
+    calls[0].resolve(resultFor('Source'));
+    const source = await transcribed;
+    const local = recording('Local');
+
+    const held = await heldRealRestore();
+    await held.freeLocally(cloud);
+    const concat = require('../services/audioConcatService') as {
+      concatAudioFiles: (o: { inputPaths: string[]; outputPath: string }) => Promise<void>;
+    };
+    let inputs: string[] = [];
+    concat.concatAudioFiles = async ({ inputPaths, outputPath }) => {
+      inputs = inputPaths;
+      fs.writeFileSync(outputPath, 'merged');
+    };
+    const merge = invoke('merge-recordings', { paths: [local, cloud], title: 'M' });
+    await held.downloading.promise;
+    fs.writeFileSync(cloud, 'unrelated audio');
+    held.release.resolve();
+    await waitFor(() => calls.length === 2, 'merge provider call');
+    const numbered = path.join(recordingsDir, `Cloud_${TS} (2).webm`);
+    assert.deepEqual(inputs, [fs.realpathSync(local), fs.realpathSync(numbered)]);
+    calls[1].resolve(resultFor('Merged'));
+    const result = await merge;
+    assert.equal(result.success, true);
+    const meta = JSON.parse(
+      fs.readFileSync(path.join(result.transcriptionPath, META_JSON), 'utf-8'),
+    );
+    assert.ok(meta.merge.sourceIds.includes(path.basename(source.transcriptionPath)));
+    assert.equal(fs.readFileSync(cloud, 'utf-8'), 'unrelated audio');
   });
 
   it('fails the job with the download error when cloud-only audio cannot be restored', async () => {

@@ -143,6 +143,8 @@ export function register(ctx: IpcContext): void {
           return { canceled: true };
         }
         const destPath = saveResult.filePath;
+        // The file the encode reads, as the lease names it (lexical path).
+        let sourcePath = path.resolve(srcPath);
         if (cloudOnly) {
           const restored = await ctx.restoreCloudAudio!(srcPath);
           if (!restored.success && notCloudAudio(restored.code)) {
@@ -151,7 +153,10 @@ export function register(ctx: IpcContext): void {
           if (!restored.success) {
             return { success: false, error: `Couldn't download audio: ${restored.error}` };
           }
-          resolvedSrc = await fs.promises.realpath(srcPath);
+          // The restored file, which may not be `srcPath` (an earlier restored
+          // copy, or a numbered name when `srcPath` holds other audio).
+          if (restored.success) sourcePath = path.resolve(restored.path);
+          resolvedSrc = await fs.promises.realpath(sourcePath);
           if (!resolvedSrc.startsWith(resolvedRoot + path.sep)) {
             return { success: false, error: 'Source path is outside the recordings directory' };
           }
@@ -162,24 +167,27 @@ export function register(ctx: IpcContext): void {
 
         try {
           // Force -f ipod (M4A muxer) because the `.partial` extension defeats
-          // ffmpeg's format-by-extension detection otherwise.
-          await execFileAsync(ffmpegPath, [
-            '-y',
-            '-loglevel',
-            'error',
-            '-i',
-            resolvedSrc,
-            '-vn',
-            '-c:a',
-            'aac',
-            '-b:a',
-            '128k',
-            '-movflags',
-            '+faststart',
-            '-f',
-            'ipod',
-            tmpPath,
-          ]);
+          // ffmpeg's format-by-extension detection otherwise. The file read
+          // holds its own lease too: a restore can return another path.
+          await withAudioReadLease(app.getPath('userData'), sourcePath, () =>
+            execFileAsync(ffmpegPath, [
+              '-y',
+              '-loglevel',
+              'error',
+              '-i',
+              resolvedSrc,
+              '-vn',
+              '-c:a',
+              'aac',
+              '-b:a',
+              '128k',
+              '-movflags',
+              '+faststart',
+              '-f',
+              'ipod',
+              tmpPath,
+            ]),
+          );
           await fs.promises.rename(tmpPath, destPath);
         } catch (encodeError) {
           await fs.promises.unlink(tmpPath).catch(() => {});
@@ -260,22 +268,31 @@ async function runMerge(
     await fs.promises.mkdir(recordingsDir, { recursive: true });
     const resolvedRoot = await fs.promises.realpath(recordingsDir);
     const resolvedInputs: string[] = [];
+    // Read leases name each verified input by its lexical path: a lease on a
+    // realpath outside the data path as configured (a symlinked data
+    // directory) is skipped, leaving the input unguarded.
+    const leasePaths: string[] = [];
     for (const p of inputPaths) {
       if (typeof p !== 'string' || !p) {
         return { success: false, error: 'Invalid input path' };
       }
       // A source kept only in Google Drive is downloaded first, inside this
       // job, so the merge does not depend on the window that requested it.
+      // The restore may return another verified file than `p` (an earlier
+      // restored copy, or a numbered name when `p` holds other audio); that
+      // file is the source, never whatever now sits at `p`.
+      let source = p;
       if (!fs.existsSync(p) && ctx.restoreCloudAudio && (await realDir(p)) === resolvedRoot) {
         sendProgress(0, 'Downloading audio from Google Drive...');
         const restored = await ctx.restoreCloudAudio(p);
         if (!restored.success && !notCloudAudio(restored.code)) {
           return { success: false, error: `Couldn't download audio: ${restored.error}` };
         }
+        if (restored.success) source = restored.path;
       }
       let resolved: string;
       try {
-        resolved = await fs.promises.realpath(p);
+        resolved = await fs.promises.realpath(source);
       } catch {
         return { success: false, error: `Recording not found: ${path.basename(p)}` };
       }
@@ -283,6 +300,7 @@ async function runMerge(
         return { success: false, error: 'Source path is outside the recordings directory' };
       }
       resolvedInputs.push(resolved);
+      leasePaths.push(path.resolve(source));
     }
 
     const geminiService = ctx.ensureGeminiService();
@@ -320,7 +338,7 @@ async function runMerge(
     // also drop entries whose transcription folder no longer exists on disk
     // so the merged note's Sources section never references stale ghosts.
     const dataPath = app.getPath('userData');
-    const leasedConcat = resolvedInputs.reduceRight<() => Promise<unknown>>(
+    const leasedConcat = leasePaths.reduceRight<() => Promise<unknown>>(
       (inner, input) => () => withAudioReadLease(dataPath, input, inner),
       () =>
         concatAudioFiles({ ffmpegPath, inputPaths: resolvedInputs, outputPath: mergedAudioPath }),
