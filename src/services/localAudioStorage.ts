@@ -393,7 +393,19 @@ function collectAudioItems(dataPath: string, state: SyncState | null): Collected
   for (const link of scanNoteAudioLinks(dataPath)) {
     const name = path.basename(link.audioFile);
     const drive = driveEntryFor(state, link.meeting, name);
-    if (isManagedAudioPathLexical(recordingsDir, link.audioFile)) {
+    // A copy restored for this note under another path (a note from another
+    // device, or a collision-safe numbered name because the note's own path
+    // holds unrelated audio here) is the note's audio on this device. Resolve
+    // it before grouping by meta.audioFile, or the restored copy would look
+    // unlinked and the unrelated file would be attributed to the note.
+    const restoredElsewhere = records.find(
+      (r) =>
+        !r.removedAt &&
+        r.meetings?.includes(link.meeting) &&
+        path.resolve(r.path) !== path.resolve(link.audioFile) &&
+        fs.existsSync(r.path),
+    );
+    if (!restoredElsewhere && isManagedAudioPathLexical(recordingsDir, link.audioFile)) {
       const key = path.resolve(link.audioFile);
       const stat = statManagedAudio(recordingsDir, key);
       const group = groups.get(key) ?? { stat, refs: [], copies: [] };
@@ -419,9 +431,11 @@ function collectAudioItems(dataPath: string, state: SyncState | null): Collected
     }
     // Not an app recording here: either another device's path (restorable
     // from Drive) or an original the CLI transcribed in place.
-    const restored = records.find(
-      (r) => !r.removedAt && r.meetings?.includes(link.meeting) && fs.existsSync(r.path),
-    );
+    const restored =
+      restoredElsewhere ??
+      records.find(
+        (r) => !r.removedAt && r.meetings?.includes(link.meeting) && fs.existsSync(r.path),
+      );
     if (restored) {
       const stat = statManagedAudio(recordingsDir, restored.path);
       if (stat) {
@@ -818,6 +832,34 @@ export function resolveNoteAudioPath(
   if (restored) return restored;
   if (metaAudioFile && fs.existsSync(metaAudioFile)) return metaAudioFile;
   return null;
+}
+
+/**
+ * True when `audioPath` is a copy this device restored for `meeting` and its
+ * bytes are still exactly the ones verified against that meeting's Drive copy
+ * at restore time. Regenerate uses it to replace the linked note even though
+ * meta.audioFile names another path (the originating device's, or the path an
+ * unrelated local file occupies). Anything else -- another recording, or the
+ * restored copy after it changed -- is not this note's audio.
+ */
+export function isVerifiedRestoredCopy(
+  dataPath: string,
+  audioPath: string,
+  meeting: string,
+): boolean {
+  const record = readLocalAudioRecord(dataPath, audioPath);
+  if (!record || record.removedAt || !record.md5Checksum) return false;
+  if (!record.meetings?.includes(meeting)) return false;
+  if (record.copies && !record.copies[meeting]) return false;
+  try {
+    const st = fs.statSync(audioPath);
+    if (!st.isFile() || (record.size !== undefined && st.size !== record.size)) return false;
+    return (
+      createHash('md5').update(fs.readFileSync(audioPath)).digest('hex') === record.md5Checksum
+    );
+  } catch {
+    return false;
+  }
 }
 
 function restoredCopyFor(dataPath: string, meeting: string): string | null {

@@ -15,6 +15,7 @@ import {
   migrateV1ToV2,
   saveTranscription,
 } from '../outputService';
+import { saveRegeneratedTranscription } from '../regenerateTranscription';
 import { makeTempDir, rmDir } from '../test-helpers';
 import { FakeDrive } from './fakeDriveForTests';
 import { GoogleSessionTracker } from './googleSession';
@@ -624,6 +625,149 @@ describe('local audio storage backed by Google Drive', () => {
       assert.deepEqual(fs.readFileSync(localPath), unrelated, 'unrelated file untouched');
       assert.equal(resolveNoteAudioPath(dataPath, meeting, localPath), restored.path);
       assert.equal(await resolveVerifiedNoteAudioPath(dataPath, meeting, localPath), restored.path);
+    });
+
+    it('a collision-safe restored copy stays linked: reported, reclaimable, and the next sync keeps both sides', async () => {
+      const name = 'Numbered_2026-05-03T00-00-00-000Z.webm';
+      const localPath = path.join(recordingsDir, name);
+      fs.writeFileSync(localPath, Buffer.from('remote meeting audio'.repeat(30)));
+      const otherData = makeTempDir('device-a-numbered');
+      try {
+        saveTranscription({
+          title: 'Remote',
+          result,
+          audioFilePath: localPath,
+          dataPath: otherData,
+        });
+        await new SyncEngine({
+          driveClient: drive.asClient(),
+          transcriptionsDir: path.join(otherData, 'transcriptions'),
+          syncStatePath: path.join(otherData, 'sync-state.json'),
+          recordingsDir,
+        }).syncOnce();
+      } finally {
+        rmDir(otherData);
+      }
+      const remoteBytes = fs.readFileSync(localPath);
+      fs.writeFileSync(localPath, Buffer.from('unrelated local audio'.repeat(30)));
+      const unrelated = fs.readFileSync(localPath);
+      await engine().syncOnce();
+      const meeting = fs
+        .readdirSync(path.join(dataPath, 'transcriptions'))
+        .find((n) => !n.startsWith('.'))!;
+      const restored = await restoreLocalAudio({
+        dataPath,
+        driveClient: drive.asClient(),
+        meetingFolder: meeting,
+      });
+      assert.equal(path.basename(restored.path), 'Numbered_2026-05-03T00-00-00-000Z (2).webm');
+
+      // The restored copy belongs to the note; the unrelated file at the
+      // note's original path belongs to no note.
+      const report = buildLocalStorageReport(dataPath);
+      const item = report.items.find((i) => i.path === restored.path);
+      assert.equal(item?.status, 'uploaded');
+      assert.deepEqual(item?.meetings, [meeting]);
+      assert.equal(report.unlinkedFiles, 1, 'the unrelated file is the unlinked one');
+      assert.equal(report.eligibleBytes, remoteBytes.length);
+
+      const out = await reclaim({ paths: [restored.path] });
+      assert.deepEqual(out.skipped, []);
+      assert.equal(out.removed.length, 1);
+      assert.equal(fs.existsSync(restored.path), false);
+      assert.deepEqual(fs.readFileSync(localPath), unrelated, 'unrelated bytes kept');
+
+      const uploads = drive.uploads.length;
+      const res = await engine().syncOnce();
+      assert.deepEqual(res.errors, []);
+      assert.equal(drive.uploads.length, uploads, 'nothing uploaded');
+      assert.deepEqual(drive.trashCalls, []);
+      const copies = drive.byName(name);
+      assert.equal(copies.length, 1);
+      assert.deepEqual(copies[0].content, remoteBytes, 'Drive backup unchanged');
+      // The unrelated file is still never treated as removable.
+      assert.equal((await reclaim({ paths: [localPath] })).removed.length, 0);
+    });
+
+    it('regenerating from a restored copy updates the original note, not a new one', async () => {
+      const name = 'Regen_2026-05-04T00-00-00-000Z.webm';
+      await remoteNote('Regen', name, 'regen', new Date('2026-05-04T00:00:00Z'));
+      await engine().syncOnce();
+      const meeting = fs
+        .readdirSync(path.join(dataPath, 'transcriptions'))
+        .find((n) => !n.startsWith('.'))!;
+      const folder = path.join(dataPath, 'transcriptions', meeting);
+      const originalAudio = JSON.parse(fs.readFileSync(path.join(folder, 'meta.json'), 'utf-8'))
+        .audioFile as string;
+      // A merged note references this one by folder name.
+      const merged = saveTranscription({
+        title: 'Merged',
+        result,
+        dataPath,
+        mergedFrom: [meeting],
+        now: new Date('2026-05-05T00:00:00Z'),
+      });
+      const restored = await restoreLocalAudio({
+        dataPath,
+        driveClient: drive.asClient(),
+        meetingFolder: meeting,
+      });
+      assert.notEqual(restored.path, originalAudio);
+
+      const saved = saveRegeneratedTranscription({
+        title: 'Regen v2',
+        result: { ...result, summary: 'Regenerated summary.' },
+        audioFilePath: restored.path,
+        dataPath,
+        previousFolderPath: folder,
+      });
+      assert.equal(saved, folder, 'the linked note was replaced in place');
+      assert.equal(
+        fs.readFileSync(path.join(folder, 'summary.md'), 'utf-8').trim(),
+        'Regenerated summary.',
+      );
+      const meta = JSON.parse(fs.readFileSync(path.join(folder, 'meta.json'), 'utf-8'));
+      assert.equal(meta.audioFile, originalAudio, 'source-audio identity kept for sync');
+      const notes = fs
+        .readdirSync(path.join(dataPath, 'transcriptions'))
+        .filter((n) => !n.startsWith('.'));
+      assert.equal(notes.length, 2, 'no duplicate note');
+      assert.deepEqual(
+        JSON.parse(fs.readFileSync(path.join(merged, 'meta.json'), 'utf-8')).merge?.sourceIds,
+        [meeting],
+      );
+
+      // The next sync uploads nothing new (no audio under the local name).
+      const uploadsBefore = drive.uploads.filter((u) => u.name.endsWith('.webm')).length;
+      await engine().syncOnce();
+      assert.equal(drive.uploads.filter((u) => u.name.endsWith('.webm')).length, uploadsBefore);
+      assert.equal(drive.byName(name).length, 1, 'still one Drive copy of the audio');
+
+      // Unrelated audio, or the restored copy after its bytes changed, never
+      // replaces the note.
+      const other = path.join(recordingsDir, 'Other_2026-05-06T00-00-00-000Z.webm');
+      fs.writeFileSync(other, 'other recording');
+      const fromOther = saveRegeneratedTranscription({
+        title: 'Other',
+        result,
+        audioFilePath: other,
+        dataPath,
+        previousFolderPath: folder,
+      });
+      assert.notEqual(fromOther, folder);
+      fs.appendFileSync(restored.path, 'edited');
+      const fromEdited = saveRegeneratedTranscription({
+        title: 'Edited',
+        result,
+        audioFilePath: restored.path,
+        dataPath,
+        previousFolderPath: folder,
+      });
+      assert.notEqual(fromEdited, folder);
+      assert.equal(
+        fs.readFileSync(path.join(folder, 'summary.md'), 'utf-8').trim(),
+        'Regenerated summary.',
+      );
     });
 
     it("a matching file at the note's own path is adopted without downloading", async () => {
