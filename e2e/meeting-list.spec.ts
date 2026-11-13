@@ -509,9 +509,21 @@ test('signed in with a fake Drive: free locally, merge downloads first, free all
     expect(fs.existsSync(bravo.audio)).toBe(false);
     await page.locator('#cancelConfig').click();
 
-    // Download again from the row menu; the bytes match.
-    await bravoRow.locator('.more-actions-btn').click();
-    await bravoRow.locator('.download-audio-btn').click();
+    // Download again from the row menu; the bytes match. Freeing broadcasts
+    // `recordings-changed`, and the recordings watcher sends another after the
+    // unlinks (debounced, and later on macOS), each rebuilding every row: a
+    // menu opened on a row that is then replaced closes with it. So the row
+    // must show the freed state first, and the gesture (open the menu if its
+    // trigger says closed, then choose Download audio) is repeated on the
+    // current row until a click lands, within the click's usual 30s.
+    await expect(bravoRow).toContainText('In Google Drive');
+    await expect(async () => {
+      const trigger = bravoRow.locator('.more-actions-btn');
+      if ((await trigger.getAttribute('aria-expanded')) !== 'true') {
+        await trigger.click({ timeout: 2_000 });
+      }
+      await bravoRow.locator('.download-audio-btn').click({ timeout: 2_000 });
+    }).toPass({ timeout: 30_000 });
     await expect.poll(() => fs.existsSync(bravo.audio)).toBe(true);
     expect(fs.readFileSync(bravo.audio)).toEqual(bravo.bytes);
     await expect(bravoRow).not.toContainText('In Google Drive');
