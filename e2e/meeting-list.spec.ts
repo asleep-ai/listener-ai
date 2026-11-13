@@ -1,7 +1,7 @@
 import type {} from '../renderer/electronAPI';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, readFileSync, writeFileSync, symlinkSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { ReusableApp } from './support/reusable-app';
 import { answerConfirm, scriptDialogs, scriptedDialogs, visibleWindows } from './support/dialogs';
 import { fakeDriveState, installFakeDrive, uninstallFakeDrive } from './support/fake-drive';
@@ -515,9 +515,30 @@ test('signed in with a fake Drive: free locally, merge downloads first, free all
     // menu opened on a row that is then replaced closes with it. So the row
     // must show the freed state first, and the gesture (open the menu if its
     // trigger says closed, then choose Download audio) is repeated on the
-    // current row until a click lands, within the click's usual 30s.
+    // current row until a click lands, within the click's usual 30s. A click
+    // can land and still report its 2s timeout (a busy runner acknowledges
+    // the input late); its download then turns the row local, which has no
+    // Download item, so the gesture stops once the audio is back. The restore
+    // must have come from this row's Download action (checked below).
     await expect(bravoRow).toContainText('In Google Drive');
+    // Main's tracked restores of Bravo started from here on (the row's
+    // Download action goes through that registry): exactly one, succeeded.
+    const restoresBefore = new Set(
+      (await page.evaluate(() => window.electronAPI.getBackgroundOperations())).operations.map(
+        (op) => op.id,
+      ),
+    );
+    const bravoRestores = async () =>
+      (await page.evaluate(() => window.electronAPI.getBackgroundOperations())).operations
+        .filter(
+          (op) =>
+            !restoresBefore.has(op.id) &&
+            op.kind === 'local-audio-restore' &&
+            resolve(op.target) === resolve(bravo.audio),
+        )
+        .map((op) => op.status);
     await expect(async () => {
+      if (fs.existsSync(bravo.audio)) return;
       const trigger = bravoRow.locator('.more-actions-btn');
       if ((await trigger.getAttribute('aria-expanded')) !== 'true') {
         await trigger.click({ timeout: 2_000 });
@@ -525,6 +546,7 @@ test('signed in with a fake Drive: free locally, merge downloads first, free all
       await bravoRow.locator('.download-audio-btn').click({ timeout: 2_000 });
     }).toPass({ timeout: 30_000 });
     await expect.poll(() => fs.existsSync(bravo.audio)).toBe(true);
+    await expect.poll(bravoRestores).toEqual(['succeeded']);
     expect(fs.readFileSync(bravo.audio)).toEqual(bravo.bytes);
     await expect(bravoRow).not.toContainText('In Google Drive');
     expect((await fakeDriveState(app)).trashed).toEqual([]);
