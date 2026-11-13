@@ -100,6 +100,7 @@ const TODAY_KNOWN_CONFIG_KEYS = [
   'openaiLiveTranslationModel',
   'liveSttLanguage',
   'liveTranslationLanguage',
+  'audioOffloadAfterDays',
   'notionApiKey',
   'notionDatabaseId',
   'autoMode',

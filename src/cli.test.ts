@@ -1337,3 +1337,298 @@ drive.uploadMeetingFolder = async ({ files }) => {
     }
   });
 });
+
+// Local storage management through the CLI, against the real recordings/ +
+// transcriptions/ layout. A preload swaps GoogleDriveClient's methods for an
+// in-memory Drive persisted to a JSON file, so state survives across the
+// separate CLI processes and no network is touched.
+describe('listener storage (CLI integration)', () => {
+  let storageDataPath: string;
+  let preloadPath: string;
+  let drivePath: string;
+
+  before(() => {
+    storageDataPath = makeTempDir('cli-storage');
+    drivePath = path.join(storageDataPath, 'fake-drive.json');
+    preloadPath = path.join(storageDataPath, 'stub-drive.js');
+    fs.writeFileSync(
+      preloadPath,
+      `
+const fs = require('fs');
+const crypto = require('crypto');
+global.fetch = async () => { throw new Error('Network forbidden in CLI storage test'); };
+const { ConfigService } = require(${JSON.stringify(path.join(__dirname, 'configService.js'))});
+const creds = { email: 'a@example.com', refresh: 'r', access: 'a', expires: Date.now() + 1e9 };
+ConfigService.prototype.getGoogleOAuth = () => creds;
+ConfigService.prototype.readPersistedGoogleOAuth = () => creds;
+const { GoogleDriveClient, GoogleDriveError } = require(${JSON.stringify(path.join(__dirname, 'services/googleDriveService.js'))});
+const file = ${JSON.stringify(drivePath)};
+const load = () => (fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf-8')) : { seq: 0, files: {}, trashed: [] });
+const save = (s) => fs.writeFileSync(file, JSON.stringify(s));
+const meta = (f) => { const { content, ...m } = f; return m; };
+const P = GoogleDriveClient.prototype;
+P.ensureFolder = async function (name, parentId) {
+  const s = load();
+  let f = Object.values(s.files).find((x) => x.name === name && x.mimeType === 'application/vnd.google-apps.folder' && (x.parents[0] || null) === (parentId || null) && !x.trashed);
+  if (!f) { f = { id: 'f' + ++s.seq, name, mimeType: 'application/vnd.google-apps.folder', parents: parentId ? [parentId] : [] }; s.files[f.id] = f; save(s); }
+  return meta(f);
+};
+P.findFile = async function ({ name, parentId }) {
+  return Object.values(load().files).map(meta).find((x) => x.name === name && x.parents.includes(parentId) && !x.trashed);
+};
+P.listFolder = async function (id) { return Object.values(load().files).filter((x) => x.parents.includes(id) && !x.trashed).map(meta); };
+P.uploadFile = async function ({ name, parentId, content, mimeType }) {
+  const s = load();
+  const buf = Buffer.from(content);
+  let f = Object.values(s.files).find((x) => x.name === name && x.parents.includes(parentId) && !x.trashed);
+  if (!f) { f = { id: 'x' + ++s.seq, name, mimeType, parents: [parentId] }; s.files[f.id] = f; }
+  f.content = buf.toString('base64'); f.size = String(buf.length);
+  f.md5Checksum = crypto.createHash('md5').update(buf).digest('hex');
+  f.modifiedTime = new Date(Date.now() + s.seq).toISOString();
+  save(s); return meta(f);
+};
+P.getFile = async function (id) { const f = load().files[id]; if (!f) throw new GoogleDriveError(404, '{}', 'nf'); return meta(f); };
+P.downloadFile = async function (id) { const f = load().files[id]; if (!f) throw new GoogleDriveError(404, '{}', 'nf'); return Buffer.from(f.content || '', 'base64'); };
+P.trashFile = async function (id) { const s = load(); s.trashed.push(id); if (s.files[id]) s.files[id].trashed = true; save(s); };
+P.deleteFile = async function (id) { const s = load(); delete s.files[id]; save(s); };
+`,
+    );
+  });
+
+  after(() => rmDir(storageDataPath));
+
+  async function cli(args: string[], extraEnv: Record<string, string> = {}) {
+    return execFileAsync('node', ['--require', preloadPath, cliPath, ...args], {
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        LISTENER_AI_PROVIDER: 'gemini',
+        LISTENER_DATA_PATH: storageDataPath,
+        ...extraEnv,
+      },
+    });
+  }
+
+  async function status() {
+    const { stdout } = await cli(['storage', 'status', '--json']);
+    return JSON.parse(stdout) as Record<string, number>;
+  }
+
+  const result = {
+    transcript: 'Body.',
+    summary: 'Summary.',
+    keyPoints: [],
+    actionItems: [],
+    emoji: '',
+  };
+
+  it('backs up, frees, survives the next sync, and restores the recording', async () => {
+    const recordingsDir = path.join(storageDataPath, 'recordings');
+    fs.mkdirSync(recordingsDir, { recursive: true });
+    const audio = path.join(recordingsDir, 'Standup_2026-05-01T00-00-00-000Z.webm');
+    fs.writeFileSync(audio, Buffer.from('standup audio '.repeat(200)));
+    const bytes = fs.readFileSync(audio);
+    const folder = saveTranscription({
+      title: 'Standup',
+      result,
+      audioFilePath: audio,
+      dataPath: storageDataPath,
+    });
+    const ref = path.basename(folder);
+
+    assert.equal((await status()).notBackedUpFiles, 1);
+
+    await cli(['google', 'sync']);
+    const afterSync = await status();
+    assert.equal(afterSync.eligibleFiles, 1);
+    assert.equal(afterSync.eligibleBytes, bytes.length);
+
+    const dry = await cli(['storage', 'free', ref, '--dry-run']);
+    assert.match(dry.stderr, /Would remove 1/);
+    assert.ok(fs.existsSync(audio));
+
+    const freed = await cli(['storage', 'free', ref]);
+    assert.match(freed.stderr, /Removed 1 local recording/);
+    assert.equal(fs.existsSync(audio), false);
+    assert.ok(fs.existsSync(path.join(folder, 'meta.json')), 'note kept');
+
+    await cli(['google', 'sync']);
+    const drive = JSON.parse(fs.readFileSync(drivePath, 'utf-8'));
+    assert.deepEqual(drive.trashed, [], 'nothing trashed on Drive');
+    assert.equal(
+      Object.values(drive.files as Record<string, { name: string }>).filter(
+        (f) => f.name === path.basename(audio),
+      ).length,
+      1,
+    );
+    const cloud = await status();
+    assert.equal(cloud.cloudOnlyFiles, 1);
+    assert.equal(cloud.eligibleFiles, 0);
+
+    const restored = await cli(['storage', 'restore', ref]);
+    assert.equal(restored.stdout.trim(), audio);
+    assert.deepEqual(fs.readFileSync(audio), bytes);
+  });
+
+  it('refuses to free an original outside recordings/', async () => {
+    const outside = path.join(storageDataPath, 'elsewhere.m4a');
+    fs.writeFileSync(outside, 'original');
+    const folder = saveTranscription({
+      title: 'Imported',
+      result,
+      audioFilePath: outside,
+      dataPath: storageDataPath,
+    });
+    const { stderr } = await cli(['storage', 'free', path.basename(folder)]);
+    assert.match(stderr, /Kept elsewhere\.m4a: not-managed/);
+    assert.ok(fs.existsSync(outside));
+    assert.ok((await status()).externalFiles >= 1);
+  });
+
+  it(
+    'merge downloads a cloud-only source before concatenating',
+    { skip: !ffmpegPath ? 'ffmpeg not installed' : undefined },
+    async () => {
+      const recordingsDir = path.join(storageDataPath, 'recordings');
+      fs.mkdirSync(recordingsDir, { recursive: true });
+      const a = await makeOpusWebm(
+        ffmpegPath!,
+        recordingsDir,
+        'MergeA_2026-06-01T00-00-00-000Z.webm',
+        440,
+      );
+      const b = await makeOpusWebm(
+        ffmpegPath!,
+        recordingsDir,
+        'MergeB_2026-06-01T00-00-00-000Z.webm',
+        880,
+      );
+      const fa = saveTranscription({
+        title: 'Merge A',
+        result,
+        audioFilePath: a,
+        dataPath: storageDataPath,
+      });
+      const fb = saveTranscription({
+        title: 'Merge B',
+        result,
+        audioFilePath: b,
+        dataPath: storageDataPath,
+      });
+      await cli(['google', 'sync']);
+      await cli(['storage', 'free', path.basename(fa)]);
+      assert.equal(fs.existsSync(a), false);
+
+      const merged = await cli(
+        ['merge', path.basename(fa), path.basename(fb), '--title', 'Merged'],
+        {
+          LISTENER_TEST_MODE: '1',
+          GEMINI_API_KEY: 'test-mode-key',
+        },
+      );
+      assert.match(merged.stderr, /Downloading audio/);
+      assert.ok(fs.existsSync(a), 'source restored');
+      assert.ok(fs.existsSync(merged.stdout.trim()));
+    },
+  );
+
+  it('google upload sends the linked recording but not an outside original', async () => {
+    const recordingsDir = path.join(storageDataPath, 'recordings');
+    const audio = path.join(recordingsDir, 'Upload_2026-07-01T00-00-00-000Z.webm');
+    fs.writeFileSync(audio, 'upload audio');
+    const folder = saveTranscription({
+      title: 'Upload',
+      result,
+      audioFilePath: audio,
+      dataPath: storageDataPath,
+    });
+    await cli(['google', 'upload', path.basename(folder)]);
+    // A symlink in recordings/ pointing at an original elsewhere is not sent.
+    const outside = path.join(storageDataPath, 'private-original.webm');
+    fs.writeFileSync(outside, 'private');
+    const link = path.join(recordingsDir, 'Linked_2026-07-02T00-00-00-000Z.webm');
+    fs.symlinkSync(outside, link);
+    const linkedFolder = saveTranscription({
+      title: 'Linked',
+      result,
+      audioFilePath: link,
+      dataPath: storageDataPath,
+    });
+    await cli(['google', 'upload', path.basename(linkedFolder)]);
+    const drive = JSON.parse(fs.readFileSync(drivePath, 'utf-8'));
+    const names = Object.values(drive.files as Record<string, { name: string }>).map((f) => f.name);
+    assert.ok(names.includes(path.basename(audio)));
+    assert.equal(names.includes(path.basename(link)), false);
+  });
+
+  it('google upload never replaces a different Drive copy of the note audio', async () => {
+    const crypto = await import('node:crypto');
+    const recordingsDir = path.join(storageDataPath, 'recordings');
+    fs.mkdirSync(recordingsDir, { recursive: true });
+    const name = 'Foreign_2026-09-09T00-00-00-000Z.webm';
+    // A note from another device names this path; here it holds unrelated audio.
+    fs.writeFileSync(path.join(recordingsDir, name), 'unrelated local audio');
+    const folder = saveTranscription({
+      title: 'Foreign upload',
+      result,
+      audioFilePath: path.join(recordingsDir, name),
+      dataPath: storageDataPath,
+    });
+    const meeting = path.basename(folder);
+    const original = Buffer.from('the meeting original audio');
+    const drive = fs.existsSync(drivePath)
+      ? JSON.parse(fs.readFileSync(drivePath, 'utf-8'))
+      : { seq: 0, files: {}, trashed: [] };
+    const folders = Object.values(drive.files as Record<string, any>);
+    let app = folders.find((f) => f.name === 'Listener.AI' && f.parents.length === 0);
+    if (!app) {
+      app = {
+        id: 'app-seeded',
+        name: 'Listener.AI',
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [],
+      };
+      drive.files[app.id] = app;
+    }
+    drive.files['meeting-seeded'] = {
+      id: 'meeting-seeded',
+      name: meeting,
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: [app.id],
+    };
+    drive.files['audio-seeded'] = {
+      id: 'audio-seeded',
+      name,
+      mimeType: 'audio/webm',
+      parents: ['meeting-seeded'],
+      content: original.toString('base64'),
+      size: String(original.length),
+      md5Checksum: crypto.createHash('md5').update(original).digest('hex'),
+    };
+    fs.writeFileSync(drivePath, JSON.stringify(drive));
+
+    const { stderr } = await cli(['google', 'upload', meeting]);
+    assert.match(stderr, /Kept the Google Drive copy of Foreign_/);
+    const after = JSON.parse(fs.readFileSync(drivePath, 'utf-8'));
+    assert.equal(
+      Buffer.from(after.files['audio-seeded'].content, 'base64').toString(),
+      original.toString(),
+      'the Drive original is unchanged',
+    );
+    assert.ok(
+      Object.values(after.files as Record<string, any>).some(
+        (f) => f.name === 'meta.json' && f.parents.includes('meeting-seeded'),
+      ),
+      'the note files were still uploaded',
+    );
+  });
+
+  it('transcript-only reads hold a read lease (recorded as a use)', async () => {
+    const recordingsDir = path.join(storageDataPath, 'recordings');
+    const audio = path.join(recordingsDir, 'Plain_2026-08-01T00-00-00-000Z.webm');
+    fs.writeFileSync(audio, 'plain audio');
+    await cli(['transcript', audio], { LISTENER_TEST_MODE: '1', GEMINI_API_KEY: 'test-mode-key' });
+    const { readLocalAudioRecord } = await import('./services/localAudioStorage');
+    assert.ok(readLocalAudioRecord(storageDataPath, audio)?.lastUsedAt);
+  });
+});

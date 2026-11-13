@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import Module from 'node:module';
 import { afterEach, beforeEach, describe, it } from 'node:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { liveReadLeases } from '../services/localAudioStorage';
+import { makeTempDir, rmDir } from '../test-helpers';
 import type { IpcContext } from './types';
 
 // Intercepts CJS `require('electron')` so the meetingsManagement module --
@@ -27,13 +31,15 @@ describe('meetingsManagement.register', () => {
   let originalLoad: ModuleWithLoad['_load'];
   let handlers: Map<string, (...args: unknown[]) => unknown>;
   let registerFn: ((ctx: IpcContext) => void) | null = null;
+  let userData = '/tmp/listener-ai-test';
+  let dialogStub: Record<string, unknown> = {};
 
   beforeEach(() => {
     handlers = new Map();
     const fakeElectron: ElectronStub = {
       ipcMain: { handle: (channel, fn) => handlers.set(channel, fn) },
-      app: { getPath: () => '/tmp/listener-ai-test' },
-      dialog: {},
+      app: { getPath: () => userData },
+      dialog: dialogStub,
     };
     const moduleAny = Module as ModuleWithLoad;
     originalLoad = moduleAny._load;
@@ -84,5 +90,33 @@ describe('meetingsManagement.register', () => {
       'export-recording-m4a',
       'merge-recordings',
     ]);
+  });
+
+  it('M4A export holds a read lease from the save dialog until it settles', async () => {
+    const dataPath = makeTempDir('export-lease');
+    userData = dataPath;
+    try {
+      const recordings = path.join(dataPath, 'recordings');
+      fs.mkdirSync(recordings, { recursive: true });
+      const src = path.join(recordings, 'Talk_2026-01-01T00-00-00-000Z.webm');
+      fs.writeFileSync(src, 'audio');
+      let leasesDuringDialog = -1;
+      dialogStub.showSaveDialog = async () => {
+        leasesDuringDialog = liveReadLeases(dataPath, src);
+        return { canceled: true };
+      };
+      registerFn!({
+        getMainWindow: () => null,
+        ffmpegManager: { ensureFFmpeg: async () => '/usr/bin/false' },
+      } as unknown as IpcContext);
+      const result = await handlers.get('export-recording-m4a')!({}, src);
+      assert.deepEqual(result, { canceled: true });
+      assert.equal(leasesDuringDialog, 1, 'source leased while the dialog is open');
+      assert.equal(liveReadLeases(dataPath, src), 0, 'lease released on cancel');
+    } finally {
+      delete dialogStub.showSaveDialog;
+      userData = '/tmp/listener-ai-test';
+      rmDir(dataPath);
+    }
   });
 });

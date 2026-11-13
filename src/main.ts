@@ -37,7 +37,13 @@ import { CHATGPT_MANAGE_USAGE_URL, ChatGPTInferenceError } from './chatgptRespon
 import { getDataPath } from './dataPath';
 import { maybeAutoSync, refreshGoogleSyncTimer } from './ipc/googleDrive';
 import { registerAllIpc } from './ipc/register';
-import { pathKeys } from './transcriptionJobs';
+import { pathKeys, transcriptionJobs } from './transcriptionJobs';
+import {
+  isManagedAudioPathLexical,
+  listAudioStorageItems,
+  recordingsDirFor,
+  resolveNoteAudioPath,
+} from './services/localAudioStorage';
 import { unlinkedNotes } from './meetingList';
 import { DisplayDetectorService } from './displayDetectorService';
 import { GeminiService, TranscriptionError, type TranscriptionErrorPayload } from './geminiService';
@@ -1212,7 +1218,34 @@ registerAllIpc({
   getNotionService,
   getSlackService,
   openExternal: (url) => void shell.openExternal(url),
+  isAudioInUse,
 });
+
+// Paths whose header remux is rewriting the file right now.
+const remuxingPaths = new Set<string>();
+
+// In-process users of a recording that read leases cannot see: the active
+// capture, a header remux, and running transcription/merge jobs (including
+// merge sources and a renamed recording's new name).
+function isAudioInUse(audioPath: string): boolean {
+  const keys = new Set(pathKeys(audioPath));
+  const matches = (p: string | undefined) => !!p && pathKeys(p).some((k) => keys.has(k));
+  if (matches(audioRecorder.getActiveRecording()?.filePath)) return true;
+  for (const p of remuxingPaths) if (matches(p)) return true;
+  for (const job of transcriptionJobs.list().jobs) {
+    if (job.status !== 'running') continue;
+    if (job.aliases.some((k) => keys.has(k))) return true;
+    const paths = [
+      job.filePath,
+      ...job.paths,
+      ...(job.sourcePaths ?? []),
+      job.mergedAudioPath,
+      job.newFilePath,
+    ];
+    if (paths.some(matches)) return true;
+  }
+  return false;
+}
 
 // Audio capture runs in the renderer via MediaRecorder; chunks stream over IPC as
 // they're encoded so the renderer never accumulates hours of audio in memory. Main
@@ -1366,6 +1399,7 @@ ipcMain.handle('stop-recording', async (_, opts?: { liveNotes?: unknown }) => {
 });
 
 async function remuxRecordingHeader(filePath: string): Promise<void> {
+  remuxingPaths.add(filePath);
   try {
     const ffmpegPath = await ffmpegManager.ensureFFmpeg();
     if (!ffmpegPath) return;
@@ -1384,6 +1418,8 @@ async function remuxRecordingHeader(filePath: string): Promise<void> {
     await fs.promises.rename(tmpPath, filePath);
   } catch (error) {
     console.warn('Header remux skipped:', error instanceof Error ? error.message : error);
+  } finally {
+    remuxingPaths.delete(filePath);
   }
 }
 
@@ -2055,6 +2091,11 @@ ipcMain.handle('get-recordings', async () => {
       // Same keys the transcription job registry matches on, so the renderer
       // can tie this row to a job started through another path spelling.
       aliases: string[];
+      // Local copy removed to free space; the audio is in Google Drive.
+      cloudOnly?: boolean;
+      // Every linked note has an uploaded Drive copy (re-verified on removal).
+      backedUp?: boolean;
+      transcriptionPath?: string;
     }> = [];
     for (const file of files) {
       if (isTranscriptionTempFile(file)) continue;
@@ -2087,14 +2128,81 @@ ipcMain.handle('get-recordings', async () => {
       });
     }
 
+    const dataPath = app.getPath('userData');
+    let allNotes: Awaited<ReturnType<typeof listTranscriptions>> = [];
+    try {
+      allNotes = await listTranscriptions(dataPath, 0);
+    } catch (error) {
+      reportError(error, { operation: 'notes.list', severity: 'warning' });
+    }
+
+    // Local storage state: which recordings are backed up, and which linked
+    // recordings now live only in Google Drive. A cloud-only recording keeps
+    // its row (conventional cloud-file behavior) when its sidecar still links
+    // the note; otherwise the note row says the audio is in Drive.
+    const cloudNoteFolders = new Set<string>();
+    try {
+      const items = listAudioStorageItems(dataPath);
+      const statusByPath = new Map(items.map((i) => [path.resolve(i.path), i]));
+      for (const recording of recordings) {
+        recording.backedUp = statusByPath.get(path.resolve(recording.path))?.status === 'uploaded';
+      }
+      const recordingsRoot = recordingsDirFor(dataPath);
+      for (const item of items) {
+        if (item.status !== 'cloud-only') continue;
+        let shownAsRow = false;
+        if (isManagedAudioPathLexical(recordingsRoot, item.path)) {
+          const sidecar = await metadataService.getMetadata(item.path).catch(() => null);
+          const linked = sidecar?.transcriptionPath
+            ? item.meetings.find((m) => path.basename(sidecar.transcriptionPath as string) === m)
+            : undefined;
+          if (linked) {
+            const note = allNotes.find((n) => n.folderName === linked);
+            const file = path.basename(item.path);
+            const parts = path.basename(file, path.extname(file)).split('_');
+            const timestamp = parts.pop();
+            const when = note ? new Date(note.transcribedAt) : new Date(0);
+            recordings.push({
+              filename: file,
+              path: item.path,
+              title: parts.join('_') || 'Untitled',
+              timestamp,
+              size: item.bytes,
+              createdAt: when,
+              modifiedAt: when,
+              aliases: pathKeys(item.path),
+              cloudOnly: true,
+              transcriptionPath: sidecar!.transcriptionPath,
+            });
+            shownAsRow = true;
+          }
+        }
+        if (!shownAsRow) for (const m of item.meetings) cloudNoteFolders.add(m);
+      }
+    } catch (error) {
+      reportError(error, { operation: 'storage.list', severity: 'warning' });
+    }
+
     recordings.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()); // Sort by newest first
 
-    let notes: Awaited<ReturnType<typeof unlinkedNotes>> = [];
+    let notes: Array<
+      Awaited<ReturnType<typeof unlinkedNotes>>[number] & { audioInCloud?: boolean }
+    > = [];
     try {
-      notes = await unlinkedNotes({
-        notes: await listTranscriptions(app.getPath('userData'), 0),
-        recordings,
-        sidecarFor: (filePath) => metadataService.getMetadata(filePath),
+      notes = (
+        await unlinkedNotes({
+          notes: allNotes,
+          recordings,
+          sidecarFor: (filePath) => metadataService.getMetadata(filePath),
+        })
+      ).map((note) => {
+        const restored =
+          !note.audioAvailable && resolveNoteAudioPath(dataPath, note.folderName, note.audioFile);
+        return {
+          ...note,
+          audioAvailable: note.audioAvailable || !!restored,
+          ...(cloudNoteFolders.has(note.folderName) && !restored ? { audioInCloud: true } : {}),
+        };
       });
     } catch (error) {
       reportError(error, { operation: 'notes.list', severity: 'warning' });

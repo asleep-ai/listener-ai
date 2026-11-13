@@ -209,3 +209,48 @@ export type SystemAudioStartResult =
       reason: 'unsupported-platform' | 'permission-denied' | 'error';
       message?: string;
     };
+
+// Local storage management (Google Drive backed audio). Mirrors
+// src/services/localAudioStorage.ts; kept structural so the renderer does not
+// import node code.
+export type LocalStorageReportPayload = {
+  totalBytes: number;
+  audioBytes: number;
+  audioFiles: number;
+  notesBytes: number;
+  otherBytes: number;
+  eligibleBytes: number;
+  eligibleFiles: number;
+  notBackedUpBytes: number;
+  notBackedUpFiles: number;
+  unlinkedBytes: number;
+  unlinkedFiles: number;
+  cloudOnlyBytes: number;
+  cloudOnlyFiles: number;
+  externalFiles: number;
+};
+
+export type LocalStorageReportResult =
+  | {
+      success: true;
+      report: LocalStorageReportPayload;
+      signedIn: boolean;
+      syncEnabled: boolean;
+      offloadAfterDays: number;
+    }
+  | { success: false; error: string };
+
+export type LocalAudioFreeResult =
+  | {
+      success: true;
+      result: {
+        removed: Array<{ path: string; bytes: number }>;
+        skipped: Array<{ path: string; reason: string; detail?: string }>;
+        freedBytes: number;
+      };
+    }
+  | { success: false; error: string };
+
+export type LocalAudioRestoreResult =
+  | { success: true; path: string; downloaded: boolean }
+  | { success: false; error: string; code?: string };

@@ -929,6 +929,7 @@ describe('ConfigService: getAllConfig projection', () => {
     legacyCodexConfigured: true,
     googleOAuthConfigured: false,
     googleDriveEnabled: false,
+    audioOffloadAfterDays: 0,
     notionApiKey: 'env-notion-key',
     notionDatabaseId: 'stored-db',
     autoMode: true,

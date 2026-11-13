@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { isSupportedAudioExtension, mimeTypeForFile } from '../audioFormats';
+import { createHash } from 'crypto';
 import { withMeetingLock } from '../meetingLock';
 import { reportError } from '../sentry';
 import { telemetryHash } from '../sentryScrub';
@@ -45,6 +46,14 @@ export type FileSyncState = {
   // sync state entry so we know about it; Phase 3D will provide the UI to
   // hydrate on demand.
   cloudOnly?: boolean;
+  // Source-audio bookkeeping (additive; absent on legacy entries). The note's
+  // recording lives in `<dataPath>/recordings/`, outside the meeting folder;
+  // `sourceAudio` marks the Drive copy uploaded from there under its basename.
+  // `md5Checksum` / `size` describe the bytes this device sent, so local
+  // removal can be checked against Drive's own checksum.
+  sourceAudio?: boolean;
+  md5Checksum?: string;
+  size?: number;
 };
 
 export type MeetingSyncState = {
@@ -126,6 +135,10 @@ export type SyncEngineOptions = {
   // Omitting the option disables config sync entirely (back-compat: tests and
   // legacy callers keep working without changes).
   configSync?: ConfigSyncAccessors;
+  // `<dataPath>/recordings`. When set, each meeting's linked source audio
+  // (meta.audioFile, only when it is an app recording inside this directory)
+  // is uploaded into the meeting's Drive folder. Omitted = legacy behavior.
+  recordingsDir?: string;
 };
 
 const DEFAULT_EXCLUDES: RegExp[] = [/^\./];
@@ -198,6 +211,7 @@ export class SyncEngine {
   private readonly logger: (msg: string) => void;
   private readonly onProgress: (event: SyncProgressEvent) => void;
   private readonly configSync?: ConfigSyncAccessors;
+  private readonly recordingsDir?: string;
 
   constructor(opts: SyncEngineOptions) {
     this.driveClient = opts.driveClient;
@@ -213,6 +227,7 @@ export class SyncEngine {
     ];
     this.logger = opts.logger ?? (() => {});
     this.configSync = opts.configSync;
+    this.recordingsDir = opts.recordingsDir;
     const userProgress = opts.onProgress;
     this.onProgress = userProgress
       ? (event) => {
@@ -755,6 +770,7 @@ export class SyncEngine {
     for (const entry of localFiles) {
       await this.uploadLocalFile(meetingName, entry.name, folderPath, meetingState, result);
     }
+    await this.syncSourceAudioGuarded(meetingName, folderPath, meetingState, undefined, result);
     meetingState.lastSyncedAt = new Date().toISOString();
   }
 
@@ -923,6 +939,20 @@ export class SyncEngine {
     const localByName = new Map(localFiles.map((e) => [e.name, e]));
     const remoteByName = new Map(remoteFiles.map((f) => [f.name, f]));
     const allFilenames = new Set<string>([...localByName.keys(), ...remoteByName.keys()]);
+
+    // The linked source audio is reconciled by its own rules (never
+    // downloaded automatically, never deleted remotely) and kept out of the
+    // generic per-file loop below.
+    const sourceAudioName = await this.syncSourceAudioGuarded(
+      meetingName,
+      folderPath,
+      meetingState,
+      remoteByName,
+      result,
+    );
+    if (sourceAudioName && !localByName.has(sourceAudioName)) {
+      allFilenames.delete(sourceAudioName);
+    }
 
     // Defensive ordering: process `meta.json` LAST so a crash mid-loop never
     // promotes a half-populated folder to v2 (the writer side in
@@ -1117,6 +1147,192 @@ export class SyncEngine {
     }
   }
 
+  // Reads meta.audioFile and returns the linked recording when it is an app
+  // recording: a direct child of recordingsDir with an audio extension. The
+  // file itself may be absent (local copy removed to free space).
+  private linkedSourceAudio(folderPath: string): { path: string; name: string } | null {
+    if (!this.recordingsDir) return null;
+    let audioFile: unknown;
+    try {
+      audioFile = JSON.parse(
+        fs.readFileSync(path.join(folderPath, META_JSON_FILENAME), 'utf-8'),
+      )?.audioFile;
+    } catch {
+      return null;
+    }
+    if (typeof audioFile !== 'string' || !audioFile) return null;
+    const resolved = path.resolve(audioFile);
+    const name = path.basename(resolved);
+    if (path.dirname(resolved) !== path.resolve(this.recordingsDir)) return null;
+    if (name.startsWith('.') || !this.isAudioFile(name) || this.shouldExcludeName(name))
+      return null;
+    return { path: resolved, name };
+  }
+
+  private async syncSourceAudioGuarded(
+    meetingName: string,
+    folderPath: string,
+    meetingState: MeetingSyncState,
+    remoteByName: Map<string, DriveFile> | undefined,
+    result: SyncResult,
+  ): Promise<string | null> {
+    const linked = this.linkedSourceAudio(folderPath);
+    if (!linked) return null;
+    try {
+      await this.syncSourceAudio(meetingName, linked, meetingState, remoteByName, result);
+    } catch (err) {
+      result.errors.push({
+        meeting: meetingName,
+        file: linked.name,
+        error: (err as Error).message,
+      });
+      if (!isTransientDriveError(err)) {
+        reportError(err, {
+          operation: 'drive.sourceAudio',
+          severity: 'warning',
+          extra: { meetingHash: telemetryHash(meetingName) },
+        });
+      }
+    }
+    return linked.name;
+  }
+
+  // Source audio rules:
+  // - Local copy present: upload when there is no matching Drive copy (new,
+  //   changed bytes, or the remote file disappeared), and record the md5 and
+  //   size of exactly the bytes sent. Drive's returned checksum must match.
+  // - Local copy absent: if a Drive copy is known, the audio is cloud-only on
+  //   this device. Nothing is uploaded or deleted -- removing a local copy to
+  //   free space must never propagate to Drive.
+  // `remoteByName` is undefined on the upload-only path (no remote folder
+  // listing yet), where a fresh folder cannot hold the file anyway.
+  private async syncSourceAudio(
+    meetingName: string,
+    linked: { path: string; name: string },
+    meetingState: MeetingSyncState,
+    remoteByName: Map<string, DriveFile> | undefined,
+    result: SyncResult,
+  ): Promise<void> {
+    const { name } = linked;
+    const label = `${meetingName}/${name}`;
+    const prior = meetingState.files[name];
+    const remote = remoteByName?.get(name);
+
+    let stat: fs.Stats | null = null;
+    try {
+      const lst = fs.lstatSync(linked.path);
+      if (lst.isFile() && !lst.isSymbolicLink()) stat = lst;
+    } catch {
+      stat = null;
+    }
+
+    if (!stat) {
+      if (remote) {
+        meetingState.files[name] = {
+          ...prior,
+          driveFileId: remote.id,
+          localMtimeMs: prior?.localMtimeMs ?? 0,
+          driveModifiedTime: remote.modifiedTime,
+          mimeType: remote.mimeType,
+          lastUploadedAt: prior?.lastUploadedAt ?? new Date().toISOString(),
+          cloudOnly: true,
+          sourceAudio: prior?.sourceAudio ?? false,
+          ...(remote.md5Checksum ? { md5Checksum: remote.md5Checksum } : {}),
+          ...(remote.size !== undefined ? { size: Number(remote.size) } : {}),
+        };
+      } else if (prior?.driveFileId) {
+        // Remote listing unavailable (upload-only path) or the copy is gone.
+        // Keep the bookkeeping; never re-create or delete anything here.
+        meetingState.files[name] = { ...prior, cloudOnly: true };
+        if (remoteByName) {
+          this.logger(`Source audio ${label} is missing locally and on Drive.`);
+        }
+      }
+      return;
+    }
+
+    const remoteGone = remoteByName !== undefined && !!prior?.driveFileId && !remote;
+    if (
+      prior?.sourceAudio &&
+      prior.driveFileId &&
+      prior.md5Checksum &&
+      prior.size === stat.size &&
+      prior.localMtimeMs === stat.mtimeMs &&
+      !remoteGone
+    ) {
+      if (prior.cloudOnly) meetingState.files[name] = { ...prior, cloudOnly: false };
+      result.skipped.push(label);
+      return;
+    }
+
+    const content = fs.readFileSync(linked.path);
+    const md5 = createHash('md5').update(content).digest('hex');
+    const after = fs.statSync(linked.path);
+    const stable = after.size === stat.size && after.mtimeMs === stat.mtimeMs;
+
+    // Same bytes already on Drive (restored copy, or a wiped sync state):
+    // adopt instead of uploading again.
+    const knownMd5 = remote?.md5Checksum ?? (remoteGone ? undefined : prior?.md5Checksum);
+    const knownId = remote?.id ?? (remoteGone ? undefined : prior?.driveFileId);
+    if (knownId && knownMd5 === md5 && content.length === stat.size) {
+      meetingState.files[name] = {
+        driveFileId: knownId,
+        localMtimeMs: stable ? stat.mtimeMs : -1,
+        driveModifiedTime: remote?.modifiedTime ?? prior?.driveModifiedTime,
+        mimeType: mimeTypeForFile(name),
+        lastUploadedAt: prior?.lastUploadedAt ?? new Date().toISOString(),
+        sourceAudio: true,
+        md5Checksum: md5,
+        size: content.length,
+      };
+      result.skipped.push(label);
+      return;
+    }
+
+    // Never replace a Drive copy this device did not upload with different
+    // bytes: a note synced from another device can name a path that exists
+    // here holding unrelated audio. Only our own earlier upload (same md5 as
+    // recorded) may be updated.
+    const remoteIsOurs =
+      !!prior?.sourceAudio && !!remote && remote.md5Checksum === prior.md5Checksum;
+    if (remote && !remoteIsOurs && remote.md5Checksum !== md5) {
+      this.logger(
+        `Kept Drive copy of ${label}: the local file at that path holds different audio.`,
+      );
+      result.skipped.push(label);
+      return;
+    }
+
+    const mimeType = mimeTypeForFile(name);
+    const uploaded = await this.driveClient.uploadFile({
+      name,
+      parentId: meetingState.driveFolderId,
+      content,
+      mimeType,
+    });
+    if (
+      (uploaded.md5Checksum !== undefined && uploaded.md5Checksum !== md5) ||
+      (uploaded.size !== undefined && Number(uploaded.size) !== content.length)
+    ) {
+      // Keep any earlier entry untouched so nothing treats this as backed up.
+      throw new Error(`Drive copy of ${name} did not match the uploaded audio`);
+    }
+    meetingState.files[name] = {
+      driveFileId: uploaded.id,
+      // An mtime that moved while reading means the bytes may not be what we
+      // sent; -1 never matches, so the next sync re-checks.
+      localMtimeMs: stable ? stat.mtimeMs : -1,
+      driveModifiedTime: uploaded.modifiedTime,
+      mimeType,
+      lastUploadedAt: new Date().toISOString(),
+      sourceAudio: true,
+      md5Checksum: md5,
+      size: content.length,
+    };
+    result.uploaded.push(label);
+    this.logger(`Uploaded source audio ${label} -> ${uploaded.id}`);
+  }
+
   private async uploadLocalFile(
     meetingName: string,
     filename: string,
@@ -1208,6 +1424,10 @@ export class SyncEngine {
       mimeType: remote.mimeType,
       lastUploadedAt: new Date().toISOString(),
       cloudOnly: true,
+      // As listed by Drive: lets this device tell whether a file at the
+      // note's path is really this audio.
+      ...(remote.md5Checksum ? { md5Checksum: remote.md5Checksum } : {}),
+      ...(remote.size !== undefined ? { size: Number(remote.size) } : {}),
     };
   }
 }

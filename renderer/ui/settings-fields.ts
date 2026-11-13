@@ -121,6 +121,9 @@ export const SETTINGS_FIELDS: readonly SettingsFieldRow[] = [
   { kind: 'text', id: 'slackWebhookUrl', key: 'slackWebhookUrl' },
   { kind: 'checkbox', id: 'slackAutoShare', key: 'slackAutoShare' },
   { kind: 'checkbox', id: 'googleDriveEnabled', key: 'googleDriveEnabled' },
+  // A <select> whose "Never" option has the empty value, so the number
+  // row's 0 <-> '' mapping selects it.
+  { kind: 'number', id: 'audioOffloadAfterDays', key: 'audioOffloadAfterDays' },
   { kind: 'checkbox', id: 'crashReportingEnabled', key: 'crashReportingEnabled', defaultOn: true },
   { kind: 'text', id: 'globalShortcut', key: 'globalShortcut' },
   { kind: 'number', id: 'maxRecordingMinutes', key: 'maxRecordingMinutes' },

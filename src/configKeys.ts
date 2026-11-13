@@ -265,6 +265,16 @@ export const CONFIG_KEYS = [
     payload: true,
   },
   {
+    // Remove a recording's local audio automatically once it has not been
+    // used for this many days AND its Google Drive copy verifies. 0 = never
+    // (default): audio stays on this device until the user frees it.
+    key: 'audioOffloadAfterDays',
+    kind: 'int',
+    default: 0,
+    cli: true,
+    payload: true,
+  },
+  {
     key: 'notionApiKey',
     kind: 'string',
     envVar: 'NOTION_API_KEY',

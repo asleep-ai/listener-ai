@@ -15,6 +15,10 @@ export type DriveFile = {
   mimeType: string;
   modifiedTime?: string;
   size?: string;
+  // Present for binary (non-Google-Docs) files. Used to verify an uploaded
+  // audio copy byte-for-byte before any local copy is removed.
+  md5Checksum?: string;
+  trashed?: boolean;
   parents?: string[];
 };
 
@@ -209,7 +213,7 @@ export class GoogleDriveClient {
     const q = clauses.join(' and ');
     const url = new URL(`${DRIVE_API_BASE}/files`);
     url.searchParams.set('q', q);
-    url.searchParams.set('fields', 'files(id,name,mimeType,modifiedTime,size,parents)');
+    url.searchParams.set('fields', 'files(id,name,mimeType,modifiedTime,size,md5Checksum,parents)');
     url.searchParams.set('pageSize', '10');
     url.searchParams.set('spaces', 'drive');
 
@@ -230,7 +234,7 @@ export class GoogleDriveClient {
     url.searchParams.set('q', q);
     url.searchParams.set(
       'fields',
-      'nextPageToken,files(id,name,mimeType,modifiedTime,size,parents)',
+      'nextPageToken,files(id,name,mimeType,modifiedTime,size,md5Checksum,parents)',
     );
     url.searchParams.set('pageSize', '100');
     url.searchParams.set('spaces', 'drive');
@@ -259,7 +263,7 @@ export class GoogleDriveClient {
     if (parentId) metadata.parents = [parentId];
 
     const url = new URL(`${DRIVE_API_BASE}/files`);
-    url.searchParams.set('fields', 'id,name,mimeType,modifiedTime,size,parents');
+    url.searchParams.set('fields', 'id,name,mimeType,modifiedTime,size,md5Checksum,parents');
 
     const res = await this.authedFetch(url.toString(), {
       method: 'POST',
@@ -306,7 +310,7 @@ export class GoogleDriveClient {
 
     const url = new URL(`${DRIVE_UPLOAD_BASE}/files`);
     url.searchParams.set('uploadType', 'multipart');
-    url.searchParams.set('fields', 'id,name,mimeType,modifiedTime,size,parents');
+    url.searchParams.set('fields', 'id,name,mimeType,modifiedTime,size,md5Checksum,parents');
 
     const res = await this.authedFetch(url.toString(), {
       method: 'POST',
@@ -327,7 +331,7 @@ export class GoogleDriveClient {
   ): Promise<DriveFile> {
     const url = new URL(`${DRIVE_UPLOAD_BASE}/files/${encodeURIComponent(fileId)}`);
     url.searchParams.set('uploadType', 'media');
-    url.searchParams.set('fields', 'id,name,mimeType,modifiedTime,size,parents');
+    url.searchParams.set('fields', 'id,name,mimeType,modifiedTime,size,md5Checksum,parents');
 
     const res = await this.authedFetch(url.toString(), {
       method: 'PATCH',
@@ -360,12 +364,29 @@ export class GoogleDriveClient {
     await this.ensureOk(res, `Drive trashFile ${fileId}`);
   }
 
+  // Fresh metadata for one file, including trash state. Callers that are about
+  // to rely on a remote copy (local audio removal) re-read it here instead of
+  // trusting a cached listing.
+  async getFile(fileId: string): Promise<DriveFile> {
+    const url = new URL(`${DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}`);
+    url.searchParams.set(
+      'fields',
+      'id,name,mimeType,modifiedTime,size,md5Checksum,trashed,parents',
+    );
+    const res = await this.authedFetch(url.toString());
+    await this.ensureOk(res, `Drive getFile ${fileId}`);
+    return (await res.json()) as DriveFile;
+  }
+
   // Downloads file content as a Buffer. Drive returns the raw bytes when
   // `alt=media` is set; without it the response would be the file metadata.
-  async downloadFile(fileId: string): Promise<Buffer> {
+  async downloadFile(fileId: string, options: { signal?: AbortSignal } = {}): Promise<Buffer> {
     const url = new URL(`${DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}`);
     url.searchParams.set('alt', 'media');
-    const res = await this.authedFetch(url.toString());
+    const res = await this.authedFetch(
+      url.toString(),
+      options.signal ? { signal: options.signal } : {},
+    );
     await this.ensureOk(res, `Drive downloadFile ${fileId}`);
     const arrayBuffer = await res.arrayBuffer();
     return Buffer.from(arrayBuffer);

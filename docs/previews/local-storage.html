@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; form-action 'none'; base-uri 'none'">
+  <title>Local storage preview</title>
+  <!-- Standalone sample, not an Electron runtime capture. Product copy and style excerpts:
+       renderer/index.html, renderer/styles.css, renderer/ui/local-storage.ts,
+       renderer/ui/recordings-list.ts, src/localStorageView.ts. No real data, network or APIs. -->
+  <style>
+    *{box-sizing:border-box}
+    :root{--focus-ring:0 0 0 3px rgba(52,152,219,.18)}
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,Ubuntu,Cantarell,sans-serif;color:#1f2937;background:#eef1f5;background-image:radial-gradient(1200px 600px at 8% -10%,rgba(99,102,241,.05),transparent 60%),linear-gradient(180deg,#f4f6fa,#eaedf3);line-height:1.5;-webkit-font-smoothing:antialiased}
+    main{max-width:1120px;margin:40px auto;padding:0 24px}
+    h1{font-size:24px;letter-spacing:-.02em;margin:0 0 4px} h2{font-size:17px;margin:0} p{margin:0}
+    button,select{font-family:inherit} button{cursor:pointer} button:disabled{cursor:not-allowed}
+    button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #3498db;outline-offset:2px}
+    [hidden]{display:none!important}
+    .intro{color:#64748b;font-size:14px}
+    .preview-note{margin:18px 0 24px;border:1px solid #cbd5e1;border-radius:10px;background:#f8fafc;padding:12px 16px;font-size:13px;color:#475569}
+    .preview-note strong{display:block;color:#334155}
+    .preview-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:start}
+    .panel{background:#fff;border:1px solid #e2e8f0;border-radius:14px;box-shadow:0 8px 28px rgba(15,23,42,.04);min-width:0}
+    .panel-header{padding:18px 22px;border-bottom:1px solid #eef2f6}
+    .panel-kind{font-size:12px;color:#64748b;margin-bottom:2px}
+    .panel-body{padding:18px 22px}
+    .recordings{padding:8px}
+    /* Main window recordings list (excerpt) */
+    .recording-item{padding:12px 14px;border-radius:10px;border:1px solid transparent;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:12px;position:relative}
+    .recording-item:hover{background:#f8fafc;border-color:#e2e8f0}
+    .recording-status{width:8px;height:8px;border-radius:50%;background:#27ae60}
+    .recording-info h3{font-size:14px;font-weight:600;color:#0f172a;margin:0 0 2px;line-height:1.35;overflow-wrap:break-word}
+    .recording-meta{font-size:12px;color:#64748b;font-variant-numeric:tabular-nums}
+    .recording-actions{display:flex;align-items:center;gap:4px}
+    .action-button{padding:5px 9px;border:1px solid transparent;border-radius:6px;background:transparent;color:#64748b;font-size:12px;font-weight:500;white-space:nowrap;line-height:1.2}
+    .action-button:hover{background:#eef2f6;color:#0f172a}
+    .recording-menu{position:absolute;right:8px;top:46px;z-index:2;min-width:190px;padding:4px;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 8px 24px rgba(15,23,42,.12)}
+    .recording-menu-item{display:block;width:100%;padding:7px 10px;border:0;border-radius:6px;background:transparent;color:#0f172a;font-size:13px;text-align:left;white-space:nowrap}
+    .recording-menu-item:hover,.recording-menu-item:focus{background:#eef2f6}
+    .recording-menu-item:disabled{color:#94a3b8}
+    /* Settings shell (excerpt) */
+    .config-subgroup{min-width:0;border:1px solid #e5e7eb;border-radius:10px;padding:14px 16px 6px;margin:0 0 18px}
+    .config-subgroup legend{padding:0 6px;font-size:12px;font-weight:600;color:#334155;text-transform:uppercase;letter-spacing:.04em}
+    .form-group{margin-bottom:18px}
+    .form-group label{display:block;margin-bottom:6px;font-weight:600;font-size:13px;color:#334155}
+    .form-group select{width:100%;padding:9px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#0f172a;background:#fff}
+    .form-group select:focus{outline:none;border-color:#3498db;box-shadow:var(--focus-ring)}
+    .form-group small{display:block;margin-top:6px;color:#64748b;font-size:11.5px;line-height:1.5}
+    .slack-webhook-status{font-size:12px;color:#64748b}.slack-webhook-status.is-success{color:#2f7a64}.slack-webhook-status.is-error{color:#c0392b}
+    .modal-buttons{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
+    .save-button,.cancel-button{padding:8px 18px;border:1px solid transparent;border-radius:7px;font-size:13px;font-weight:600}
+    .save-button{background:#2563eb;color:#fff}.cancel-button{background:#f1f5f9;color:#475569}
+    .config-status{min-height:20px;font-size:12px;color:#2f7a64}
+    /* Storage on this device: copied from renderer/styles.css */
+    .storage-panel{--storage-freeable:#2563eb;--storage-pending:#d97706;--storage-kept:#475569;--storage-notes:#0d9488;--storage-other:#94a3b8;--storage-track:#f1f5f9;min-width:0;padding-bottom:12px}
+    .storage-report{display:flex;flex-direction:column;gap:10px;min-height:44px;color:#475569;font-size:13px}
+    .storage-head{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:2px 16px}
+    .storage-total{margin:0;color:#0f172a;font-size:22px;font-weight:600;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+    .storage-reclaim{margin:0;font-size:13px;font-variant-numeric:tabular-nums}
+    .storage-reclaim.is-action{color:#1d4ed8;font-weight:600}.storage-reclaim.is-muted{color:#64748b}
+    .storage-bar{display:flex;gap:2px;height:10px;border-radius:5px;overflow:hidden;background-color:var(--storage-track)}
+    .storage-seg{flex:0 1 0;min-width:4px}
+    .storage-seg.is-freeable,.storage-swatch.is-freeable{background-color:var(--storage-freeable)}
+    .storage-seg.is-pending,.storage-swatch.is-pending{background-color:var(--storage-pending);background-image:repeating-linear-gradient(-45deg,rgba(255,255,255,.55) 0 2px,transparent 2px 5px)}
+    .storage-seg.is-kept,.storage-swatch.is-kept{background-color:var(--storage-kept)}
+    .storage-seg.is-notes,.storage-swatch.is-notes{background-color:var(--storage-notes)}
+    .storage-seg.is-other,.storage-swatch.is-other{background-color:var(--storage-other);background-image:radial-gradient(rgba(255,255,255,.7) 1px,transparent 1.2px);background-size:4px 4px}
+    .storage-legend{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px 16px}
+    .storage-legend-item{display:flex;align-items:center;gap:7px;min-width:0;font-size:12px;line-height:1.4}
+    .storage-swatch{flex:0 0 auto;width:10px;height:10px;border-radius:3px}
+    .storage-legend-label{min-width:0;color:#475569}
+    .storage-legend-value{margin-left:auto;color:#0f172a;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+    .storage-cloud{display:flex;align-items:center;gap:8px;margin:0;padding:6px 10px;border:1px dashed #cbd5e1;border-radius:8px;color:#475569;font-size:12px;font-variant-numeric:tabular-nums}
+    .storage-cloud-icon{flex:0 0 auto;color:#2563eb}
+    .storage-error{margin:0;color:#991b1b}
+    .storage-action{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-top:14px}
+    .storage-free-button{padding:7px 14px;border:1px solid transparent;border-radius:7px;background-color:#2563eb;color:#fff;font-size:13px;font-weight:600;font-variant-numeric:tabular-nums;transition:background-color .15s}
+    .storage-free-button:not(:disabled):hover{background-color:#1d4ed8}
+    .storage-free-button:disabled{border-color:#e2e8f0;background-color:#f1f5f9;color:#64748b}
+    .storage-help{display:block;margin:6px 0 0;color:#64748b;font-size:11.5px;line-height:1.5}
+    .storage-policy{margin:16px 0 0;padding-top:14px;border-top:1px solid #eef2f6}
+    .storage-details{margin-top:12px;font-size:12px;color:#475569}
+    .storage-details>summary{width:fit-content;color:#334155;font-weight:500;cursor:pointer;border-radius:4px}
+    .storage-details-list{margin:8px 0 0;padding-left:18px;line-height:1.5}
+    .storage-details-list li+li{margin-top:3px}
+    .storage-counts{margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #eef2f6;color:#334155}
+    @media (max-width:480px){.storage-total{font-size:19px}.storage-legend{grid-template-columns:1fr}.storage-free-button{width:100%}}
+    /* Preview chrome */
+    .preview-controls{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;margin:20px 0;font-size:12px;color:#475569}
+    .preview-controls label{display:flex;align-items:center;gap:6px}
+    .preview-controls select{padding:5px 8px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;font-size:12px}
+    .preview-controls .cancel-button{margin-left:auto}
+    dialog{max-width:440px;width:calc(100% - 32px);padding:24px;border:1px solid #e2e8f0;border-radius:14px;color:#1f2937;box-shadow:0 16px 48px rgba(15,23,42,.15)}
+    dialog::backdrop{background:rgba(15,23,42,.33)} dialog h2{margin-bottom:12px} dialog p{font-size:13px;color:#475569;white-space:pre-line}
+    @media (max-width:850px){main{margin:24px auto;padding:0 16px}.preview-grid{grid-template-columns:1fr}.panel-body{padding:16px}}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Listener.AI</h1>
+    <p class="intro">Storage on this device, with recordings backed up to Google Drive.</p>
+    <aside class="preview-note" aria-label="Preview notice"><strong>Interactive preview with sample data</strong><span lang="ko">실제 구현과 같은 스타일과 문구의 미리보기입니다. 공간 비우기, 다운로드, 자동 정리 설정을 눌러볼 수 있으며 실제 파일, Google 계정, 네트워크에는 접근하지 않습니다.</span></aside>
+
+    <div class="preview-controls" role="group" aria-label="Preview state">
+      <label>Sample state
+        <select id="previewState">
+          <option value="signed-in">Signed in to Google Drive</option>
+          <option value="signed-out">Signed out</option>
+          <option value="error">Report error</option>
+        </select>
+      </label>
+      <button type="button" id="resetPreview" class="cancel-button">Reset preview</button>
+    </div>
+
+    <div class="preview-grid">
+      <section class="panel" aria-labelledby="settingsHeading">
+        <header class="panel-header"><p class="panel-kind">Settings</p><h2 id="settingsHeading">Integrations</h2></header>
+        <form id="settingsForm" class="panel-body">
+          <fieldset class="config-subgroup storage-panel" id="localStorageGroup">
+            <legend>Storage on this device</legend>
+            <div id="localStorageReport" class="storage-report" role="status" aria-live="polite" aria-label="Space used by Listener.AI on this device">Loading...</div>
+            <div class="storage-action">
+              <button type="button" id="freeLocalAudioNow" class="storage-free-button" aria-describedby="freeLocalAudioHelp" disabled>Free up space</button>
+              <span id="freeLocalAudioStatus" class="slack-webhook-status" role="status" aria-live="polite"></span>
+            </div>
+            <small id="freeLocalAudioHelp" class="storage-help">Removes audio already in Google Drive from this device. Transcripts and notes stay here.</small>
+            <div class="form-group storage-policy">
+              <label for="audioOffloadAfterDays">Remove synced audio automatically</label>
+              <select id="audioOffloadAfterDays" aria-describedby="audioOffloadAfterDaysHelp">
+                <option value="">Never (keep all audio on this device)</option>
+                <option value="7">When not used for 7 days</option>
+                <option value="14">When not used for 14 days</option>
+                <option value="30">When not used for 30 days</option>
+                <option value="90">When not used for 90 days</option>
+              </select>
+              <small id="audioOffloadAfterDaysHelp">Runs after each automatic sync.</small>
+            </div>
+            <details class="storage-details">
+              <summary>What stays on this device</summary>
+              <ul id="localStorageCounts" class="storage-details-list storage-counts" hidden></ul>
+              <ul class="storage-details-list">
+                <li>Transcripts and notes are never removed, and nothing is deleted from Google Drive.</li>
+                <li>Audio not yet uploaded, recordings without a saved meeting, and audio you transcribed from elsewhere on your computer always stay.</li>
+                <li>Each Drive copy is checked again just before the local audio is removed.</li>
+                <li>Removed audio shows as "In Google Drive" and downloads again when you regenerate, merge, export, or show it in Finder.</li>
+              </ul>
+            </details>
+          </fieldset>
+          <p id="configStatus" class="config-status" role="status" aria-live="polite"></p>
+          <div class="modal-buttons"><button type="submit" class="save-button">Save</button></div>
+        </form>
+      </section>
+
+      <section class="panel" aria-labelledby="recordingsHeading">
+        <header class="panel-header"><p class="panel-kind">Main window</p><h2 id="recordingsHeading">Recent recordings</h2></header>
+        <div id="recordingsList" class="recordings"></div>
+      </section>
+    </div>
+  </main>
+
+  <dialog id="confirmRemoval" aria-labelledby="confirmTitle" aria-describedby="confirmDescription">
+    <h2 id="confirmTitle">Free up space?</h2><p id="confirmDescription"></p>
+    <div class="modal-buttons"><button type="button" id="cancelRemoval" class="cancel-button" autofocus>Cancel</button><button type="button" id="acceptRemoval" class="save-button">Remove</button></div>
+  </dialog>
+
+  <script>
+    'use strict';
+    // In-memory sample state only. No fetch, Electron bridge, storage, or file APIs.
+    const MB = 1024 * 1024;
+    const SAMPLES = [
+      { id: 'alpha', title: 'Product planning', size: 480 * MB, local: true, backed: true, date: '11/13/2026, 10:00 AM' },
+      { id: 'bravo', title: 'Research review', size: 320 * MB, local: false, backed: true, date: '11/12/2026, 2:30 PM' },
+      { id: 'delta', title: 'Customer interview', size: 260 * MB, local: true, backed: true, date: '11/10/2026, 4:00 PM' },
+      { id: 'charlie', title: 'Team check-in', size: 120 * MB, local: true, backed: false, date: '11/13/2026, 9:00 AM' }
+    ];
+    const UNLINKED = { files: 1, bytes: 80 * MB };
+    const NOTES = 8 * MB, OTHER = 12 * MB, EXTERNAL = 1;
+    let recordings = SAMPLES.map((r) => ({ ...r }));
+    let pendingIds = null, returnFocus = null;
+    const $ = (id) => document.getElementById(id);
+
+    // Same wording rules as src/localStorageView.ts.
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    function formatBytes(bytes) {
+      if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
+      const units = ['KB', 'MB', 'GB', 'TB']; let value = bytes / 1024; let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+      return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+    }
+    function buildReport() {
+      const sum = (items) => items.reduce((t, r) => t + r.size, 0);
+      const local = recordings.filter((r) => r.local);
+      const eligible = local.filter((r) => r.backed);
+      const pending = local.filter((r) => !r.backed);
+      const cloud = recordings.filter((r) => !r.local);
+      const audioBytes = sum(local) + UNLINKED.bytes;
+      return {
+        totalBytes: audioBytes + NOTES + OTHER, audioBytes, notesBytes: NOTES, otherBytes: OTHER,
+        eligibleBytes: sum(eligible), eligibleFiles: eligible.length,
+        notBackedUpBytes: sum(pending), notBackedUpFiles: pending.length,
+        unlinkedBytes: UNLINKED.bytes, unlinkedFiles: UNLINKED.files,
+        cloudOnlyBytes: sum(cloud), cloudOnlyFiles: cloud.length, externalFiles: EXTERNAL
+      };
+    }
+    function storageSummary(report, signedIn) {
+      const freeable = Math.max(0, report.eligibleBytes);
+      const pending = Math.max(0, report.notBackedUpBytes);
+      const kept = Math.max(0, report.audioBytes - freeable - pending);
+      const canFree = signedIn && report.eligibleFiles > 0;
+      const segments = [
+        { category: 'freeable', label: signedIn ? 'Can be freed' : 'Audio in Drive', bytes: freeable,
+          detail: report.eligibleFiles > 0 ? `${plural(report.eligibleFiles, 'recording')} already in Google Drive` : undefined },
+        { category: 'pending', label: 'Waiting to upload', bytes: pending,
+          detail: report.notBackedUpFiles > 0 ? `${plural(report.notBackedUpFiles, 'recording')}, kept until a sync uploads ${report.notBackedUpFiles === 1 ? 'it' : 'them'}` : undefined },
+        { category: 'kept', label: 'Audio kept here', bytes: kept,
+          detail: report.unlinkedFiles > 0 ? `Includes ${plural(report.unlinkedFiles, 'recording')} without a saved meeting, which always ${report.unlinkedFiles === 1 ? 'stays' : 'stay'} here` : undefined },
+        { category: 'notes', label: 'Transcripts', bytes: report.notesBytes },
+        { category: 'other', label: 'Other', bytes: report.otherBytes }
+      ].filter((s) => s.bytes > 0).map((s) => ({ ...s, size: formatBytes(s.bytes) }));
+      const segBytes = segments.reduce((t, s) => t + s.bytes, 0);
+      return {
+        total: `${formatBytes(report.totalBytes)} in total`,
+        reclaim: !signedIn ? { text: 'Sign in to Google Drive to free space', tone: 'muted' }
+          : canFree ? { text: `${formatBytes(freeable)} can be freed`, tone: 'action' }
+          : { text: 'Nothing to free right now', tone: 'muted' },
+        segments, barBytes: Math.max(1, report.totalBytes, segBytes),
+        cloudOnly: report.cloudOnlyFiles > 0 ? `${plural(report.cloudOnlyFiles, 'recording')} in Google Drive only (${formatBytes(report.cloudOnlyBytes)}), not using space here` : undefined,
+        external: report.externalFiles > 0 ? `${plural(report.externalFiles, 'meeting')} ${report.externalFiles === 1 ? 'uses' : 'use'} audio stored elsewhere on your computer. Listener.AI never uploads or removes it.` : undefined,
+        canFree, freeLabel: canFree ? `Free up ${formatBytes(freeable)}` : 'Free up space'
+      };
+    }
+
+    // Same DOM as renderer/ui/local-storage.ts.
+    function el(tag, className, text) { const n = document.createElement(tag); if (className) n.className = className; if (text !== undefined) n.textContent = text; return n; }
+    function cloudIcon() {
+      const NS = 'http://www.w3.org/2000/svg'; const svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('viewBox', '0 0 20 20'); svg.setAttribute('width', '16'); svg.setAttribute('height', '16'); svg.setAttribute('aria-hidden', 'true'); svg.setAttribute('focusable', 'false'); svg.classList.add('storage-cloud-icon');
+      const p = document.createElementNS(NS, 'path'); p.setAttribute('d', 'M6 15.5h8.5a3.5 3.5 0 0 0 .4-6.98A5 5 0 0 0 5.2 8.1 3.7 3.7 0 0 0 6 15.5Z'); p.setAttribute('fill', 'none'); p.setAttribute('stroke', 'currentColor'); p.setAttribute('stroke-width', '1.5'); p.setAttribute('stroke-linejoin', 'round');
+      svg.append(p); return svg;
+    }
+    function renderStorage() {
+      const state = $('previewState').value;
+      const button = $('freeLocalAudioNow');
+      if (state === 'error') {
+        $('localStorageReport').replaceChildren(el('p', 'storage-error', "Couldn't measure storage: sample read error."));
+        $('localStorageCounts').hidden = true; button.disabled = true; button.textContent = 'Free up space'; return;
+      }
+      const s = storageSummary(buildReport(), state === 'signed-in');
+      const head = el('div', 'storage-head'); head.append(el('p', 'storage-total', s.total), el('p', `storage-reclaim is-${s.reclaim.tone}`, s.reclaim.text));
+      const bar = el('div', 'storage-bar'); bar.setAttribute('aria-hidden', 'true');
+      const legend = el('ul', 'storage-legend'); legend.setAttribute('aria-label', 'Breakdown');
+      s.segments.forEach((seg) => {
+        const part = el('span', `storage-seg is-${seg.category}`); part.style.flexGrow = String(seg.bytes / s.barBytes); bar.append(part);
+        const item = el('li', 'storage-legend-item'); const sw = el('span', `storage-swatch is-${seg.category}`); sw.setAttribute('aria-hidden', 'true');
+        item.append(sw, el('span', 'storage-legend-label', seg.label), el('span', 'storage-legend-value', seg.size)); legend.append(item);
+      });
+      const nodes = [head, bar]; if (s.segments.length) nodes.push(legend);
+      if (s.cloudOnly) { const c = el('p', 'storage-cloud'); c.append(cloudIcon(), el('span', undefined, s.cloudOnly)); nodes.push(c); }
+      $('localStorageReport').replaceChildren(...nodes);
+      const lines = s.segments.flatMap((seg) => (seg.detail ? [`${seg.label}: ${seg.detail}.`] : [])); if (s.external) lines.push(s.external);
+      $('localStorageCounts').replaceChildren(...lines.map((l) => el('li', undefined, l))); $('localStorageCounts').hidden = !lines.length;
+      button.disabled = !s.canFree; button.textContent = s.freeLabel;
+    }
+
+    function closeMenus() { document.querySelectorAll('.recording-menu').forEach((m) => { m.hidden = true; }); document.querySelectorAll('.recording-actions [aria-expanded]').forEach((b) => b.setAttribute('aria-expanded', 'false')); }
+    function renderList() {
+      const signedIn = $('previewState').value !== 'signed-out';
+      $('recordingsList').replaceChildren();
+      recordings.forEach((r) => {
+        const row = el('article', 'recording-item'); row.dataset.recording = r.id; row.setAttribute('aria-labelledby', `title-${r.id}`);
+        const dot = el('span', 'recording-status'); dot.setAttribute('aria-hidden', 'true');
+        const info = el('div', 'recording-info'); const t = el('h3', undefined, r.title); t.id = `title-${r.id}`;
+        info.append(t, el('p', 'recording-meta', `${r.date}, ${formatBytes(r.size)}${r.local ? '' : ', in Google Drive, not on this device'}`));
+        const actions = el('div', 'recording-actions');
+        const more = el('button', 'action-button', 'More'); more.type = 'button'; more.setAttribute('aria-label', `More actions for ${r.title}`); more.setAttribute('aria-expanded', 'false'); more.setAttribute('aria-controls', `menu-${r.id}`);
+        const menu = el('div', 'recording-menu'); menu.id = `menu-${r.id}`; menu.hidden = true;
+        const action = el('button', 'recording-menu-item', r.local ? 'Remove local copy...' : 'Download audio'); action.type = 'button';
+        action.disabled = (r.local && (!r.backed || !signedIn)) || (!r.local && !signedIn);
+        action.addEventListener('click', () => {
+          if (r.local) askRemoval([r.id], more);
+          else { r.local = true; renderAll(); setStatus('Audio downloaded to this device.', 'success'); document.querySelector(`[data-recording="${r.id}"] .action-button`).focus(); }
+        });
+        menu.append(action);
+        more.addEventListener('click', () => { const open = menu.hidden; closeMenus(); menu.hidden = !open; more.setAttribute('aria-expanded', String(open)); if (open) action.focus(); });
+        menu.addEventListener('keydown', (e) => { if (e.isComposing) return; if (e.key === 'Escape') { e.stopPropagation(); closeMenus(); more.focus(); } });
+        actions.append(more); row.append(dot, info, actions, menu); $('recordingsList').append(row);
+      });
+    }
+    function renderAll() { renderStorage(); renderList(); }
+    function setStatus(text, tone) { const s = $('freeLocalAudioStatus'); s.textContent = text; s.className = `slack-webhook-status${tone ? ` is-${tone}` : ''}`; }
+    function askRemoval(ids, trigger) {
+      closeMenus(); pendingIds = ids; returnFocus = trigger;
+      $('confirmTitle').textContent = ids.length > 1 ? 'Free up space?' : 'Remove local copy?';
+      $('confirmDescription').textContent = (ids.length > 1 ? 'Remove the local audio of every meeting backed up to Google Drive?\n\n' : 'Remove this recording’s local audio?\n\n') + 'Transcripts and notes stay on this device, and the audio stays in Google Drive. Each file is checked against its Drive copy first, and you can download any of them again.';
+      $('acceptRemoval').textContent = ids.length > 1 ? 'Free up space' : 'Remove local copy';
+      $('confirmRemoval').showModal();
+    }
+    $('freeLocalAudioNow').addEventListener('click', (e) => askRemoval(recordings.filter((r) => r.local && r.backed).map((r) => r.id), e.currentTarget));
+    $('cancelRemoval').addEventListener('click', () => $('confirmRemoval').close());
+    // The close event is queued, so focus moves there once the list has re-rendered.
+    $('confirmRemoval').addEventListener('close', () => {
+      pendingIds = null;
+      const target = returnFocus?.isConnected && !returnFocus.disabled ? returnFocus : $('audioOffloadAfterDays');
+      returnFocus = null; target.focus();
+    });
+    $('acceptRemoval').addEventListener('click', () => {
+      const ids = pendingIds || []; const chosen = recordings.filter((r) => ids.includes(r.id) && r.local && r.backed);
+      const freed = chosen.reduce((t, r) => t + r.size, 0); chosen.forEach((r) => { r.local = false; });
+      renderAll();
+      if (ids.length === 1) returnFocus = document.querySelector(`[data-recording="${ids[0]}"] .action-button`);
+      setStatus(chosen.length ? `Freed ${formatBytes(freed)} from ${plural(chosen.length, 'recording')}.` : 'Nothing was removed.', 'success');
+      $('confirmRemoval').close();
+    });
+    $('settingsForm').addEventListener('submit', (e) => { e.preventDefault(); const sel = $('audioOffloadAfterDays'); $('configStatus').textContent = `Sample setting saved: ${sel.options[sel.selectedIndex].text}. Nothing runs in this preview.`; });
+    $('previewState').addEventListener('change', () => { setStatus(''); renderAll(); });
+    $('resetPreview').addEventListener('click', () => { recordings = SAMPLES.map((r) => ({ ...r })); $('previewState').value = 'signed-in'; $('audioOffloadAfterDays').value = ''; $('configStatus').textContent = ''; setStatus('Preview reset. No real files were changed.'); renderAll(); });
+    document.addEventListener('click', (e) => { if (!e.target.closest('.recording-actions') && !e.target.closest('.recording-menu')) closeMenus(); });
+    renderAll();
+  </script>
+</body>
+</html>

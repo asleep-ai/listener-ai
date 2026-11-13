@@ -8,6 +8,7 @@ import { META_JSON } from '../outputService';
 import { saveRegeneratedTranscription } from '../regenerateTranscription';
 import type { TranscriptionResult } from '../geminiService';
 import { reportError } from '../sentry';
+import { withAudioReadLease } from '../services/localAudioStorage';
 import { metadataService } from '../services/metadataService';
 import { notificationService } from '../services/notificationService';
 import {
@@ -272,12 +273,9 @@ async function runTranscription(
     console.log('Starting transcription...');
 
     const summaryPrompt = ctx.configService.getSummaryPrompt();
-    const result = await geminiService.transcribeAudio(
-      filePath,
-      sendProgress,
-      summaryPrompt,
-      liveNotes,
-      { signal },
+    // The read lease keeps "free up space" from removing the audio mid-read.
+    const result = await withAudioReadLease(app.getPath('userData'), filePath, () =>
+      geminiService.transcribeAudio(filePath, sendProgress, summaryPrompt, liveNotes, { signal }),
     );
     // A cancel that lands after the provider already returned must not save.
     signal.throwIfAborted();

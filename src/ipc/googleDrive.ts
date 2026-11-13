@@ -9,6 +9,21 @@ import { syncChangedLocalNotes } from '../meetingList';
 import { getTranscriptionsDir } from '../outputService';
 import { reportError } from '../sentry';
 import { GoogleDriveClient, isTransientDriveError } from '../services/googleDriveService';
+import {
+  AudioRestoreError,
+  buildLocalStorageReport,
+  cleanupRestoreTemps,
+  meetingsForAudio,
+  type ReclaimResult,
+  reclaimLocalAudio,
+  recordingsDirFor,
+  restoreLocalAudio,
+} from '../services/localAudioStorage';
+import {
+  type GoogleSession,
+  GoogleSessionTracker,
+  withGoogleCredentialLock,
+} from '../services/googleSession';
 import { SyncEngine, type SyncProgressEvent, type SyncResult } from '../services/syncEngine';
 import type { IpcContext } from './types';
 
@@ -75,18 +90,52 @@ function broadcastGoogleSyncProgress(event: SyncProgressEvent): void {
   }
 }
 
-function buildDriveClient(credentials: GoogleOAuthCredentials): GoogleDriveClient {
+// Sign-in generation for this process; see googleSession.ts.
+let sessionTracker: GoogleSessionTracker<GoogleOAuthCredentials> | null = null;
+function sessions(): GoogleSessionTracker<GoogleOAuthCredentials> {
+  if (!sessionTracker) {
+    const { configService } = requireCtx();
+    // Reads the persisted sign-in, so a CLI sign-out or account switch is seen
+    // even though this process's ConfigService caches config.json.
+    sessionTracker = new GoogleSessionTracker<GoogleOAuthCredentials>(
+      () => configService.readPersistedGoogleOAuth(),
+      () => configService.readPersistedStoredGoogleOAuth(),
+      (action) => withGoogleCredentialLock(app.getPath('userData'), action),
+    );
+  }
+  return sessionTracker;
+}
+
+// Restores in flight; a sign-in change cancels them.
+const restoreControllers = new Set<AbortController>();
+
+function onGoogleSessionChanged(): void {
+  sessions().bump();
+  for (const controller of restoreControllers) controller.abort();
+}
+
+// The client carries the credentials and session of ONE persisted snapshot
+// (see GoogleSessionTracker.snapshot). Refreshed tokens are persisted only
+// while that session is current and a stored sign-in of the same account
+// exists, so env-sourced tokens never leak into config.json and a late
+// refresh cannot overwrite or resurrect another sign-in.
+function buildDriveClient(snapshot: {
+  credentials: GoogleOAuthCredentials;
+  session: GoogleSession;
+}): GoogleDriveClient {
   const { configService } = requireCtx();
+  const { credentials, session } = snapshot;
   return new GoogleDriveClient({
     getAccessToken: async () => {
+      if (!sessions().isCurrent(session)) {
+        throw new Error('The Google sign-in changed; this Drive operation was stopped.');
+      }
       const token = await resolveGoogleAccessToken({
         credentials,
-        onCredentialsChanged: (next) => {
-          // Same gate as the Codex side: never silently persist refreshed
-          // tokens that originated from env vars.
-          if (configService.hasStoredGoogleOAuth()) {
-            configService.setGoogleOAuth(next);
-          }
+        onCredentialsChanged: async (next) => {
+          await sessions().persistRefreshed(session, next, (value) =>
+            configService.setGoogleOAuth(value),
+          );
         },
       });
       if (!token) throw new Error('Failed to resolve Google access token.');
@@ -95,25 +144,97 @@ function buildDriveClient(credentials: GoogleOAuthCredentials): GoogleDriveClien
   });
 }
 
+// Sync and local audio removal both read and act on sync-state.json and the
+// recordings folder; they never overlap inside this process. (Across
+// processes, removal re-verifies with Drive and the engine treats a missing
+// source audio as cloud-only, so an interleaved CLI run cannot lose data.)
+let storageChain: Promise<unknown> = Promise.resolve();
+function serializeStorage<T>(work: () => Promise<T>): Promise<T> {
+  const run = storageChain.then(work, work);
+  storageChain = run.catch(() => {});
+  return run;
+}
+
+function notifyLocalStorageChanged(): void {
+  const window = requireCtx().getMainWindow();
+  if (window && !window.isDestroyed()) {
+    window.webContents.send('recordings-changed');
+    window.webContents.send('local-storage-changed');
+  }
+}
+
+function isAudioInUse(audioPath: string): boolean {
+  return requireCtx().isAudioInUse?.(audioPath) ?? false;
+}
+
+// Automatic policy: after a successful sync, remove local audio unused for
+// the configured number of days whose Drive copies verify. Stops between
+// files when the setting, sync toggle, or account changes.
+async function runAutomaticAudioOffload(
+  driveClient: GoogleDriveClient,
+  dataPath: string,
+  session: GoogleSession | null,
+): Promise<void> {
+  const { configService } = requireCtx();
+  const days = configService.getAudioOffloadAfterDays();
+  if (days <= 0 || !configService.getGoogleDriveEnabled()) return;
+  // The client verifies against the account the sync started under; stop if
+  // that is no longer the signed-in session.
+  if (!sessions().isCurrent(session)) return;
+  const result = await reclaimLocalAudio({
+    dataPath,
+    driveClient,
+    olderThanDays: days,
+    isInUse: isAudioInUse,
+    shouldContinue: () =>
+      configService.getAudioOffloadAfterDays() === days &&
+      configService.getGoogleDriveEnabled() &&
+      sessions().isCurrent(session),
+    logger: (msg) => console.log(`[local-audio] ${msg}`),
+  });
+  if (result.removed.length > 0) {
+    console.log(
+      `[local-audio] Automatic cleanup removed ${result.removed.length} local recording(s), ${result.freedBytes} bytes.`,
+    );
+    notifyLocalStorageChanged();
+  }
+}
+
 async function runGoogleSync(): Promise<SyncResult | undefined> {
   if (googleSyncInFlight) return undefined;
   const { configService } = requireCtx();
-  const credentials = configService.getGoogleOAuth();
-  if (!credentials) return undefined;
+  // Credentials and session come from the same persisted read, so a CLI
+  // sign-out or switch since this process loaded config.json is honored.
+  const snapshot = sessions().snapshot();
+  if (!snapshot) return undefined;
+  const { session } = snapshot;
 
   googleSyncInFlight = true;
   broadcastGoogleSyncStatus('syncing');
   try {
     const dataPath = app.getPath('userData');
+    const driveClient = buildDriveClient(snapshot);
     const engine = new SyncEngine({
-      driveClient: buildDriveClient(credentials),
+      driveClient,
       transcriptionsDir: getTranscriptionsDir(dataPath),
       syncStatePath: path.join(dataPath, 'sync-state.json'),
+      recordingsDir: recordingsDirFor(dataPath),
       logger: (msg) => console.log(`[google-sync] ${msg}`),
       onProgress: broadcastGoogleSyncProgress,
       configSync: configService,
     });
-    const result = await engine.syncOnce();
+    const result = await serializeStorage(async () => {
+      const synced = await engine.syncOnce();
+      try {
+        await runAutomaticAudioOffload(driveClient, dataPath, session);
+      } catch (error) {
+        console.warn('[local-audio] automatic cleanup failed:', error);
+        if (!isTransientDriveError(error)) {
+          reportError(error, { operation: 'storage.autoOffload', severity: 'warning' });
+        }
+      }
+      return synced;
+    });
     if (syncChangedLocalNotes(result)) {
       const window = requireCtx().getMainWindow();
       if (window && !window.isDestroyed()) window.webContents.send('recordings-changed');
@@ -181,8 +302,145 @@ export function maybeAutoSync(): void {
   void runGoogleSync();
 }
 
+/**
+ * Downloads a note's audio back from Drive (conventional "download on
+ * demand"). Accepts the note folder or the recording path. Returns the local
+ * path, already present or freshly restored.
+ */
+export async function restoreAudio(target: {
+  folderPath?: string;
+  audioPath?: string;
+}): Promise<
+  | { success: true; path: string; downloaded: boolean }
+  | { success: false; error: string; code?: string }
+> {
+  const ctx = requireCtx();
+  const dataPath = app.getPath('userData');
+  let meeting: string | undefined;
+  if (target.folderPath) {
+    if (!ctx.isContainedTranscriptionPath(target.folderPath)) {
+      return { success: false, error: 'Invalid meeting folder' };
+    }
+    meeting = path.basename(target.folderPath);
+  } else if (typeof target.audioPath === 'string' && target.audioPath) {
+    meeting = meetingsForAudio(dataPath, target.audioPath)[0];
+  }
+  if (!meeting) return { success: false, error: 'No meeting links this audio.', code: 'no-audio' };
+  const snapshot = sessions().snapshot();
+  if (!snapshot) {
+    return {
+      success: false,
+      error: 'Sign in to Google Drive to download this audio.',
+      code: 'signed-out',
+    };
+  }
+  const controller = new AbortController();
+  restoreControllers.add(controller);
+  try {
+    cleanupRestoreTemps(dataPath);
+    const restored = await restoreLocalAudio({
+      dataPath,
+      driveClient: buildDriveClient(snapshot),
+      shouldContinue: () => sessions().isCurrent(snapshot.session),
+      meetingFolder: meeting,
+      signal: controller.signal,
+    });
+    if (restored.downloaded) notifyLocalStorageChanged();
+    return { success: true, path: restored.path, downloaded: restored.downloaded };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      return {
+        success: false,
+        error: 'Download cancelled: the Google sign-in changed.',
+        code: 'cancelled',
+      };
+    }
+    if (!(error instanceof AudioRestoreError) && !isTransientDriveError(error)) {
+      reportError(error, { operation: 'storage.restore', severity: 'warning' });
+    }
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      ...(error instanceof AudioRestoreError ? { code: error.code } : {}),
+    };
+  } finally {
+    restoreControllers.delete(controller);
+  }
+}
+
 export function register(ctx: IpcContext): void {
   ctxRef = ctx;
+
+  ipcMain.handle('local-storage-report', async () => {
+    try {
+      const dataPath = app.getPath('userData');
+      return {
+        success: true as const,
+        report: buildLocalStorageReport(dataPath),
+        signedIn: ctx.configService.hasGoogleOAuth(),
+        syncEnabled: ctx.configService.getGoogleDriveEnabled(),
+        offloadAfterDays: ctx.configService.getAudioOffloadAfterDays(),
+      };
+    } catch (error) {
+      reportError(error, { operation: 'storage.report', severity: 'warning' });
+      return {
+        success: false as const,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+
+  // Manual "free up space": removes local copies only (never Drive, never the
+  // note). `paths` omitted = every recording whose copies verify.
+  ipcMain.handle('local-audio-free', async (_, opts?: { paths?: unknown }) => {
+    const snapshot = sessions().snapshot();
+    if (!snapshot) {
+      return { success: false as const, error: 'Sign in to Google Drive first.' };
+    }
+    const dataPath = app.getPath('userData');
+    const recordingsDir = recordingsDirFor(dataPath);
+    const paths = Array.isArray(opts?.paths)
+      ? opts.paths.filter(
+          (p): p is string =>
+            typeof p === 'string' && path.dirname(path.resolve(p)) === path.resolve(recordingsDir),
+        )
+      : undefined;
+    if (Array.isArray(opts?.paths) && paths && paths.length === 0) {
+      return { success: false as const, error: 'Only app recordings can be removed.' };
+    }
+    const { session } = snapshot;
+    try {
+      const result: ReclaimResult = await serializeStorage(() =>
+        reclaimLocalAudio({
+          dataPath,
+          driveClient: buildDriveClient(snapshot),
+          ...(paths ? { paths } : {}),
+          isInUse: isAudioInUse,
+          shouldContinue: () => sessions().isCurrent(session),
+          logger: (msg) => console.log(`[local-audio] ${msg}`),
+        }),
+      );
+      if (result.removed.length > 0) notifyLocalStorageChanged();
+      return { success: true as const, result };
+    } catch (error) {
+      if (!isTransientDriveError(error)) {
+        reportError(error, { operation: 'storage.free', severity: 'warning' });
+      }
+      return {
+        success: false as const,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+
+  ipcMain.handle(
+    'local-audio-restore',
+    async (_, opts?: { folderPath?: unknown; audioPath?: unknown }) =>
+      restoreAudio({
+        folderPath: typeof opts?.folderPath === 'string' ? opts.folderPath : undefined,
+        audioPath: typeof opts?.audioPath === 'string' ? opts.audioPath : undefined,
+      }),
+  );
 
   ipcMain.handle('google-oauth-login', async () => {
     while (pendingGoogleLogin) {
@@ -217,7 +475,8 @@ export function register(ctx: IpcContext): void {
         },
         signal: controller.signal,
       });
-      ctx.configService.setGoogleOAuth(credentials);
+      await ctx.configService.signInGoogleOAuth(credentials);
+      onGoogleSessionChanged();
       ctx.applyConfigSideEffects({ googleOAuth: credentials });
       ctx.broadcastConfigChanged();
       return { success: true as const, config: ctx.configService.getAllConfig() };
@@ -251,7 +510,8 @@ export function register(ctx: IpcContext): void {
 
   ipcMain.handle('google-oauth-clear', async () => {
     try {
-      ctx.configService.clearGoogleOAuth();
+      await ctx.configService.signOutGoogleOAuth();
+      onGoogleSessionChanged();
       ctx.applyConfigSideEffects({ googleOAuth: undefined });
       ctx.broadcastConfigChanged();
       return { success: true, config: ctx.configService.getAllConfig() };
