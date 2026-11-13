@@ -11,7 +11,12 @@ import type {
   RecordingStateSnapshot,
 } from '../../src/recordingState';
 import { getDom, state } from '../state';
-import { hideLiveNotesPanel, setLiveNotes, showLiveNotesPanel } from '../ui/live-notes';
+import {
+  hideLiveNotesPanel,
+  setLiveNotes,
+  setLiveNotesAccepting,
+  showLiveNotesPanel,
+} from '../ui/live-notes';
 import {
   clearLiveSessionLauncher,
   configureLiveSessionLauncher,
@@ -220,6 +225,9 @@ function applySnapshot(next: RecordingStateSnapshot): void {
     enterRecordingUi(next);
   }
   if (state.isRecording) setLiveNotes(next.notes);
+  // Notes are taken only while main is recording; from 'stopping' on, main
+  // refuses them, so the panel stops offering it at once.
+  setLiveNotesAccepting(next.phase === 'recording');
   if (next.phase === 'stopping' && previous?.phase !== 'stopping') {
     statusText.textContent = 'Saving recording...';
     if (next.stopReason === 'track-ended')

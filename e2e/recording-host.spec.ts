@@ -554,6 +554,41 @@ test('quitting during a recording with a stalled live caption tail exits within 
   }
 });
 
+// While the recording is stopping, main refuses notes; the window's notes
+// panel stops taking them at once and keeps whatever was typed.
+test('the notes panel stops taking notes while the recording is stopping and keeps typed text', async () => {
+  shared.seed(SEED);
+  const { app, page } = await shared.start();
+  await installSyntheticCapture(app);
+  await startWithoutUi(app, 'Notes While Stopping');
+  const input = page.locator('#liveNoteInput');
+  await expect(input).toBeEnabled();
+  await input.fill('Typed before the stop');
+  // Keep the stop from reaching the host so the recording stays 'stopping'.
+  await app.evaluate(({ app }) => {
+    process.mainModule!.require(`${app.getAppPath()}/dist/captureHost.js`).CaptureHostWindow.prototype.stop =
+      () => {};
+  });
+  await app.evaluate(({ ipcMain }) => {
+    void (ipcMain as any)._invokeHandlers.get('recording-request-stop')({ sender: null });
+  });
+  await waitForPhase(app, 'stopping');
+  await expect(input).toBeDisabled();
+  await expect(page.locator('#liveNoteFlagButton')).toBeDisabled();
+  await expect(input).toHaveValue('Typed before the stop');
+  // Main's rule is unchanged: a note sent now is refused, not taken silently.
+  expect(await page.evaluate(() => window.electronAPI.addRecordingNote({ text: 'late' }))).toMatchObject({
+    success: false,
+  });
+  expect((await recordingState(app)).notes).toEqual([]);
+  // The 10s grace force-finalizes the stuck stop and disposes the host it
+  // never heard from; release its pinned window role like the crash case.
+  await waitForPhase(app, 'idle');
+  await shared.releaseCaptureHost();
+  await settle(app, shared);
+  await shared.finish();
+});
+
 // A normal stop gives a silent capture host 10s before it force-finalizes. A
 // quit within that window must pull the force-finalize inside its own
 // deadline (3s grace), or the process exits first and the recording's notes
