@@ -100,6 +100,33 @@ async function expectFirstRtp(app: ElectronApplication): Promise<void> {
   }
 }
 
+// The loopback peers connected over numeric host candidates (the launch turns
+// off mDNS host-candidate hiding), each saw the other's candidates, and a
+// candidate pair succeeded. Candidate kinds only: no addresses are read out,
+// and the kinds are kept as an output file of the case.
+async function expectNumericLoopback(app: ElectronApplication): Promise<void> {
+  const peers = await realtimeDiagnostics(app);
+  // Kept with the case's results as the evidence of what the peers used.
+  writeFileSync(
+    test.info().outputPath('realtime-connected-diagnostics.json'),
+    JSON.stringify(peers, null, 2),
+  );
+  for (const side of [peers.offerer, peers.answerer]) {
+    expect(side.connection).toBe('connected');
+    expect(side.localSdp.length).toBeGreaterThan(0);
+    expect(side.remoteSdp.length).toBeGreaterThan(0);
+    expect(
+      [...side.localSdp, ...side.remoteSdp, ...side.candidateStats].filter((c: string) =>
+        c.endsWith('/mdns'),
+      ),
+    ).toEqual([]);
+    expect(side.candidateStats.some((c: string) => c.startsWith('remote-candidate:'))).toBe(true);
+    expect(side.pairs.succeeded ?? 0).toBeGreaterThan(0);
+  }
+  expect(peers.offerer.rtp['outbound-rtp'].packets).toBeGreaterThan(0);
+  expect(peers.answerer.rtp['inbound-rtp'].packets).toBeGreaterThan(0);
+}
+
 async function startWithoutUi(app: ElectronApplication, title: string) {
   const started = await invokeMain(app, 'recording-request-start', { title });
   expect(started).toEqual({ success: true });
@@ -333,6 +360,7 @@ test('the host-owned OpenAI Realtime WebRTC peer keeps streaming across a UI rel
       channel: 'open',
       authorization: ['Bearer synthetic-client-secret'],
     });
+    await expectNumericLoopback(app);
     // The client secret goes to the host only, never to the visible window.
     expect(
       await page.evaluate(async () =>

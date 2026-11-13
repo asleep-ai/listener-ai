@@ -123,6 +123,25 @@ function isAlive(pid: number): boolean {
   }
 }
 
+// TEST-ONLY Chromium switch for every owned launch. The WebRTC loopback case
+// connects two peers in one hidden page, and with Chromium's default each peer
+// advertises only an mDNS .local name for its host candidates, which the other
+// must resolve over multicast. A hosted macOS run had no remote candidates or
+// pairs, with ICE still "new"; remove that dependency from this loopback.
+// With this feature off the peers
+// advertise their numeric host addresses; the case asserts that it did.
+export const OWNED_DISABLED_FEATURES = ['WebRtcHideLocalIpsWithMdns'];
+
+// Merges `features` into the args' --disable-features switch (Chromium keeps
+// only one value per switch), keeping any features already listed.
+export function withDisabledFeatures(args: string[], features: string[]): string[] {
+  const prefix = '--disable-features=';
+  const index = args.findIndex((arg) => arg.startsWith(prefix));
+  const existing = index < 0 ? [] : args[index].slice(prefix.length).split(',').filter(Boolean);
+  const merged = `${prefix}${[...new Set([...existing, ...features])].join(',')}`;
+  return index < 0 ? [...args, merged] : args.map((arg, i) => (i === index ? merged : arg));
+}
+
 // Each suite owns one data root for the entire lifetime of its main-process
 // singletons. Only synthetic app data is reset; Chromium's live profile stays.
 export class ReusableApp {
@@ -204,12 +223,12 @@ export class ReusableApp {
             .digest('hex');
           app = await electron.launch({
             executablePath: artifact.executable,
-            args: ['--no-sandbox'],
+            args: withDisabledFeatures(['--no-sandbox'], OWNED_DISABLED_FEATURES),
             cwd: this.dataDir,
             env,
           });
         } else {
-          app = await launchApp(env);
+          app = await launchApp(env, withDisabledFeatures([], OWNED_DISABLED_FEATURES));
         }
         this.application = app;
         this.pid = app.process().pid;

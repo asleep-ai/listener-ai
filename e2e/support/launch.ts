@@ -16,7 +16,12 @@ import { assertBackgroundDevBuild } from '../background-test';
 export const ROOT = resolve(__dirname, '..', '..');
 export const HIDDEN_ELECTRON = resolve(__dirname, 'hidden-electron.cjs');
 
-export function launchApp(env: NodeJS.ProcessEnv): Promise<ElectronApplication> {
+// `extraArgs` are appended after the hidden-launch arguments (test-only
+// Chromium switches); the default adds nothing.
+export function launchApp(
+  env: NodeJS.ProcessEnv,
+  extraArgs: string[] = [],
+): Promise<ElectronApplication> {
   if (process.env.LISTENER_E2E_SHOW === '1')
     throw new Error('Background tests refuse LISTENER_E2E_SHOW=1.');
   assertBackgroundDevBuild();
@@ -31,7 +36,7 @@ export function launchApp(env: NodeJS.ProcessEnv): Promise<ElectronApplication> 
   );
   return electron.launch({
     executablePath: process.env.LISTENER_E2E_ELECTRON || (require('electron') as string),
-    args: ['-r', HIDDEN_ELECTRON, '.', '--disable-gpu', '--no-sandbox'],
+    args: ['-r', HIDDEN_ELECTRON, '.', '--disable-gpu', '--no-sandbox', ...extraArgs],
     cwd: ROOT,
     env: {
       ...isolatedEnv,
