@@ -11,6 +11,7 @@ import {
   chooseInitial,
 } from '../services/model-options';
 import type { ConfigPayload, ElectronAPI, GoogleSyncProgress } from '../electronAPI';
+import { formatLastSynced } from './drive-status';
 import {
   LEGACY_CODEX_PROVIDER,
   type LiveSttProvider,
@@ -789,17 +790,6 @@ function syncProgressText(progress: GoogleSyncProgress): string {
   return `Syncing ${progress.index}/${progress.total}: ${progress.meeting}`;
 }
 
-function formatLastSynced(iso: string | null | undefined): string {
-  if (!iso) return 'Never synced';
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diffMs / 60_000);
-  if (mins < 1) return 'Synced just now';
-  if (mins < 60) return `Synced ${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `Synced ${hrs}h ago`;
-  return `Synced ${Math.floor(hrs / 24)}d ago`;
-}
-
 // Gate a deliberate AI action on the credentials it needs: the AI provider
 // (summary, report regeneration, Ask Listener) and, for audio work, the
 // selected transcription backend, which can be a different vendor with its
@@ -892,6 +882,8 @@ export async function showConfigModal(options: ConfigModalOptions = {}): Promise
     .then((s) => {
       if (s.inFlight) {
         setGoogleSyncStatus(s.progress ? syncProgressText(s.progress) : 'Syncing...', 'idle');
+      } else if (s.lastError) {
+        setGoogleSyncStatus(`${s.lastError} (${formatLastSynced(s.lastSyncedAt)})`, 'error');
       } else {
         setGoogleSyncStatus(formatLastSynced(s.lastSyncedAt));
       }
@@ -1499,6 +1491,10 @@ export function setupConfigModal(): void {
       if (tombstoned.length > 0) parts.push(`${tombstoned.length} marked for deletion`);
       setGoogleSyncStatus(`Synced just now (${parts.join(', ')})`, 'success');
       if (configModal?.open) void refreshLocalStorageReport();
+    } else if (status.phase === 'idle') {
+      // A cycle that ended after a sign-in change: nothing to report for the
+      // current account.
+      setGoogleSyncStatus(formatLastSynced(status.lastSyncedAt));
     } else if (status.phase === 'error') {
       const errCount = status.result?.errors.length ?? 0;
       setGoogleSyncStatus(status.error ?? `Sync finished with ${errCount} error(s)`, 'error');

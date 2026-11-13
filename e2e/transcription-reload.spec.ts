@@ -5,6 +5,8 @@ import { basename, join } from 'node:path';
 import { ROOT } from './support/launch';
 import { answerConfirm, scriptDialogs, scriptedDialogs, visibleWindows } from './support/dialogs';
 import { ReusableApp } from './support/reusable-app';
+import { installFakeDrive, uninstallFakeDrive } from './support/fake-drive';
+import { SYNTHETIC_GOOGLE_OAUTH } from './support/packaged-guards';
 
 // Reload-safe transcription jobs, end to end in the real Electron app.
 //
@@ -578,6 +580,141 @@ test('auto-mode Notion and Slack follow-ups survive reloads in every phase and r
     failure = { error };
     throw error;
   } finally {
+    await close(fx, dataDir, failure);
+  }
+});
+
+test('a manual Notion upload survives a reload: the reopened note shows it running, a repeat joins it, and the result appears', async () => {
+  const dataDir = seed({ notionApiKey: 'secret_fixture', notionDatabaseId: 'fixture-database' });
+  const audio = seedRecording(dataDir, 'Untitled_Meeting');
+  let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
+  try {
+    fx = await launch(dataDir);
+    const { app, page } = fx;
+    await row(page, audio).locator('.transcribe-btn').click();
+    await expect.poll(async () => (await stats(app)).calls.length).toBe(1);
+    await resolveCall(app, 0, 'Export Reload');
+    const open = page.getByRole('button', { name: 'Open transcript for Export_Reload' });
+    await expect(open).toBeVisible();
+    const [folder] = noteMetas(dataDir);
+
+    const upload = (p: string) =>
+      page.evaluate(async (folderPath) => {
+        const note = await window.electronAPI.getSavedNote(folderPath);
+        void window.electronAPI.uploadToNotion({
+          title: 'Export Reload',
+          transcriptionData: note.data,
+          transcriptionPath: folderPath,
+          expectedGenerationId: note.data?.generationId ?? null,
+        });
+      }, p);
+    await upload(folder);
+    await expect.poll(async () => (await stats(app)).notion.length).toBe(1);
+
+    await page.reload();
+    await page.waitForLoadState('domcontentloaded');
+    await open.click();
+    await expect(page.locator('#transcriptionModal')).toHaveJSProperty('open', true);
+    await expect(page.locator('#uploadToNotion')).toBeDisabled();
+    await expect(page.locator('#notionButtonLabel')).toHaveText('Uploading...');
+
+    await upload(folder); // a repeat after the reload joins the running upload
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect((await stats(app)).notion).toHaveLength(1);
+
+    await app.evaluate(() =>
+      (globalThis as any).__jobFixture.notion[0].resolve({
+        success: true,
+        url: 'https://notion.invalid/manual',
+      }),
+    );
+    await expect(page.locator('#notionButtonLabel')).toHaveText('View in Notion');
+    await expect(page.locator('#uploadToNotion')).toBeEnabled();
+    // The outcome is announced inside the modal dialog (a toast outside it
+    // would be inert under the dialog).
+    const status = page.locator('#transcriptionModal #noteExportStatus');
+    await expect(status).toHaveAttribute('role', 'status');
+    await expect(status).toHaveText('Uploaded to Notion.');
+    const meta = JSON.parse(readFileSync(join(folder, 'meta.json'), 'utf8'));
+    expect(meta.exports.notion.pageUrl).toBe('https://notion.invalid/manual');
+    expect((await stats(app)).notion).toHaveLength(1);
+  } catch (error) {
+    failure = { error };
+    throw error;
+  } finally {
+    await close(fx, dataDir, failure);
+  }
+});
+
+test('a regenerate of audio kept only in Google Drive downloads inside the job and survives a reload', async () => {
+  const dataDir = seed({
+    googleOAuth: { ...SYNTHETIC_GOOGLE_OAUTH, expires: Date.now() + 24 * 60 * 60 * 1000 },
+  });
+  const audio = seedRecording(dataDir, 'Untitled_Meeting');
+  const renamed = join(dataDir, 'recordings', `Cloud_Regen_${TS}.wav`);
+  let fx: Fixture | undefined;
+  let failure: CaseFailure | undefined;
+  let driveInstalled = false;
+  try {
+    fx = await launch(dataDir);
+    const { app, page } = fx;
+    await installFakeDrive(app);
+    driveInstalled = true;
+    await row(page, audio).locator('.transcribe-btn').click();
+    await expect.poll(async () => (await stats(app)).calls.length).toBe(1);
+    await resolveCall(app, 0, 'Cloud Regen');
+    await expect.poll(async () => (await jobsFromMain(page)).jobs[0]?.status).toBe('succeeded');
+    expect((await page.evaluate(() => window.electronAPI.syncGoogleDriveNow())).success).toBe(true);
+    const freed = await page.evaluate(
+      (p) => window.electronAPI.freeLocalAudio({ paths: [p] }),
+      renamed,
+    );
+    expect(freed.success && freed.result.removed.length).toBe(1);
+    expect(existsSync(renamed)).toBe(false);
+
+    // Hold the Drive download so the reload lands while the job downloads.
+    await app.evaluate(({ app }) => {
+      const { createRequire } = process.getBuiltinModule('node:module');
+      const path = process.getBuiltinModule('node:path');
+      const req = createRequire(path.join(app.getAppPath(), 'dist', 'main.js'));
+      const proto = req('./services/googleDriveService.js').GoogleDriveClient.prototype;
+      const g = globalThis as any;
+      const original = proto.downloadFile;
+      let release!: () => void;
+      g.__heldDownload = { pending: 0, promise: new Promise<void>((r) => (release = r)) };
+      g.__heldDownload.release = release;
+      proto.downloadFile = async function (...args: unknown[]) {
+        g.__heldDownload.pending++;
+        await g.__heldDownload.promise;
+        return original.apply(this, args);
+      };
+    });
+    await page.evaluate((p) => {
+      void window.electronAPI.transcribeAudio(p);
+    }, renamed);
+    await expect
+      .poll(() => app.evaluate(() => (globalThis as any).__heldDownload.pending))
+      .toBe(1);
+
+    await page.reload();
+    await page.waitForLoadState('domcontentloaded');
+    const running = (await jobsFromMain(page)).jobs.find((j) => j.status === 'running');
+    expect(running?.message).toBe('Downloading audio from Google Drive...');
+    await app.evaluate(() => (globalThis as any).__heldDownload.release());
+
+    await expect.poll(async () => (await stats(app)).calls.length).toBe(2);
+    expect(existsSync(renamed)).toBe(true);
+    await resolveCall(app, 1, 'Cloud Regen');
+    await expect
+      .poll(async () => (await jobsFromMain(page)).jobs.every((j) => j.status === 'succeeded'))
+      .toBe(true);
+    expect(noteMetas(dataDir)).toHaveLength(1);
+  } catch (error) {
+    failure = { error };
+    throw error;
+  } finally {
+    if (driveInstalled && fx) await uninstallFakeDrive(fx.app);
     await close(fx, dataDir, failure);
   }
 });

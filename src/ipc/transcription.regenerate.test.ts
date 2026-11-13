@@ -100,7 +100,12 @@ describe('transcribe-audio regenerate (#213)', () => {
         },
       }),
       getMainWindow: () => null,
-      configService: { getSummaryPrompt: () => '' },
+      configService: {
+        getSummaryPrompt: () => '',
+        getNotionApiKey: () => 'secret_x',
+        getNotionDatabaseId: () => 'db-x',
+        getSlackWebhookUrl: () => 'https://hooks.slack.com/services/x',
+      },
       ensureGeminiService: () => ({
         transcribeAudio: (...args: Parameters<TranscribeFn>) => transcribe(...args),
       }),

@@ -2,7 +2,7 @@ import type { FullResult, Reporter, Suite, TestCase, TestResult } from '@playwri
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyCase, type CasePolicy } from './case-policy';
+import { caseApplies, classifyCase, type CasePolicy } from './case-policy';
 
 // Set before workers are created so every project appends to the same owned log.
 export function initializeLaunchLog(): void {
@@ -46,7 +46,12 @@ export default class LaunchReporter implements Reporter {
         file: test.location.file,
         title: test.title,
         status: 'not-run',
-        required: policy.group !== 'settings-shots' || !!process.env.LISTENER_E2E_SHOTS,
+        // Opt-in screenshots, and a case that does not apply on this
+        // platform (caseApplies), plan no launch.
+        required:
+          policy.group === 'settings-shots'
+            ? !!process.env.LISTENER_E2E_SHOTS
+            : caseApplies(test.title),
       });
     }
   }

@@ -90,6 +90,11 @@ describe('transcription jobs (reload-safe ownership)', () => {
   let notionConfigured: boolean;
   let slackConfigured: boolean;
   let ffmpegGate: Deferred<string | null> | null;
+  // Cloud-only audio: restore requests, an optional gate, and whether it fails.
+  let restoreCalls: string[];
+  let restoreGate: Deferred<void> | null;
+  let restoreFails: boolean;
+  let cloudCopies: Set<string>;
 
   beforeEach(() => {
     dataPath = makeTempDir('ipc-transcription-jobs');
@@ -98,6 +103,10 @@ describe('transcription jobs (reload-safe ownership)', () => {
     handlers = new Map();
     calls = [];
     sent = [];
+    restoreCalls = [];
+    restoreGate = null;
+    restoreFails = false;
+    cloudCopies = new Set();
     notionCalls = [];
     notionGate = null;
     notionResult = null;
@@ -132,6 +141,8 @@ describe('transcription jobs (reload-safe ownership)', () => {
       getMainWindow: () => window,
       configService: {
         getSummaryPrompt: () => '',
+        getNotionApiKey: () => 'secret_x',
+        getNotionDatabaseId: () => 'db-x',
         getSlackWebhookUrl: () => (slackConfigured ? 'https://hooks.slack.com/services/x' : ''),
         getSlackAutoShare: () => slackConfigured,
       },
@@ -189,6 +200,17 @@ describe('transcription jobs (reload-safe ownership)', () => {
           : null,
       openExternal: (url: string) => opened.push(url),
       maybeAutoSync: () => {},
+      restoreCloudAudio: async (audioPath: string) => {
+        restoreCalls.push(audioPath);
+        await restoreGate?.promise;
+        if (restoreFails)
+          return { success: false, error: 'No Drive copy', code: 'drive-unavailable' };
+        if (!cloudCopies.has(audioPath)) {
+          return { success: false, error: 'No meeting links this audio.', code: 'no-audio' };
+        }
+        fs.writeFileSync(audioPath, 'audio');
+        return { success: true, path: audioPath };
+      },
       isContainedTranscriptionPath: (p: string | undefined): p is string =>
         typeof p === 'string' && path.resolve(p).startsWith(transcriptionsRoot + path.sep),
       formatAiCredentialsError: () => 'no credentials',
@@ -938,5 +960,93 @@ describe('transcription jobs (reload-safe ownership)', () => {
     const next = invoke('merge-recordings', { paths: [a, b] });
     ffmpegGate.resolve(null);
     assert.equal((await next).code, 'ffmpeg-missing');
+  });
+
+  // A transcribe or regenerate of a recording kept only in Google Drive
+  // downloads it inside the main-owned job: a reloaded window finds the job
+  // (and its download step) running, a repeat joins it, and the provider runs
+  // once the audio is back.
+  it('downloads cloud-only audio inside the job, visible to a reloaded window and joined by a repeat', async () => {
+    const audio = path.join(recordingsDir, `Cloud_Only_${TS}.webm`); // not on disk
+    cloudCopies.add(audio);
+    restoreGate = deferred();
+    const first = invoke('transcribe-audio', audio);
+    await waitFor(() => restoreCalls.length === 1, 'the download');
+    const [running] = (await jobs()).jobs; // what a reloaded window reads
+    assert.equal(running.status, 'running');
+    assert.equal(running.message, 'Downloading audio from Google Drive...');
+    const repeat = invoke('transcribe-audio', audio);
+    restoreGate.resolve();
+    await waitFor(() => calls.length === 1, 'provider call');
+    assert.equal(restoreCalls.length, 1, 'one download');
+    calls[0].resolve(resultFor('Cloud Only'));
+    const [a, b] = await Promise.all([first, repeat]);
+    assert.equal(a.success, true);
+    assert.equal(b.joined, true);
+    assert.equal(noteFolders().length, 1);
+  });
+
+  it('fails the job with the download error when cloud-only audio cannot be restored', async () => {
+    const audio = path.join(recordingsDir, `Gone_${TS}.webm`);
+    restoreFails = true;
+    const result = await invoke('transcribe-audio', audio);
+    assert.equal(result.success, false);
+    assert.match(result.error, /Couldn't download audio: No Drive copy/);
+    assert.equal(calls.length, 0);
+  });
+
+  it('a merge downloads a cloud-only source inside the merge job', async () => {
+    const local = recording('Local');
+    const cloud = path.join(recordingsDir, `Cloud_${TS}.webm`);
+    restoreFails = true;
+    const result = await invoke('merge-recordings', { paths: [local, cloud], title: 'M' });
+    assert.deepEqual(restoreCalls, [cloud]);
+    assert.equal(result.success, false);
+    assert.match(result.error, /Couldn't download audio/);
+  });
+
+  // Auto mode's upload names the generation it saved, so a click on the same
+  // note (same generation, title and database) joins it: one page.
+  it('a manual Notion click during auto mode upload of the same note joins it', async () => {
+    notionConfigured = true;
+    notionGate = deferred();
+    const audio = recording('Untitled_Meeting');
+    const auto = invoke('transcribe-audio', audio, undefined, {
+      autoExport: true,
+      recordingTitle: 'Untitled_Meeting',
+    });
+    await waitFor(() => calls.length === 1, 'provider call');
+    calls[0].resolve(resultFor('Weekly Sync'));
+    await waitFor(() => notionCalls.length === 1, 'auto upload');
+    const [folderName] = noteFolders();
+    const folder = path.join(getTranscriptionsDir(dataPath), folderName);
+    const meta = JSON.parse(fs.readFileSync(path.join(folder, 'meta.json'), 'utf-8'));
+    const manual = invoke('upload-to-notion', {
+      title: 'Weekly Sync Title',
+      transcriptionData: {},
+      transcriptionPath: folder,
+      expectedGenerationId: meta.generationId,
+    });
+    notionGate.resolve();
+    const [autoResult, manualResult] = await Promise.all([auto, manual]);
+    assert.equal(notionCalls.length, 1, 'one page');
+    assert.equal(manualResult.url, autoResult.exports.notion.url);
+  });
+
+  it('cancels a job at once while its cloud audio downloads, leaving the shared download running', async () => {
+    const audio = path.join(recordingsDir, `Cancel_Download_${TS}.webm`);
+    cloudCopies.add(audio);
+    restoreGate = deferred();
+    const pending = invoke('transcribe-audio', audio);
+    await waitFor(() => restoreCalls.length === 1, 'the download');
+    const cancelled = await invoke('cancel-transcription', audio);
+    assert.equal(cancelled.success, true);
+    const result = await pending; // returns before the download finishes
+    assert.equal(result.success, false);
+    assert.equal(result.cancelled, true);
+    assert.equal(fs.existsSync(audio), false, 'the download is still running');
+    restoreGate.resolve();
+    await waitFor(() => fs.existsSync(audio), 'the shared download completes');
+    assert.equal(calls.length, 0, 'the cancelled job never transcribed');
   });
 });

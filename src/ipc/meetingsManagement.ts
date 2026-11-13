@@ -12,6 +12,7 @@ import { concatAudioFiles } from '../services/audioConcatService';
 import { withAudioReadLease } from '../services/localAudioStorage';
 import { metadataService } from '../services/metadataService';
 import { type TranscriptionJobHandle, pathKeys, transcriptionJobs } from '../transcriptionJobs';
+import { notCloudAudio } from './transcription';
 import type { IpcContext } from './types';
 
 const execFileAsync = promisify(execFile);
@@ -96,15 +97,24 @@ export function register(ctx: IpcContext): void {
       // recordings directory so a future renderer bug can't transcode arbitrary
       // local files. realpath resolves symlinks before the prefix check.
       const recordingsDir = path.join(app.getPath('userData'), 'recordings');
-      let resolvedSrc: string;
-      try {
-        resolvedSrc = await fs.promises.realpath(srcPath);
-      } catch {
-        return { success: false, error: 'Source recording not found' };
-      }
       const resolvedRoot = await fs.promises.realpath(recordingsDir).catch(() => recordingsDir);
-      if (!resolvedSrc.startsWith(resolvedRoot + path.sep)) {
-        return { success: false, error: 'Source path is outside the recordings directory' };
+      // A recording kept only in Google Drive: the destination is asked for
+      // first (while the window that asked is there), then the download and
+      // encode run in main without it.
+      const cloudOnly =
+        !fs.existsSync(srcPath) &&
+        !!ctx.restoreCloudAudio &&
+        (await realDir(srcPath)) === resolvedRoot;
+      let resolvedSrc = path.resolve(srcPath);
+      if (!cloudOnly) {
+        try {
+          resolvedSrc = await fs.promises.realpath(srcPath);
+        } catch {
+          return { success: false, error: 'Source recording not found' };
+        }
+        if (!resolvedSrc.startsWith(resolvedRoot + path.sep)) {
+          return { success: false, error: 'Source path is outside the recordings directory' };
+        }
       }
 
       // The read lease spans the save dialog and the encode, so "free up
@@ -133,6 +143,19 @@ export function register(ctx: IpcContext): void {
           return { canceled: true };
         }
         const destPath = saveResult.filePath;
+        if (cloudOnly) {
+          const restored = await ctx.restoreCloudAudio!(srcPath);
+          if (!restored.success && notCloudAudio(restored.code)) {
+            return { success: false, error: 'Source recording not found' };
+          }
+          if (!restored.success) {
+            return { success: false, error: `Couldn't download audio: ${restored.error}` };
+          }
+          resolvedSrc = await fs.promises.realpath(srcPath);
+          if (!resolvedSrc.startsWith(resolvedRoot + path.sep)) {
+            return { success: false, error: 'Source path is outside the recordings directory' };
+          }
+        }
         // Write to a sibling temp file and atomically rename on success so a
         // failed encode never overwrites the user's picked path with a partial.
         const tmpPath = `${destPath}.partial`;
@@ -240,6 +263,15 @@ async function runMerge(
     for (const p of inputPaths) {
       if (typeof p !== 'string' || !p) {
         return { success: false, error: 'Invalid input path' };
+      }
+      // A source kept only in Google Drive is downloaded first, inside this
+      // job, so the merge does not depend on the window that requested it.
+      if (!fs.existsSync(p) && ctx.restoreCloudAudio && (await realDir(p)) === resolvedRoot) {
+        sendProgress(0, 'Downloading audio from Google Drive...');
+        const restored = await ctx.restoreCloudAudio(p);
+        if (!restored.success && !notCloudAudio(restored.code)) {
+          return { success: false, error: `Couldn't download audio: ${restored.error}` };
+        }
       }
       let resolved: string;
       try {
@@ -383,4 +415,9 @@ async function runMerge(
     ctx.notificationService.notifyTranscriptionFailed('Merge failed. Check the app for details.');
     return { success: false, error: message };
   }
+}
+
+// The resolved directory of a path whose file may not exist (yet).
+function realDir(p: string): Promise<string | null> {
+  return fs.promises.realpath(path.dirname(path.resolve(p))).catch(() => null);
 }

@@ -161,26 +161,54 @@ export function assertCleanReset(state: {
 
 export interface WindowState {
   id: number;
+  url: string;
   visible: boolean;
   focused: boolean;
   focusable: boolean;
   devTools: boolean;
 }
 
-export function assertSingleHiddenWindow(windows: WindowState[], expectedId?: number): number {
-  if (
-    windows.length !== 1 ||
-    windows[0].visible ||
-    windows[0].focused ||
-    windows[0].focusable ||
-    windows[0].devTools ||
-    (expectedId !== undefined && windows[0].id !== expectedId)
-  ) {
+// The only native windows the app may own: its main UI and the hidden
+// recording capture host (src/captureHost.ts, loaded lazily on the first
+// recording and kept loaded afterwards). A role comes from the loaded page.
+export type WindowRole = 'main' | 'capture';
+export interface WindowRoles {
+  main: number;
+  capture?: number;
+}
+
+export function windowRole(url: string): WindowRole | null {
+  const path = url.split(/[?#]/)[0];
+  if (path.endsWith('/renderer/index.html')) return 'main';
+  if (path.endsWith('/renderer/capture.html')) return 'capture';
+  return null;
+}
+
+// Every window must be hidden, unfocused, non-focusable and without DevTools.
+// Exactly one main window and at most one capture host; each keeps the ID it
+// was first seen with. A capture host appears once (first recording) and is
+// then expected at that ID; replacing either window must be adopted
+// deliberately by the caller, never tolerated here.
+export function assertHiddenWindowRoles(
+  windows: WindowState[],
+  expected: Partial<WindowRoles> = {},
+): WindowRoles {
+  const fail = () => {
     throw new Error(
-      `Expected the same single hidden, unfocused test window: ${JSON.stringify(windows)}`,
+      `Expected one hidden main window and at most one hidden capture host with stable IDs: ${JSON.stringify(
+        { expected, windows },
+      )}`,
     );
-  }
-  return windows[0].id;
+  };
+  const roles = windows.map((w) => windowRole(w.url));
+  if (roles.some((role) => role === null)) fail();
+  if (windows.some((w) => w.visible || w.focused || w.focusable || w.devTools)) fail();
+  const main = windows.filter((_, i) => roles[i] === 'main');
+  const capture = windows.filter((_, i) => roles[i] === 'capture');
+  if (main.length !== 1 || capture.length > 1) fail();
+  if (expected.main !== undefined && main[0].id !== expected.main) fail();
+  if (expected.capture !== undefined && capture[0]?.id !== expected.capture) fail();
+  return { main: main[0].id, ...(capture[0] ? { capture: capture[0].id } : {}) };
 }
 
 export async function bounded<T>(

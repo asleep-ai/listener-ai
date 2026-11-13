@@ -125,6 +125,42 @@ describe('meetingsManagement.register', () => {
     }
   });
 
+  // A recording kept only in Google Drive: the destination is asked for
+  // first, then main downloads and encodes without needing the window.
+  it('M4A export of cloud-only audio asks for the destination before downloading', async () => {
+    const dataPath = makeTempDir('export-cloud');
+    userData = dataPath;
+    const order: string[] = [];
+    try {
+      const recordings = path.join(dataPath, 'recordings');
+      fs.mkdirSync(recordings, { recursive: true });
+      const src = path.join(recordings, 'Cloud_2026-01-01T00-00-00-000Z.webm'); // not on disk
+      dialogStub.showSaveDialog = async () => {
+        order.push('dialog');
+        return { canceled: false, filePath: path.join(dataPath, 'out.m4a') };
+      };
+      registerFn!({
+        getMainWindow: () => null,
+        ffmpegManager: { ensureFFmpeg: async () => '/usr/bin/false' },
+        restoreCloudAudio: async (p: string) => {
+          order.push('download');
+          fs.writeFileSync(p, 'audio');
+          return { success: true, path: p };
+        },
+      } as unknown as IpcContext);
+      const result = (await handlers.get('export-recording-m4a')!({}, src)) as {
+        success: boolean;
+      };
+      assert.deepEqual(order, ['dialog', 'download']);
+      assert.ok(fs.existsSync(src), 'downloaded into place');
+      assert.equal(result.success, false, '/usr/bin/false stands in for a failing encode');
+    } finally {
+      delete dialogStub.showSaveDialog;
+      userData = '/tmp/listener-ai-test';
+      rmDir(dataPath);
+    }
+  });
+
   // Deleting the row of the recording still being written loses the
   // recording; its transcription then hits ENOENT (a reachable cause
   // consistent with LISTENER-AI-Q's breadcrumbs).

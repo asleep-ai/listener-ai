@@ -1,23 +1,29 @@
 # Electron test session reuse
 
-The behavioral suites keep one main process and one hidden native window per
-compatible group. They reload the renderer between cases. Development and
+The behavioral suites keep one main process per compatible group, with its
+hidden native windows in fixed roles: the main window and, once a recording
+has started, the hidden capture host (`src/captureHost.ts`). Every window must
+stay hidden, unfocused and non-focusable, each role keeps a stable ID, and no
+other window may appear; a replaced window must be adopted explicitly. They reload the renderer between cases. Development and
 packaged artifacts never share a process.
 
 | Project         |     Cases | Process lifetime                | State reset                                                                                         |
 | --------------- | --------: | ------------------------------- | --------------------------------------------------------------------------------------------------- |
 | settings        |         5 | One development process         | Raw config, client caches, renderer, synthetic files                                                |
-| meeting-list    |         2 | Dev, or packaged (see below)    | Saved-note fixtures, config, renderer                                                               |
+| meeting-list    |         5 | Dev, or packaged (see below)    | Saved-note fixtures, config, renderer                                                               |
 | cutoff          |         2 | One development process         | Saved-note fixtures, config, renderer                                                               |
-| reload          |        23 | One development process         | Deferred jobs and exports, reservations, locks, IPC and provider overrides, renderer                |
-| live            |         8 | One development process         | Synthetic live capture, providers, config, renderer                                                 |
+| reload          |        25 | One development process         | Deferred jobs and exports, reservations, locks, IPC and provider overrides, renderer                |
+| live            |         9 | One development process         | Synthetic live capture, providers, config, renderer                                                 |
+| recording       |         2 | Dev, or packaged                | Synthetic capture, recordings, config, renderer                                                     |
+| recording-window|         3 | Fresh process each, dev or pkg  | Main window destroyed and recreated: recording, OpenAI Realtime WebRTC loopback, queued Settings     |
+| recording-quit  |         1 | Fresh process, dev or packaged  | Real app.quit() with a stalled live tail; the process exits on its own                              |
 | chatgpt         |        22 | One packaged process            | Pending sign-in/preflight, auth and agent overrides, global fetch, IPC, raw config, synthetic files |
 | chatgpt-startup |         4 | Fresh packaged process per case | Independent startup configuration                                                                   |
 | hidden-startup  |         1 | Fresh development process       | Hidden construction contract                                                                        |
 | package-smoke   |         1 | Fresh packaged process          | Packaged boot contract                                                                              |
 | settings-shots  | 1, opt-in | Fresh development process       | Independent screenshot evidence                                                                     |
 
-The normal run discovers 69 cases and expects 12 process launches, with the
+The normal run discovers 81 cases and expects 17 process launches (one fewer on Windows/Linux, where the menu Settings case does not apply), with the
 optional screenshot case skipped. Enabling `LISTENER_E2E_SHOTS` adds one launch.
 These are expected budgets, not execution evidence.
 
@@ -139,3 +145,16 @@ rows. Independent reports sharing an audio file remain reachable, including old
 or transient duplicate reports. Note-only rows do not add deletion or audio
 hydration, and these tests do not establish real Drive or assistive-technology
 behavior.
+
+## Main-window replacement and quit cases
+
+The `recording-window` cases destroy the main window and recreate it. A
+packaged run re-pins the guards' main window with
+`__listenerPackagedGuards.adoptMainWindow()`, which refuses while the pinned
+window still exists or unless exactly one replacement main window exists, and
+then re-checks every hidden-window invariant. The menu Settings case applies
+only on macOS (`caseApplies` in `e2e/support/case-policy.ts`); on Windows and
+Linux the same request comes from the tray, which background test mode never
+creates. The `recording-quit` case ends its own process through `app.quit()`;
+`closeOwnedElectron` then confirms the owned PID is gone (signal 0 probe)
+instead of signalling it.

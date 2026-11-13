@@ -1,16 +1,24 @@
-import { type BrowserWindow, Menu, Tray, app, nativeImage } from 'electron';
-import type { SimpleAudioRecorder } from './simpleAudioRecorder';
+import { Menu, Tray, app, nativeImage } from 'electron';
+
+// Main-process actions the tray triggers. Recording goes straight to the
+// RecordingController, so the tray works with no visible window; the window
+// actions recreate a destroyed window instead of showing a dead one.
+export interface MenuBarActions {
+  isRecording(): boolean;
+  startRecording(): void;
+  stopRecording(): void;
+  openWindow(): void;
+  openPreferences(): void;
+}
 
 export class MenuBarManager {
   private tray: Tray | null = null;
   private isRecording = false;
-  private mainWindow: BrowserWindow | null = null;
-  private audioRecorder: SimpleAudioRecorder | null = null;
+  private actions: MenuBarActions | null = null;
   private currentRecordingTitle = 'Quick Recording';
 
-  init(mainWindow: BrowserWindow, audioRecorder: SimpleAudioRecorder) {
-    this.mainWindow = mainWindow;
-    this.audioRecorder = audioRecorder;
+  init(actions: MenuBarActions) {
+    this.actions = actions;
 
     try {
       this.createTray();
@@ -57,13 +65,11 @@ export class MenuBarManager {
   }
 
   private setupWindowListeners() {
-    if (!this.mainWindow) return;
+    if (!this.actions) return;
 
     // Show window when activated (macOS dock click)
     app.on('activate', () => {
-      if (this.mainWindow && !this.mainWindow.isVisible()) {
-        this.mainWindow.show();
-      }
+      this.actions?.openWindow();
     });
   }
 
@@ -124,7 +130,7 @@ export class MenuBarManager {
   }
 
   private async handleTrayClick() {
-    if (this.isRecording) {
+    if (this.actions?.isRecording() ?? this.isRecording) {
       // If recording, stop it
       await this.stopRecording();
     } else {
@@ -134,21 +140,12 @@ export class MenuBarManager {
   }
 
   async startQuickRecording() {
-    // Instead of starting recording directly, send a message to the renderer
-    // to click the start button, which will handle all the logic
-    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      // Start recording in the background -- no show/focus so the window stays hidden
-      this.mainWindow.webContents.send('tray-start-recording');
-    }
+    // Start recording in the background -- no show/focus so the window stays hidden
+    this.actions?.startRecording();
   }
 
   async stopRecording() {
-    // Instead of stopping recording directly, send a message to the renderer
-    // to click the stop button, which will handle all the logic
-    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      // Tell the renderer to stop recording
-      this.mainWindow.webContents.send('tray-stop-recording');
-    }
+    this.actions?.stopRecording();
   }
 
   private updateTrayIcon(state: 'normal' | 'recording') {
@@ -169,24 +166,14 @@ export class MenuBarManager {
 
     menuItems.push({
       label: 'Open Listener.AI',
-      click: () => {
-        if (this.mainWindow) {
-          this.mainWindow.show();
-          this.mainWindow.focus();
-        }
-      },
+      click: () => this.actions?.openWindow(),
     });
 
     menuItems.push({ type: 'separator' });
 
     menuItems.push({
       label: 'Preferences...',
-      click: () => {
-        if (this.mainWindow) {
-          this.mainWindow.show();
-          this.mainWindow.webContents.send('open-config');
-        }
-      },
+      click: () => this.actions?.openPreferences(),
     });
 
     menuItems.push({ type: 'separator' });

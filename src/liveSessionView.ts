@@ -10,7 +10,8 @@ export type LiveIndicatorPhase = 'idle' | 'connecting' | 'active' | 'finalizing'
 
 /**
  * Why the last session ended. `renderer-lost` means main closed the provider
- * because the window that captured audio reloaded or crashed; `failed` means
+ * because the hidden capture host that captured audio crashed or closed (a
+ * reload of the visible window never ends a session); `failed` means
  * the session could not start or its fallback failed.
  */
 export type LiveIndicatorEndReason = 'user' | 'renderer-lost' | 'failed';
@@ -100,7 +101,7 @@ export function describeLiveIndicator(state: LiveIndicatorState): LiveIndicatorV
         visible: true,
         buttonLabel: 'Open live captions',
         opensDialog: true,
-        statusText: 'Live captions ended when the window reloaded',
+        statusText: 'Live captions ended when audio capture stopped',
         detailText: captionDetail(count, true),
         tone: 'ended',
         readOnly: true,

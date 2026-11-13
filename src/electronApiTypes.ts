@@ -123,6 +123,8 @@ export type LiveSessionEvent =
   | { type: 'translationInterim'; sessionId: string; text: string; offsetMs?: number }
   | { type: 'segment'; sessionId: string; segment: LiveTranscriptSegment }
   | { type: 'error'; sessionId: string; error: string }
+  /** The session finished stopping, whoever stopped it; `error` when capture failed. */
+  | { type: 'ended'; sessionId: string; reason: 'user' | 'renderer-lost'; error?: string }
   | LiveHintEvent;
 
 export type AgentConfirmRequest = {
@@ -254,3 +256,26 @@ export type LocalAudioFreeResult =
 export type LocalAudioRestoreResult =
   | { success: true; path: string; downloaded: boolean }
   | { success: false; error: string; code?: string };
+
+// Main-owned long operations other than transcription jobs (see
+// src/ipc/backgroundOperations.ts). Snapshots carry no results or errors.
+export type BackgroundOperationSnapshot = {
+  id: string;
+  kind: string;
+  target: string;
+  status: 'running' | 'succeeded' | 'failed';
+  revision: number;
+  startedAt: string;
+  finishedAt?: string;
+};
+
+export type BackgroundOperationsSnapshot = {
+  revision: number;
+  operations: BackgroundOperationSnapshot[];
+};
+
+export type BackgroundOperationChange = {
+  revision: number;
+  operation: BackgroundOperationSnapshot;
+  removedIds: string[];
+};

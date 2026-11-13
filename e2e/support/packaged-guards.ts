@@ -97,6 +97,7 @@ export function installPackagedGuards(
   phase: 'post-boot';
   appPath: string;
   windowId: number | null;
+  captureWindowId: number | null;
   electronVersion: string | undefined;
   observations: unknown[];
   pid: number;
@@ -115,6 +116,16 @@ export function installPackagedGuards(
   )
     throw new Error('Packaged guards require the verified ASAR and explicit background test mode.');
   const windows = BrowserWindow.getAllWindows();
+  // The main window the invariants hold to: the boot window, or the one a
+  // case adopted after deliberately destroying it (adoptMainWindow).
+  let pinnedMain = windows[0];
+  const roleOfUrl = (url: unknown): 'main' | 'capture' | null => {
+    if (typeof url !== 'string') return null;
+    const path = url.split(/[?#]/)[0];
+    if (path.endsWith('/renderer/index.html')) return 'main';
+    if (path.endsWith('/renderer/capture.html')) return 'capture';
+    return null;
+  };
   if ((globalThis as any).__listenerPackagedGuardProof)
     throw new Error('Packaged guards must be installed once per owned process.');
 
@@ -124,6 +135,8 @@ export function installPackagedGuards(
     phase: 'post-boot' as const,
     appPath: app.getAppPath(),
     windowId: windows[0]?.id ?? null,
+    // The hidden recording capture host, pinned when first observed.
+    captureWindowId: null as number | null,
     electronVersion: process.versions?.electron,
     observations: [] as unknown[],
     pid: process.pid,
@@ -180,6 +193,7 @@ export function installPackagedGuards(
   };
   configureProof(proofContext);
   observeNativeState('before-guard-install', windows, {
+    url: (window) => window.webContents.getURL(),
     visible: (window) => window.isVisible(),
     focused: (window) => window.isFocused(),
     focusable: (window) => window.isFocusable(),
@@ -343,6 +357,7 @@ export function installPackagedGuards(
     focused: windows[0].isFocused,
     focusable: windows[0].isFocusable,
     devTools: windows[0].webContents.isDevToolsOpened,
+    url: windows[0].webContents.getURL,
     on: app.on,
     listeners: app.listeners,
   };
@@ -369,10 +384,11 @@ export function installPackagedGuards(
       !app.isPackaged ||
       app.dock !== nativeLookups.dock ||
       app.dock?.isVisible !== nativeLookups.dockVisible ||
-      windows[0].isVisible !== nativeLookups.visible ||
-      windows[0].isFocused !== nativeLookups.focused ||
-      windows[0].isFocusable !== nativeLookups.focusable ||
-      windows[0].webContents.isDevToolsOpened !== nativeLookups.devTools ||
+      pinnedMain.isVisible !== nativeLookups.visible ||
+      pinnedMain.isFocused !== nativeLookups.focused ||
+      pinnedMain.isFocusable !== nativeLookups.focusable ||
+      pinnedMain.webContents.isDevToolsOpened !== nativeLookups.devTools ||
+      pinnedMain.webContents.getURL !== nativeLookups.url ||
       app.on !== nativeLookups.on ||
       app.listeners !== nativeLookups.listeners ||
       !nativeLookups.listeners.call(app, 'browser-window-created').includes(onWindow) ||
@@ -388,6 +404,7 @@ export function installPackagedGuards(
       );
     }
     observeNativeState(stage, nativeLookups.allWindows.call(BrowserWindow), {
+      url: (window) => nativeLookups.url.call(window.webContents),
       visible: (window) => nativeLookups.visible.call(window),
       focused: (window) => nativeLookups.focused.call(window),
       focusable: (window) => nativeLookups.focusable.call(window),
@@ -395,10 +412,15 @@ export function installPackagedGuards(
       dockVisible: () => nativeLookups.dockVisible!.call(app.dock),
     });
   };
+  // Windows are identified by role: the boot main window (same reference and
+  // ID) and at most one hidden recording capture host, pinned at the ID it
+  // was first seen with. Every window must be hidden, unfocused,
+  // non-focusable and without DevTools; any other window fails.
   function observeNativeState(
     stage: string,
     current: Electron.BrowserWindow[],
     queries: {
+      url(window: Electron.BrowserWindow): string;
       visible(window: Electron.BrowserWindow): boolean;
       focused(window: Electron.BrowserWindow): boolean;
       focusable(window: Electron.BrowserWindow): boolean;
@@ -406,17 +428,20 @@ export function installPackagedGuards(
       dockVisible(): boolean;
     },
   ): void {
-    const read = (query: () => boolean): boolean | { error: string } => {
+    const read = <T>(query: () => T): T | { error: string } => {
       try {
         return query();
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) };
       }
     };
+    const roleOf = roleOfUrl;
     const snapshot = {
       expected: {
         count: 1,
+        captureCountMax: 1,
         windowId: proof.windowId,
+        captureWindowId: proof.captureWindowId,
         referenceMatches: true,
         visible: false,
         focused: false,
@@ -427,28 +452,43 @@ export function installPackagedGuards(
       actual: {
         count: current.length,
         windowIds: current.map((window) => window.id),
-        windows: current.map((window) => ({
-          id: window.id,
-          referenceMatches: window === windows[0],
-          visible: read(() => queries.visible(window)),
-          focused: read(() => queries.focused(window)),
-          focusable: read(() => queries.focusable(window)),
-          devTools: read(() => queries.devTools(window)),
-        })),
+        windows: current.map((window) => {
+          const url = read(() => queries.url(window));
+          return {
+            id: window.id,
+            role: roleOf(url),
+            referenceMatches: window === pinnedMain,
+            visible: read(() => queries.visible(window)),
+            focused: read(() => queries.focused(window)),
+            focusable: read(() => queries.focusable(window)),
+            devTools: read(() => queries.devTools(window)),
+          };
+        }),
         dockVisible: process.platform === 'darwin' ? read(() => queries.dockVisible()) : null,
       },
     };
-    const first = snapshot.actual.windows[0];
+    const all = snapshot.actual.windows;
+    const mains = all.filter((w) => w.role === 'main');
+    const captures = all.filter((w) => w.role === 'capture');
+    const main = mains[0];
+    const capture = captures[0];
     const matchedExpected = {
-      count: snapshot.actual.count === 1,
-      windowId: first?.id === proof.windowId,
-      referenceMatches: first?.referenceMatches === true,
-      visible: first?.visible === false,
-      focused: first?.focused === false,
-      focusable: first?.focusable === false,
-      devTools: first?.devTools === false,
+      count:
+        mains.length === 1 &&
+        captures.length <= 1 &&
+        mains.length + captures.length === all.length,
+      windowId: main?.id === proof.windowId,
+      referenceMatches: main?.referenceMatches === true,
+      captureWindowId:
+        !capture || proof.captureWindowId === null || capture.id === proof.captureWindowId,
+      visible: all.length > 0 && all.every((w) => w.visible === false),
+      focused: all.length > 0 && all.every((w) => w.focused === false),
+      focusable: all.length > 0 && all.every((w) => w.focusable === false),
+      devTools: all.length > 0 && all.every((w) => w.devTools === false),
       dockVisible: process.platform !== 'darwin' || snapshot.actual.dockVisible === false,
     };
+    if (capture && proof.captureWindowId === null && matchedExpected.captureWindowId)
+      proof.captureWindowId = capture.id;
     const observation = {
       stage,
       caseName: context?.caseName,
@@ -503,7 +543,39 @@ export function installPackagedGuards(
     assertIntact('after-guard-restore');
   };
   Object.defineProperty(globalThis, '__listenerPackagedGuards', {
-    value: Object.freeze({ restoreAndAssert, assertIntact, assertNativeState, configureProof }),
+    value: Object.freeze({
+      restoreAndAssert,
+      assertIntact,
+      assertNativeState,
+      configureProof,
+      // A test that deliberately crashed the capture host releases its pinned
+      // ID; the next host is pinned when observed.
+      releaseCaptureHost: () => {
+        proof.captureWindowId = null;
+        persist('capture-host-released');
+      },
+      // A case that deliberately destroyed the main window (Windows/Linux
+      // close) adopts its replacement. Refused while the pinned main window
+      // still exists or unless exactly one main window exists now; the
+      // replacement must then pass every hidden-window invariant.
+      adoptMainWindow: () => {
+        const current = nativeLookups.allWindows.call(BrowserWindow);
+        if (current.includes(pinnedMain)) {
+          persist('main-window-adopt-refused', ['mainWindowAlive']);
+          throw new Error('The pinned main window still exists; only a destroyed one is replaced.');
+        }
+        const mains = current.filter(
+          (window) => roleOfUrl(nativeLookups.url.call(window.webContents)) === 'main',
+        );
+        if (mains.length !== 1) {
+          persist('main-window-adopt-refused', ['mainWindowCount']);
+          throw new Error(`Expected exactly one replacement main window, found ${mains.length}.`);
+        }
+        pinnedMain = mains[0];
+        proof.windowId = pinnedMain.id;
+        assertIntact('main-window-adopted');
+      },
+    }),
     writable: false,
     configurable: false,
   });

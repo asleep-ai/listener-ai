@@ -37,6 +37,21 @@ export default defineConfig({
       testMatch: 'chatgpt-integration.spec.ts',
       grep: /startup .* opens without AI setup prompt/,
     },
+    {
+      name: 'recording',
+      testMatch: 'recording-host.spec.ts',
+      grepInvert: /main window is destroyed|quitting during a recording/,
+    },
+    {
+      name: 'recording-quit',
+      testMatch: 'recording-host.spec.ts',
+      grep: /quitting during a recording/,
+    },
+    {
+      name: 'recording-window',
+      testMatch: 'recording-host.spec.ts',
+      grep: /main window is destroyed/,
+    },
     { name: 'hidden-startup', testMatch: 'hidden-launch.spec.ts' },
     { name: 'package-smoke', testMatch: 'smoke.spec.ts' },
   ],

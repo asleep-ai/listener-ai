@@ -1,6 +1,6 @@
 import type {} from '../renderer/electronAPI';
 import { test, expect } from '@playwright/test';
-import { mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, symlinkSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { ReusableApp } from './support/reusable-app';
 import { answerConfirm, scriptDialogs, scriptedDialogs, visibleWindows } from './support/dialogs';
@@ -443,18 +443,27 @@ test('signed in with a fake Drive: free locally, merge downloads first, free all
     ).toBe(true);
     expect((await fakeDriveState(app)).trashed).toEqual([]);
 
-    // Merge from Bravo with cloud-only Alpha: the renderer downloads Alpha
-    // first and sends only local, existing paths. The merge handler is
-    // swapped for a recorder so no transcription provider is called.
-    await app.evaluate(({ ipcMain }) => {
+    // Merge from Bravo with cloud-only Alpha: the request names Alpha's path
+    // as is, and main downloads it as the merge job's first step (so the
+    // merge survives a reload). The merge handler is swapped for a recorder
+    // that runs that same main restore (restoreRecordingAudio, which the merge
+    // job calls; see transcription.jobs.test) and no transcription provider.
+    await app.evaluate(({ app, ipcMain }) => {
       const handlers = (ipcMain as any)._invokeHandlers;
       const gg = globalThis as any;
+      const { createRequire } = process.getBuiltinModule('node:module');
+      const pathm = process.getBuiltinModule('node:path');
+      const req = createRequire(pathm.join(app.getAppPath(), 'dist', 'main.js'));
+      const { restoreRecordingAudio } = req('./ipc/googleDrive.js');
       gg.__e2eMergeCalls = [];
       gg.__e2eMergeOriginal = handlers.get('merge-recordings');
       handlers.set('merge-recordings', async (_e: unknown, opts: { paths: string[] }) => {
         const fsm = process.getBuiltinModule('node:fs');
+        const existBefore = opts.paths.map((p) => fsm.existsSync(p));
+        for (const p of opts.paths) if (!fsm.existsSync(p)) await restoreRecordingAudio(p);
         gg.__e2eMergeCalls.push({
           paths: opts.paths,
+          existBefore,
           exist: opts.paths.map((p) => fsm.existsSync(p)),
         });
         return { success: false, error: 'e2e merge recorder' };
@@ -473,6 +482,7 @@ test('signed in with a fake Drive: free locally, merge downloads first, free all
       .toBe(1);
     const [call] = await app.evaluate(() => (globalThis as any).__e2eMergeCalls);
     expect(call.paths).toContain(alpha.audio);
+    expect(call.existBefore).toContain(false); // the renderer no longer pre-downloads
     expect(call.exist).toEqual([true, true]);
     expect(fs.readFileSync(alpha.audio)).toEqual(alpha.bytes);
 
@@ -516,6 +526,62 @@ test('signed in with a fake Drive: free locally, merge downloads first, free all
       delete gg.__e2eMergeOriginal;
       delete gg.__e2eMergeCalls;
     });
+    await uninstallFakeDrive(app);
+    await meetingApp.finish();
+  }
+});
+
+// Automatic sync is owned by main: with the window never touched and Settings
+// never opened, the periodic scheduler transfers files once sync is enabled on
+// disk (the way `listener config set googleDriveEnabled true` does it), and the
+// main window's status line reports it.
+test('Drive syncs on its own schedule with Settings never opened', async () => {
+  test.setTimeout(150_000);
+  const dataDir = meetingApp.seed({
+    aiProvider: 'gemini',
+    geminiApiKey: 'synthetic-unused-key',
+    googleDriveEnabled: false,
+    googleOAuth: { ...SYNTHETIC_GOOGLE_OAUTH, expires: Date.now() + 24 * 60 * 60 * 1000 },
+  });
+  const { saveTranscription } =
+    require('../dist/outputService.js') as typeof import('../src/outputService');
+  const recordings = join(dataDir, 'recordings');
+  mkdirSync(recordings, { recursive: true });
+  const audio = join(recordings, 'Scheduled_2026-10-05T00-00-00-000Z.webm');
+  writeFileSync(audio, Buffer.from('Scheduled audio '.repeat(64)));
+  saveTranscription({
+    title: 'Scheduled',
+    audioFilePath: audio,
+    dataPath: dataDir,
+    result: { emoji: '', transcript: 'Speech', summary: 'S', keyPoints: [], actionItems: [] },
+  });
+  const configPath = join(dataDir, 'config.json');
+  const writeEnabled = (enabled: boolean) => {
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    writeFileSync(configPath, JSON.stringify({ ...config, googleDriveEnabled: enabled }));
+  };
+
+  const { app, page } = await meetingApp.start();
+  try {
+    await installFakeDrive(app);
+    await expect(page.locator('#driveSyncStatus')).toBeHidden();
+    writeEnabled(true); // outside this process; its cached config still says off
+
+    await expect
+      .poll(async () => (await fakeDriveState(app)).names, { timeout: 75_000, intervals: [1_000] })
+      .toContain(basename(audio));
+    await expect(page.locator('#driveSyncStatus')).toHaveText(/^Google Drive: Synced /, {
+      timeout: 75_000,
+    });
+    expect(await page.evaluate(() => (document.getElementById('configModal') as HTMLDialogElement).open)).toBe(false);
+    expect(await visibleWindows(app)).toEqual([]);
+  } finally {
+    writeEnabled(false);
+    await expect
+      .poll(async () => (await page.evaluate(() => window.electronAPI.getGoogleSyncStatus())).inFlight, {
+        timeout: 30_000,
+      })
+      .toBe(false);
     await uninstallFakeDrive(app);
     await meetingApp.finish();
   }

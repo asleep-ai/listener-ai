@@ -44,17 +44,27 @@ function fixture(options: Record<string, unknown> = {}) {
       constructor(options = {}) {
         this.id = options.id ?? 1;
         this.options = options;
-        this.isVisible = () => !!options.visible;
-        this.isFocused = () => !!options.focused;
-        this.isFocusable = () => !!options.focusable;
+        // Shared like Electron's prototype methods, so a native lookup taken
+        // from the first window reads whichever window it is called on.
+        this.isVisible = NativeWindow.isVisible;
+        this.isFocused = NativeWindow.isFocused;
+        this.isFocusable = NativeWindow.isFocusable;
         this.webContents = {
-          isDevToolsOpened: () => !!options.devTools,
+          options,
+          url: options.url ?? 'file:///app/resources/app.asar/dist/renderer/index.html',
+          getURL: NativeWindow.getURL,
+          isDevToolsOpened: NativeWindow.isDevToolsOpened,
           openDevTools: original('devTools'),
         };
         for (const name of ['show', 'showInactive', 'focus', 'moveTop', 'restore'])
           this[name] = original('window.' + name);
       }
       static getAllWindows() { return windows.slice(); }
+      static isVisible() { return !!this.options.visible; }
+      static isFocused() { return !!this.options.focused; }
+      static isFocusable() { return !!this.options.focusable; }
+      static getURL() { return this.url; }
+      static isDevToolsOpened() { return !!this.options.devTools; }
     }
     const windows = options.noWindows ? [] : [new NativeWindow(options)];
     if (options.extraWindow) windows.push(new NativeWindow({id: 2}));
@@ -531,6 +541,104 @@ for (const [field, mutate] of [
       },
     );
     assert.equal(runInContext('__listenerTestNativeEffects.length', f.context), 0);
+  });
+}
+
+const CAPTURE_URL = 'file:///app/resources/app.asar/dist/renderer/capture.html';
+
+test('a hidden capture host is accepted, pinned at its first ID and released only deliberately', () => {
+  const f = fixture();
+  const proof = f.install();
+  const guards = runInContext('__listenerPackagedGuards', f.context);
+  f.state.windows.push(new f.state.NativeWindow({ id: 5, url: CAPTURE_URL }));
+  guards.assertIntact('capture-created');
+  assert.equal(proof.captureWindowId, 5);
+  // Host disposed between recordings is fine; a different host is not.
+  f.state.windows.splice(1, 1);
+  guards.assertIntact('capture-gone');
+  f.state.windows.push(new f.state.NativeWindow({ id: 6, url: CAPTURE_URL }));
+  assert.throws(() => guards.assertIntact('capture-replaced'), (error: any) => {
+    const diagnostic = JSON.parse(error.message.slice(error.message.indexOf('{')));
+    assert.equal(diagnostic.matchedExpected.captureWindowId, false);
+    return true;
+  });
+  guards.releaseCaptureHost();
+  guards.assertIntact('capture-adopted');
+  assert.equal(proof.captureWindowId, 6);
+});
+
+test('a destroyed main window is replaced only through a strict, deliberate adoption', () => {
+  const f = fixture();
+  const proof = f.install();
+  const guards = runInContext('__listenerPackagedGuards', f.context);
+  // Adoption is refused while the boot window still exists.
+  assert.throws(() => guards.adoptMainWindow(), /still exists/);
+  // Destroyed and recreated: without adoption the replacement is not the pinned main.
+  f.state.windows.splice(0, 1);
+  f.state.windows.push(new f.state.NativeWindow({ id: 7 }));
+  assert.throws(() => guards.assertIntact('main-replaced'), (error: any) => {
+    const diagnostic = JSON.parse(error.message.slice(error.message.indexOf('{')));
+    assert.equal(diagnostic.matchedExpected.windowId, false);
+    return true;
+  });
+  guards.adoptMainWindow();
+  assert.equal(proof.windowId, 7);
+  guards.assertIntact('main-adopted');
+});
+
+for (const [name, windows] of [
+  ['no replacement main window', []],
+  ['two main windows', [{ id: 7 }, { id: 8 }]],
+] as const) {
+  test(`adoption is refused with ${name}`, () => {
+    const f = fixture();
+    f.install();
+    const guards = runInContext('__listenerPackagedGuards', f.context);
+    f.state.windows.splice(0, 1);
+    for (const options of windows) f.state.windows.push(new f.state.NativeWindow(options));
+    assert.throws(() => guards.adoptMainWindow(), /exactly one replacement main window/);
+  });
+}
+
+test('an adopted main window must still be hidden', () => {
+  const f = fixture();
+  f.install();
+  const guards = runInContext('__listenerPackagedGuards', f.context);
+  f.state.windows.splice(0, 1);
+  f.state.windows.push(new f.state.NativeWindow({ id: 7, visible: true }));
+  assert.throws(() => guards.adoptMainWindow(), /window or Dock invariant/);
+});
+
+for (const [name, options] of [
+  ['visible', { visible: true }],
+  ['focused', { focused: true }],
+  ['focusable', { focusable: true }],
+  ['devTools', { devTools: true }],
+] as const) {
+  test(`a capture host that is ${name} fails the native invariant`, () => {
+    const f = fixture();
+    f.install();
+    const guards = runInContext('__listenerPackagedGuards', f.context);
+    f.state.windows.push(new f.state.NativeWindow({ id: 5, url: CAPTURE_URL, ...options }));
+    assert.throws(() => guards.assertIntact(), /window or Dock invariant/);
+  });
+}
+
+for (const [name, extra] of [
+  ['a second capture host', [{ id: 5, url: CAPTURE_URL }, { id: 6, url: CAPTURE_URL }]],
+  ['an unknown window', [{ id: 5, url: 'file:///app/resources/app.asar/dist/renderer/other.html' }]],
+  ['an unloaded window', [{ id: 5, url: '' }]],
+] as const) {
+  test(`${name} fails the window count invariant`, () => {
+    const f = fixture();
+    f.install();
+    const guards = runInContext('__listenerPackagedGuards', f.context);
+    for (const options of extra) f.state.windows.push(new f.state.NativeWindow(options));
+    assert.throws(() => guards.assertIntact(), (error: any) => {
+      const diagnostic = JSON.parse(error.message.slice(error.message.indexOf('{')));
+      assert.equal(diagnostic.matchedExpected.count, false);
+      return true;
+    });
   });
 }
 

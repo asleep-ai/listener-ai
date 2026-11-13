@@ -1,12 +1,11 @@
 // Microphone selector dropdown wiring extracted from legacy.ts.
 // - populateAudioDevices fills #audioDeviceId with the available audio inputs.
 // - setupMicSelector wires the change handler so the user's pick is persisted
-//   and (when actively recording) hot-swapped into the audio graph.
+//   and (when actively recording) hot-swapped into the capture host's audio graph.
 //
 // State.isRecording lives on the shared state object so a switchMicDevice call
 // only fires when a session is in progress.
 
-import { switchMicDevice } from '../audio/mic';
 import { state } from '../state';
 import { reportError } from '../sentry';
 import { showToast } from './notifications';
@@ -65,8 +64,12 @@ export function setupMicSelector(): void {
     const newId = select.value;
     await window.electronAPI.saveConfig({ audioDeviceId: newId });
     if (state.isRecording) {
-      const ok = await switchMicDevice(newId);
-      if (ok) showToast('Switched mic');
+      // The capture host owns the graph; main forwards the hot-swap to it.
+      const { success } = await window.electronAPI.switchRecordingMic(newId);
+      showToast(
+        success ? 'Switched mic' : 'Failed to switch mic — keeping current',
+        success ? 'success' : 'error',
+      );
     }
   });
 }

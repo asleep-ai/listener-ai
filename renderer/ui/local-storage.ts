@@ -2,6 +2,7 @@
 // setting's non-standard values, and "Free up space". Removing local audio
 // never deletes anything from Google Drive or the note itself.
 
+import { isOperationRunning, onBackgroundOperation } from './background-operations';
 import {
   describeSkip,
   formatBytes,
@@ -157,6 +158,31 @@ export function setupLocalStorageSettings(): void {
     statusEl.textContent = text;
     statusEl.className = `slack-webhook-status${state === 'idle' ? '' : ` is-${state}`}`;
   };
+  // "Free up space" runs in main; after a reload or reopen, show that it is
+  // still running and refresh once it ends. A click meanwhile joins it.
+  let localFree = false;
+  let followingFree = false;
+  const followFree = (status?: 'running' | 'succeeded' | 'failed') => {
+    if (localFree || !freeBtn) return;
+    if (isOperationRunning('local-audio-free', 'all')) {
+      followingFree = true;
+      freeBtn.disabled = true;
+      setStatus('Checking Drive copies...');
+    } else if (followingFree) {
+      followingFree = false;
+      freeBtn.disabled = false;
+      if (status === 'failed') {
+        setStatus('Removing local audio did not finish. Try again.', 'error');
+      } else {
+        setStatus('Finished removing local audio backed up to Google Drive.', 'success');
+      }
+      void refreshLocalStorageReport();
+    }
+  };
+  onBackgroundOperation((op) => {
+    if (op.kind === 'local-audio-free' && op.target === 'all') followFree(op.status);
+  });
+  followFree();
   freeBtn?.addEventListener('click', async () => {
     const ok = confirm(
       'Remove the local audio of every meeting backed up to Google Drive?\n\n' +
@@ -165,6 +191,7 @@ export function setupLocalStorageSettings(): void {
     );
     if (!ok) return;
     freeBtn.disabled = true;
+    localFree = true;
     setStatus('Checking Drive copies...');
     try {
       const res = await window.electronAPI.freeLocalAudio({});
@@ -184,6 +211,8 @@ export function setupLocalStorageSettings(): void {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error), 'error');
     } finally {
+      localFree = false;
+      freeBtn.disabled = false;
       await refreshLocalStorageReport();
     }
   });

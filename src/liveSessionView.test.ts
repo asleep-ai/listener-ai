@@ -84,7 +84,7 @@ describe('describeLiveIndicator', () => {
     assert.equal(finalizing.statusText, 'Finishing live captions...');
   });
 
-  it('offers a read-only reopen for a session ended by a reload, even without recording', () => {
+  it('offers a read-only reopen for a session ended by capture host loss, even without recording', () => {
     const view = describeLiveIndicator({
       recording: false,
       phase: 'ended',
@@ -94,11 +94,11 @@ describe('describeLiveIndicator', () => {
     assert.equal(view.visible, true);
     assert.equal(view.opensDialog, true);
     assert.equal(view.readOnly, true);
-    assert.equal(view.statusText, 'Live captions ended when the window reloaded');
+    assert.equal(view.statusText, 'Live captions ended when audio capture stopped');
     assert.equal(view.detailText, '5 captions kept');
   });
 
-  it('hides an empty reload recovery', () => {
+  it('hides an empty capture-loss recovery', () => {
     const view = describeLiveIndicator({
       recording: false,
       phase: 'ended',

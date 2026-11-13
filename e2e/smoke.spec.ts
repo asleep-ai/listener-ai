@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { appWindow } from './support/launch';
 import { ReusableApp } from './support/reusable-app';
 
 // Launches the electron-builder *packaged* output (not dev mode) and asserts the
@@ -23,12 +24,12 @@ test('packaged app boots without crashing', async () => {
     owned.seed({});
     const { app: electronApp } = await owned.start();
     // A missing-module crash throws at require time and never opens a window, so
-    // firstWindow() rejects (no explicit timeout -> bounded by the test timeout).
-    // Then wait for the renderer to reach the app UI. toHaveURL auto-retries,
-    // which avoids a race on slow headless runners where the window opens before
+    // appWindow() times out. It selects the verified main page (index.html),
+    // never the hidden recording capture host. toHaveURL auto-retries, which
+    // avoids a race on slow headless runners where the window opens before
     // index.html has finished loading (a title/content check would flake there).
-    const window = await electronApp.firstWindow();
-    await expect(window).toHaveURL(/index\.html/);
+    const window = await appWindow(electronApp);
+    await expect(window).toHaveURL(/\/renderer\/index\.html$/);
   } finally {
     try {
       await owned.finish();

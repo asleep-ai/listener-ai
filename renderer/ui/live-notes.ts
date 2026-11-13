@@ -1,8 +1,8 @@
 // In-recording notes panel (Plaud-style highlights). Visible only while
-// recording. Holds an append-only list of {offsetMs, text} captured from the
-// user; the flag button records the moment with empty text, the text input
-// records the moment with the typed text. Notes leave the renderer when
-// transcribeAudio forwards them to main at the end of the recording.
+// recording. The flag button records the moment with empty text, the text
+// input records the moment with the typed text. Notes live in main's
+// recording state (so a reload keeps them); this panel renders that list and
+// main persists it with the recording.
 
 import { type LiveNote, state } from '../state';
 
@@ -60,7 +60,14 @@ function renderList(): void {
 
 function appendNote(note: LiveNote): void {
   if (state.liveNotes.length >= NOTE_MAX_COUNT) return;
-  state.liveNotes.push(note);
+  void window.electronAPI.addRecordingNote(note).catch((error) => {
+    console.warn('Could not add note:', error);
+  });
+}
+
+/** Replaces the rendered notes with main's recording state. */
+export function setLiveNotes(notes: LiveNote[]): void {
+  state.liveNotes = notes.map((note) => ({ ...note }));
   renderList();
 }
 

@@ -6,9 +6,11 @@ import { setupRecorder } from './audio/recorder';
 import { setupFileHandler } from './services/file-handler';
 import { setupRendererLogger } from './services/renderer-logger';
 import { getDom, initDom } from './state';
+import { setupBackgroundOperations } from './ui/background-operations';
 import { setupAgentConfirmHandler, setupHomeChat, setupModalChat } from './ui/chat-panel';
 import { setupConfigModal, showConfigModal } from './ui/config-modal';
 import { setupDragAndDrop, setupPasteListener } from './ui/drag-drop';
+import { setupDriveStatusLine } from './ui/drive-status';
 import { setupHomeToggles } from './ui/home-toggles';
 import { setupLiveNotes } from './ui/live-notes';
 import { setupLiveSession } from './ui/live-session';
@@ -95,6 +97,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     setupNotifications();
     // Job state first: rows, auto mode and the modal reconnect from it.
     const jobsReady = setupTranscriptionJobs();
+    void setupBackgroundOperations();
     setupRecorder();
     setupLiveNotes();
     setupLiveSession();
@@ -102,6 +105,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     setupMicSelector();
     setupPermissionStatus();
     setupRecordingsList();
+    setupDriveStatusLine();
     setupSearch();
     setupConfigModal();
     setupTranscriptionModal();
@@ -133,6 +137,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     window.electronAPI.onOpenConfig(() => {
       void showConfigModal();
     });
+    window.electronAPI.signalUiReady();
 
     // Open recordings folder button (header).
     const openFolderButton = document.getElementById('openFolderButton');

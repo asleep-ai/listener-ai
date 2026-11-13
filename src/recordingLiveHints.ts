@@ -198,10 +198,21 @@ export async function finishRecordingWithHints(options: {
   onSaveError(error: unknown): void;
   /** A live stop already in flight; its late finals are taken after the audio closes. */
   liveDrain?: Promise<unknown>;
+  /** Runs right after the audio closes, before the live drain (e.g. saving notes). */
+  onClosed?(filePath: string): Promise<void>;
 }): Promise<import('./simpleAudioRecorder').StopResult> {
   const { activeFilePath, hints } = options;
   if (activeFilePath) hints.takeRecordingHints(activeFilePath, false);
   const result = await options.stop();
+  if (result.filePath) {
+    await options.onClosed?.(result.filePath).catch(() => {});
+    if (options.liveDrain) {
+      // The drain can be cut short (a bounded quit): persist the hints held
+      // now first; the save after the drain replaces them with the fuller set.
+      const early = hints.takeRecordingHints(result.filePath, false);
+      if (early) await options.save(result.filePath, early).catch(() => {});
+    }
+  }
   await options.liveDrain?.catch(() => {});
   if (result.filePath) {
     const history = hints.takeRecordingHints(result.filePath, false);

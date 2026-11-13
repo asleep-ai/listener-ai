@@ -568,6 +568,37 @@ export class ConfigService {
     return this.read('googleDriveEnabled');
   }
 
+  /**
+   * `googleDriveEnabled` as persisted in config.json right now, without
+   * touching this instance's cache (the CLI may have changed it since this
+   * instance loaded). An absent key reads as the default; `null` when there
+   * is no readable file, so callers fall back to the cached value.
+   */
+  readPersistedGoogleDriveEnabled(): boolean | null {
+    const parsed = this.readPersistedConfig();
+    return parsed ? parsed.googleDriveEnabled === true : null;
+  }
+
+  /**
+   * `audioOffloadAfterDays` as persisted now (normalized like the getter);
+   * `null` when there is no readable file.
+   */
+  readPersistedAudioOffloadAfterDays(): number | null {
+    const parsed = this.readPersistedConfig();
+    if (!parsed) return null;
+    const days = Number(parsed.audioOffloadAfterDays ?? 0);
+    return Number.isFinite(days) && days > 0 ? Math.floor(days) : 0;
+  }
+
+  private readPersistedConfig(): AppConfig | null {
+    try {
+      if (!fs.existsSync(this.configPath)) return null;
+      return JSON.parse(fs.readFileSync(this.configPath, 'utf-8')) as AppConfig;
+    } catch {
+      return null;
+    }
+  }
+
   setGoogleDriveEnabled(enabled: boolean): void {
     this.write('googleDriveEnabled', enabled);
   }

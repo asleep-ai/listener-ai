@@ -44,6 +44,8 @@ describe('automatic local audio removal after sync (IPC wiring)', () => {
   let dataPath: string;
   let drive: FakeDrive;
   let days: number;
+  // What config.json says now when another process changed it.
+  let persistedDays: number | undefined;
   let enabled: boolean;
   let creds: { email: string; refresh: string; access: string; expires: number } | undefined;
   // What config.json says now when it differs from this process's cache.
@@ -54,6 +56,7 @@ describe('automatic local audio removal after sync (IPC wiring)', () => {
     fs.mkdirSync(path.join(dataPath, 'recordings'), { recursive: true });
     drive = new FakeDrive();
     days = 0;
+    persistedDays = undefined;
     enabled = true;
     persistedOverride = undefined;
     creds = { email: 'a@example.com', refresh: 'ra', access: 'x', expires: Date.now() + 1e9 };
@@ -91,7 +94,10 @@ describe('automatic local audio removal after sync (IPC wiring)', () => {
       hasGoogleOAuth: () => !!creds,
       hasStoredGoogleOAuth: () => false,
       getGoogleDriveEnabled: () => enabled,
+      readPersistedGoogleDriveEnabled: () => enabled,
       getAudioOffloadAfterDays: () => days,
+      readPersistedAudioOffloadAfterDays: () =>
+        persistedDays === undefined ? days : persistedDays,
       getKnownWords: () => [],
       setKnownWords: () => {},
     };
@@ -221,6 +227,44 @@ describe('automatic local audio removal after sync (IPC wiring)', () => {
       success: boolean;
     };
     assert.equal(freed.success, false);
+    assert.ok(fs.existsSync(audio));
+  });
+
+  it('a repeated restore or free of the same recording joins the running one', async () => {
+    const audio = oldRecording('Twice_2026-01-01T00-00-00-000Z.webm', 1);
+    await syncNow();
+    const free = () =>
+      handlers.get('local-audio-free')!({}, { paths: [audio] }) as Promise<{
+        success: boolean;
+        result: { removed: unknown[] };
+      }>;
+    const [f1, f2] = await Promise.all([free(), free()]);
+    assert.equal(f1.success, true);
+    assert.deepEqual(f2, f1, 'the second request received the first pass result');
+    assert.equal(fs.existsSync(audio), false);
+
+    let downloads = 0;
+    const original = drive.downloadFile.bind(drive);
+    drive.downloadFile = (async (...args: Parameters<FakeDrive['downloadFile']>) => {
+      downloads++;
+      return original(...args);
+    }) as FakeDrive['downloadFile'];
+    const restore = () =>
+      handlers.get('local-audio-restore')!({}, { audioPath: audio }) as Promise<{
+        success: boolean;
+        downloaded?: boolean;
+      }>;
+    const [r1, r2] = await Promise.all([restore(), restore()]);
+    assert.equal(r1.success, true);
+    assert.deepEqual(r2, r1);
+    assert.equal(downloads, 1, 'one download');
+  });
+
+  it('automatic removal honors the policy as persisted now, not the cached one', async () => {
+    days = 30; // cached
+    persistedDays = 0; // the CLI turned it off
+    const audio = oldRecording('Old_2026-01-01T00-00-00-000Z.webm', 40);
+    assert.equal((await syncNow()).success, true);
     assert.ok(fs.existsSync(audio));
   });
 });

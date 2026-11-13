@@ -33,7 +33,7 @@ import type { IpcContext } from './types';
 // Optional third `transcribe-audio` argument. `autoExport` (auto mode) makes
 // the job itself run the configured Notion upload and Slack send after the
 // note is saved, so they happen even if the renderer that asked reloads.
-interface TranscribeOptions {
+export interface TranscribeOptions {
   autoExport: boolean;
   recordingTitle?: string;
 }
@@ -158,36 +158,13 @@ export function register(ctx: IpcContext): void {
       if (typeof filePath !== 'string' || !filePath) {
         return { success: false, error: 'Invalid audio file path' };
       }
-      const options = sanitizeTranscribeOptions(optionsRaw);
-      // Admitted synchronously, so a cancel sent right after the request
-      // reaches it. A duplicate joins the running job even while its cancel is
-      // still rolling back, and gets the same cancelled result; a new run can
-      // start once the job has ended. A path still being created by another
-      // job's rename is waited out first (no-op otherwise).
-      if (transcriptionJobs.pendingReservation(filePath)) await settleReservations(filePath);
-      const { job, joined, promise } = transcriptionJobs.start(
-        {
-          kind: 'transcribe',
-          origin: options.autoExport ? 'auto' : 'manual',
-          filePath,
-          ...(options.recordingTitle ? { title: options.recordingTitle } : {}),
-        },
-        (handle) => runTranscription(ctx, filePath, liveNotesRaw, handle),
-        (result, handle) => {
-          if (!result.success || !('data' in result) || !result.data || handle.origin !== 'auto')
-            return result;
-          return runAutoExports(ctx, handle, {
-            recordingTitle: handle.requestedTitle,
-            result: result.data,
-            audioFilePath: result.newFilePath ?? filePath,
-            transcriptionPath: result.transcriptionPath,
-            generationId: result.generationId,
-          }).then((exports) => ({ ...result, exports }));
-        },
+      const { jobId, joined, result } = await startAudioTranscription(
+        ctx,
+        filePath,
+        liveNotesRaw,
+        sanitizeTranscribeOptions(optionsRaw),
       );
-      if (joined) console.log('Joining the transcription already running for:', filePath);
-      const result = await promise;
-      return { ...result, jobId: job.id, ...(joined ? { joined: true as const } : {}) };
+      return { ...(await result), jobId, ...(joined ? { joined: true as const } : {}) };
     },
   );
 
@@ -198,6 +175,46 @@ export function register(ctx: IpcContext): void {
     if (transcriptionJobs.pendingReservation(filePath)) await settleReservations(filePath);
     return transcriptionJobs.cancel(filePath);
   });
+}
+
+// Admits a transcription job (or joins the one already running for the path)
+// and resolves once admitted, with the job's eventual result. The
+// 'transcribe-audio' handler and main's own auto mode share this, so a
+// renderer request for a recording main already started joins that job.
+export async function startAudioTranscription(
+  ctx: IpcContext,
+  filePath: string,
+  liveNotesRaw: unknown,
+  options: TranscribeOptions,
+) {
+  // Admitted synchronously, so a cancel sent right after the request
+  // reaches it. A duplicate joins the running job even while its cancel is
+  // still rolling back, and gets the same cancelled result; a new run can
+  // start once the job has ended. A path still being created by another
+  // job's rename is waited out first (no-op otherwise).
+  if (transcriptionJobs.pendingReservation(filePath)) await settleReservations(filePath);
+  const { job, joined, promise } = transcriptionJobs.start(
+    {
+      kind: 'transcribe',
+      origin: options.autoExport ? 'auto' : 'manual',
+      filePath,
+      ...(options.recordingTitle ? { title: options.recordingTitle } : {}),
+    },
+    (handle) => runTranscription(ctx, filePath, liveNotesRaw, handle),
+    (result, handle) => {
+      if (!result.success || !('data' in result) || !result.data || handle.origin !== 'auto')
+        return result;
+      return runAutoExports(ctx, handle, {
+        recordingTitle: handle.requestedTitle,
+        result: result.data,
+        audioFilePath: result.newFilePath ?? filePath,
+        transcriptionPath: result.transcriptionPath,
+        generationId: result.generationId,
+      }).then((exports) => ({ ...result, exports }));
+    },
+  );
+  if (joined) console.log('Joining the transcription already running for:', filePath);
+  return { jobId: job.id, joined, result: promise };
 }
 
 // Waits while another job's rename is still creating `filePath`, so neither a
@@ -213,6 +230,31 @@ async function settleReservations(filePath: string): Promise<void> {
   ) {
     await pending;
   }
+}
+
+// Resolves with `work`, or rejects as soon as `signal` aborts without
+// cancelling `work` itself.
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+// Restore outcomes meaning the path is not audio kept in Google Drive.
+export function notCloudAudio(code: string | undefined): boolean {
+  return code === 'no-audio' || code === 'no-drive-copy';
 }
 
 async function runTranscription(
@@ -267,6 +309,22 @@ async function runTranscription(
     const geminiService = ctx.ensureGeminiService();
     if (!geminiService) {
       return { success: false, error: ctx.formatAiCredentialsError() };
+    }
+
+    // A recording kept only in Google Drive is downloaded as part of this
+    // job, so a transcribe or regenerate requested for it continues even if
+    // the window that asked is reloaded or closed meanwhile.
+    if (!fs.existsSync(filePath) && ctx.restoreCloudAudio) {
+      sendProgress(5, 'Downloading audio from Google Drive...');
+      // A cancel ends this job at once; the download itself is shared (a
+      // "Download audio" click or another job may be waiting on it) and keeps
+      // going.
+      const restored = await untilAborted(ctx.restoreCloudAudio(filePath), signal);
+      // Not a recording kept in Drive: carry on as before and let the
+      // transcription report the missing file.
+      if (!restored.success && !notCloudAudio(restored.code)) {
+        return { success: false, error: `Couldn't download audio: ${restored.error}` };
+      }
     }
 
     sendProgress(10, 'Starting transcription...');

@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { ipcMain } from 'electron';
 import { withNoteOperation } from '../noteOperationQueue';
 import {
@@ -13,6 +14,7 @@ import {
   titleForSavedReport,
   withIncludedTranscript,
 } from '../transcriptCutoff';
+import { backgroundOperations, operationTarget, privateJoinKey } from './backgroundOperations';
 import type { IpcContext } from './types';
 
 const CUTOFF_MISMATCH_UPLOAD_ERROR =
@@ -51,6 +53,20 @@ export function register(ctx: IpcContext): void {
     uploadNoteToNotion(ctx, data),
   );
   ipcMain.handle('send-to-slack', (_, data: SlackSendRequest) => sendNoteToSlack(ctx, data));
+}
+
+// Only a request that names the generation it expects (a click in the open
+// note, including after a reload, and auto mode's follow-ups, which pass the
+// generation they just saved) joins a running export of that same
+// generation. Requests with the same generation, title and destination
+// describe the same publication, so an auto-mode upload and a click on the
+// same note produce one page. A request without an expectation means
+// "whatever is stored when its turn in the note's queue comes", which may be
+// a report a queued Regenerate or cutoff has not written yet, so it never
+// joins: it gets a unique identity and is only tracked. `null` (a legacy note
+// expected to have no generation) is an expectation like any other.
+function expectation(expected: string | null | undefined): unknown {
+  return expected === undefined ? { unjoinable: randomUUID() } : expected;
 }
 
 export async function uploadNoteToNotion(
@@ -140,9 +156,28 @@ export async function uploadNoteToNotion(
       return result;
     };
 
-    return ctx.isContainedTranscriptionPath(data.transcriptionPath)
-      ? await withNoteOperation(data.transcriptionPath, upload)
-      : await upload();
+    // A saved note's upload publishes what is stored, whatever the caller
+    // sent, so a second request to the same database (a click after a
+    // reload) joins the running upload instead of creating a second page.
+    // The generation the caller expects is part of the identity: a stale
+    // request is refused on its own and never takes a current one down with
+    // it.
+    const folder = data.transcriptionPath;
+    if (!ctx.isContainedTranscriptionPath(folder)) return await upload();
+    const target = operationTarget(folder);
+    return await backgroundOperations.run(
+      'notion-upload',
+      target,
+      () => withNoteOperation(folder, upload),
+      undefined,
+      privateJoinKey(
+        target,
+        expectation(data.expectedGenerationId),
+        data.title,
+        ctx.configService.getNotionApiKey(),
+        ctx.configService.getNotionDatabaseId(),
+      ),
+    );
   } catch (error) {
     console.error('Error uploading to Notion:', error);
     reportError(error, { operation: 'notion.upload', severity: 'error' });
@@ -238,9 +273,25 @@ export async function sendNoteToSlack(ctx: IpcContext, data: SlackSendRequest) {
       return result;
     };
 
-    return ctx.isContainedTranscriptionPath(data.transcriptionPath)
-      ? await withNoteOperation(data.transcriptionPath, send)
-      : await send();
+    // Same as Notion: a repeated send of a saved note to the same webhook
+    // joins the running one, so the channel gets one message.
+    const folder = data.transcriptionPath;
+    if (!ctx.isContainedTranscriptionPath(folder)) return await send();
+    const target = operationTarget(folder);
+    return await backgroundOperations.run(
+      'slack-send',
+      target,
+      () => withNoteOperation(folder, send),
+      undefined,
+      privateJoinKey(
+        target,
+        expectation(data.expectedGenerationId),
+        data.title,
+        ctx.configService.getSlackWebhookUrl(),
+        data.notionUrl ?? null,
+        data.notionError ?? null,
+      ),
+    );
   } catch (error) {
     console.error('Error sending to Slack:', error);
     reportError(error, { operation: 'slack.send', severity: 'error' });
