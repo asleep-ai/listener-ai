@@ -30,9 +30,41 @@ const SENSITIVE_KEY_RE =
   /(authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret|secret|webhook|password|token|dsn|cookie)/i;
 
 export function redactString(value: string): string {
-  return value
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, 'Bearer [REDACTED]')
-    .replace(/sk-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]');
+  return redactPaths(
+    value
+      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, 'Bearer [REDACTED]')
+      .replace(/sk-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]'),
+  );
+}
+
+// File system error messages (`ENOENT: ... open '<path>'`) carry the OS
+// account name in the home directory and, under the meeting directories
+// below, a file or folder name built from the meeting title. Keep the
+// directory shape (useful for triage) and drop both.
+// Account and meeting names can contain spaces and apostrophes (sanitizers
+// keep both; only `"` is always replaced), so an apostrophe alone does not
+// end a name. Node quotes a path as `'<path>'` either at the end of the
+// message or before ` -> ` (rename/copyfile), so only those positions count
+// as the closing quote. Anything else runs to the end of the line, which can
+// over-redact but never leaves part of a name behind.
+const PATH_END = String.raw`(?='(?:$|\s+->)|"|\n|$)`;
+const HOME_DIR_RE = new RegExp(
+  String.raw`(\/Users\/|\/home\/|[A-Za-z]:\\Users\\)[^/\\"\n]+?(?=[/\\]|'(?:$|\s+->)|"|\n|$)`,
+  'g',
+);
+// Every directory whose children are named after a meeting: recordings/,
+// transcriptions/, the per-run segment workspace (listener-segments-*, see
+// geminiService getSegmentedTranscript), Drive conflict backups
+// (.listener-conflicts/<meeting>/), Regenerate scratch (.regenerate-*) and
+// v1 migration backups (.v1-backup-<ts>/<folder>/).
+const MEETING_DIR = String.raw`recordings|transcriptions|\.listener-conflicts|(?:listener-segments-|\.regenerate-|\.v1-backup-)[^/\\"\n]+`;
+const MEETING_NAME_RE = new RegExp(
+  String.raw`([/\\](?:${MEETING_DIR})[/\\])[^"\n]+?${PATH_END}`,
+  'g',
+);
+
+function redactPaths(value: string): string {
+  return value.replace(HOME_DIR_RE, '$1[user]').replace(MEETING_NAME_RE, '$1[name]');
 }
 
 /**

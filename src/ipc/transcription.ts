@@ -2,6 +2,7 @@ import { parseRecordingLiveHints, recordingHintsBelongToAudio } from '../recordi
 import * as fs from 'fs';
 import * as path from 'path';
 import { app, ipcMain } from 'electron';
+import { isExpectedTranscriptionFailure } from '../errorClassification';
 import { withMeetingLock } from '../meetingLock';
 import { withNoteOperation } from '../noteOperationQueue';
 import { META_JSON } from '../outputService';
@@ -516,7 +517,11 @@ async function runTranscription(
       };
     }
     console.error('Error transcribing audio:', error);
-    reportError(error, { operation: 'transcription', severity: 'error' });
+    // No speech, offline, provider overloaded or out of credit: the user gets
+    // the specific message below, but these are not app defects to report.
+    if (!isExpectedTranscriptionFailure(error)) {
+      reportError(error, { operation: 'transcription', severity: 'error' });
+    }
     notificationService.notifyTranscriptionFailed(
       'Transcription failed. Check the app for details.',
     );

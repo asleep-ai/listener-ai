@@ -21,11 +21,28 @@ import { acquireMediaStream, attachTrackEndedHandlers } from './mic';
 import { createSystemAudioSource } from './system-audio';
 
 let stopRecordingInProgress = false;
+// Start is async (mic permission, audio graph, the start-recording IPC) and
+// `state.isRecording` only flips at its end, so a second click, tray start or
+// shortcut during that window used to run a second start. Its failure path
+// (main refuses a second recording) ran cleanupAudioState, which nulled the
+// shared `state.mediaRecorder` under the first start: production saw
+// "Cannot set properties of null (setting 'ondataavailable')" (LISTENER-AI-7/E).
+let startRecordingInProgress = false;
 // ondataavailable fires ~once/sec; latch so a stuck chunk-forward failure
 // reports once per recording session instead of flooding Sentry.
 let reportedChunkForward = false;
 
 export async function startRecording(): Promise<void> {
+  if (startRecordingInProgress || state.isRecording) return;
+  startRecordingInProgress = true;
+  try {
+    await startRecordingOnce();
+  } finally {
+    startRecordingInProgress = false;
+  }
+}
+
+async function startRecordingOnce(): Promise<void> {
   const { recordButton, statusIndicator, statusText, recordingTime, meetingTitle } = getDom();
 
   if (state.isAutoModeProcessing) {

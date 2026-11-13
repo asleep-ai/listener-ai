@@ -4,6 +4,7 @@ import type { ElectronApplication, Page } from 'playwright';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT } from './support/launch';
+import { scriptedDialogs } from './support/dialogs';
 import { ReusableApp } from './support/reusable-app';
 
 // The recording graph, PCM bridge, live service and events run unchanged.
@@ -35,6 +36,7 @@ async function fixture(): Promise<{ app: ElectronApplication; page: Page }> {
     const recorderStart = recorderProto.startRecording;
     fx.restoreRecorder = () => { recorderProto.startRecording = recorderStart; };
     recorderProto.startRecording = function (...args: unknown[]) {
+      fx.recordStarts = (fx.recordStarts ?? 0) + 1;
       fx.recorder = this;
       if (this.isRecording()) throw new Error('Live scenario started with an active recording');
       return recorderStart.apply(this, args);
@@ -349,6 +351,94 @@ test('the first final flushed after reload recovers a read-only caption from an 
     await page.locator('#liveCaptionTranscriptTab').click();
     await expect(page.locator('#liveChatInput')).toBeDisabled();
     expect(await stats(app)).toMatchObject({ starts: 1, closes: 1 });
+  } catch (error) { failure = error; throw error; }
+  finally { await finish(app, page, failure); }
+});
+
+// LISTENER-AI-7/E: a second start while the first was still awaiting the mic
+// and main used to null the shared recorder under the first start
+// ("Cannot set properties of null (setting 'ondataavailable')").
+test('a second start while one is in flight is ignored and the recording keeps its audio', async () => {
+  const { app, page } = await fixture();
+  let failure: unknown;
+  const pageErrors: string[] = [];
+  const onPageError = (error: Error) => pageErrors.push(error.message);
+  page.on('pageerror', onPageError);
+  try {
+    await app.evaluate(({ app }) => {
+      const fx = (globalThis as any).__liveFixture;
+      const proto = process.mainModule!.require(`${app.getAppPath()}/dist/simpleAudioRecorder.js`).SimpleAudioRecorder.prototype;
+      const append = proto.appendChunk;
+      fx.chunks = 0;
+      fx.restoreAppend = () => { proto.appendChunk = append; };
+      proto.appendChunk = function (...args: unknown[]) { fx.chunks++; return append.apply(this, args); };
+    });
+    await page.evaluate(() => {
+      // Hold the mic open long enough for the second click to land mid-start.
+      const acquire = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      Object.defineProperty(navigator.mediaDevices, 'getUserMedia', {
+        configurable: true,
+        value: async (constraints?: MediaStreamConstraints) => {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          return acquire(constraints);
+        },
+      });
+      const button = document.getElementById('recordButton') as HTMLButtonElement;
+      button.click();
+      button.click();
+    });
+    await expect(page.locator('#recordButton')).toHaveText('Stop Recording');
+    await expect.poll(() => app.evaluate(() => (globalThis as any).__liveFixture.chunks)).toBeGreaterThan(1);
+    expect(await app.evaluate(() => (globalThis as any).__liveFixture.recordStarts)).toBe(1);
+    const filePath = await app.evaluate(() =>
+      (globalThis as any).__liveFixture.recorder.getActiveRecording()?.filePath as string | undefined);
+    expect(filePath).toBeTruthy();
+    // Stop through the product's own button: the first start's recorder must
+    // still finalize, flush its chunks and save a non-empty file.
+    await page.locator('#recordButton').click();
+    await expect(page.locator('#recordButton')).toHaveText('Start Recording');
+    await expect.poll(() => app.evaluate((_e, file) =>
+      process.mainModule!.require('fs').existsSync(file)
+        ? process.mainModule!.require('fs').statSync(file).size : 0, filePath)).toBeGreaterThan(0);
+    expect(await scriptedDialogs(page)).toEqual([]);
+    expect(pageErrors).toEqual([]);
+  } catch (error) { failure = error; throw error; }
+  finally {
+    page.off('pageerror', onPageError);
+    await app.evaluate(() => { (globalThis as any).__liveFixture?.restoreAppend?.(); });
+    await finish(app, page, failure);
+  }
+});
+
+// Deleting the row of the recording still being written unlinked the open
+// file and lost the recording. Main now refuses it until capture stops.
+test('the recording being written cannot be deleted until it stops, and still saves', async () => {
+  const { app, page } = await fixture();
+  let failure: unknown;
+  try {
+    await page.locator('#recordButton').click();
+    await expect(page.locator('#recordButton')).toHaveText('Stop Recording');
+    const filePath = await app.evaluate(() =>
+      (globalThis as any).__liveFixture.recorder.getActiveRecording()?.filePath as string | undefined);
+    expect(filePath).toBeTruthy();
+    const size = (file: string) => app.evaluate((_e, f) => {
+      const fs = process.mainModule!.require('fs');
+      return fs.existsSync(f) ? fs.statSync(f).size : -1;
+    }, file);
+    await expect.poll(() => size(filePath!)).toBeGreaterThan(0);
+
+    const refused = await page.evaluate((f) => window.electronAPI.deleteMeeting(f), filePath!);
+    expect(refused.success).toBe(false);
+    expect(await size(filePath!)).toBeGreaterThan(0);
+
+    await page.locator('#recordButton').click();
+    await expect(page.locator('#recordButton')).toHaveText('Start Recording');
+    await expect.poll(() => size(filePath!)).toBeGreaterThan(0);
+
+    const removed = await page.evaluate((f) => window.electronAPI.deleteMeeting(f), filePath!);
+    expect(removed.success).toBe(true);
+    expect(await size(filePath!)).toBe(-1);
+    expect(await scriptedDialogs(page)).toEqual([]);
   } catch (error) { failure = error; throw error; }
   finally { await finish(app, page, failure); }
 });

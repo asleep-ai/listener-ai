@@ -1212,6 +1212,7 @@ registerAllIpc({
   getNotionService,
   getSlackService,
   openExternal: (url) => void shell.openExternal(url),
+  getActiveRecordingPath: () => audioRecorder.getActiveRecording()?.filePath,
 });
 
 // Audio capture runs in the renderer via MediaRecorder; chunks stream over IPC as

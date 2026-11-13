@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -48,6 +49,11 @@ import {
   isRetryableStatus,
   TranscriptionApiError,
 } from './transcriptionErrors';
+import {
+  isNetworkUnreachableError,
+  isProviderBillingError,
+  isProviderOverloadedError,
+} from './errorClassification';
 import {
   type BatchSttBackend,
   type BatchSttBackendId,
@@ -447,7 +453,11 @@ export function annotateTranscriptionError(
   // (silent/noise-only recording), not a failure of the pipeline.
   if (error instanceof EmptyTranscriptionError) {
     return new TranscriptionError(
-      { userMessage: 'No intelligible speech was found in this recording.', rawMessage },
+      {
+        userMessage: 'No intelligible speech was found in this recording.',
+        rawMessage,
+        errorType: 'no-speech',
+      },
       { cause: error },
     );
   }
@@ -490,6 +500,14 @@ export function annotateTranscriptionError(
   // Fallback for non-API errors (Gemini SDK, file IO, ffmpeg) -- keep the
   // legacy substring heuristic so callers still get a friendlier message when
   // possible, but preserve the raw text in `rawMessage` for "Show details".
+  // Environment and provider-account states first: their raw text can contain
+  // words the substring heuristic below keys on (Gemini's 503 body says "This
+  // model is currently experiencing high demand", which used to read as
+  // "Model not available").
+  const classified = classifyEnvironmentFailure(error);
+  if (classified) {
+    return new TranscriptionError({ ...classified, rawMessage }, { cause: error });
+  }
   const lower = rawMessage.toLowerCase();
   let userMessage: string;
   if (lower.includes('api key')) {
@@ -502,6 +520,52 @@ export function annotateTranscriptionError(
     userMessage = `Failed to transcribe audio: ${rawMessage}`;
   }
   return new TranscriptionError({ userMessage, rawMessage }, { cause: error });
+}
+
+// Checked before any work so a recording that is gone (deleted, moved, or a
+// stale path) gets its own message. Only the caller's source file is judged
+// here: an ENOENT on a file the pipeline generated itself (segments, remuxed
+// copies) is an app defect and stays on the generic, reported path.
+async function assertSourceAudioExists(audioFilePath: string): Promise<void> {
+  try {
+    await fs.promises.access(audioFilePath, fs.constants.R_OK);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return;
+    throw new TranscriptionError(
+      {
+        userMessage:
+          'The recording file could not be found. It may have been moved, renamed, or deleted.',
+        rawMessage: error instanceof Error ? error.message : String(error),
+        errorType: 'file-missing',
+      },
+      { cause: error },
+    );
+  }
+}
+
+function classifyEnvironmentFailure(
+  error: unknown,
+): { userMessage: string; errorType: string } | undefined {
+  if (isProviderBillingError(error)) {
+    return {
+      userMessage:
+        'The AI provider account has no credit left. Add credits or check billing for your API key, then try again.',
+      errorType: 'provider-billing',
+    };
+  }
+  if (isProviderOverloadedError(error)) {
+    return {
+      userMessage: 'The AI service is temporarily overloaded. Please try again in a few minutes.',
+      errorType: 'provider-overloaded',
+    };
+  }
+  if (isNetworkUnreachableError(error)) {
+    return {
+      userMessage: 'Could not reach the AI service. Check your internet connection and try again.',
+      errorType: 'network',
+    };
+  }
+  return undefined;
 }
 
 // Credential copy for the non-API error path (SDK/file/ffmpeg errors whose
@@ -1494,6 +1558,7 @@ export class GeminiService {
       };
     }
 
+    await assertSourceAudioExists(audioFilePath);
     const prepared = await this.prepareAudioForProvider(audioFilePath, signal);
     try {
       signal?.throwIfAborted();
@@ -1697,16 +1762,19 @@ Requirements:
     }
   }
 
-  // List existing `<base>_segment_NNN.<ext>` files for an audio path. Used by
-  // both the split step (collecting newly written segments) and the cleanup
-  // step (sweeping leftovers when ffmpeg was killed mid-split). Optional
-  // extension filter -- omit to match any segment file regardless of ext.
+  // List existing `<base>_segment_NNN.<ext>` files for an audio path in
+  // `outputDir` (default: next to the audio). Used by the split step to
+  // collect newly written segments. Optional extension filter -- omit to
+  // match any segment file regardless of ext.
   //
   // Pattern is strict on purpose: ffmpeg's `%03d` formatter emits exactly
   // three digits, and a loose prefix match would let user-named recordings
   // like `Meeting_segment_notes.webm` get caught by cleanup and deleted.
-  private findSegmentFiles(audioFilePath: string, ext?: string): string[] {
-    const outputDir = path.dirname(audioFilePath);
+  private findSegmentFiles(
+    audioFilePath: string,
+    ext?: string,
+    outputDir = path.dirname(audioFilePath),
+  ): string[] {
     const baseName = path.basename(audioFilePath, path.extname(audioFilePath));
     const escaped = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const extPattern = ext ? ext.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '\\.[A-Za-z0-9]+';
@@ -1738,8 +1806,11 @@ Requirements:
     // plan; when unknown (<= 0, i.e. ffprobe failed upstream) we fall back
     // to the legacy single-invocation segment muxer without overlap.
     duration = 0,
+    // Where the segment files go. The transcription pipeline passes a
+    // per-run workspace so two runs on the same recording (app + CLI, or two
+    // CLI calls) never share `<base>_segment_NNN` names.
+    outputDir = path.dirname(audioFilePath),
   ): Promise<string[]> {
-    const outputDir = path.dirname(audioFilePath);
     const baseName = path.basename(audioFilePath, path.extname(audioFilePath));
     const ext = path.extname(audioFilePath);
 
@@ -1815,7 +1886,7 @@ Requirements:
       // Find all created segment files. Match on the EXTENSION WE TOLD
       // FFMPEG TO WRITE -- when re-encoding, that's `.webm` regardless of
       // the source's original extension.
-      const segmentFiles = this.findSegmentFiles(audioFilePath, segmentExt);
+      const segmentFiles = this.findSegmentFiles(audioFilePath, segmentExt, outputDir);
 
       console.error(`Split audio into ${segmentFiles.length} segments`);
       return segmentFiles;
@@ -2849,9 +2920,13 @@ Requirements:
     includeGlossary = true,
     qualityRetry = true,
   ): Promise<SegmentedQualityGatedTranscript> {
-    // Track segments outside the try so the finally can clean them up on
-    // abort / mid-pipeline failure too. Without this, cancelled transcribes
-    // leave `<base>_segment_NNN.<ext>` files piling up in recordings/.
+    // Segments go into a workspace private to this run. They used to be
+    // written next to the recording under deterministic names, so a second
+    // run on the same file (app and CLI, two CLI calls) overwrote them and
+    // its cleanup deleted the first run's segments mid-upload (LISTENER-AI-T:
+    // ENOENT opening `<base>_segment_008`). Track segments outside the try
+    // so the finally can clean them up on abort / mid-pipeline failure too.
+    const segmentWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'listener-segments-'));
     let segmentFiles: string[] = [];
     try {
       signal?.throwIfAborted();
@@ -2867,6 +2942,7 @@ Requirements:
         this.sttBackend.requiresReencodedSegments,
         signal,
         duration,
+        segmentWorkspace,
       );
 
       signal?.throwIfAborted();
@@ -3040,13 +3116,12 @@ Requirements:
       throw error;
     } finally {
       // Clean up segment files regardless of outcome (success, error, abort).
-      // On the happy path `segmentFiles` is authoritative; on abort/error
-      // before split returned we re-scan because ffmpeg may have written
-      // partial segments that never made it into the array. Best-effort:
-      // missing/locked files shouldn't crash the pipeline.
-      const toDelete =
-        segmentFiles.length > 0 ? segmentFiles : this.findSegmentFiles(audioFilePath);
-      for (const segmentFile of toDelete) {
+      // Removing the workspace also catches partial segments ffmpeg wrote
+      // before an abort/error. Only this run's own files are touched: the
+      // recording's directory is never swept, since a sweep there is what
+      // deleted another run's segments. Best-effort: missing/locked files
+      // shouldn't crash the pipeline.
+      for (const segmentFile of segmentFiles) {
         try {
           fs.unlinkSync(segmentFile);
         } catch (e) {
@@ -3055,6 +3130,11 @@ Requirements:
             console.error(`Failed to delete segment file: ${segmentFile}`, e);
           }
         }
+      }
+      try {
+        fs.rmSync(segmentWorkspace, { recursive: true, force: true });
+      } catch (e) {
+        console.error('Failed to remove segment workspace', e);
       }
     }
   }
