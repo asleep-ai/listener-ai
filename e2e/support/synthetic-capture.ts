@@ -185,11 +185,25 @@ export async function installSyntheticRealtime(app: ElectronApplication): Promis
       await this.current()!.webContents.executeJavaScript(`(() => {
         if (window.__realtimeLoopback) return;
         const Native = window.RTCPeerConnection;
-        const fx = { offerers: [], answerers: [], channels: [], calls: [], commits: 0, open: [], tail: null, tailDelayMs: 300 };
+        const fx = { offerers: [], answerers: [], channels: [], calls: [], commits: 0, open: [], tail: null, tailDelayMs: 300, timeline: [] };
         window.__realtimeLoopback = fx;
-        // Same constructor and prototype; only remembers the production peer.
+        // Commit and tail timing (ms since page start, item ids only), so a
+        // missing tail shows which commit took it and whether it arrived.
+        const mark = (event, extra) => fx.timeline.push({ event, at: Math.round(performance.now()), ...extra });
+        // Same constructor and prototype; only remembers the production peer,
+        // and notes when its event channel receives the tail or closes.
         window.RTCPeerConnection = class extends Native {
           constructor(...args) { super(...args); fx.offerers.push(this); }
+          createDataChannel(...args) {
+            const channel = super.createDataChannel(...args);
+            channel.addEventListener('message', ({ data }) => {
+              const event = JSON.parse(String(data));
+              if (event.item_id && event.item_id === fx.tailItem && event.type === 'conversation.item.input_audio_transcription.completed')
+                mark('host-received-tail', { item: event.item_id });
+            });
+            channel.addEventListener('close', () => mark('host-channel-closed'));
+            return channel;
+          }
         };
         const gathered = (peer) => new Promise((resolve, reject) => {
           if (peer.iceGatheringState === 'complete') return resolve();
@@ -220,6 +234,7 @@ export async function installSyntheticRealtime(app: ElectronApplication): Promis
               if (event.type !== 'input_audio_buffer.commit') return;
               fx.commits++;
               const itemId = 'item_' + fx.commits;
+              mark('commit-received', { item: itemId, takesTail: !!fx.tail });
               channel.send(JSON.stringify({
                 type: 'input_audio_buffer.committed', item_id: itemId,
                 previous_item_id: fx.open[fx.open.length - 1] || null,
@@ -233,10 +248,15 @@ export async function installSyntheticRealtime(app: ElectronApplication): Promis
               }
               const tail = fx.tail;
               fx.tail = null;
-              setTimeout(() => channel.send(JSON.stringify({
-                type: 'conversation.item.input_audio_transcription.completed',
-                item_id: itemId, transcript: tail,
-              })), fx.tailDelayMs);
+              fx.tailItem = itemId;
+              setTimeout(() => {
+                mark('tail-sent', { item: itemId, channel: channel.readyState });
+                if (channel.readyState !== 'open') return;
+                channel.send(JSON.stringify({
+                  type: 'conversation.item.input_audio_transcription.completed',
+                  item_id: itemId, transcript: tail,
+                }));
+              }, fx.tailDelayMs);
             };
           };
           await answerer.setRemoteDescription(offerer.localDescription);
@@ -324,6 +344,10 @@ const captureHostEval = (app: ElectronApplication, script: string) =>
 export const realtimeEvidence = (app: ElectronApplication) =>
   captureHostEval(app, 'window.__realtimeLoopback.evidence()');
 
+// The loopback's commit and tail timeline (see installSyntheticRealtime).
+export const realtimeTimeline = (app: ElectronApplication) =>
+  captureHostEval(app, 'window.__realtimeLoopback.timeline');
+
 export const realtimeDiagnostics = (app: ElectronApplication) =>
   captureHostEval(app, 'window.__realtimeLoopback.diagnostics()');
 
@@ -336,7 +360,8 @@ export const realtimeSay = (app: ElectronApplication, itemId: string, text: stri
 export const realtimeTail = (app: ElectronApplication, text: string, delayMs = 300) =>
   captureHostEval(
     app,
-    `window.__realtimeLoopback.tailDelayMs = ${delayMs}; window.__realtimeLoopback.tail = ${JSON.stringify(text)}`,
+    `window.__realtimeLoopback.tailDelayMs = ${delayMs}; window.__realtimeLoopback.tail = ${JSON.stringify(text)}; ` +
+      `window.__realtimeLoopback.timeline.push({ event: 'tail-armed', at: Math.round(performance.now()) })`,
   );
 
 export const syntheticRealtime = (app: ElectronApplication) =>

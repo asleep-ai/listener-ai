@@ -14,6 +14,7 @@ import {
   realtimeEvidence,
   realtimeSay,
   realtimeTail,
+  realtimeTimeline,
   stallSyntheticLiveClose,
   recordingState,
   releaseSyntheticCapture,
@@ -467,7 +468,11 @@ test('the host-owned OpenAI Realtime WebRTC peer keeps streaming across a UI rel
     });
     // The provider replies to the final commit only after TAIL_REPLY_MS: a stop
     // that waits for that reply before ending capture shows it in the stages.
-    const TAIL_REPLY_MS = 1_400;
+    // The host's flush waits at most 1.5s after its final commit, and a reply
+    // after that is dropped by design, so the reply stays well inside that cap
+    // (1.4s left only 0.1s for channel and timer delay) while the stage bounds
+    // below stay under the reply.
+    const TAIL_REPLY_MS = 1_100;
     await realtimeTail(app, '녹음 정지 중의 꼬리 발언입니다.', TAIL_REPLY_MS);
     await replacement.locator('#recordButton').click();
     // RTP stops at once (the sender is muted before the provider replies).
@@ -495,7 +500,15 @@ test('the host-owned OpenAI Realtime WebRTC peer keeps streaming across a UI rel
     expect(stages.stoppingToRecordedEnd, JSON.stringify(stages)).toBeLessThan(TAIL_REPLY_MS - 400);
     const ended = (await invokeMain(app, 'live-session-snapshot')).snapshot;
     expect(ended).toMatchObject({ sessionId: second.sessionId, active: false });
-    expect(ended.transcript).toContain('녹음 정지 중의 꼬리 발언입니다.');
+    // Which commit took the tail, when it was sent and whether the host got it
+    // before its channel closed; kept with the case's results.
+    const tailTimeline = await realtimeTimeline(app);
+    writeFileSync(
+      test.info().outputPath('realtime-tail-timeline.json'),
+      JSON.stringify(tailTimeline, null, 2),
+    );
+    console.log(`[tail-timeline] ${JSON.stringify(tailTimeline)}`);
+    expect(ended.transcript, JSON.stringify(tailTimeline)).toContain('녹음 정지 중의 꼬리 발언입니다.');
     await settle(app, owned);
     await owned.finish();
   } finally {
