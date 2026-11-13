@@ -5,12 +5,18 @@ import { basename, join } from 'node:path';
 import { ReusableApp } from './support/reusable-app';
 import { answerConfirm, scriptDialogs, scriptedDialogs, visibleWindows } from './support/dialogs';
 import { fakeDriveState, installFakeDrive, uninstallFakeDrive } from './support/fake-drive';
+import { SYNTHETIC_GOOGLE_OAUTH } from './support/packaged-guards';
 
-const meetingApp = new ReusableApp('meeting-list');
+// With LISTENER_SMOKE_BUILD_DIR set (CI package-check and the macOS test
+// build), the same cases run against the packaged executable and its ASAR, so
+// Drive-backed storage is verified on the artifact under test, not only dev.
+const meetingApp = new ReusableApp('meeting-list', {
+  packaged: Boolean(process.env.LISTENER_SMOKE_BUILD_DIR),
+});
 test.afterAll(async () => meetingApp.close());
 
 test('note-only meetings open by keyboard and refresh without audio actions', async () => {
-  const dataDir = meetingApp.seed({ aiProvider: 'gemini', geminiApiKey: 'e2e-unused' });
+  const dataDir = meetingApp.seed({ aiProvider: 'gemini', geminiApiKey: 'synthetic-unused-key' });
   const { saveTranscription } =
     require('../dist/outputService.js') as typeof import('../src/outputService');
   const save = (title: string, audioFilePath?: string) =>
@@ -171,7 +177,7 @@ test('note-only meetings open by keyboard and refresh without audio actions', as
 });
 
 test('saved meetings remain available without a recordings directory', async () => {
-  const dataDir = meetingApp.seed({ aiProvider: 'gemini', geminiApiKey: 'e2e-unused' });
+  const dataDir = meetingApp.seed({ aiProvider: 'gemini', geminiApiKey: 'synthetic-unused-key' });
   const { saveTranscription } =
     require('../dist/outputService.js') as typeof import('../src/outputService');
   saveTranscription({
@@ -220,7 +226,7 @@ test('saved meetings remain available without a recordings directory', async () 
 });
 
 test('Drive-backed storage: cloud-only rows, local-only actions, and the storage setting', async () => {
-  const dataDir = meetingApp.seed({ aiProvider: 'gemini', geminiApiKey: 'e2e-unused' });
+  const dataDir = meetingApp.seed({ aiProvider: 'gemini', geminiApiKey: 'synthetic-unused-key' });
   const fs = require('node:fs') as typeof import('node:fs');
   const crypto = require('node:crypto') as typeof import('node:crypto');
   const { saveTranscription } =
@@ -374,14 +380,9 @@ test('Drive-backed storage: cloud-only rows, local-only actions, and the storage
 test('signed in with a fake Drive: free locally, merge downloads first, free all, download again', async () => {
   const dataDir = meetingApp.seed({
     aiProvider: 'gemini',
-    geminiApiKey: 'e2e-unused',
+    geminiApiKey: 'synthetic-unused-key',
     googleDriveEnabled: false,
-    googleOAuth: {
-      access: 'e2e-access',
-      refresh: 'e2e-refresh',
-      expires: Date.now() + 24 * 60 * 60 * 1000,
-      email: 'e2e@example.com',
-    },
+    googleOAuth: { ...SYNTHETIC_GOOGLE_OAUTH, expires: Date.now() + 24 * 60 * 60 * 1000 },
   });
   const fs = require('node:fs') as typeof import('node:fs');
   const { saveTranscription } =
@@ -414,8 +415,10 @@ test('signed in with a fake Drive: free locally, merge downloads first, free all
   const bravo = meeting('Bravo');
 
   const { app, page } = await meetingApp.start();
-  await installFakeDrive(app);
   try {
+    // Before the first Drive request of the case; the packaged fetch/https
+    // guards record any request that would bypass it.
+    await installFakeDrive(app);
     await scriptDialogs(app, page);
     const synced = await page.evaluate(() => window.electronAPI.syncGoogleDriveNow());
     expect(synced.success).toBe(true);

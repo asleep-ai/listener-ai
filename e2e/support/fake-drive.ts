@@ -2,18 +2,20 @@ import type { ElectronApplication } from 'playwright';
 
 // TEST-ONLY in-memory Google Drive for the hidden Electron E2Es. It swaps the
 // methods of the main process's own GoogleDriveClient (same module instance,
-// reached through createRequire on dist/main.js) for an in-memory store with
+// reached through createRequire on <app path>/dist/main.js, which is the ASAR
+// entry point in packaged runs; their cwd is the isolated data root, not the
+// checkout) for an in-memory store with
 // Drive-style md5 checksums, so sync, local audio removal and restore run
 // end to end without network or credentials. Product code is unchanged.
 // Always pair with uninstallFakeDrive in a finally: the main process is
 // reused across cases.
 
 export async function installFakeDrive(app: ElectronApplication): Promise<void> {
-  await app.evaluate(() => {
+  await app.evaluate(({ app }) => {
     const { createRequire } = process.getBuiltinModule('node:module');
     const path = process.getBuiltinModule('node:path');
     const crypto = process.getBuiltinModule('node:crypto');
-    const req = createRequire(path.join(process.cwd(), 'dist', 'main.js'));
+    const req = createRequire(path.join(app.getAppPath(), 'dist', 'main.js'));
     const { GoogleDriveClient, GoogleDriveError } = req('./services/googleDriveService.js');
     const g = globalThis as any;
     if (g.__e2eFakeDrive) throw new Error('fake Drive already installed');
@@ -116,13 +118,13 @@ export async function fakeDriveState(
 }
 
 export async function uninstallFakeDrive(app: ElectronApplication): Promise<void> {
-  await app.evaluate(() => {
+  await app.evaluate(({ app }) => {
     const g = globalThis as any;
     const s = g.__e2eFakeDrive;
     if (!s) return;
     const { createRequire } = process.getBuiltinModule('node:module');
     const path = process.getBuiltinModule('node:path');
-    const req = createRequire(path.join(process.cwd(), 'dist', 'main.js'));
+    const req = createRequire(path.join(app.getAppPath(), 'dist', 'main.js'));
     const proto = req('./services/googleDriveService.js').GoogleDriveClient.prototype;
     for (const [n, fn] of Object.entries(s.originals)) proto[n] = fn;
     delete g.__e2eFakeDrive;

@@ -98,10 +98,21 @@ jobs:
       - name: Validate Electron harness and types before native execution
         run: pnpm run test:e2e:harness && pnpm run test:e2e:types
 
-      - name: Smoke-test that the packaged app launches
+      # With LISTENER_SMOKE_BUILD_DIR set, smoke and the meeting-list storage
+      # cases run against the packaged executable; transcription-reload stays
+      # on the development build.
+      - name: Smoke-test the packaged app and its Drive-backed storage
         run: xvfb-run --auto-servernum -- pnpm exec playwright test e2e/smoke.spec.ts e2e/meeting-list.spec.ts e2e/transcription-reload.spec.ts
         env:
           LISTENER_SMOKE_BUILD_DIR: ${{ runner.temp }}/smoke-build
+
+      - name: Upload packaged Electron evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: package-check-electron-evidence-${{ github.sha }}
+          path: test-results/
+          if-no-files-found: warn
 
   mac-test-build:
     if: github.event_name == 'workflow_dispatch'
@@ -129,6 +140,26 @@ jobs:
           pnpm exec electron-builder --mac dmg --arm64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Validate Electron harness and types before native execution
+        run: pnpm run test:e2e:harness && pnpm run test:e2e:types
+
+      # The .app that electron-builder staged for the DMG below. The release
+      # directory sits inside the checkout, so this run does not detect
+      # dependencies pruned from app.asar; package-check covers that.
+      - name: Test packaged boot and Drive-backed storage in the macOS build
+        run: pnpm exec playwright test e2e/smoke.spec.ts e2e/meeting-list.spec.ts
+        env:
+          LISTENER_SMOKE_BUILD_DIR: ${{ github.workspace }}/release
+
+      # Upload before the next Playwright run replaces test-results/.
+      - name: Upload macOS packaged Electron evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: listener-ai-mac-arm64-electron-evidence-${{ github.sha }}
+          path: test-results/
+          if-no-files-found: warn
 
       - name: Test transcript cutoff in Electron
         run: pnpm exec playwright test e2e/transcript-cutoff.spec.ts

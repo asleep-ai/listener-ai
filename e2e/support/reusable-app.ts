@@ -28,6 +28,7 @@ import {
   bounded,
   clearOwnedFixtureData,
   OwnedSession,
+  storageStateResidue,
 } from './reusable-lifecycle';
 
 async function resetConfiguration(
@@ -681,7 +682,9 @@ export class ReusableApp {
               ),
             };
           }, this.rawConfig);
-          assertCleanReset(state);
+          // Checked after the reload and IPC drain, so storage state written
+          // by the reloaded renderer would also be caught here.
+          assertCleanReset({ ...state, storageResidue: storageStateResidue(this.dataDir) });
           const log = process.env.LISTENER_E2E_LAUNCH_LOG;
           if (log)
             appendFileSync(
