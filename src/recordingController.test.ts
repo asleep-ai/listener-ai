@@ -566,16 +566,35 @@ describe('RecordingController grace default', () => {
   });
 
   it('saves notes as soon as the audio closes, before a stalled live drain', async () => {
-    const h = harness({ beginLiveDrain: () => new Promise(() => {}) });
+    // Waits on the save itself: closing the real recorder file is file-system
+    // work whose duration varies by machine, so no fixed number of event-loop
+    // turns can stand in for it. The drain never settles, so a save ordered
+    // after it never happens and the deadline below reports that.
+    const saved: Array<{ filePath: string; notes: RecordingNote[] }> = [];
+    let notesSaved!: () => void;
+    const savedSignal = new Promise<void>((resolve) => {
+      notesSaved = resolve;
+    });
+    const h = harness({
+      beginLiveDrain: () => new Promise(() => {}),
+      saveNotes: async (filePath, notes) => {
+        saved.push({ filePath, notes });
+        notesSaved();
+      },
+    });
     after(() => h.cleanup());
     const sessionId = await startRecording(h);
     h.controller.addNote({ text: 'Decision: ship it' });
     h.recorder.appendChunk(Buffer.from([1, 2]));
     void h.controller.requestStop('quit', { autoMode: false });
     h.controller.hostEvent({ type: 'stopped', sessionId });
-    for (let i = 0; i < 20 && h.savedNotes.length === 0; i++) await flush();
-    assert.equal(h.savedNotes.length, 1, 'saved while the drain never finishes');
-    assert.equal(h.savedNotes[0].notes[0].text, 'Decision: ship it');
+    const outcome = await Promise.race([
+      savedSignal.then(() => 'saved' as const),
+      new Promise<'deadline'>((resolve) => setTimeout(() => resolve('deadline'), 10_000).unref()),
+    ]);
+    assert.equal(outcome, 'saved', 'notes saved while the live drain never finishes');
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].notes[0].text, 'Decision: ship it');
   });
 
   it('a duplicate open while one is pending is refused and cannot leak the owned open', async () => {
