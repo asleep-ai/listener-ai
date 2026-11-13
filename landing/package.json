@@ -1,0 +1,30 @@
+{
+  "name": "listener-ai-landing",
+  "private": true,
+  "type": "module",
+  "description": "Build-time prerender of the Listener.AI landing page with Astryx components",
+  "packageManager": "pnpm@11.21.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node build/prerender.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "oxlint src test",
+    "format": "oxfmt 'src/**/*.ts' 'src/**/*.tsx' 'test/**/*.mjs'",
+    "format:check": "oxfmt --check 'src/**/*.ts' 'src/**/*.tsx' 'test/**/*.mjs'",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "0.7.14",
+    "@astryxdesign/theme-neutral": "0.7.14",
+    "@stylexjs/stylex": "0.19.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "oxfmt": "0.63.0",
+    "oxlint": "1.78.0",
+    "typescript": "5.9.3"
+  }
+}

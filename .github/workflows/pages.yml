@@ -6,11 +6,13 @@ on:
     paths:
       - 'docs/**'
       - 'scripts/fetch-landing-media.mjs'
+      - 'landing/**'
       - '.github/workflows/pages.yml'
   pull_request:
     paths:
       - 'docs/**'
       - 'scripts/fetch-landing-media.mjs'
+      - 'landing/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -26,27 +28,54 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 11.21.0
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+          cache: 'pnpm'
+          cache-dependency-path: landing/pnpm-lock.yaml
+      # The landing page is an isolated package: this installs only its own
+      # build-time dependencies, never the Electron app's.
+      - name: Install landing build dependencies
+        working-directory: landing
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Lint, format-check, type-check and prerender landing page
+        working-directory: landing
+        run: pnpm run lint && pnpm run format:check && pnpm run typecheck && pnpm run build
+      - name: Test landing page and download link resolution
+        working-directory: landing
+        run: pnpm test
       - name: Fetch and verify release media
         run: node scripts/fetch-landing-media.mjs
-      - name: Build website and legal pages
+      - name: Build legal pages and shared assets
         uses: actions/jekyll-build-pages@v1
         with:
           source: ./docs
           destination: ./_site
+      # Jekyll must not emit a landing of its own: the prerendered page from
+      # landing/src is the only source of index.html and landing.css.
+      - name: Assemble site
+        run: |
+          test ! -e _site/index.html
+          test ! -e _site/assets/landing.css
+          mkdir public
+          cp -R _site/. public/
+          cp -R landing/dist/. public/
       - name: Check published entry points
         run: |
-          test -s _site/index.html
-          test -s _site/privacy/index.html
-          test -s _site/terms/index.html
-          test -s _site/assets/demos/listener-demo.mp4
-          test -s _site/assets/demos/listener-demo.jpg
-          test -s _site/assets/demos/listener-demo.ko.vtt
+          grep -q 'data-astryx-theme="neutral"' public/index.html
+          test -s public/assets/landing.css
+          test -s public/assets/downloads.js
+          test -s public/privacy/index.html
+          test -s public/terms/index.html
+          test -s public/assets/demos/listener-demo.mp4
+          test -s public/assets/demos/listener-demo.jpg
+          test -s public/assets/demos/listener-demo.ko.vtt
       - uses: actions/upload-pages-artifact@v4
         with:
-          path: ./_site
+          path: ./public
 
   deploy:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
