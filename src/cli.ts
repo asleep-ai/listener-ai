@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { type AgentScope, AgentService, type ConfigProposal } from './agentService';
@@ -19,9 +19,34 @@ import { CHATGPT_MANAGE_USAGE_URL } from './chatgptResponses';
 import { LEGACY_CODEX_TRANSCRIPTION_MESSAGE } from './aiProvider';
 import { getDataPath } from './dataPath';
 import { GeminiService } from './geminiService';
-import { loginGoogleOAuth, resolveGoogleAccessToken } from './googleOAuth';
-import { GoogleDriveClient, uploadMeetingFolder } from './services/googleDriveService';
-import { SyncEngine } from './services/syncEngine';
+import {
+  type GoogleOAuthCredentials,
+  loginGoogleOAuth,
+  resolveGoogleAccessToken,
+} from './googleOAuth';
+import {
+  GoogleSessionTracker,
+  googleAccountKey,
+  withGoogleCredentialLock,
+} from './services/googleSession';
+import {
+  GoogleDriveClient,
+  LISTENER_DRIVE_FOLDER_NAME,
+  uploadMeetingFolder,
+} from './services/googleDriveService';
+import { SyncEngine, type SyncState } from './services/syncEngine';
+import {
+  buildLocalStorageReport,
+  cleanupRestoreTemps,
+  driveEntryFor,
+  readNoteAudioFile,
+  reclaimLocalAudio,
+  recordingsDirFor,
+  resolveVerifiedNoteAudioPath,
+  restoreLocalAudio,
+  statManagedAudio,
+  withAudioReadLease,
+} from './services/localAudioStorage';
 import {
   ACTION_ITEMS_FILE,
   HIGHLIGHTS_JSON_FILE,
@@ -64,7 +89,15 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.webm',
 ]);
 
-const MEETING_READER_COMMANDS = new Set(['list', 'show', 'export', 'search', 'merge', 'ask']);
+const MEETING_READER_COMMANDS = new Set([
+  'list',
+  'show',
+  'export',
+  'search',
+  'merge',
+  'ask',
+  'storage',
+]);
 const COMMANDS_WITHOUT_MIGRATION = new Set([
   'config',
   'chatgpt',
@@ -118,6 +151,11 @@ const USAGE_TEXT =
   '       listener google login|logout|status Manage Google Drive OAuth sign-in\n' +
   '       listener google upload <ref>        Upload a meeting folder to Google Drive\n' +
   '       listener google sync                Sync all meetings to Google Drive (upload changes only)\n' +
+  '       listener storage [status] [--json]  Show local storage use and audio backed up to Google Drive\n' +
+  '       listener storage free <ref>... | --all [--older-than <days>] [--dry-run]\n' +
+  '                                           Remove local audio already in Google Drive (checked first;\n' +
+  '                                           notes and the Drive copy are kept)\n' +
+  "       listener storage restore <ref>      Download a meeting's audio back from Google Drive\n" +
   '       listener config list|get|set|unset|path\n' +
   '                                           Manage configuration\n' +
   '       listener usage [--month YYYY-MM] [--json]\n' +
@@ -592,7 +630,7 @@ async function handleGoogle(args: string[]): Promise<void> {
   }
 
   if (sub === 'logout') {
-    config.clearGoogleOAuth();
+    await config.signOutGoogleOAuth();
     process.stderr.write('Signed out of Google Drive OAuth.\n');
     return;
   }
@@ -620,7 +658,7 @@ async function handleGoogle(args: string[]): Promise<void> {
     },
     onProgress: (message) => process.stderr.write(`${message}\n`),
   });
-  config.setGoogleOAuth(credentials);
+  await config.signInGoogleOAuth(credentials);
   const accountSuffix = credentials.email ? ` as ${credentials.email}` : '';
   process.stderr.write(`Signed in with Google Drive OAuth${accountSuffix}.\n`);
 }
@@ -665,7 +703,37 @@ async function handleGoogleUpload(
       });
   });
 
-  if (files.length === 0) {
+  // The note's recording lives in recordings/, outside the folder. It is a
+  // candidate only when it is an app recording (statManagedAudio rejects
+  // symlinks and anything whose real path leaves recordings/) AND it is this
+  // note's own audio: a note synced from another device can name a path that
+  // exists here holding unrelated audio (resolveVerifiedNoteAudioPath checks
+  // it against what sync recorded). The Drive side is checked below.
+  const audioFile = readNoteAudioFile(folderPath);
+  let audio: { name: string; content: NonSharedBuffer; md5: string } | null = null;
+  if (
+    audioFile &&
+    statManagedAudio(recordingsDirFor(dataPath), audioFile) &&
+    !files.some((f) => f.name === path.basename(audioFile))
+  ) {
+    const verified = await resolveVerifiedNoteAudioPath(dataPath, folderName, audioFile);
+    if (verified === audioFile) {
+      const content = await withAudioReadLease(dataPath, audioFile, () =>
+        fs.readFileSync(audioFile),
+      );
+      audio = {
+        name: path.basename(audioFile),
+        content,
+        md5: createHash('md5').update(content).digest('hex'),
+      };
+    } else {
+      process.stderr.write(
+        `Skipped ${path.basename(audioFile)}: the file at this note's audio path is not this note's recording.\n`,
+      );
+    }
+  }
+
+  if (files.length === 0 && !audio) {
     process.stderr.write(`Error: No files to upload in ${folderPath}\n`);
     process.exit(1);
   }
@@ -674,17 +742,43 @@ async function handleGoogleUpload(
     getAccessToken: async () => {
       const token = await resolveGoogleAccessToken({
         credentials,
-        onCredentialsChanged: (next) => {
-          // Only persist rotated tokens if the original came from disk -- env-
-          // sourced creds should not silently leak into config.json. Mirrors
-          // the Codex pattern.
-          if (config.hasStoredGoogleOAuth()) config.setGoogleOAuth(next);
+        onCredentialsChanged: async (next) => {
+          // Compare and write under the credential lock: only over a stored
+          // sign-in of the same account (never env-only credentials, never
+          // undoing a sign-out or switch made by another process).
+          await config.persistRefreshedGoogleOAuth(googleAccountKey(credentials), next);
         },
       });
       if (!token) throw new Error('Failed to resolve Google access token.');
       return token;
     },
   });
+
+  if (audio) {
+    // Uploads replace a same-named Drive file, so never send audio over a
+    // Drive copy holding different bytes unless this device uploaded that
+    // copy itself (sync bookkeeping records our md5).
+    const appFolder = await client.ensureFolder(LISTENER_DRIVE_FOLDER_NAME);
+    const meetingFolder = await client.ensureFolder(folderName, appFolder.id);
+    const remote = await client.findFile({ name: audio.name, parentId: meetingFolder.id });
+    const ours = driveEntryFor(loadCliSyncState(dataPath), folderName, audio.name);
+    const remoteIsOurs = !!ours?.sourceAudio && ours.md5Checksum === remote?.md5Checksum;
+    if (remote && remote.md5Checksum !== audio.md5 && !remoteIsOurs) {
+      process.stderr.write(
+        `Kept the Google Drive copy of ${audio.name}: the local file holds different audio.\n`,
+      );
+    } else {
+      files.push({
+        name: audio.name,
+        content: audio.content,
+        mimeType: mimeTypeForFile(audio.name),
+      });
+    }
+  }
+  if (files.length === 0) {
+    process.stderr.write(`Error: No files to upload in ${folderPath}\n`);
+    process.exit(1);
+  }
 
   process.stderr.write(`Uploading "${folderName}" (${files.length} files) to Google Drive...\n`);
   const result = await uploadMeetingFolder({
@@ -712,8 +806,11 @@ async function handleGoogleSync(config: ConfigService, dataPath: string): Promis
     getAccessToken: async () => {
       const token = await resolveGoogleAccessToken({
         credentials,
-        onCredentialsChanged: (next) => {
-          if (config.hasStoredGoogleOAuth()) config.setGoogleOAuth(next);
+        onCredentialsChanged: async (next) => {
+          // Compare and write under the credential lock: only over a stored
+          // sign-in of the same account (never env-only credentials, never
+          // undoing a sign-out or switch made by another process).
+          await config.persistRefreshedGoogleOAuth(googleAccountKey(credentials), next);
         },
       });
       if (!token) throw new Error('Failed to resolve Google access token.');
@@ -725,6 +822,7 @@ async function handleGoogleSync(config: ConfigService, dataPath: string): Promis
     driveClient: client,
     transcriptionsDir: getTranscriptionsDir(dataPath),
     syncStatePath: path.join(dataPath, 'sync-state.json'),
+    recordingsDir: recordingsDirFor(dataPath),
     logger: (msg) => process.stderr.write(`${msg}\n`),
     configSync: config,
   });
@@ -750,6 +848,206 @@ async function handleGoogleSync(config: ConfigService, dataPath: string): Promis
     }
     process.exit(1);
   }
+}
+
+// Drive client for the storage commands and merge restores, bound to one
+// persisted snapshot of the Google sign-in (see googleSession.ts). Another
+// process (the app, or a second CLI) signing out or switching accounts stops
+// the operation, and a refresh is written back only over a stored sign-in of
+// the same account.
+function loadCliSyncState(dataPath: string): SyncState | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(dataPath, 'sync-state.json'), 'utf-8'));
+    return parsed?.version === 1 ? (parsed as SyncState) : null;
+  } catch {
+    return null;
+  }
+}
+
+function cliDriveClient(config: ConfigService): {
+  client: GoogleDriveClient;
+  isCurrent: () => boolean;
+} {
+  const tracker = new GoogleSessionTracker<GoogleOAuthCredentials>(
+    () => config.readPersistedGoogleOAuth(),
+    () => config.readPersistedStoredGoogleOAuth(),
+    (action) => withGoogleCredentialLock(getDataPath(), action),
+  );
+  const snapshot = tracker.snapshot();
+  if (!snapshot) {
+    process.stderr.write(
+      'Error: Not signed in to Google Drive. Run `listener google login` first.\n',
+    );
+    process.exit(1);
+  }
+  const { credentials, session } = snapshot;
+  const isCurrent = () => tracker.isCurrent(session);
+  const client = new GoogleDriveClient({
+    getAccessToken: async () => {
+      if (!isCurrent()) throw new Error('The Google sign-in changed; the operation was stopped.');
+      const token = await resolveGoogleAccessToken({
+        credentials,
+        onCredentialsChanged: async (next) => {
+          await tracker.persistRefreshed(session, next, (value) => config.setGoogleOAuth(value));
+        },
+      });
+      if (!token) throw new Error('Failed to resolve Google access token.');
+      return token;
+    },
+  });
+  return { client, isCurrent };
+}
+
+function formatBytesCli(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+// `listener storage`: local space report, removing local audio that is backed
+// up to Google Drive, and downloading it back. Removal never touches Drive or
+// the note; every file is checked against its Drive copy first.
+async function handleStorage(args: string[]): Promise<void> {
+  const dataPath = getDataPath();
+  const config = new ConfigService(dataPath);
+  const sub = args[0] && !args[0].startsWith('-') ? args[0] : 'status';
+  const rest = sub === args[0] ? args.slice(1) : args;
+
+  if (sub === 'status') {
+    const report = buildLocalStorageReport(dataPath);
+    if (rest.includes('--json')) {
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      return;
+    }
+    const out = process.stdout;
+    out.write(`Total:              ${formatBytesCli(report.totalBytes)}\n`);
+    out.write(
+      `  Audio:            ${formatBytesCli(report.audioBytes)} (${report.audioFiles} recordings)\n`,
+    );
+    out.write(`  Notes:            ${formatBytesCli(report.notesBytes)}\n`);
+    out.write(`  Other:            ${formatBytesCli(report.otherBytes)}\n`);
+    out.write(
+      `Can be freed:       ${formatBytesCli(report.eligibleBytes)} (${report.eligibleFiles} recordings; ` +
+        'uploaded, re-verified with Drive before removal)\n',
+    );
+    out.write(
+      `Not uploaded yet:   ${formatBytesCli(report.notBackedUpBytes)} (${report.notBackedUpFiles} recordings)\n`,
+    );
+    out.write(
+      `In Drive only:      ${formatBytesCli(report.cloudOnlyBytes)} (${report.cloudOnlyFiles} recordings)\n`,
+    );
+    out.write(
+      `Without a meeting:  ${formatBytesCli(report.unlinkedBytes)} (${report.unlinkedFiles} recordings, always kept)\n`,
+    );
+    if (report.externalFiles > 0) {
+      out.write(
+        `External originals: ${report.externalFiles} meeting(s) use audio outside the app folder; never uploaded or removed\n`,
+      );
+    }
+    const days = config.getAudioOffloadAfterDays();
+    out.write(
+      `Automatic removal:  ${days > 0 ? `after ${days} days unused (app, after each sync)` : 'off'}\n`,
+    );
+    return;
+  }
+
+  if (sub === 'free') {
+    let all = false;
+    let dryRun = false;
+    let olderThanDays: number | undefined;
+    const refs: string[] = [];
+    for (let i = 0; i < rest.length; i++) {
+      const a = rest[i];
+      if (a === '--all') all = true;
+      else if (a === '--dry-run') dryRun = true;
+      else if (a === '--older-than' && i + 1 < rest.length) {
+        olderThanDays = Number.parseInt(rest[++i], 10);
+        if (!Number.isFinite(olderThanDays) || olderThanDays < 0) {
+          process.stderr.write('Error: --older-than takes a number of days.\n');
+          process.exit(1);
+        }
+      } else if (a.startsWith('-')) {
+        process.stderr.write(`Error: Unknown option: ${a}\n`);
+        process.exit(1);
+      } else refs.push(a);
+    }
+    if (!all && refs.length === 0) {
+      process.stderr.write(
+        'Error: Usage: listener storage free <ref>... | --all [--older-than <days>] [--dry-run]\n',
+      );
+      process.exit(1);
+    }
+    let paths: string[] | undefined;
+    if (!all) {
+      paths = [];
+      for (const ref of refs) {
+        const folderPath = await resolveRef(ref, dataPath);
+        const audio = await resolveVerifiedNoteAudioPath(
+          dataPath,
+          path.basename(folderPath),
+          readNoteAudioFile(folderPath),
+        );
+        if (!audio) {
+          process.stderr.write(`Skipped ${ref}: its audio is not on this device.\n`);
+          continue;
+        }
+        paths.push(audio);
+      }
+      if (paths.length === 0) return;
+    }
+    const drive = cliDriveClient(config);
+    const result = await reclaimLocalAudio({
+      dataPath,
+      driveClient: drive.client,
+      shouldContinue: drive.isCurrent,
+      ...(paths ? { paths } : {}),
+      ...(olderThanDays !== undefined ? { olderThanDays } : {}),
+      dryRun,
+    });
+    const verb = dryRun ? 'Would remove' : 'Removed';
+    for (const r of result.removed) {
+      process.stderr.write(`  ${verb} ${path.basename(r.path)} (${formatBytesCli(r.bytes)})\n`);
+    }
+    for (const s of result.skipped) {
+      process.stderr.write(
+        `  Kept ${path.basename(s.path)}: ${s.reason}${s.detail ? ` (${s.detail})` : ''}\n`,
+      );
+    }
+    process.stderr.write(
+      `${verb} ${result.removed.length} local recording(s), ${formatBytesCli(result.freedBytes)}. ` +
+        'Notes and Google Drive copies are unchanged.\n',
+    );
+    return;
+  }
+
+  if (sub === 'restore') {
+    const ref = rest[0];
+    if (!ref) {
+      process.stderr.write('Error: Usage: listener storage restore <ref>\n');
+      process.exit(1);
+    }
+    const folderPath = await resolveRef(ref, dataPath);
+    cleanupRestoreTemps(dataPath);
+    const drive = cliDriveClient(config);
+    const restored = await restoreLocalAudio({
+      dataPath,
+      driveClient: drive.client,
+      shouldContinue: drive.isCurrent,
+      meetingFolder: path.basename(folderPath),
+    });
+    process.stderr.write(
+      restored.downloaded
+        ? `Downloaded ${formatBytesCli(restored.bytes)} from Google Drive.\n`
+        : 'The audio is already on this device.\n',
+    );
+    process.stdout.write(`${restored.path}\n`);
+    return;
+  }
+
+  process.stderr.write(
+    'Error: Unknown storage command. Usage: listener storage status|free|restore\n',
+  );
+  process.exit(1);
 }
 
 function handleConfig(subArgs: string[]): void {
@@ -1217,11 +1515,37 @@ async function handleMerge(args: string[]): Promise<void> {
       );
       process.exit(1);
     }
-    if (!fs.existsSync(data.audioFilePath)) {
+    const folderName = path.basename(folderPath);
+    // A file at the note's path is used only if it matches what sync recorded
+    // for this note; otherwise the note's own audio is downloaded.
+    let audioPath = await resolveVerifiedNoteAudioPath(dataPath, folderName, data.audioFilePath);
+    if (!audioPath && config.readPersistedGoogleOAuth()) {
+      // Removed locally to save space: download it back from Google Drive.
+      process.stderr.write(`Downloading audio for ${ref} from Google Drive...\n`);
+      try {
+        audioPath = (
+          await (async () => {
+            const drive = cliDriveClient(config);
+            return restoreLocalAudio({
+              dataPath,
+              driveClient: drive.client,
+              shouldContinue: drive.isCurrent,
+              meetingFolder: folderName,
+            });
+          })()
+        ).path;
+      } catch (err) {
+        process.stderr.write(
+          `Error: could not download audio for ${ref}: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+        process.exit(1);
+      }
+    }
+    if (!audioPath) {
       process.stderr.write(`Error: source audio missing for ${ref}: ${data.audioFilePath}\n`);
       process.exit(1);
     }
-    sources.push({ folderName: path.basename(folderPath), audioPath: data.audioFilePath });
+    sources.push({ folderName, audioPath });
   }
 
   const ffmpegManager = new FFmpegManager(dataPath);
@@ -1244,11 +1568,17 @@ async function handleMerge(args: string[]): Promise<void> {
   );
 
   process.stderr.write(`Merging ${sources.length} recordings...\n`);
-  await concatAudioFiles({
-    ffmpegPath,
-    inputPaths: sources.map((s) => s.audioPath),
-    outputPath: mergedAudioPath,
-  });
+  // Every source holds a read lease so the app cannot remove it mid-concat.
+  const leasedConcat = sources.reduceRight<() => Promise<unknown>>(
+    (inner, source) => () => withAudioReadLease(dataPath, source.audioPath, inner),
+    () =>
+      concatAudioFiles({
+        ffmpegPath,
+        inputPaths: sources.map((s) => s.audioPath),
+        outputPath: mergedAudioPath,
+      }),
+  );
+  await leasedConcat();
   process.stderr.write(`  -> ${mergedAudioPath}\n`);
 
   const gemini = createTranscriptionService(config, dataPath);
@@ -1575,14 +1905,16 @@ async function handleTranscript(args: string[]): Promise<void> {
 
   process.stderr.write(`Processing: ${filePath}\n`);
 
-  const result = await gemini.transcribeAudio(
-    filePath,
-    (_percent, message) => {
-      process.stderr.write(`  ${message}\n`);
-    },
-    undefined,
-    undefined,
-    { transcriptOnly: true, transcriptionPrompt: promptText },
+  const result = await withAudioReadLease(dataPath, filePath, () =>
+    gemini.transcribeAudio(
+      filePath,
+      (_percent, message) => {
+        process.stderr.write(`  ${message}\n`);
+      },
+      undefined,
+      undefined,
+      { transcriptOnly: true, transcriptionPrompt: promptText },
+    ),
   );
 
   if (outputPath) {
@@ -1698,6 +2030,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === 'storage') {
+    await handleStorage(args.slice(1));
+    return;
+  }
+
   if (args[0] === 'transcript') {
     await handleTranscript(args.slice(1));
     return;
@@ -1761,12 +2098,14 @@ async function main(): Promise<void> {
 
   process.stderr.write(`Processing: ${filePath}\n`);
 
-  const result = await gemini.transcribeAudio(
-    filePath,
-    (_percent, message) => {
-      process.stderr.write(`  ${message}\n`);
-    },
-    config.getSummaryPrompt(),
+  const result = await withAudioReadLease(dataPath, filePath, () =>
+    gemini.transcribeAudio(
+      filePath,
+      (_percent, message) => {
+        process.stderr.write(`  ${message}\n`);
+      },
+      config.getSummaryPrompt(),
+    ),
   );
 
   const title = result.suggestedTitle || path.basename(filePath, path.extname(filePath));

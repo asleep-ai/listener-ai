@@ -56,6 +56,8 @@
     "dist/services/audioConcatService.js",
     "dist/services/googleDriveService.js",
     "dist/services/syncEngine.js",
+    "dist/services/localAudioStorage.js",
+    "dist/services/googleSession.js",
     "dist/services/usageTracker.js"
   ],
   "scripts": {

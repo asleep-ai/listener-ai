@@ -23,6 +23,9 @@ import type {
   TranscriptionJobExports,
   TranscriptionJobSnapshot,
   TranscriptionJobsList,
+  LocalAudioFreeResult,
+  LocalAudioRestoreResult,
+  LocalStorageReportResult,
 } from './electronApiTypes';
 import type { LiveNote } from './outputService';
 import type { FileInfoResult } from './services/fileInfoTypes';
@@ -177,6 +180,19 @@ const api = {
   },
   onGoogleSyncProgress: (callback: (event: SyncProgressEvent) => void) => {
     ipcRenderer.on('google-sync-progress', (_, event) => callback(event));
+  },
+
+  // Local storage: totals, freeing local audio backed up to Drive, and
+  // downloading it back on demand. Removal never touches Drive or the note.
+  getLocalStorageReport: (): Promise<LocalStorageReportResult> => invoke('local-storage-report'),
+  freeLocalAudio: (opts: { paths?: string[] } = {}): Promise<LocalAudioFreeResult> =>
+    invoke('local-audio-free', opts),
+  restoreLocalAudio: (opts: {
+    folderPath?: string;
+    audioPath?: string;
+  }): Promise<LocalAudioRestoreResult> => invoke('local-audio-restore', opts),
+  onLocalStorageChanged: (callback: () => void) => {
+    ipcRenderer.on('local-storage-changed', () => callback());
   },
   // A request for a recording that is already transcribing joins that job
   // (`joined: true`) instead of starting another. `autoExport` makes main run

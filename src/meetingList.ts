@@ -2,7 +2,12 @@ import * as fs from 'node:fs';
 import type { TranscriptionEntry } from './outputService';
 import { pathKeys } from './transcriptionJobs';
 
-export type NoteListEntry = TranscriptionEntry & { audioAvailable: boolean };
+export type NoteListEntry = TranscriptionEntry & {
+  audioAvailable: boolean;
+  // The audio is not on this device but a Google Drive copy is known; the
+  // list offers to download it.
+  audioInCloud?: boolean;
+};
 
 /** Metadata-only list projection: local recordings retain ownership of linked notes. */
 export async function unlinkedNotes(options: {

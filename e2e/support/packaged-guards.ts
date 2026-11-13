@@ -1,3 +1,34 @@
+// The only Google sign-in a packaged seed may carry: fixed non-token strings,
+// an example.invalid address, and an expiry far enough ahead that no refresh
+// request is attempted during a case (refresh starts within 60s of expiry).
+export const SYNTHETIC_GOOGLE_OAUTH = Object.freeze({
+  access: 'synthetic-not-a-token',
+  refresh: 'synthetic-not-a-refresh',
+  email: 'synthetic@example.invalid',
+});
+
+function isSyntheticGoogleOAuth(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (keys.join(',') !== 'access,email,expires,refresh') return false;
+  if (
+    record.access !== SYNTHETIC_GOOGLE_OAUTH.access ||
+    record.refresh !== SYNTHETIC_GOOGLE_OAUTH.refresh ||
+    record.email !== SYNTHETIC_GOOGLE_OAUTH.email
+  )
+    return false;
+  const now = Date.now();
+  return (
+    typeof record.expires === 'number' &&
+    Number.isSafeInteger(record.expires) &&
+    record.expires >= now + 10 * 60_000 &&
+    record.expires <= now + 48 * 60 * 60_000
+  );
+}
+
 // Test-only guards for an unmodified packaged executable. Installation happens
 // after boot; this cannot prove that no OS activation occurred before it.
 export function assertPackagedSeed(config: Record<string, unknown>, rootEntries: string[]): void {
@@ -6,6 +37,7 @@ export function assertPackagedSeed(config: Record<string, unknown>, rootEntries:
     'metadata',
     'transcriptions',
     'config.json',
+    'sync-state.json',
     'fixture-before.json',
     'fixture-after.json',
   ]);
@@ -35,6 +67,14 @@ export function assertPackagedSeed(config: Record<string, unknown>, rootEntries:
       Object.keys(value).length === 1 &&
       Object.hasOwn(value, 'access') &&
       (value as { access?: unknown }).access === 'synthetic-not-a-token'
+    )
+      continue;
+    // A synthetic Drive sign-in is allowed only while automatic sync is
+    // explicitly off; Drive calls must go through an installed fake client.
+    if (
+      key === 'googleOAuth' &&
+      config.googleDriveEnabled === false &&
+      isSyntheticGoogleOAuth(value)
     )
       continue;
     throw new Error(`Credentials are forbidden in packaged seeds: ${key}`);

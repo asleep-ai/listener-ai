@@ -1,6 +1,21 @@
 import { lstatSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
+// Device-local storage state the app writes at the data root (Drive sync
+// state, local-audio records, read leases, sync conflicts). Named explicitly:
+// the same root is Chromium's profile, which must survive between cases.
+const STORAGE_STATE = [
+  'sync-state.json',
+  'local-audio',
+  '.listener-audio-leases',
+  '.listener-conflicts',
+];
+const STORAGE_TEMP = /^\.sync-state\.json\.tmp\.\d+$/;
+// Lock directories exist only while a lock is held. Cleanup runs after jobs
+// and IPC drained, so the parent is removed only when empty; a remaining lock
+// is left in place and reported by storageStateResidue.
+const MEETING_LOCKS = '.listener-meeting-locks';
+
 // Keep the app's watched directory inodes alive across cases. Replacing a
 // directory leaves fs.watch attached to its removed inode on macOS and Linux.
 export function clearOwnedFixtureData(dataDir: string, includeConfig = false): void {
@@ -34,10 +49,35 @@ export function clearOwnedFixtureData(dataDir: string, includeConfig = false): v
       (includeConfig && name === 'config.json') ||
       lstatSync(path).isSymbolicLink() ||
       /\.(wav|webm|m4a)$/.test(name) ||
-      name.startsWith('fixture-')
+      name.startsWith('fixture-') ||
+      STORAGE_STATE.includes(name) ||
+      STORAGE_TEMP.test(name)
     )
       rmSync(path, { recursive: true, force: true });
+    else if (
+      name === MEETING_LOCKS &&
+      lstatSync(path).isDirectory() &&
+      readdirSync(path).length === 0
+    )
+      rmSync(path, { recursive: true });
   }
+}
+
+// Storage state a reset must not carry into the next case. Empty means clean.
+export function storageStateResidue(dataDir: string): string[] {
+  const residue: string[] = [];
+  for (const name of readdirSync(dataDir)) {
+    if (STORAGE_STATE.includes(name) || STORAGE_TEMP.test(name)) residue.push(name);
+    else if (name === MEETING_LOCKS) {
+      const path = join(dataDir, name);
+      const state = lstatSync(path);
+      // The app recreates an empty lock directory on its next read; held
+      // locks or a replaced entry are residue.
+      if (!state.isDirectory() || state.isSymbolicLink()) residue.push(name);
+      else for (const lock of readdirSync(path)) residue.push(`${name}/${lock}`);
+    }
+  }
+  return residue.sort();
 }
 
 // Test-only ownership. A failed setup/reset poisons the session instead of
@@ -105,13 +145,16 @@ export function assertCleanReset(state: {
   configMatches: boolean;
   mocksRestored: boolean;
   dataEmpty: boolean;
+  storageResidue: string[];
 }): void {
   if (
     state.activeJobs ||
     state.pendingInvocations ||
     !state.configMatches ||
     !state.mocksRestored ||
-    !state.dataEmpty
+    !state.dataEmpty ||
+    !Array.isArray(state.storageResidue) ||
+    state.storageResidue.length
   )
     throw new Error(`Test isolation failed: ${JSON.stringify(state)}`);
 }

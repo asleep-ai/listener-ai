@@ -31,6 +31,7 @@ import {
   getGoogleOAuthEnvCredentials,
   hasGoogleOAuthEnvCredentials,
 } from './googleOAuth';
+import { googleAccountKey, withGoogleCredentialLock } from './services/googleSession';
 
 /** Sanitized ChatGPT sign-in status for the renderer (never a token). */
 export interface ChatGPTStatusPayload {
@@ -484,6 +485,66 @@ export class ConfigService {
     return this.config.googleOAuth || getGoogleOAuthEnvCredentials();
   }
 
+  /**
+   * The Google sign-in as persisted right now, re-read from config.json
+   * without touching this instance's cache. Another process (the CLI) may
+   * have signed out or switched accounts since this instance loaded; actions
+   * that remove local data check this before acting. Env credentials still
+   * apply when nothing is stored. An unreadable file reads as signed out.
+   */
+  readPersistedGoogleOAuth(): GoogleOAuthCredentials | null {
+    const stored = this.readPersistedStoredGoogleOAuth();
+    if (stored === null) return null;
+    return stored || getGoogleOAuthEnvCredentials() || null;
+  }
+
+  /**
+   * Only what is stored in config.json now (no env fallback). `undefined`
+   * when nothing is stored; `null` when the file cannot be read, which
+   * callers treat as signed out.
+   */
+  readPersistedStoredGoogleOAuth(): GoogleOAuthCredentials | undefined | null {
+    try {
+      if (!fs.existsSync(this.configPath)) return undefined;
+      const parsed = JSON.parse(fs.readFileSync(this.configPath, 'utf-8')) as AppConfig;
+      return parsed.googleOAuth || undefined;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Sign-in and sign-out writes, serialized with refreshed-token write-back
+   * in every process (see withGoogleCredentialLock).
+   */
+  async signInGoogleOAuth(credentials: GoogleOAuthCredentials): Promise<void> {
+    await withGoogleCredentialLock(path.dirname(this.configPath), () =>
+      this.setGoogleOAuth(credentials),
+    );
+  }
+
+  async signOutGoogleOAuth(): Promise<void> {
+    await withGoogleCredentialLock(path.dirname(this.configPath), () => this.clearGoogleOAuth());
+  }
+
+  /**
+   * Writes refreshed tokens back only when config.json still holds a stored
+   * sign-in of `accountKey` (compare and write under the credential lock).
+   * Env-only credentials are never persisted, and a sign-out or switch made
+   * by another process is never undone. Returns whether it wrote.
+   */
+  async persistRefreshedGoogleOAuth(
+    accountKey: string | null,
+    next: GoogleOAuthCredentials,
+  ): Promise<boolean> {
+    if (!accountKey) return false;
+    return withGoogleCredentialLock(path.dirname(this.configPath), () => {
+      if (googleAccountKey(this.readPersistedStoredGoogleOAuth()) !== accountKey) return false;
+      this.setGoogleOAuth(next);
+      return true;
+    });
+  }
+
   hasStoredGoogleOAuth(): boolean {
     const c = this.config.googleOAuth;
     return !!(c?.access && c.refresh && Number.isFinite(c.expires));
@@ -509,6 +570,13 @@ export class ConfigService {
 
   setGoogleDriveEnabled(enabled: boolean): void {
     this.write('googleDriveEnabled', enabled);
+  }
+
+  // Days without use before local audio backed up to Drive is removed
+  // automatically. 0 (default) disables automatic removal.
+  getAudioOffloadAfterDays(): number {
+    const days = Number(this.read('audioOffloadAfterDays'));
+    return Number.isFinite(days) && days > 0 ? Math.floor(days) : 0;
   }
 
   // Summary, judge and agent auth. A Soniox key alone never satisfies this:

@@ -20,6 +20,11 @@ import {
   showLegacyCodexNotice,
 } from '../../src/aiProvider';
 import { applySettingsFields, parseLiveSttProvider, readSettingsFields } from './settings-fields';
+import {
+  ensureOffloadOption,
+  refreshLocalStorageReport,
+  setupLocalStorageSettings,
+} from './local-storage';
 import { diffConfigPayload } from '../../src/configDiff';
 import { DEFAULT_GLOBAL_SHORTCUT } from '../../src/configKeys';
 import {
@@ -860,6 +865,7 @@ export async function showConfigModal(options: ConfigModalOptions = {}): Promise
   // Pre-fill the form if values exist
   resetSettingsKeys.clear();
   applySettingsFields(config);
+  ensureOffloadOption(config.audioOffloadAfterDays);
   applyModelValue('geminiModel', config.geminiModel);
   applyModelValue('geminiFlashModel', config.geminiFlashModel);
   applyModelValue('openaiTranscriptionModel', config.openaiTranscriptionModel);
@@ -941,6 +947,7 @@ export async function showConfigModal(options: ConfigModalOptions = {}): Promise
   // even if the user has been recording in the same session. Fire-and-forget;
   // missing data renders as zeros.
   void refreshUsageSummaryCard();
+  void refreshLocalStorageReport();
 
   // AI connection carries the required-credentials state; open there so the
   // user sees setup status first, unless the caller names a specific setting.
@@ -1491,6 +1498,7 @@ export function setupConfigModal(): void {
       if (deleted.length > 0) parts.push(`${deleted.length} deleted`);
       if (tombstoned.length > 0) parts.push(`${tombstoned.length} marked for deletion`);
       setGoogleSyncStatus(`Synced just now (${parts.join(', ')})`, 'success');
+      if (configModal?.open) void refreshLocalStorageReport();
     } else if (status.phase === 'error') {
       const errCount = status.result?.errors.length ?? 0;
       setGoogleSyncStatus(status.error ?? `Sync finished with ${errCount} error(s)`, 'error');
@@ -1529,6 +1537,8 @@ export function setupConfigModal(): void {
       }
     });
   }
+
+  setupLocalStorageSettings();
 
   if (googleDriveSyncNowBtn) {
     googleDriveSyncNowBtn.addEventListener('click', async () => {

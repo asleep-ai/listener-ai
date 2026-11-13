@@ -3,6 +3,7 @@ import * as path from 'path';
 import { randomUUID } from 'node:crypto';
 import type { TranscriptionResult } from './geminiService';
 import { withMeetingLock } from './meetingLock';
+import { isVerifiedRestoredCopy } from './services/localAudioStorage';
 import {
   ACTION_ITEMS_FILE,
   HIGHLIGHTS_JSON_FILE,
@@ -116,12 +117,22 @@ export function saveRegeneratedTranscription(opts: RegenerateTranscriptionOption
   const target = resolveReplaceableFolder(saveOpts.dataPath, previousFolderPath);
   // A stale sidecar must not let this recording overwrite another recording's
   // note. Older notes without audioFile keep the existing replacement path.
-  if (
-    !target ||
-    (target.meta.audioFile &&
-      saveOpts.audioFilePath &&
-      path.resolve(target.meta.audioFile) !== path.resolve(saveOpts.audioFilePath))
-  ) {
+  // The one other match is a copy this device restored from the note's own
+  // Drive audio (to another path) whose bytes are unchanged since that
+  // verified download.
+  const pathMismatch =
+    !!target?.meta.audioFile &&
+    !!saveOpts.audioFilePath &&
+    path.resolve(target.meta.audioFile) !== path.resolve(saveOpts.audioFilePath);
+  const restoredCopy =
+    !!target &&
+    pathMismatch &&
+    isVerifiedRestoredCopy(
+      saveOpts.dataPath,
+      saveOpts.audioFilePath!,
+      path.basename(target.folderPath),
+    );
+  if (!target || (pathMismatch && !restoredCopy)) {
     return saveTranscription(saveOpts);
   }
 
@@ -132,6 +143,10 @@ export function saveRegeneratedTranscription(opts: RegenerateTranscriptionOption
   try {
     const staged = saveTranscription({
       ...saveOpts,
+      // A restored copy keeps the note's source-audio identity: meta.audioFile
+      // stays the path sync knows the Drive copy by, so no second copy is
+      // uploaded under the local name and other devices are unaffected.
+      ...(restoredCopy ? { audioFilePath: target.meta.audioFile } : {}),
       outputDir: path.join(scratch, 'new'),
       // Regenerating re-transcribes the same audio, so a merged note stays merged.
       mergedFrom: target.meta.merge?.sourceIds,

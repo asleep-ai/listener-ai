@@ -60,6 +60,11 @@ export interface IpcContext {
   // Opens a URL in the user's browser. Auto-mode follow-ups that run in main
   // use it to open the uploaded Notion page, as the renderer used to.
   openExternal(url: string): void;
+  // True while something in this process reads or writes the recording: an
+  // active capture or header remux, or a running transcription/merge job.
+  // Local audio removal skips such files. Optional so handler tests that do
+  // not exercise storage can omit it.
+  isAudioInUse?(audioPath: string): boolean;
   // Path of the recording main is currently writing, if any. Destructive
   // handlers (delete) refuse it: the list shows the file while it is still
   // being written, and deleting it loses the whole recording. A reachable

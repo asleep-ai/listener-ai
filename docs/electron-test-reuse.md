@@ -7,7 +7,7 @@ packaged artifacts never share a process.
 | Project         |     Cases | Process lifetime                | State reset                                                                                         |
 | --------------- | --------: | ------------------------------- | --------------------------------------------------------------------------------------------------- |
 | settings        |         5 | One development process         | Raw config, client caches, renderer, synthetic files                                                |
-| meeting-list    |         2 | One development process         | Saved-note fixtures, config, renderer                                                               |
+| meeting-list    |         2 | Dev, or packaged (see below)    | Saved-note fixtures, config, renderer                                                               |
 | cutoff          |         2 | One development process         | Saved-note fixtures, config, renderer                                                               |
 | reload          |        23 | One development process         | Deferred jobs and exports, reservations, locks, IPC and provider overrides, renderer                |
 | live            |         8 | One development process         | Synthetic live capture, providers, config, renderer                                                 |
@@ -20,6 +20,16 @@ packaged artifacts never share a process.
 The normal run discovers 69 cases and expects 12 process launches, with the
 optional screenshot case skipped. Enabling `LISTENER_E2E_SHOTS` adds one launch.
 These are expected budgets, not execution evidence.
+
+meeting-list runs in one development process unless `LISTENER_SMOKE_BUILD_DIR`
+is set; then the same cases, including the fake-Drive storage cases, run in one
+packaged process. Its seeds use `synthetic-unused-key` and, for the signed-in
+Drive case, the fixed `SYNTHETIC_GOOGLE_OAUTH` sign-in, which
+`assertPackagedSeed` accepts only with `googleDriveEnabled: false`. CI
+package-check runs it against the Linux unpacked build; the manually dispatched
+macOS test build runs it against the `.app` staged for the uploaded DMG. Both
+jobs upload `test-results/` (coverage, launch summary, per-case
+`native-proof.json`) as an artifact named with the commit SHA.
 
 ## Commands
 

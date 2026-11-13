@@ -9,6 +9,7 @@ import { withMeetingLock } from '../meetingLock';
 import { META_JSON, formatTimestamp, sanitizeForPath, saveTranscription } from '../outputService';
 import { reportError } from '../sentry';
 import { concatAudioFiles } from '../services/audioConcatService';
+import { withAudioReadLease } from '../services/localAudioStorage';
 import { metadataService } from '../services/metadataService';
 import { type TranscriptionJobHandle, pathKeys, transcriptionJobs } from '../transcriptionJobs';
 import type { IpcContext } from './types';
@@ -106,60 +107,64 @@ export function register(ctx: IpcContext): void {
         return { success: false, error: 'Source path is outside the recordings directory' };
       }
 
-      const ffmpegPath = await ctx.ffmpegManager.ensureFFmpeg();
-      if (!ffmpegPath) {
-        return {
-          success: false,
-          code: 'ffmpeg-missing',
-          error: 'FFmpeg is required for M4A export.',
+      // The read lease spans the save dialog and the encode, so "free up
+      // space" cannot remove the source while the user picks a destination.
+      return await withAudioReadLease(app.getPath('userData'), path.resolve(srcPath), async () => {
+        const ffmpegPath = await ctx.ffmpegManager.ensureFFmpeg();
+        if (!ffmpegPath) {
+          return {
+            success: false,
+            code: 'ffmpeg-missing',
+            error: 'FFmpeg is required for M4A export.',
+          };
+        }
+
+        const baseName = path.basename(resolvedSrc, path.extname(resolvedSrc));
+        const dialogOptions = {
+          title: 'Export recording as M4A',
+          defaultPath: `${baseName}.m4a`,
+          filters: [{ name: 'M4A Audio', extensions: ['m4a'] }],
         };
-      }
+        const mainWindow = ctx.getMainWindow();
+        const saveResult = mainWindow
+          ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+          : await dialog.showSaveDialog(dialogOptions);
+        if (saveResult.canceled || !saveResult.filePath) {
+          return { canceled: true };
+        }
+        const destPath = saveResult.filePath;
+        // Write to a sibling temp file and atomically rename on success so a
+        // failed encode never overwrites the user's picked path with a partial.
+        const tmpPath = `${destPath}.partial`;
 
-      const baseName = path.basename(resolvedSrc, path.extname(resolvedSrc));
-      const dialogOptions = {
-        title: 'Export recording as M4A',
-        defaultPath: `${baseName}.m4a`,
-        filters: [{ name: 'M4A Audio', extensions: ['m4a'] }],
-      };
-      const mainWindow = ctx.getMainWindow();
-      const saveResult = mainWindow
-        ? await dialog.showSaveDialog(mainWindow, dialogOptions)
-        : await dialog.showSaveDialog(dialogOptions);
-      if (saveResult.canceled || !saveResult.filePath) {
-        return { canceled: true };
-      }
-      const destPath = saveResult.filePath;
-      // Write to a sibling temp file and atomically rename on success so a
-      // failed encode never overwrites the user's picked path with a partial.
-      const tmpPath = `${destPath}.partial`;
+        try {
+          // Force -f ipod (M4A muxer) because the `.partial` extension defeats
+          // ffmpeg's format-by-extension detection otherwise.
+          await execFileAsync(ffmpegPath, [
+            '-y',
+            '-loglevel',
+            'error',
+            '-i',
+            resolvedSrc,
+            '-vn',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '128k',
+            '-movflags',
+            '+faststart',
+            '-f',
+            'ipod',
+            tmpPath,
+          ]);
+          await fs.promises.rename(tmpPath, destPath);
+        } catch (encodeError) {
+          await fs.promises.unlink(tmpPath).catch(() => {});
+          throw encodeError;
+        }
 
-      try {
-        // Force -f ipod (M4A muxer) because the `.partial` extension defeats
-        // ffmpeg's format-by-extension detection otherwise.
-        await execFileAsync(ffmpegPath, [
-          '-y',
-          '-loglevel',
-          'error',
-          '-i',
-          resolvedSrc,
-          '-vn',
-          '-c:a',
-          'aac',
-          '-b:a',
-          '128k',
-          '-movflags',
-          '+faststart',
-          '-f',
-          'ipod',
-          tmpPath,
-        ]);
-        await fs.promises.rename(tmpPath, destPath);
-      } catch (encodeError) {
-        await fs.promises.unlink(tmpPath).catch(() => {});
-        throw encodeError;
-      }
-
-      return { success: true, path: destPath };
+        return { success: true, path: destPath };
+      });
     } catch (error) {
       console.error('Error exporting M4A:', error);
       reportError(error, { operation: 'recording.exportM4a', severity: 'warning' });
@@ -282,8 +287,15 @@ async function runMerge(
     // Recordings without a transcription contribute nothing to mergedFrom; we
     // also drop entries whose transcription folder no longer exists on disk
     // so the merged note's Sources section never references stale ghosts.
+    const dataPath = app.getPath('userData');
+    const leasedConcat = resolvedInputs.reduceRight<() => Promise<unknown>>(
+      (inner, input) => () => withAudioReadLease(dataPath, input, inner),
+      () =>
+        concatAudioFiles({ ffmpegPath, inputPaths: resolvedInputs, outputPath: mergedAudioPath }),
+    );
     const [, metas] = await Promise.all([
-      concatAudioFiles({ ffmpegPath, inputPaths: resolvedInputs, outputPath: mergedAudioPath }),
+      // Every source holds a read lease for the whole concat.
+      leasedConcat(),
       Promise.all(resolvedInputs.map((p) => metadataService.getMetadata(p))),
     ]);
     const sourceFolders = metas

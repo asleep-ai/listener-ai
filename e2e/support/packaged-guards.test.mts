@@ -4,7 +4,11 @@ import { createContext, runInContext } from 'node:vm';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
-import { assertPackagedSeed, installPackagedGuards } from './packaged-guards.ts';
+import {
+  assertPackagedSeed,
+  installPackagedGuards,
+  SYNTHETIC_GOOGLE_OAUTH,
+} from './packaged-guards.ts';
 
 const ownedEvidence: string[] = [];
 after(() => {
@@ -775,4 +779,63 @@ test('packaged seed permits only exact synthetic credentials and seed entries', 
     assert.throws(() => assertPackagedSeed(config, []));
   for (const entry of ['chatgpt', 'auth.json', 'codex-cli', '../recordings', 'unknown'])
     assert.throws(() => assertPackagedSeed({}, [entry]));
+});
+
+test('packaged seed allows only the exact synthetic Google sign-in with Drive sync off', () => {
+  const hour = 60 * 60_000;
+  const synthetic = (extra: Record<string, unknown> = {}) => ({
+    ...SYNTHETIC_GOOGLE_OAUTH,
+    expires: Date.now() + 24 * hour,
+    ...extra,
+  });
+  assertPackagedSeed({ googleDriveEnabled: false, googleOAuth: synthetic() }, [
+    'recordings',
+    'metadata',
+    'transcriptions',
+    'config.json',
+    'sync-state.json',
+  ]);
+  const { email: _email, ...withoutEmail } = synthetic();
+  for (const googleOAuth of [
+    synthetic({ access: 'ya29.real-looking-token' }),
+    synthetic({ refresh: '1//real-looking-refresh' }),
+    synthetic({ refresh: 'synthetic-not-a-token' }),
+    synthetic({ email: 'someone@gmail.com' }),
+    synthetic({ scope: 'https://www.googleapis.com/auth/drive.file' }),
+    synthetic({ expires: Date.now() + 30_000 }),
+    synthetic({ expires: Date.now() - hour }),
+    synthetic({ expires: Date.now() + 30 * 24 * hour }),
+    synthetic({ expires: String(Date.now() + 24 * hour) }),
+    synthetic({ expires: Number.POSITIVE_INFINITY }),
+    withoutEmail,
+    Object.assign(Object.create({ inherited: true }), synthetic()),
+    [synthetic()],
+    'synthetic-not-a-token',
+  ]) {
+    assert.throws(
+      () => assertPackagedSeed({ googleDriveEnabled: false, googleOAuth }, []),
+      /Credentials are forbidden/,
+    );
+  }
+  // Automatic Drive sync must be explicitly off, never absent or on.
+  assert.throws(() => assertPackagedSeed({ googleOAuth: synthetic() }, []), /Credentials/);
+  assert.throws(
+    () => assertPackagedSeed({ googleDriveEnabled: true, googleOAuth: synthetic() }, []),
+    /googleDriveEnabled/,
+  );
+  // The synthetic shape is not a pass for any other credential key.
+  assert.throws(
+    () => assertPackagedSeed({ googleDriveEnabled: false, codexOAuth: synthetic() }, []),
+    /Credentials/,
+  );
+  assert.throws(
+    () =>
+      assertPackagedSeed(
+        { googleDriveEnabled: false, googleOAuth: synthetic(), googleOAuthClientSecret: 'x' },
+        [],
+      ),
+    /Credentials/,
+  );
+  for (const entry of ['sync-state.json.bak', 'sync-state', '.listener-tombstones', 'chatgpt'])
+    assert.throws(() => assertPackagedSeed({}, [entry]), /Unsafe packaged seed entry/);
 });

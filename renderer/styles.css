@@ -3738,3 +3738,273 @@ h1 {
 @media (max-width: 480px) {
   .live-session-card { padding: 14px; }
 }
+
+/* Settings > Storage on this device.
+   One composition bar of what Listener.AI keeps on this device; the legend
+   carries every value as text, and patterns repeat in bar and swatch so
+   categories never rely on color alone. Not a disk-capacity meter. */
+.storage-panel {
+  --storage-freeable: #2563eb;
+  --storage-pending: #d97706;
+  --storage-kept: #475569;
+  --storage-notes: #0d9488;
+  --storage-other: #94a3b8;
+  --storage-track: #f1f5f9;
+  min-width: 0;
+  padding-bottom: 12px;
+}
+
+.storage-report {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 44px;
+  color: #475569;
+  font-size: 13px;
+}
+
+.storage-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 16px;
+}
+
+.storage-total {
+  margin: 0;
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+
+.storage-reclaim {
+  margin: 0;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.storage-reclaim.is-action {
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.storage-reclaim.is-muted {
+  color: #64748b;
+}
+
+.storage-bar {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+  border-radius: 5px;
+  overflow: hidden;
+  background-color: var(--storage-track);
+}
+
+.storage-seg {
+  flex: 0 1 0;
+  /* A small but nonzero category stays visible. */
+  min-width: 4px;
+}
+
+.storage-seg.is-freeable,
+.storage-swatch.is-freeable {
+  background-color: var(--storage-freeable);
+}
+
+.storage-seg.is-pending,
+.storage-swatch.is-pending {
+  background-color: var(--storage-pending);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(255, 255, 255, 0.55) 0 2px,
+    transparent 2px 5px
+  );
+}
+
+.storage-seg.is-kept,
+.storage-swatch.is-kept {
+  background-color: var(--storage-kept);
+}
+
+.storage-seg.is-notes,
+.storage-swatch.is-notes {
+  background-color: var(--storage-notes);
+}
+
+.storage-seg.is-other,
+.storage-swatch.is-other {
+  background-color: var(--storage-other);
+  background-image: radial-gradient(rgba(255, 255, 255, 0.7) 1px, transparent 1.2px);
+  background-size: 4px 4px;
+}
+
+.storage-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 4px 16px;
+}
+
+.storage-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.storage-swatch {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.storage-legend-label {
+  min-width: 0;
+  color: #475569;
+}
+
+.storage-legend-value {
+  margin-left: auto;
+  color: #0f172a;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.storage-cloud {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  color: #475569;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.storage-cloud-icon {
+  flex: 0 0 auto;
+  color: #2563eb;
+}
+
+.storage-error {
+  margin: 0;
+  color: #991b1b;
+}
+
+.storage-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 14px;
+}
+
+.storage-free-button {
+  padding: 7px 14px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background-color: #2563eb;
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.storage-free-button:not(:disabled):hover {
+  background-color: #1d4ed8;
+}
+
+.storage-free-button:disabled {
+  border-color: #e2e8f0;
+  background-color: #f1f5f9;
+  color: #64748b;
+  cursor: not-allowed;
+}
+
+.config-body .storage-help {
+  display: block;
+  margin: 6px 0 0;
+  color: #64748b;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.storage-policy {
+  margin: 16px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid #eef2f6;
+}
+
+.storage-details {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.storage-details > summary {
+  width: fit-content;
+  color: #334155;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.storage-details > summary:focus-visible,
+.storage-panel select:focus-visible {
+  outline: 2px solid #3498db;
+  outline-offset: 2px;
+}
+
+.storage-details-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+
+.storage-details-list li + li {
+  margin-top: 3px;
+}
+
+.storage-counts {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #eef2f6;
+  color: #334155;
+}
+
+@media (max-width: 480px) {
+  .storage-total {
+    font-size: 19px;
+  }
+
+  .storage-legend {
+    grid-template-columns: 1fr;
+  }
+
+  .storage-free-button {
+    width: 100%;
+  }
+}
+
+@media (forced-colors: active) {
+  .storage-bar,
+  .storage-seg,
+  .storage-swatch {
+    forced-color-adjust: none;
+  }
+}

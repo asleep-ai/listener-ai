@@ -592,6 +592,36 @@
                 <small id="googleSyncHelp">Runs one sync right away. Safe at any time; only files changed since the last sync are uploaded.</small>
               </div>
             </fieldset>
+            <fieldset class="config-subgroup storage-panel" id="localStorageGroup">
+              <legend>Storage on this device</legend>
+              <div id="localStorageReport" class="storage-report" role="status" aria-live="polite" aria-label="Space used by Listener.AI on this device">Loading...</div>
+              <div class="storage-action">
+                <button type="button" id="freeLocalAudioNow" class="storage-free-button" aria-describedby="freeLocalAudioHelp" disabled>Free up space</button>
+                <span id="freeLocalAudioStatus" class="slack-webhook-status" role="status" aria-live="polite"></span>
+              </div>
+              <small id="freeLocalAudioHelp" class="storage-help">Removes audio already in Google Drive from this device. Transcripts and notes stay here.</small>
+              <div class="form-group storage-policy">
+                <label for="audioOffloadAfterDays">Remove synced audio automatically</label>
+                <select id="audioOffloadAfterDays" aria-describedby="audioOffloadAfterDaysHelp">
+                  <option value="">Never (keep all audio on this device)</option>
+                  <option value="7">When not used for 7 days</option>
+                  <option value="14">When not used for 14 days</option>
+                  <option value="30">When not used for 30 days</option>
+                  <option value="90">When not used for 90 days</option>
+                </select>
+                <small id="audioOffloadAfterDaysHelp">Runs after each automatic sync.</small>
+              </div>
+              <details class="storage-details">
+                <summary>What stays on this device</summary>
+                <ul id="localStorageCounts" class="storage-details-list storage-counts" hidden></ul>
+                <ul class="storage-details-list">
+                  <li>Transcripts and notes are never removed, and nothing is deleted from Google Drive.</li>
+                  <li>Audio not yet uploaded, recordings without a saved meeting, and audio you transcribed from elsewhere on your computer always stay.</li>
+                  <li>Each Drive copy is checked again just before the local audio is removed.</li>
+                  <li>Removed audio shows as "In Google Drive" and downloads again when you regenerate, merge, export, or show it in Finder.</li>
+                </ul>
+              </details>
+            </fieldset>
           </section>
 
           <section class="config-pane" id="config-pane-advanced" data-pane="advanced" role="tabpanel" aria-labelledby="config-tab-advanced" hidden>

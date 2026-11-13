@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { createContext, runInContext } from 'node:vm';
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -22,6 +23,7 @@ import {
   assertSingleHiddenWindow,
   bounded,
   clearOwnedFixtureData,
+  storageStateResidue,
 } from './reusable-lifecycle.ts';
 import { classifyCase } from './case-policy.ts';
 
@@ -86,6 +88,100 @@ test('fixture cleanup rejects a protected directory symlink before deleting any 
   } finally {
     rmSync(directory, { recursive: true, force: true });
     rmSync(target, { recursive: true, force: true });
+  }
+});
+
+test('fixture cleanup removes owned storage state between cases and keeps profile, inodes and outside data', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'listener-owned-storage-'));
+  const outside = mkdtempSync(join(tmpdir(), 'listener-owned-storage-outside-'));
+  try {
+    clearOwnedFixtureData(directory, true);
+    const protectedNames = ['recordings', 'metadata', 'transcriptions'];
+    const inodes = protectedNames.map((name) => statSync(join(directory, name)).ino);
+    // Chromium profile entries share the data root and must survive.
+    const profile = ['Preferences', 'Local Storage', 'Cookies', 'Session Storage'];
+    writeFileSync(join(directory, 'Preferences'), '{}');
+    writeFileSync(join(directory, 'Cookies'), 'synthetic');
+    mkdirSync(join(directory, 'Local Storage', 'leveldb'), { recursive: true });
+    writeFileSync(join(directory, 'Local Storage', 'leveldb', 'LOG'), 'synthetic');
+    mkdirSync(join(directory, 'Session Storage'));
+    writeFileSync(join(outside, 'keep'), 'outside');
+    const seedStorage = () => {
+      writeFileSync(join(directory, 'sync-state.json'), '{"version":1,"meetings":{}}');
+      writeFileSync(join(directory, `.sync-state.json.tmp.${process.pid}`), '{}');
+      mkdirSync(join(directory, 'local-audio'), { recursive: true });
+      writeFileSync(join(directory, 'local-audio', 'a.json'), '{}');
+      writeFileSync(join(directory, 'local-audio', 'a.json.tmp.1.abcd'), '{}');
+      mkdirSync(join(directory, '.listener-audio-leases', 'hash'), { recursive: true });
+      writeFileSync(join(directory, '.listener-audio-leases', 'hash', '1-x.lease'), '{}');
+      mkdirSync(join(directory, '.listener-conflicts', 'meeting'), { recursive: true });
+      // A nested link into outside data must be removed as a link only.
+      symlinkSync(outside, join(directory, 'local-audio', 'outside-link'), 'dir');
+      mkdirSync(join(directory, '.listener-meeting-locks'), { recursive: true });
+    };
+    for (const includeConfig of [true, false]) {
+      writeFileSync(join(directory, 'config.json'), '{}');
+      seedStorage();
+      // Omitting the reset leaves detectable residue.
+      assert.deepEqual(storageStateResidue(directory), [
+        '.listener-audio-leases',
+        '.listener-conflicts',
+        `.sync-state.json.tmp.${process.pid}`,
+        'local-audio',
+        'sync-state.json',
+      ]);
+      assert.throws(
+        () =>
+          assertCleanReset({
+            activeJobs: 0,
+            pendingInvocations: 0,
+            configMatches: true,
+            mocksRestored: true,
+            dataEmpty: true,
+            storageResidue: storageStateResidue(directory),
+          }),
+        /Test isolation failed/,
+      );
+      clearOwnedFixtureData(directory, includeConfig);
+      assert.deepEqual(storageStateResidue(directory), []);
+      for (const name of [
+        'sync-state.json',
+        'local-audio',
+        '.listener-audio-leases',
+        '.listener-conflicts',
+        '.listener-meeting-locks',
+      ])
+        assert.equal(existsSync(join(directory, name)), false, name);
+      assert.deepEqual(
+        protectedNames.map((name) => statSync(join(directory, name)).ino),
+        inodes,
+      );
+      for (const name of profile) assert.equal(existsSync(join(directory, name)), true, name);
+      assert.equal(
+        readFileSync(join(directory, 'Local Storage', 'leveldb', 'LOG'), 'utf8'),
+        'synthetic',
+      );
+      assert.equal(readFileSync(join(outside, 'keep'), 'utf8'), 'outside');
+      assert.equal(existsSync(join(directory, 'config.json')), !includeConfig);
+    }
+
+    // A lock still held after the drain is not deleted; the proof reports it.
+    mkdirSync(join(directory, '.listener-meeting-locks', 'held.lock'), { recursive: true });
+    clearOwnedFixtureData(directory);
+    assert.equal(existsSync(join(directory, '.listener-meeting-locks', 'held.lock')), true);
+    assert.deepEqual(storageStateResidue(directory), ['.listener-meeting-locks/held.lock']);
+    rmSync(join(directory, '.listener-meeting-locks'), { recursive: true });
+
+    // A top-level storage name that is a symlink is unlinked, never followed.
+    symlinkSync(outside, join(directory, 'local-audio'), 'dir');
+    symlinkSync(outside, join(directory, '.listener-meeting-locks'), 'dir');
+    assert.deepEqual(storageStateResidue(directory), ['.listener-meeting-locks', 'local-audio']);
+    clearOwnedFixtureData(directory);
+    assert.deepEqual(storageStateResidue(directory), []);
+    assert.equal(readFileSync(join(outside, 'keep'), 'utf8'), 'outside');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 
@@ -307,6 +403,7 @@ test('clean reset proof rejects each independent contamination and an omitted re
     configMatches: true,
     mocksRestored: true,
     dataEmpty: true,
+    storageResidue: [] as string[],
   };
   assert.doesNotThrow(() => assertCleanReset(clean));
   for (const dirty of [
@@ -315,6 +412,9 @@ test('clean reset proof rejects each independent contamination and an omitted re
     { configMatches: false },
     { mocksRestored: false },
     { dataEmpty: false },
+    { storageResidue: ['sync-state.json'] },
+    { storageResidue: ['.listener-meeting-locks/abc.lock'] },
+    { storageResidue: undefined as unknown as string[] },
   ])
     assert.throws(() => assertCleanReset({ ...clean, ...dirty }), /Test isolation failed/);
   const previousCase = {
@@ -323,6 +423,7 @@ test('clean reset proof rejects each independent contamination and an omitted re
     configMatches: false,
     mocksRestored: false,
     dataEmpty: false,
+    storageResidue: ['local-audio'],
   };
   assert.throws(() => assertCleanReset(previousCase), /Test isolation failed/);
   Object.assign(previousCase, clean);

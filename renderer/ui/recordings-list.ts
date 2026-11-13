@@ -12,6 +12,7 @@ import { formatUsd } from '../../src/usageFormat';
 import { isActiveJob, jobMatchesPath } from '../../src/transcriptionJobView';
 import type { TranscriptionJobSnapshot } from '../electronAPI';
 import { requireAiSetup } from './config-modal';
+import { describeSkip } from './local-storage';
 import { showToast } from './notifications';
 import {
   _setCurrentTranscription,
@@ -32,7 +33,76 @@ type Recording = {
   size: number;
   // Path keys main matches transcription jobs on (resolved, symlink-free).
   aliases?: string[];
+  // The local copy was removed to free space; the audio is in Google Drive.
+  cloudOnly?: boolean;
+  // Every linked note has an uploaded Drive copy, so the local copy can go.
+  backedUp?: boolean;
 };
+
+// Recordings shown from Google Drive in the last list load. Actions that read
+// the audio (regenerate, merge, export, reveal) download it first.
+let cloudOnlyPaths = new Set<string>();
+
+/**
+ * Downloads a recording's audio back from Google Drive. Resolves to the local
+ * path, or null after telling the user why it could not be downloaded.
+ */
+async function downloadAudio(target: {
+  audioPath?: string;
+  folderPath?: string;
+}): Promise<string | null> {
+  showToast('Downloading audio from Google Drive…');
+  try {
+    const result = await window.electronAPI.restoreLocalAudio(target);
+    if (!result.success) {
+      showToast(`Couldn't download audio: ${result.error}`, 'error');
+      return null;
+    }
+    showToast(result.downloaded ? 'Audio downloaded to this device' : 'Audio is on this device');
+    if (target.audioPath) cloudOnlyPaths.delete(target.audioPath);
+    return result.path;
+  } catch (error) {
+    showToast(
+      `Couldn't download audio: ${error instanceof Error ? error.message : String(error)}`,
+      'error',
+    );
+    return null;
+  }
+}
+
+/** The recording's local path, downloading it from Drive when cloud-only. */
+async function localAudioPath(filePath: string): Promise<string | null> {
+  if (!cloudOnlyPaths.has(filePath)) return filePath;
+  return downloadAudio({ audioPath: filePath });
+}
+
+async function removeLocalCopy(recording: Recording): Promise<void> {
+  const ok = confirm(
+    `Remove the audio of "${recording.title}" from this device?\n\n` +
+      'The transcript and notes stay here, and the audio stays in Google Drive. ' +
+      'Listener.AI checks the Drive copy before removing anything, and you can download it again at any time.',
+  );
+  if (!ok) return;
+  try {
+    const result = await window.electronAPI.freeLocalAudio({ paths: [recording.path] });
+    if (!result.success) {
+      showToast(`Couldn't remove local audio: ${result.error}`, 'error');
+      return;
+    }
+    if (result.result.removed.length > 0) {
+      showToast(`Removed local audio (${formatFileSize(result.result.freedBytes)} freed)`);
+    } else {
+      const skipped = result.result.skipped[0];
+      showToast(`Kept the local audio: ${describeSkip(skipped?.reason, skipped?.detail)}`, 'error');
+    }
+    void loadRecordings();
+  } catch (error) {
+    showToast(
+      `Couldn't remove local audio: ${error instanceof Error ? error.message : String(error)}`,
+      'error',
+    );
+  }
+}
 
 // Each row's path plus its aliases, for matching rows to running jobs.
 const rowKeys = new WeakMap<HTMLElement, string[]>();
@@ -76,6 +146,9 @@ export async function loadRecordings(): Promise<void> {
   try {
     const result = (await window.electronAPI.getRecordings()) as unknown as GetRecordingsResult;
 
+    if (result.success) {
+      cloudOnlyPaths = new Set(result.recordings.filter((r) => r.cloudOnly).map((r) => r.path));
+    }
     if (result.success && (result.recordings.length > 0 || result.notes?.length)) {
       const items = await Promise.all(
         [
@@ -139,7 +212,11 @@ function createNoteItem(note: NoteListEntry): HTMLElement {
   const date = new Date(note.transcribedAt);
   meta.textContent = [
     Number.isNaN(date.getTime()) ? '' : date.toLocaleString(),
-    note.audioAvailable ? '' : 'Audio not on this device',
+    note.audioAvailable
+      ? ''
+      : note.audioInCloud
+        ? 'Audio in Google Drive'
+        : 'Audio not on this device',
   ]
     .filter(Boolean)
     .join(' · ');
@@ -150,6 +227,20 @@ function createNoteItem(note: NoteListEntry): HTMLElement {
   chevron.textContent = '›';
   const actions = document.createElement('div');
   actions.className = 'recording-actions';
+  if (note.audioInCloud && !note.audioAvailable) {
+    const download = createActionButton('download-audio-btn', 'Download audio', {
+      ariaLabel: `Download audio for ${note.title} from Google Drive`,
+    });
+    download.addEventListener('click', (event) => {
+      event.stopPropagation();
+      download.disabled = true;
+      void downloadAudio({ folderPath: note.folderPath }).finally(() => {
+        download.disabled = false;
+        void loadRecordings();
+      });
+    });
+    actions.append(download);
+  }
   actions.append(chevron);
   item.append(status, info, actions);
   let opening = false;
@@ -193,7 +284,9 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
 
   const date = new Date(recording.createdAt);
   const sizeStr = formatFileSize(recording.size);
-  const metaStr = formatRecordingMeta(date, sizeStr);
+  const metaStr = recording.cloudOnly
+    ? `${formatRecordingMeta(date, sizeStr)} · In Google Drive, not on this device`
+    : formatRecordingMeta(date, sizeStr);
   const keys = [recording.path, ...(recording.aliases ?? [])];
   rowKeys.set(item, keys);
 
@@ -266,6 +359,16 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
   if (hasTranscript) {
     menuItems.unshift(createMenuItem('regenerate-btn', 'Regenerate transcript'));
   }
+  if (recording.cloudOnly) {
+    menuItems.unshift(createMenuItem('download-audio-btn', 'Download audio'));
+  } else if (recording.backedUp) {
+    // Before Delete: the safe space-saving option sits next to the destructive one.
+    menuItems.splice(
+      menuItems.length - 1,
+      0,
+      createMenuItem('free-local-btn', 'Remove local copy…'),
+    );
+  }
   actions.append(...createMoreActionsMenu(recording.title, menuItems));
   actions.querySelector('.view-hints-btn')?.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -320,27 +423,42 @@ export async function createRecordingItem(recording: Recording): Promise<HTMLEle
           'Are you sure you want to regenerate the transcript? This will overwrite the existing one.',
         )
       ) {
-        void runInlineTranscription(item, recording.path);
+        void localAudioPath(recording.path).then((p) => {
+          if (p) void runInlineTranscription(item, p);
+        });
       }
     });
   } else {
     const transcribeBtn = item.querySelector('.transcribe-btn') as HTMLButtonElement | null;
     transcribeBtn?.addEventListener('click', () => {
-      void runInlineTranscription(item, recording.path);
+      void localAudioPath(recording.path).then((p) => {
+        if (p) void runInlineTranscription(item, p);
+      });
     });
   }
+
+  item.querySelector('.download-audio-btn')?.addEventListener('click', () => {
+    void downloadAudio({ audioPath: recording.path }).then(() => loadRecordings());
+  });
+  item.querySelector('.free-local-btn')?.addEventListener('click', () => {
+    void removeLocalCopy(recording);
+  });
 
   const revealBtn = item.querySelector('.reveal-btn') as HTMLButtonElement | null;
   if (revealBtn && window.electronAPI.showInFinder) {
     revealBtn.addEventListener('click', () => {
-      void window.electronAPI.showInFinder(recording.path);
+      void localAudioPath(recording.path).then((p) => {
+        if (p) void window.electronAPI.showInFinder(p);
+      });
     });
   }
 
   const exportBtn = item.querySelector('.export-m4a-btn') as HTMLButtonElement | null;
   if (exportBtn) {
     exportBtn.addEventListener('click', () => {
-      void handleExportM4A(recording.path, exportBtn);
+      void localAudioPath(recording.path).then((p) => {
+        if (p) void handleExportM4A(p, exportBtn);
+      });
     });
   }
 
@@ -629,7 +747,9 @@ async function openMergeDialog(initialFilePath: string): Promise<void> {
     const li = document.createElement('li');
     li.dataset.path = rec.path;
     const date = new Date(rec.createdAt);
-    const meta = formatRecordingMeta(date, formatFileSize(rec.size));
+    const meta = rec.cloudOnly
+      ? `${formatRecordingMeta(date, formatFileSize(rec.size))} · In Google Drive (downloads when merged)`
+      : formatRecordingMeta(date, formatFileSize(rec.size));
     li.innerHTML = `
       <input type="checkbox" />
       <div class="merge-list-item-info">
@@ -790,8 +910,19 @@ async function performMerge(paths: string[], title: string): Promise<void> {
 
   localMerges++;
   try {
+    // Recordings kept only in Google Drive are downloaded first.
+    const localPaths: string[] = [];
+    for (const p of paths) {
+      if (cloudOnlyPaths.has(p)) setModalProgress(0, 'Downloading audio from Google Drive...');
+      const local = await localAudioPath(p);
+      if (!local) {
+        transcriptionModal?.close();
+        return;
+      }
+      localPaths.push(local);
+    }
     const result = (await window.electronAPI.mergeRecordings({
-      paths,
+      paths: localPaths,
       title,
     })) as unknown as MergeRecordingsResult;
     // The modal moved on to another note: don't overwrite what it shows.
