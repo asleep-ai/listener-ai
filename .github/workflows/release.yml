@@ -104,9 +104,7 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$SHA" && test "$GITHUB_SHA" = "$SHA"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v5
-        with:
-          version: 11.21.0
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -298,9 +296,7 @@ jobs:
           test "$(node -p "require('./package.json').version")" = "$VERSION"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v5
-        with:
-          version: 11.21.0
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
