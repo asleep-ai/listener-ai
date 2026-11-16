@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "description": "Build-time prerender of the Listener.AI landing page with Astryx components",
-  "packageManager": "pnpm@11.21.0",
+  "packageManager": "pnpm@12.21.0",
   "scripts": {
     "build": "tsc -p tsconfig.json && node build/prerender.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
