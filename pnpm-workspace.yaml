@@ -16,6 +16,8 @@ shamefullyHoist: true
 enablePrePostScripts: true
 
 overrides:
+  # oxfmt worker-pool security patch.
+  'oxfmt>tinypool': 2.1.2
   js-yaml@>=4.0.0 <4.3.1: ^4.3.1
 
 allowBuilds:

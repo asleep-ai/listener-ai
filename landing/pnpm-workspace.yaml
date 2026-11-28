@@ -3,3 +3,7 @@ packages:
 
 allowBuilds:
   '@astryxdesign/core': false
+
+# Security patch for the formatter worker pool.
+overrides:
+  'oxfmt>tinypool': 2.1.2
